@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+/rhizome-mcp
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go test and coverage outputs
+*.out
+coverage.out
+coverage.txt
+
+# Go workspace files (optional local setup)
+go.work
+go.work.sum
+
+# IDE/editor noise
+.vscode/
+.idea/
