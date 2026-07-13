@@ -1,92 +1,67 @@
 # rhizome-mcp
 
-A Model Context Protocol (MCP) server in Go for lightweight task tracking.
+`rhizome-mcp` is a local-first MCP server for task tracking and coordination of autonomous AI coding agents.
 
-## Features
+The server gives agents a shared, structured view of project work:
 
-- Type-safe MCP tools using the official Go SDK
-- In-memory task store with validation and thread safety
-- Resource endpoint for task overview data
-- Graceful shutdown with signal handling
-- Unit tests for core tool handlers
+- issues, epics, bugs, comments, decisions, labels and relations;
+- dependency and planning graphs;
+- atomic task claiming with renewable leases;
+- checkpoints and recovery after interrupted agent sessions;
+- full-text search and delta-based change tracking;
+- compact, token-efficient context retrieval.
 
-## Requirements
+The project is designed for sequential and parallel work by different agent products, including GitHub Copilot, Codex, Claude Code, Antigravity and similar MCP-compatible clients.
 
-- Go 1.23+
+## Core constraints
 
-## Installation
+- Language: Go
+- Database: SQLite
+- Deployment: local native binary, no Docker required
+- Primary MCP transport: `stdio`
+- One SQLite database per project
+- Databases are stored outside project repositories
+- The repository contains only `.agent-tracker.json`
+- No web UI in the first version
+- Minimal CLI for initialization, diagnostics and maintenance
+- No authentication in the first version
 
-```bash
-go mod tidy
-go build -o rhizome-mcp
+## Documentation
+
+- [Complete specification](SPEC.md)
+- [Implementation brief for an AI agent](AGENT_BRIEF.md)
+- [Product goals and scope](docs/01-product-scope.md)
+- [Domain model](docs/02-domain-model.md)
+- [MCP tools](docs/03-mcp-tools.md)
+- [Storage and runtime](docs/04-storage-runtime.md)
+- [Implementation requirements](docs/05-implementation-requirements.md)
+- [Deferred features and non-goals](docs/06-deferred-and-open.md)
+
+## Repository identity
+
+A project repository contains:
+
+```json
+{
+  "version": 1,
+  "project_id": "01J..."
+}
 ```
 
-## Usage
+in:
 
-Run with stdio transport (default for MCP integrations):
-
-```bash
-./rhizome-mcp
+```text
+.agent-tracker.json
 ```
 
-## Configuration
+The project database is resolved through `project_id` and stored in the application data directory outside the repository.
 
-Environment variables:
+## Primary design principle
 
-- `SERVER_NAME`: MCP implementation name (default: `rhizome-mcp`)
-- `VERSION`: MCP implementation version (default: `v1.0.0`)
-- `LOG_LEVEL`: `debug`, `info`, `warn`, or `error` (default: `info`)
+An issue must never remain permanently stuck in `in_progress`.
 
-## Available Tools
+`in_progress` is therefore not a stored issue status. It is an effective status derived from the existence of an active leased work attempt. If the agent disappears and the lease expires, the attempt becomes `expired` and the issue becomes available again when its stored state permits it.
 
-### add_task
-Create a new task.
+## Status
 
-Input:
-- `title` (string, required)
-- `priority` (string, optional: `low`, `medium`, `high`)
-- `dueDate` (string, optional: `YYYY-MM-DD`)
-
-Output:
-- `task` (object)
-- `message` (string)
-
-### list_tasks
-List tasks with optional status filtering.
-
-Input:
-- `status` (string, optional: `pending`, `completed`, `all`)
-
-Output:
-- `tasks` (array)
-- `count` (number)
-- `message` (string)
-
-### complete_task
-Mark a task as completed.
-
-Input:
-- `id` (number, required)
-
-Output:
-- `task` (object)
-- `message` (string)
-
-## Available Resources
-
-### tasks://overview
-Returns JSON with task statistics and the current list of pending tasks.
-
-## Development
-
-Run tests:
-
-```bash
-go test ./...
-```
-
-Run static checks:
-
-```bash
-go vet ./...
-```
+This repository currently contains the product and technical specification. The next step is to create an implementation plan and begin development.
