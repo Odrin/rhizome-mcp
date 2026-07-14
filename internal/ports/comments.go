@@ -1,0 +1,21 @@
+package ports
+
+import (
+	"context"
+	"time"
+
+	"rhizome-mcp/internal/domain"
+)
+
+// AddCommentCommand contains a validated comment and application-generated
+// identity and timestamp values.
+type AddCommentCommand struct {
+	ID         string
+	Input      domain.AddCommentInput
+	OccurredAt time.Time
+}
+
+// CommentRepository persists one append-only comment and its issue event.
+type CommentRepository interface {
+	AddComment(context.Context, AddCommentCommand) (domain.Comment, error)
+}

@@ -70,6 +70,15 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
 
 ## Phase 5: knowledge and work context
 
+- **Phase 5 comment subunit implemented on 2026-07-14.** Append-only
+  `add_comment` now validates issue references and comment bodies, preserves
+  durable MCP-session attribution when available, and atomically persists a
+  comment with its compact `comment_added` event. Verification:
+  `go test -count=1 ./internal/domain ./internal/application ./internal/adapters/sqlite ./internal/adapters/mcp .`,
+  `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
+  and `CGO_ENABLED=0 go test -count=1 ./...`. Remaining Phase 5 work is
+  decisions and supersession, unified activity, and bounded work context;
+  Phase 5 is not complete.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
 - Implement compact default work context with explicitly bounded optional sections.
 - Deliver `add_comment`, `record_decision`, `get_issue_activity`, and `get_work_context`.

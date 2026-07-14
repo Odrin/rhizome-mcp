@@ -70,6 +70,12 @@ type archiveIssueInput struct {
 	IdempotencyKey  *string `json:"idempotency_key,omitempty"`
 }
 
+type addCommentInput struct {
+	IssueID        string  `json:"issue_id"`
+	Content        string  `json:"content"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
 type claimIssueInput struct {
 	IssueID        string  `json:"issue_id"`
 	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
@@ -392,6 +398,20 @@ type issueDTO struct {
 	Labels             []labelDTO `json:"labels"`
 }
 
+type commentDTO struct {
+	ID                 string     `json:"id"`
+	IssueID            string     `json:"issue_id"`
+	Content            string     `json:"content"`
+	CreatedBySessionID *string    `json:"created_by_session_id"`
+	AuthorLabel        *string    `json:"author_label"`
+	CreatedAt          time.Time  `json:"created_at"`
+	EditedAt           *time.Time `json:"edited_at"`
+}
+
+type addCommentOutput struct {
+	Comment commentDTO `json:"comment"`
+}
+
 type updateIssueOutput struct {
 	Issue         issueDTO `json:"issue"`
 	ChangedFields []string `json:"changed_fields"`
@@ -620,6 +640,14 @@ func issueDTOFromDomain(issue domain.Issue) issueDTO {
 		Status: string(issue.Status), Priority: string(issue.Priority), ParentIssueID: issue.ParentID,
 		BlockedReason: issue.BlockedReason, Version: issue.Version, CreatedAt: issue.CreatedAt,
 		UpdatedAt: issue.UpdatedAt, ClosedAt: issue.ClosedAt, ArchivedAt: issue.ArchivedAt, Labels: labels,
+	}
+}
+
+func commentDTOFromDomain(comment domain.Comment) commentDTO {
+	return commentDTO{
+		ID: comment.ID, IssueID: comment.IssueID, Content: comment.Content,
+		CreatedBySessionID: copyString(comment.CreatedBySessionID), AuthorLabel: copyString(comment.AuthorLabel),
+		CreatedAt: comment.CreatedAt, EditedAt: copyTime(comment.EditedAt),
 	}
 }
 

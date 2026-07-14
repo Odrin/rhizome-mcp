@@ -40,11 +40,12 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "create_issue"), "type", "title")
+	assertRequired(t, toolNamed(t, tools.Tools, "add_comment"), "issue_id", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
@@ -97,6 +98,34 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	if created.IsError || issue.DisplayID != "ISSUE-1" || issue.Version != 1 || issue.Description == nil ||
 		len(issue.Labels) != 1 || issue.Labels[0].Name != "Database" {
 		t.Fatalf("create result = %#v, issue = %#v", created, issue)
+	}
+	comment := call(t, client, "add_comment", map[string]any{
+		"issue_id": issue.DisplayID, "content": "  preserved comment  ",
+	})
+	var commentOutput struct {
+		Comment struct {
+			ID                 string  `json:"id"`
+			IssueID            string  `json:"issue_id"`
+			Content            string  `json:"content"`
+			CreatedBySessionID *string `json:"created_by_session_id"`
+			AuthorLabel        *string `json:"author_label"`
+		} `json:"comment"`
+	}
+	decodeStructured(t, comment, &commentOutput)
+	if comment.IsError || commentOutput.Comment.ID == "" || commentOutput.Comment.IssueID != issue.ID ||
+		commentOutput.Comment.Content != "  preserved comment  " || commentOutput.Comment.CreatedBySessionID == nil ||
+		commentOutput.Comment.AuthorLabel != nil {
+		t.Fatalf("comment result = %#v", commentOutput)
+	}
+	unsupportedComment := call(t, client, "add_comment", map[string]any{
+		"issue_id": issue.ID, "content": "not stored", "idempotency_key": "unsupported",
+	})
+	if !unsupportedComment.IsError {
+		t.Fatal("add_comment accepted unsupported idempotency key")
+	}
+	invalidComment := call(t, client, "add_comment", map[string]any{"issue_id": "bad", "content": "not stored"})
+	if !invalidComment.IsError {
+		t.Fatal("add_comment accepted invalid issue identifier")
 	}
 
 	labels := call(t, client, "list_labels", map[string]any{})
@@ -1029,6 +1058,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	commentRepository, err := sqlite.NewCommentRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1057,6 +1090,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	comments, err := application.NewCommentService(commentRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -1070,7 +1107,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, AttemptService: attempts, SessionService: sessions,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, AttemptService: attempts, SessionService: sessions,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

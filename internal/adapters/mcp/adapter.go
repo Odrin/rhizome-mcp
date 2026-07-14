@@ -23,6 +23,7 @@ type Options struct {
 	RelationService *application.RelationService
 	GraphService    *application.GraphService
 	PlanningService *application.PlanningService
+	CommentService  *application.CommentService
 	AttemptService  *application.AttemptService
 	SessionService  *application.AgentSessionService
 	ServerName      string
@@ -36,6 +37,7 @@ type adapter struct {
 	relations     *application.RelationService
 	graphs        *application.GraphService
 	plans         *application.PlanningService
+	comments      *application.CommentService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
 	appVersion    string
@@ -71,6 +73,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.PlanningService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
 	}
+	if options.CommentService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "comment service is required", false)
+	}
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
@@ -89,6 +94,7 @@ func NewServer(options Options) (*Server, error) {
 		relations:          options.RelationService,
 		graphs:             options.GraphService,
 		plans:              options.PlanningService,
+		comments:           options.CommentService,
 		attempts:           options.AttemptService,
 		sessions:           options.SessionService,
 		appVersion:         options.ServerVersion,
@@ -240,6 +246,7 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Return a bounded planning graph", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Validate a bounded issue plan without changes", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
 	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
+	sdkmcp.AddTool(server, tool("add_comment", "Append a comment to an issue", schemaAddComment(), schemaAddCommentOutput()), adapter.addComment)
 	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
 	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
@@ -382,6 +389,20 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 		return adapter.failure(err)
 	}
 	return success(applyIssuePlanOutputFromPort(result), "issue plan applied")
+}
+
+func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	comment, err := adapter.comments.AddComment(ctx, domain.AddCommentInput{
+		IssueID: input.IssueID, Content: input.Content, SessionID: adapter.sessionIDFor(request.Session),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(addCommentOutput{Comment: commentDTOFromDomain(comment)}, "comment added")
 }
 
 func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {

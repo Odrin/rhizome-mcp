@@ -544,6 +544,12 @@ latest_event_id
 
 ### 8.1. `add_comment`
 
+Implemented as append-only issue communication. The issue must exist and must
+not be archived. When the MCP connection has a durable session, the created
+comment and its `comment_added` event use that session for attribution;
+otherwise both attributions are NULL. The operation writes one compact event
+payload containing only the comment ID and returns the created comment.
+
 Input:
 
 ```json
@@ -559,6 +565,9 @@ Output:
 ```text
 comment
 ```
+
+Only a null `idempotency_key` is currently accepted. No duplicate-retry
+semantics are promised.
 
 ### 8.2. `record_decision`
 

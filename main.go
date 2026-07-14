@@ -100,6 +100,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	commentRepository, err := sqlite.NewCommentRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
 	if err != nil {
 		return err
@@ -125,6 +129,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	planningService, err := application.NewPlanningService(planningRepository, source, generator)
+	if err != nil {
+		return err
+	}
+	commentService, err := application.NewCommentService(commentRepository, source, generator)
 	if err != nil {
 		return err
 	}
@@ -167,6 +175,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		RelationService: relationService,
 		GraphService:    graphService,
 		PlanningService: planningService,
+		CommentService:  commentService,
 		AttemptService:  attemptService,
 		SessionService:  sessionService,
 		ServerName:      cfg.ServerName,
