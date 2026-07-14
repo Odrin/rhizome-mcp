@@ -3,6 +3,7 @@ package mcp_test
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -333,6 +334,153 @@ func TestNewServerRequiresRelationService(t *testing.T) {
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing relation service error", err)
 	}
+}
+
+func TestNewServerRequiresSessionService(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer func() {
+		if err := db.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	options := composeServices(t, db, source)
+	options.SessionService = nil
+	_, err := mcpadapter.NewServer(options)
+	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("NewServer() error = %v, want missing session service error", err)
+	}
+}
+
+func TestAgentSessionLifecyclePersistence(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "sessions.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+
+	waitForAgentSession(t, db)
+	session := readAgentSession(t, db)
+	if session.Count != 1 || session.ClientName != "test-client" || session.ClientVersion != "test" ||
+		!session.StartedAt.Equal(source.Now()) || !session.LastSeenAt.Equal(source.Now()) || session.EndedAt != nil {
+		t.Fatalf("initial agent session = %#v", session)
+	}
+
+	source.Advance(time.Minute)
+	result := call(t, client, "get_project", map[string]any{})
+	if result.IsError {
+		t.Fatalf("get_project result = %#v", result)
+	}
+	session = readAgentSession(t, db)
+	if !session.LastSeenAt.Equal(source.Now()) {
+		t.Fatalf("touched LastSeenAt = %v, want %v", session.LastSeenAt, source.Now())
+	}
+
+	stop()
+	stop()
+	session = readAgentSession(t, db)
+	if session.Count != 1 || session.EndedAt == nil || !session.EndedAt.Equal(session.LastSeenAt) {
+		t.Fatalf("ended agent session = %#v", session)
+	}
+	endedAt := *session.EndedAt
+	stop()
+	session = readAgentSession(t, db)
+	if session.Count != 1 || session.EndedAt == nil || !session.EndedAt.Equal(endedAt) {
+		t.Fatalf("repeated shutdown changed agent session = %#v", session)
+	}
+}
+
+func waitForAgentSession(t *testing.T, db *sqlite.DB) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if readAgentSession(t, db).Count == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent session was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "failed-session.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	repository, err := sqlite.NewAgentSessionRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.SessionService, err = application.NewAgentSessionService(repository, source, failingSessionIDGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, stop := newClient(t, options)
+	result := call(t, client, "get_project", map[string]any{})
+	if result.IsError {
+		t.Fatalf("get_project result after session creation failure = %#v", result)
+	}
+	stop()
+	if session := readAgentSession(t, db); session.Count != 0 {
+		t.Fatalf("agent sessions after creation failure = %#v", session)
+	}
+}
+
+type failingSessionIDGenerator struct{}
+
+func (failingSessionIDGenerator) New() (string, error) {
+	return "", errors.New("session ID generation failed")
+}
+
+type agentSessionRow struct {
+	Count         int
+	ClientName    string
+	ClientVersion string
+	StartedAt     time.Time
+	LastSeenAt    time.Time
+	EndedAt       *time.Time
+}
+
+func readAgentSession(t *testing.T, db *sqlite.DB) agentSessionRow {
+	t.Helper()
+	var result agentSessionRow
+	err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_sessions").Scan(&result.Count); err != nil {
+			return err
+		}
+		if result.Count == 0 {
+			return nil
+		}
+		var (
+			startedAt, lastSeenAt  string
+			clientVersion, endedAt sql.NullString
+		)
+		if err := query.QueryRowContext(ctx, `SELECT client_name, client_version, started_at, last_seen_at, ended_at
+			FROM agent_sessions ORDER BY started_at, id LIMIT 1`).
+			Scan(&result.ClientName, &clientVersion, &startedAt, &lastSeenAt, &endedAt); err != nil {
+			return err
+		}
+		result.ClientVersion = clientVersion.String
+		var err error
+		if result.StartedAt, err = time.Parse(time.RFC3339Nano, startedAt); err != nil {
+			return err
+		}
+		if result.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeenAt); err != nil {
+			return err
+		}
+		if endedAt.Valid {
+			ended, err := time.Parse(time.RFC3339Nano, endedAt.String)
+			if err != nil {
+				return err
+			}
+			result.EndedAt = &ended
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestAttemptToolsLifecycle(t *testing.T) {
@@ -800,8 +948,16 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	sessionRepository, err := sqlite.NewAgentSessionRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := application.NewAgentSessionService(sessionRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, AttemptService: attempts,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, AttemptService: attempts, SessionService: sessions,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

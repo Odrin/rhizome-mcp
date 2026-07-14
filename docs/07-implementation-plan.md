@@ -58,6 +58,7 @@ Exit gate: graph bounds, relation races, cycle rejection, deterministic validati
 - **Phase 4 checkpoint/note artifact attachment completed on 2026-07-14.** `save_attempt_note` now atomically attaches validated artifact references to the leased attempt; final-result attachments, sessions, cleanup scheduling, and idempotent finish retries remain pending.
 - **Phase 4 final-result artifact attachment completed on 2026-07-14.** `finish_attempt` now atomically attaches and returns validated final-result artifact references for completed, failed, and interrupted attempts; sessions, background cleanup scheduling, and idempotent finish retries remain pending.
 - **Phase 4 background expiry cleanup completed on 2026-07-14.** Lifecycle-safe periodic cleanup expires lease-expired active attempts; sessions and idempotent finish retries remain pending.
+- **Phase 4 agent-session connection lifecycle completed on 2026-07-14.** Each initialized MCP connection now creates one durable session from client metadata, touches it before tool actions, and ends it once after connection shutdown. Attempt/event attribution to sessions and idempotent finish retries remain pending.
 - Implement temporary sessions and work attempts using injected time and hashed opaque tokens.
 - Implement atomic claim, renewal, lazy expiry, periodic cleanup, checkpoints, completion consistency, verification, and artifacts.
 - Deliver `claim_issue`, `renew_attempt`, `save_attempt_note`, and `finish_attempt`.

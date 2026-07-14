@@ -132,6 +132,14 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	sessionRepository, err := sqlite.NewAgentSessionRepository(project.Database)
+	if err != nil {
+		return err
+	}
+	sessionService, err := application.NewAgentSessionService(sessionRepository, source, generator)
+	if err != nil {
+		return err
+	}
 	cleanupCtx, stopCleanup := context.WithCancel(ctx)
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -160,6 +168,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		GraphService:    graphService,
 		PlanningService: planningService,
 		AttemptService:  attemptService,
+		SessionService:  sessionService,
 		ServerName:      cfg.ServerName,
 		ServerVersion:   cfg.Version,
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,

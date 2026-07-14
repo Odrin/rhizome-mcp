@@ -5,6 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,6 +24,7 @@ type Options struct {
 	GraphService    *application.GraphService
 	PlanningService *application.PlanningService
 	AttemptService  *application.AttemptService
+	SessionService  *application.AgentSessionService
 	ServerName      string
 	ServerVersion   string
 	ConfigVersion   int
@@ -32,13 +37,24 @@ type adapter struct {
 	graphs        *application.GraphService
 	plans         *application.PlanningService
 	attempts      *application.AttemptService
+	sessions      *application.AgentSessionService
 	appVersion    string
 	configVersion int
+
+	sessionMu          sync.Mutex
+	connectionSessions map[*sdkmcp.ServerSession]string
+	sessionStarted     map[*sdkmcp.ServerSession]struct{}
+}
+
+// Server owns the MCP SDK server and its adapter lifecycle tracking.
+type Server struct {
+	server  *sdkmcp.Server
+	adapter *adapter
 }
 
 // NewServer composes a tools-only MCP server. It has no process-global
 // dependencies and deliberately exposes no resources or prototype task tools.
-func NewServer(options Options) (*sdkmcp.Server, error) {
+func NewServer(options Options) (*Server, error) {
 	if options.IssueService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "issue service is required", false)
 	}
@@ -57,6 +73,9 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
+	if options.SessionService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "session service is required", false)
+	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
 	}
@@ -64,21 +83,123 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server version is required", false)
 	}
 	adapter := &adapter{
-		issues:        options.IssueService,
-		projects:      options.ProjectService,
-		relations:     options.RelationService,
-		graphs:        options.GraphService,
-		plans:         options.PlanningService,
-		attempts:      options.AttemptService,
-		appVersion:    options.ServerVersion,
-		configVersion: options.ConfigVersion,
+		issues:             options.IssueService,
+		projects:           options.ProjectService,
+		relations:          options.RelationService,
+		graphs:             options.GraphService,
+		plans:              options.PlanningService,
+		attempts:           options.AttemptService,
+		sessions:           options.SessionService,
+		appVersion:         options.ServerVersion,
+		configVersion:      options.ConfigVersion,
+		connectionSessions: make(map[*sdkmcp.ServerSession]string),
+		sessionStarted:     make(map[*sdkmcp.ServerSession]struct{}),
 	}
 	server := sdkmcp.NewServer(
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
-		&sdkmcp.ServerOptions{Capabilities: &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}}},
+		&sdkmcp.ServerOptions{
+			Capabilities:       &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}},
+			InitializedHandler: adapter.startSession,
+		},
 	)
 	adapter.register(server)
-	return server, nil
+	return &Server{server: server, adapter: adapter}, nil
+}
+
+// Run serves one MCP connection and records its durable session lifecycle.
+func (server *Server) Run(ctx context.Context, transport sdkmcp.Transport) error {
+	sdkSession, err := server.server.Connect(ctx, transport, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		server.adapter.endSession(endCtx, sdkSession)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sdkSession.Wait()
+	}()
+	select {
+	case <-ctx.Done():
+		_ = sdkSession.Close()
+		<-done
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}
+
+func (adapter *adapter) startSession(ctx context.Context, request *sdkmcp.InitializedRequest) {
+	if request == nil || request.Session == nil {
+		return
+	}
+	sdkSession := request.Session
+
+	adapter.sessionMu.Lock()
+	if _, started := adapter.sessionStarted[sdkSession]; started {
+		adapter.sessionMu.Unlock()
+		return
+	}
+	adapter.sessionStarted[sdkSession] = struct{}{}
+
+	clientName := "unknown"
+	var clientVersion *string
+	if params := sdkSession.InitializeParams(); params != nil && params.ClientInfo != nil {
+		if name := strings.TrimSpace(params.ClientInfo.Name); name != "" {
+			clientName = name
+			if version := strings.TrimSpace(params.ClientInfo.Version); version != "" {
+				clientVersion = &version
+			}
+		}
+	}
+	created, err := adapter.sessions.Create(ctx, domain.CreateAgentSessionInput{
+		ClientName: clientName, ClientVersion: clientVersion,
+	})
+	if err != nil {
+		adapter.sessionMu.Unlock()
+		slog.Error("agent session creation failed", "error", err)
+		return
+	}
+	adapter.connectionSessions[sdkSession] = created.ID
+	adapter.sessionMu.Unlock()
+}
+
+func (adapter *adapter) touchSession(ctx context.Context, sdkSession *sdkmcp.ServerSession) {
+	if sdkSession == nil {
+		return
+	}
+	adapter.sessionMu.Lock()
+	sessionID := adapter.connectionSessions[sdkSession]
+	adapter.sessionMu.Unlock()
+	if sessionID == "" {
+		return
+	}
+	if _, err := adapter.sessions.Touch(ctx, sessionID); err != nil && !isContextCancellation(err) {
+		slog.Error("agent session touch failed", "error", err)
+	}
+}
+
+func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.ServerSession) {
+	if sdkSession == nil {
+		return
+	}
+	adapter.sessionMu.Lock()
+	sessionID := adapter.connectionSessions[sdkSession]
+	delete(adapter.connectionSessions, sdkSession)
+	adapter.sessionMu.Unlock()
+	if sessionID == "" {
+		return
+	}
+	if _, err := adapter.sessions.End(ctx, sessionID); err != nil && !isContextCancellation(err) {
+		slog.Error("agent session end failed", "error", err)
+	}
+}
+
+func isContextCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (adapter *adapter) register(server *sdkmcp.Server) {
@@ -100,7 +221,8 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("finish_attempt", "Finish an active leased work or review attempt", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
 }
 
-func (adapter *adapter) claimIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -117,7 +239,8 @@ func (adapter *adapter) claimIssue(ctx context.Context, _ *sdkmcp.CallToolReques
 	}, "issue claimed")
 }
 
-func (adapter *adapter) renewAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.attempts.RenewAttempt(ctx, domain.RenewAttemptInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: input.LeaseSeconds,
 	})
@@ -127,7 +250,8 @@ func (adapter *adapter) renewAttempt(ctx context.Context, _ *sdkmcp.CallToolRequ
 	return success(renewAttemptOutput{LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime}, "attempt lease renewed")
 }
 
-func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -152,7 +276,8 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolR
 	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(result.Note), Artifacts: outputArtifacts}, "attempt note saved")
 }
 
-func (adapter *adapter) finishAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -215,7 +340,8 @@ func interruptionPointer(value *string) *domain.InterruptionReasonCode {
 	return &result
 }
 
-func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	validation, err := adapter.plans.ValidateIssuePlan(ctx, input.domainPlan())
 	if err != nil {
 		return adapter.failure(err)
@@ -223,7 +349,8 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToo
 	return success(planValidationOutputFromDomain(validation), "issue plan validated")
 }
 
-func (adapter *adapter) applyIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.plans.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
 	if err != nil {
 		return adapter.failure(err)
@@ -231,7 +358,8 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRe
 	return success(applyIssuePlanOutputFromPort(result), "issue plan applied")
 }
 
-func (adapter *adapter) getIssueGraph(ctx context.Context, _ *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	relationTypes := make([]domain.RelationType, len(input.RelationTypes))
 	for index, relationType := range input.RelationTypes {
 		relationTypes[index] = domain.RelationType(relationType)
@@ -247,7 +375,8 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, _ *sdkmcp.CallToolReq
 	return success(graphOutputFromDomain(graph), "issue graph returned")
 }
 
-func (adapter *adapter) getPlanningGraph(ctx context.Context, _ *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	graph, err := adapter.graphs.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
 		RootIssueID: input.RootIssueID, Depth: input.Depth, MaxNodes: input.MaxNodes,
 		IncludeReview: input.IncludeReview, IncludeRelated: input.IncludeRelated,
@@ -258,7 +387,8 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, _ *sdkmcp.CallTool
 	return success(graphOutputFromDomain(graph), "planning graph returned")
 }
 
-func (adapter *adapter) getProject(ctx context.Context, _ *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	project, err := adapter.projects.GetProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
@@ -279,7 +409,8 @@ func (adapter *adapter) getProject(ctx context.Context, _ *sdkmcp.CallToolReques
 	return success(output, "project metadata returned")
 }
 
-func (adapter *adapter) manageIssueRelation(ctx context.Context, _ *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -318,7 +449,8 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, _ *sdkmcp.CallT
 	}, summary)
 }
 
-func (adapter *adapter) listLabels(ctx context.Context, _ *sdkmcp.CallToolRequest, input listLabelsInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallToolRequest, input listLabelsInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.issues.ListLabels(ctx, domain.ListLabelsInput{
 		Query:  stringValue(input.Query),
 		Limit:  input.Limit,
@@ -334,7 +466,8 @@ func (adapter *adapter) listLabels(ctx context.Context, _ *sdkmcp.CallToolReques
 	return success(labelListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "labels listed")
 }
 
-func (adapter *adapter) createIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -356,7 +489,8 @@ func (adapter *adapter) createIssue(ctx context.Context, _ *sdkmcp.CallToolReque
 	return success(issueDTOFromDomain(result.Issue), "issue created")
 }
 
-func (adapter *adapter) updateIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -372,7 +506,8 @@ func (adapter *adapter) updateIssue(ctx context.Context, _ *sdkmcp.CallToolReque
 	return success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, "issue updated")
 }
 
-func (adapter *adapter) getIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.View != "" && input.View != "compact" && input.View != "standard" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
@@ -389,7 +524,8 @@ func (adapter *adapter) getIssue(ctx context.Context, _ *sdkmcp.CallToolRequest,
 	return success(issueDTOFromDomain(issue), "issue returned")
 }
 
-func (adapter *adapter) listIssues(ctx context.Context, _ *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.View != "" && input.View != "compact" {
 		return adapter.failure(unsupportedField("view"))
 	}
@@ -423,7 +559,8 @@ func (adapter *adapter) listIssues(ctx context.Context, _ *sdkmcp.CallToolReques
 	return success(issueListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "issues listed")
 }
 
-func (adapter *adapter) archiveIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
+func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
