@@ -15,6 +15,9 @@ const (
 	CodeInvalidEpicParent = "INVALID_EPIC_PARENT"
 	// CodeIssueNotFound identifies an issue reference that is not present.
 	CodeIssueNotFound = "ISSUE_NOT_FOUND"
+	// CodeLabelNotFound identifies an explicitly requested label that does not
+	// exist when missing-label creation was not allowed.
+	CodeLabelNotFound = "LABEL_NOT_FOUND"
 	// CodeIssueArchived identifies an issue that cannot be mutated.
 	CodeIssueArchived = "ISSUE_ARCHIVED"
 	// CodeVersionConflict identifies a failed optimistic version precondition.

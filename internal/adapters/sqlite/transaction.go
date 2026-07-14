@@ -98,6 +98,36 @@ func (db *DB) Read(ctx context.Context, fn func(context.Context, Queryer) error)
 	return TranslateError(fn(ctx, conn))
 }
 
+// readSnapshot executes fn in one deferred read transaction so all of its
+// queries observe the same committed SQLite snapshot.
+func (db *DB) readSnapshot(ctx context.Context, fn func(context.Context, Queryer) error) error {
+	if db == nil || db.pool == nil {
+		return errors.New("SQLite database must not be nil")
+	}
+	if fn == nil {
+		return errors.New("SQLite read callback must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, err := db.pool.Conn(ctx)
+	if err != nil {
+		return TranslateError(err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		return TranslateError(err)
+	}
+	if err := fn(ctx, conn); err != nil {
+		return TranslateError(errors.Join(err, rollback(ctx, conn)))
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return TranslateError(errors.Join(err, rollback(ctx, conn)))
+	}
+	return nil
+}
+
 func (db *DB) writeOnce(ctx context.Context, fn func(context.Context, Executor) error) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -7,15 +7,19 @@ import "strings"
 // BlockedReason must be non-nil and non-blank; for every other status,
 // BlockedReason must be nil. An epic must not have ParentID, while a task or
 // bug may have one; storage verifies that a supplied parent is an active epic.
+// Labels are a replacement set for the new issue. Missing labels are created
+// only when CreateMissingLabels is true.
 type CreateIssueInput struct {
-	Type               Type
-	Title              string
-	Description        *string
-	AcceptanceCriteria *string
-	Status             Status
-	Priority           Priority
-	ParentID           *string
-	BlockedReason      *string
+	Type                Type
+	Title               string
+	Description         *string
+	AcceptanceCriteria  *string
+	Status              Status
+	Priority            Priority
+	ParentID            *string
+	BlockedReason       *string
+	Labels              []string
+	CreateMissingLabels bool
 }
 
 // Validate applies creation defaults and validates invariants that do not
@@ -92,16 +96,22 @@ func (input CreateIssueInput) Validate() (CreateIssueInput, error) {
 			Detail{Field: "blocked_reason", Code: "FORBIDDEN"},
 		)
 	}
+	labels, err := NormalizeLabelNames(input.Labels)
+	if err != nil {
+		return CreateIssueInput{}, err
+	}
 
 	return CreateIssueInput{
-		Type:               input.Type,
-		Title:              input.Title,
-		Description:        copyString(input.Description),
-		AcceptanceCriteria: copyString(input.AcceptanceCriteria),
-		Status:             status,
-		Priority:           priority,
-		ParentID:           copyString(input.ParentID),
-		BlockedReason:      copyString(input.BlockedReason),
+		Type:                input.Type,
+		Title:               input.Title,
+		Description:         copyString(input.Description),
+		AcceptanceCriteria:  copyString(input.AcceptanceCriteria),
+		Status:              status,
+		Priority:            priority,
+		ParentID:            copyString(input.ParentID),
+		BlockedReason:       copyString(input.BlockedReason),
+		Labels:              labels,
+		CreateMissingLabels: input.CreateMissingLabels,
 	}, nil
 }
 

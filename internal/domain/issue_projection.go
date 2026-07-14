@@ -22,4 +22,5 @@ type Issue struct {
 	ClosedAt            *time.Time
 	ArchivedAt          *time.Time
 	ArchivedBySessionID *string
+	Labels              []Label
 }

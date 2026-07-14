@@ -165,7 +165,7 @@ func TestApplyIssuePatchRejectsInvalidStatusTransition(t *testing.T) {
 	if domainErr.Retryable {
 		t.Fatal("ApplyIssuePatch() invalid transition error is retryable")
 	}
-	if next != (domain.Issue{}) || changed != nil {
+	if !reflect.DeepEqual(next, domain.Issue{}) || changed != nil {
 		t.Fatalf("ApplyIssuePatch() mutation = next %#v, changed %v; want no mutation", next, changed)
 	}
 }

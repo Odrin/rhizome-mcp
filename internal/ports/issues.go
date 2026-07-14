@@ -13,16 +13,19 @@ import (
 type CreateIssueCommand struct {
 	ID        string
 	Input     domain.CreateIssueInput
+	LabelIDs  []string // Corresponds to Input.Labels when missing creation is enabled.
 	CreatedAt time.Time
 }
 
 // UpdateIssueCommand contains a validated optimistic patch and the time to
 // persist if its conditional write succeeds.
 type UpdateIssueCommand struct {
-	Identifier      domain.IssueIdentifier
-	ExpectedVersion int64
-	Changes         domain.IssuePatch
-	UpdatedAt       time.Time
+	Identifier          domain.IssueIdentifier
+	ExpectedVersion     int64
+	Changes             domain.IssuePatch
+	LabelIDs            []string // Corresponds to Changes.Labels when missing creation is enabled.
+	CreateMissingLabels bool
+	UpdatedAt           time.Time
 }
 
 // UpdateIssueResult is the persisted projection and sorted names of fields
@@ -45,10 +48,16 @@ type ArchiveIssueResult struct {
 	Issue domain.Issue
 }
 
+// ListLabelsCommand contains a validated page request.
+type ListLabelsCommand struct {
+	Input domain.ListLabelsInput
+}
+
 // IssueRepository reads issue projections and persists issue mutations.
 type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
 	UpdateIssue(context.Context, UpdateIssueCommand) (UpdateIssueResult, error)
 	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
+	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)
 }

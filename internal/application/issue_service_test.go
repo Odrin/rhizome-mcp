@@ -52,6 +52,10 @@ func (repository *recordingIssueRepository) GetIssue(_ context.Context, identifi
 	return repository.issue, nil
 }
 
+func (repository *recordingIssueRepository) ListLabels(_ context.Context, _ ports.ListLabelsCommand) (domain.LabelList, error) {
+	return domain.LabelList{}, nil
+}
+
 type fixedIDGenerator struct {
 	id  string
 	err error

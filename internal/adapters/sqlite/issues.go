@@ -14,7 +14,8 @@ import (
 
 // IssueRepository is the SQLite implementation of ports.IssueRepository.
 type IssueRepository struct {
-	db *DB
+	db                                 *DB
+	afterGetIssueProjectionReadForTest func()
 }
 
 // NewIssueRepository returns an issue repository backed by database.
@@ -69,6 +70,13 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 		); err != nil {
 			return err
 		}
+		labels, err := resolveIssueLabels(ctx, tx, input.Labels, input.CreateMissingLabels, command.LabelIDs, now)
+		if err != nil {
+			return err
+		}
+		if err := replaceIssueLabels(ctx, tx, command.ID, labels); err != nil {
+			return err
+		}
 
 		payload, err := json.Marshal(issueCreatedPayload{
 			SequenceNo: sequenceNo,
@@ -76,6 +84,7 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 			Status:     input.Status,
 			Priority:   input.Priority,
 			ParentID:   resolvedParentID,
+			Labels:     labelNames(labels),
 		})
 		if err != nil {
 			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue creation event", false)
@@ -102,6 +111,7 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 			Version:            1,
 			CreatedAt:          now,
 			UpdatedAt:          now,
+			Labels:             labels,
 		}
 		return nil
 	})
@@ -115,25 +125,13 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 // number. It performs no writes and does not hide archived issues.
 func (repository *IssueRepository) GetIssue(ctx context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	var issue domain.Issue
-	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		var row *sql.Row
 		switch identifier.Kind {
 		case domain.IssueIdentifierInternalID:
-			row = query.QueryRowContext(ctx, `
-				SELECT id, sequence_no, type, title, description, acceptance_criteria,
-					status, priority, parent_id, blocked_reason, version,
-					created_by_session_id, created_at, updated_at, closed_at,
-					archived_at, archived_by_session_id
-				FROM issues
-				WHERE id = ?`, identifier.Value)
+			row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE id = ?", identifier.Value)
 		case domain.IssueIdentifierDisplayID:
-			row = query.QueryRowContext(ctx, `
-				SELECT id, sequence_no, type, title, description, acceptance_criteria,
-					status, priority, parent_id, blocked_reason, version,
-					created_by_session_id, created_at, updated_at, closed_at,
-					archived_at, archived_by_session_id
-				FROM issues
-				WHERE sequence_no = ?`, identifier.SequenceNo)
+			row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE sequence_no = ?", identifier.SequenceNo)
 		default:
 			return domain.NewError(
 				domain.CodeInvalidArgument,
@@ -150,6 +148,14 @@ func (repository *IssueRepository) GetIssue(ctx context.Context, identifier doma
 			}
 			return err
 		}
+		if repository.afterGetIssueProjectionReadForTest != nil {
+			repository.afterGetIssueProjectionReadForTest()
+		}
+		labels, err := loadIssueLabels(ctx, query, parsed.ID)
+		if err != nil {
+			return err
+		}
+		parsed.Labels = labels
 		issue = parsed
 		return nil
 	})
@@ -193,6 +199,16 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 		if next.Type == domain.TypeEpic && next.ParentID != nil {
 			return invalidParentError()
 		}
+		if command.Changes.Labels.Set {
+			labels, err := resolveIssueLabels(ctx, tx, command.Changes.Labels.Value, command.CreateMissingLabels, command.LabelIDs, now)
+			if err != nil {
+				return err
+			}
+			if err := replaceIssueLabels(ctx, tx, current.ID, labels); err != nil {
+				return err
+			}
+			next.Labels = labels
+		}
 		next.UpdatedAt = now
 		next.Version = current.Version + 1
 		if command.Changes.Status.Set {
@@ -230,6 +246,8 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 		eventType := "issue_updated"
 		if command.Changes.Status.Set {
 			eventType = "status_changed"
+		} else if command.Changes.Labels.Set {
+			eventType = "labels_changed"
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
@@ -334,7 +352,15 @@ func loadIssueForMutation(ctx context.Context, tx Executor, identifier domain.Is
 	if err == sql.ErrNoRows {
 		return domain.Issue{}, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
 	}
-	return issue, err
+	if err != nil {
+		return issue, err
+	}
+	labels, err := loadIssueLabels(ctx, tx, issue.ID)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	issue.Labels = labels
+	return issue, nil
 }
 
 func classifyConditionalUpdateFailure(ctx context.Context, tx Executor, id string) error {
@@ -423,6 +449,7 @@ func scanIssueProjection(row *sql.Row) (domain.Issue, error) {
 		ClosedAt:            closed,
 		ArchivedAt:          archived,
 		ArchivedBySessionID: nullableStringPointer(archivedBySessionID),
+		Labels:              []domain.Label{},
 	}, nil
 }
 
@@ -436,6 +463,7 @@ type issueUpdatedPayload struct {
 	DescriptionSet        *bool            `json:"description_set,omitempty"`
 	AcceptanceCriteriaSet *bool            `json:"acceptance_criteria_set,omitempty"`
 	BlockedReasonSet      *bool            `json:"blocked_reason_set,omitempty"`
+	Labels                []string         `json:"labels,omitempty"`
 }
 
 func newIssueUpdatedPayload(next domain.Issue, changedFields []string) issueUpdatedPayload {
@@ -465,6 +493,8 @@ func newIssueUpdatedPayload(next domain.Issue, changedFields []string) issueUpda
 		case "blocked_reason":
 			value := next.BlockedReason != nil
 			payload.BlockedReasonSet = &value
+		case "labels":
+			payload.Labels = labelNames(next.Labels)
 		}
 	}
 	return payload
@@ -527,6 +557,7 @@ type issueCreatedPayload struct {
 	Status     domain.Status   `json:"status"`
 	Priority   domain.Priority `json:"priority"`
 	ParentID   *string         `json:"parent_id,omitempty"`
+	Labels     []string        `json:"labels,omitempty"`
 }
 
 type issueArchivedPayload struct {

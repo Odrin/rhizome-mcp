@@ -22,7 +22,10 @@ type OptionalString struct {
 }
 
 // IssuePatch contains the fields supported by this internal update slice.
-// Labels are intentionally unsupported in this internal slice.
+// Labels has set semantics: Set false preserves assignments, while Set true
+// replaces them with a non-nil list, including an explicit empty list. A
+// successful patch emits one event: status_changed takes precedence when Status
+// is set; otherwise a labels patch emits labels_changed.
 type IssuePatch struct {
 	Title              OptionalValue[string]
 	Description        OptionalString
@@ -32,15 +35,17 @@ type IssuePatch struct {
 	Status             OptionalValue[Status]
 	ParentID           OptionalString
 	BlockedReason      OptionalString
+	Labels             OptionalValue[[]string]
 }
 
 // UpdateIssueInput is a typed request to patch one issue. IssueID accepts a
-// canonical ULID or ISSUE-N. ExpectedVersion is required. Labels are
-// intentionally unsupported in this internal slice.
+// canonical ULID or ISSUE-N. ExpectedVersion is required. When Labels is set,
+// missing assignments are created only when CreateMissingLabels is true.
 type UpdateIssueInput struct {
-	IssueID         string
-	ExpectedVersion int64
-	Changes         IssuePatch
+	IssueID             string
+	ExpectedVersion     int64
+	Changes             IssuePatch
+	CreateMissingLabels bool
 }
 
 // Validate checks request-local patch rules and normalizes issue references.
@@ -103,10 +108,21 @@ func (input UpdateIssueInput) Validate() (normalized UpdateIssueInput, err error
 			return UpdateIssueInput{}, err
 		}
 	}
+	if patch.Labels.Set {
+		if patch.Labels.Value == nil {
+			return UpdateIssueInput{}, validationError("labels", "NULL_NOT_ALLOWED", "must not be null")
+		}
+		labels, err := NormalizeLabelNames(patch.Labels.Value)
+		if err != nil {
+			return UpdateIssueInput{}, err
+		}
+		patch.Labels.Value = labels
+	}
 	return UpdateIssueInput{
-		IssueID:         identifier.Value,
-		ExpectedVersion: input.ExpectedVersion,
-		Changes:         copyIssuePatch(patch),
+		IssueID:             identifier.Value,
+		ExpectedVersion:     input.ExpectedVersion,
+		Changes:             copyIssuePatch(patch),
+		CreateMissingLabels: input.CreateMissingLabels,
 	}, nil
 }
 
@@ -154,6 +170,10 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 	if patch.ParentID.Set {
 		result.ParentID = copyString(patch.ParentID.Value)
 		changed["parent_id"] = true
+	}
+	if patch.Labels.Set {
+		result.Labels = labelsFromNames(patch.Labels.Value)
+		changed["labels"] = true
 	}
 
 	if patch.Status.Set {
@@ -205,7 +225,7 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 func (patch IssuePatch) anySet() bool {
 	return patch.Title.Set || patch.Description.Set || patch.AcceptanceCriteria.Set ||
 		patch.Type.Set || patch.Priority.Set || patch.Status.Set ||
-		patch.ParentID.Set || patch.BlockedReason.Set
+		patch.ParentID.Set || patch.BlockedReason.Set || patch.Labels.Set
 }
 
 func copyIssuePatch(patch IssuePatch) IssuePatch {
@@ -213,7 +233,19 @@ func copyIssuePatch(patch IssuePatch) IssuePatch {
 	patch.AcceptanceCriteria.Value = copyString(patch.AcceptanceCriteria.Value)
 	patch.ParentID.Value = copyString(patch.ParentID.Value)
 	patch.BlockedReason.Value = copyString(patch.BlockedReason.Value)
+	if patch.Labels.Set && patch.Labels.Value != nil {
+		patch.Labels.Value = append([]string{}, patch.Labels.Value...)
+	}
 	return patch
+}
+
+func labelsFromNames(names []string) []Label {
+	labels := make([]Label, len(names))
+	for i, name := range names {
+		_, normalized, _ := NormalizeLabelName(name)
+		labels[i] = Label{Name: name, NormalizedName: normalized}
+	}
+	return labels
 }
 
 func orderedChangedFields(fields map[string]bool) []string {

@@ -71,9 +71,14 @@ func (service *IssueService) CreateIssue(ctx context.Context, input domain.Creat
 	if _, err := ids.ParseStrict(id); err != nil {
 		return CreateIssueResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate issue identifier", false)
 	}
+	labelIDs, err := service.newLabelIDs(normalized.Labels, normalized.CreateMissingLabels)
+	if err != nil {
+		return CreateIssueResult{}, err
+	}
 	issue, err := service.repository.CreateIssue(ctx, ports.CreateIssueCommand{
 		ID:        id,
 		Input:     normalized,
+		LabelIDs:  labelIDs,
 		CreatedAt: service.clock.Now().UTC(),
 	})
 	if err != nil {
@@ -98,11 +103,17 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 	if err != nil {
 		return UpdateIssueResult{}, err
 	}
+	labelIDs, err := service.newLabelIDs(normalized.Changes.Labels.Value, normalized.Changes.Labels.Set && normalized.CreateMissingLabels)
+	if err != nil {
+		return UpdateIssueResult{}, err
+	}
 	result, err := service.repository.UpdateIssue(ctx, ports.UpdateIssueCommand{
-		Identifier:      identifier,
-		ExpectedVersion: normalized.ExpectedVersion,
-		Changes:         normalized.Changes,
-		UpdatedAt:       service.clock.Now().UTC(),
+		Identifier:          identifier,
+		ExpectedVersion:     normalized.ExpectedVersion,
+		Changes:             normalized.Changes,
+		LabelIDs:            labelIDs,
+		CreateMissingLabels: normalized.CreateMissingLabels,
+		UpdatedAt:           service.clock.Now().UTC(),
 	})
 	if err != nil {
 		return UpdateIssueResult{}, err
@@ -111,6 +122,33 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 		Issue:         result.Issue,
 		ChangedFields: append([]string(nil), result.ChangedFields...),
 	}, nil
+}
+
+// ListLabels validates and returns a deterministic cursor-paginated label page.
+func (service *IssueService) ListLabels(ctx context.Context, input domain.ListLabelsInput) (domain.LabelList, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return domain.LabelList{}, err
+	}
+	return service.repository.ListLabels(ctx, ports.ListLabelsCommand{Input: normalized})
+}
+
+func (service *IssueService) newLabelIDs(labels []string, enabled bool) ([]string, error) {
+	if !enabled {
+		return nil, nil
+	}
+	result := make([]string, len(labels))
+	for i := range labels {
+		id, err := service.ids.New()
+		if err != nil {
+			return nil, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate label identifier", false)
+		}
+		if _, err := ids.ParseStrict(id); err != nil {
+			return nil, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate label identifier", false)
+		}
+		result[i] = id
+	}
+	return result, nil
 }
 
 // ArchiveIssue validates and atomically archives one issue with an optimistic
