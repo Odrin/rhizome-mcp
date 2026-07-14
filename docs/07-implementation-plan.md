@@ -86,6 +86,16 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
   accepted. Verification: focused, full, race-enabled, vet, no-CGO, and
   diff-check tests passed. Remaining Phase 5 work is unified activity and
   bounded work context; Phase 5 is not complete.
+- **Phase 5 activity-storage subunit completed on 2026-07-14.** The SQLite
+  activity repository/storage slice is complete: it reads all six issue-owned
+  categories in one snapshot-consistent `UNION ALL` page with deterministic
+  newest-first keyset pagination and strict corruption validation, resolves
+  canonical and display issue identifiers, preserves full issue event history,
+  excludes global/null-scope decisions/events, and does not expose lease
+  secrets. Focused, full, race, vet, and no-CGO validation passed. The
+  immediate next unit is only MCP tool #15/composition/docs wiring for
+  `get_issue_activity`; bounded work-context assembly remains after that, and
+  Phase 5 remains incomplete.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
 - Implement compact default work context with explicitly bounded optional sections.
 - Deliver `add_comment`, `record_decision`, `get_issue_activity`, and `get_work_context`.
