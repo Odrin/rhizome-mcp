@@ -27,10 +27,11 @@ For each requested outcome:
 8. Run focused tests, then broader tests if justified.
 9. Compare implementation against brief and domain invariants.
 10. If defects exist, send one precise correction brief; do not restart.
-11. Reconcile cycle with `docs/07-implementation-plan.md`. Update it to record completed phases/milestones, refine upcoming work, correct assumptions, and align gates/verification with decisions.
-12. Review plan edits: preserve history, explain material roadmap changes, never weaken exit gates to match incomplete work.
-13. Report result, verification, risks, plan updates, and next unit.
-*Limit:* Use one subagent at a time unless scopes are independent and non-overlapping.
+11. Commit completed task changes to the repository before starting or moving to any subsequent task.
+12. Reconcile cycle with `docs/07-implementation-plan.md`. Update it to record completed phases/milestones, refine upcoming work, correct assumptions, and keep exit gates and verification requirements aligned with accepted implementation and specification decisions.
+13. Review plan edits: preserve history, explain material roadmap changes, never weaken exit gates to match incomplete work.
+14. Report result, verification, risks, plan updates, and next unit.
+*Limit:* Parallel execution of multiple tasks is permitted if and only if they are entirely non-overlapping, strictly independent, and can be safely executed concurrently without conflicts. Otherwise, enforce strict sequential execution.
 
 # Model Routing Policy
 Explicitly request either `GPT-5.6 Luna (copilot)` or `GPT-5.6 Terra (copilot)`.
