@@ -13,13 +13,15 @@ import (
 )
 
 type recordingIssueRepository struct {
-	command       ports.CreateIssueCommand
-	updateCommand ports.UpdateIssueCommand
-	issue         domain.Issue
-	identifier    domain.IssueIdentifier
-	createCalled  bool
-	updateCalled  bool
-	getCalled     bool
+	command        ports.CreateIssueCommand
+	updateCommand  ports.UpdateIssueCommand
+	archiveCommand ports.ArchiveIssueCommand
+	issue          domain.Issue
+	identifier     domain.IssueIdentifier
+	createCalled   bool
+	updateCalled   bool
+	archiveCalled  bool
+	getCalled      bool
 }
 
 func (repository *recordingIssueRepository) CreateIssue(_ context.Context, command ports.CreateIssueCommand) (domain.Issue, error) {
@@ -36,6 +38,12 @@ func (repository *recordingIssueRepository) UpdateIssue(_ context.Context, comma
 	repository.updateCalled = true
 	repository.updateCommand = command
 	return ports.UpdateIssueResult{Issue: repository.issue, ChangedFields: []string{"title"}}, nil
+}
+
+func (repository *recordingIssueRepository) ArchiveIssue(_ context.Context, command ports.ArchiveIssueCommand) (ports.ArchiveIssueResult, error) {
+	repository.archiveCalled = true
+	repository.archiveCommand = command
+	return ports.ArchiveIssueResult{Issue: repository.issue}, nil
 }
 
 func (repository *recordingIssueRepository) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
@@ -122,5 +130,50 @@ func TestIssueServiceGetIssueRejectsInvalidIdentifierBeforeRepository(t *testing
 	}
 	if repository.getCalled {
 		t.Fatal("repository called for invalid identifier")
+	}
+}
+
+func TestIssueServiceArchiveIssueNormalizesAndDelegates(t *testing.T) {
+	now := time.Date(2026, 7, 14, 8, 9, 10, 0, time.FixedZone("test", 2*60*60))
+	repository := &recordingIssueRepository{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Version: 2}}
+	service, err := application.NewIssueService(repository, clock.NewFakeClock(now), fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ArchiveIssue(context.Background(), domain.ArchiveIssueInput{
+		IssueID: "issue-7", ExpectedVersion: 2,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveIssue() error = %v", err)
+	}
+	if !repository.archiveCalled ||
+		repository.archiveCommand.Identifier.Kind != domain.IssueIdentifierDisplayID ||
+		repository.archiveCommand.Identifier.Value != "ISSUE-7" ||
+		repository.archiveCommand.ExpectedVersion != 2 ||
+		!repository.archiveCommand.ArchivedAt.Equal(now.UTC()) {
+		t.Fatalf("archive command = %#v", repository.archiveCommand)
+	}
+}
+
+func TestIssueServiceArchiveIssueRejectsInvalidInputBeforeRepository(t *testing.T) {
+	tests := []domain.ArchiveIssueInput{
+		{IssueID: "", ExpectedVersion: 1},
+		{IssueID: "not-an-issue", ExpectedVersion: 1},
+		{IssueID: "ISSUE-1", ExpectedVersion: 0},
+	}
+	for _, input := range tests {
+		repository := &recordingIssueRepository{}
+		service, err := application.NewIssueService(repository, clock.NewFakeClock(time.Unix(0, 0)), fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = service.ArchiveIssue(context.Background(), input)
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeValidationError {
+			t.Fatalf("ArchiveIssue(%#v) error = %v, want VALIDATION_ERROR", input, err)
+		}
+		if repository.archiveCalled {
+			t.Fatal("repository called for invalid archive input")
+		}
 	}
 }

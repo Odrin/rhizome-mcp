@@ -245,6 +245,80 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 	return result, nil
 }
 
+// ArchiveIssue atomically protects against active attempts, conditionally
+// archives an issue, and appends its one corresponding event.
+func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command ports.ArchiveIssueCommand) (ports.ArchiveIssueResult, error) {
+	var result ports.ArchiveIssueResult
+	now := command.ArchivedAt.UTC()
+	timestamp := now.Format(time.RFC3339Nano)
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		current, err := loadIssueForMutation(ctx, tx, command.Identifier)
+		if err != nil {
+			return err
+		}
+		if current.ArchivedAt != nil {
+			return domain.NewError(domain.CodeIssueArchived, "issue is archived", false)
+		}
+		if current.Version != command.ExpectedVersion {
+			return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
+		}
+
+		var hasActiveAttempt bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM work_attempts
+				WHERE issue_id = ? AND status = 'active'
+			)`, current.ID).Scan(&hasActiveAttempt); err != nil {
+			return err
+		}
+		if hasActiveAttempt {
+			return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
+		}
+
+		res, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET archived_at = ?, archived_by_session_id = NULL,
+				version = version + 1, updated_at = ?
+			WHERE id = ? AND version = ? AND archived_at IS NULL`,
+			timestamp, timestamp, current.ID, command.ExpectedVersion,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return classifyConditionalUpdateFailure(ctx, tx, current.ID)
+		}
+
+		payload, err := json.Marshal(issueArchivedPayload{
+			Version:    command.ExpectedVersion + 1,
+			ArchivedAt: timestamp,
+		})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue archive event", false)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_archived', NULL, NULL, ?, ?)`,
+			current.ID, string(payload), timestamp); err != nil {
+			return err
+		}
+
+		result.Issue, err = loadIssueForMutation(ctx, tx, domain.IssueIdentifier{
+			Kind:  domain.IssueIdentifierInternalID,
+			Value: current.ID,
+		})
+		return err
+	})
+	if err != nil {
+		return ports.ArchiveIssueResult{}, err
+	}
+	return result, nil
+}
+
 func loadIssueForMutation(ctx context.Context, tx Executor, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	var row *sql.Row
 	switch identifier.Kind {
@@ -453,6 +527,11 @@ type issueCreatedPayload struct {
 	Status     domain.Status   `json:"status"`
 	Priority   domain.Priority `json:"priority"`
 	ParentID   *string         `json:"parent_id,omitempty"`
+}
+
+type issueArchivedPayload struct {
+	Version    int64  `json:"version"`
+	ArchivedAt string `json:"archived_at"`
 }
 
 func validateParent(ctx context.Context, tx Executor, parentID *string) (*string, error) {

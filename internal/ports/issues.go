@@ -32,9 +32,23 @@ type UpdateIssueResult struct {
 	ChangedFields []string
 }
 
+// ArchiveIssueCommand contains a validated archive request and its mutation
+// timestamp.
+type ArchiveIssueCommand struct {
+	Identifier      domain.IssueIdentifier
+	ExpectedVersion int64
+	ArchivedAt      time.Time
+}
+
+// ArchiveIssueResult is the full persisted projection after archiving.
+type ArchiveIssueResult struct {
+	Issue domain.Issue
+}
+
 // IssueRepository reads issue projections and persists issue mutations.
 type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
 	UpdateIssue(context.Context, UpdateIssueCommand) (UpdateIssueResult, error)
+	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
 }

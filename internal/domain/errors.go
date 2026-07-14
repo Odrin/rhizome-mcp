@@ -19,6 +19,8 @@ const (
 	CodeIssueArchived = "ISSUE_ARCHIVED"
 	// CodeVersionConflict identifies a failed optimistic version precondition.
 	CodeVersionConflict = "VERSION_CONFLICT"
+	// CodeActiveAttemptExists identifies an issue protected by an active attempt.
+	CodeActiveAttemptExists = "ACTIVE_ATTEMPT_EXISTS"
 	// CodeLimitExceeded identifies input beyond a documented bound.
 	CodeLimitExceeded = "LIMIT_EXCEEDED"
 	// CodeIDGeneration identifies failure to generate a canonical internal ID.

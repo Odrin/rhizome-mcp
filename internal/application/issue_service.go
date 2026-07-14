@@ -38,6 +38,11 @@ type UpdateIssueResult struct {
 	ChangedFields []string
 }
 
+// ArchiveIssueResult contains the full persisted projection after archiving.
+type ArchiveIssueResult struct {
+	Issue domain.Issue
+}
+
 // NewIssueService composes the issue use case from its required dependencies.
 func NewIssueService(repository ports.IssueRepository, source clock.Clock, generator IDGenerator) (*IssueService, error) {
 	if repository == nil {
@@ -106,6 +111,28 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 		Issue:         result.Issue,
 		ChangedFields: append([]string(nil), result.ChangedFields...),
 	}, nil
+}
+
+// ArchiveIssue validates and atomically archives one issue with an optimistic
+// version precondition.
+func (service *IssueService) ArchiveIssue(ctx context.Context, input domain.ArchiveIssueInput) (ArchiveIssueResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return ArchiveIssueResult{}, err
+	}
+	identifier, err := domain.ParseIssueIdentifier(normalized.IssueID)
+	if err != nil {
+		return ArchiveIssueResult{}, err
+	}
+	result, err := service.repository.ArchiveIssue(ctx, ports.ArchiveIssueCommand{
+		Identifier:      identifier,
+		ExpectedVersion: normalized.ExpectedVersion,
+		ArchivedAt:      service.clock.Now().UTC(),
+	})
+	if err != nil {
+		return ArchiveIssueResult{}, err
+	}
+	return ArchiveIssueResult{Issue: result.Issue}, nil
 }
 
 // GetIssue validates an internal or display issue identifier and returns the
