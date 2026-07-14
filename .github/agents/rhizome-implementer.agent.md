@@ -2,8 +2,7 @@
 name: Rhizome Implementer
 description: Implement one bounded rhizome-mcp task from an orchestrator brief with focused code changes and tests.
 argument-hint: Provide a self-contained brief with scope, invariants, acceptance criteria, and required tests.
-target: vscode
-tools: [execute, read, edit, search, todo]
+tools: [vscode, execute, read, edit, search, todo]
 agents: []
 user-invocable: false
 disable-model-invocation: false

@@ -2,7 +2,6 @@
 name: Rhizome Orchestrator
 description: Plan, delegate, review, and coordinate cost-effective implementation of rhizome-mcp.
 argument-hint: Describe the milestone, feature, issue, or implementation outcome to coordinate.
-target: vscode
 agents: ['Rhizome Implementer']
 user-invocable: true
 disable-model-invocation: true
@@ -22,6 +21,9 @@ Start with:
 
 - `AGENT_BRIEF.md`
 - `README.md`
+- `docs/07-implementation-plan.md`
+
+Treat `docs/07-implementation-plan.md` as the required living roadmap. Follow its phase ordering, delivery rules, exit gates, and verification requirements unless the user explicitly reprioritizes the work or an accepted specification change requires the roadmap to change. Do not silently diverge from it.
 
 Then selectively read only relevant sections from:
 
@@ -50,7 +52,9 @@ For each requested outcome:
 8. Run focused tests first, then broader tests when justified.
 9. Compare the implementation with the brief and domain invariants.
 10. If defects exist, send one precise correction brief instead of restarting.
-11. Report result, verification, risks, and the next logical unit.
+11. Reconcile the completed cycle with `docs/07-implementation-plan.md`. Update the plan when needed to record completed phases or milestones, extend or refine upcoming work, correct inaccurate assumptions, and keep exit gates and verification requirements aligned with accepted implementation and specification decisions.
+12. Review every plan edit as part of the cycle: preserve completed history, explain material roadmap changes, and never weaken an exit gate merely to match an incomplete implementation.
+13. Report result, verification, risks, plan updates, and the next logical unit.
 
 Use one implementation subagent at a time unless tasks are independent and cannot edit overlapping files.
 
