@@ -79,6 +79,11 @@ func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.Re
 	})
 }
 
+func (service *AttemptService) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
+	now := service.clock.Now().UTC()
+	return service.repository.ExpireAttempts(ctx, ports.ExpireAttemptsCommand{OccurredAt: now})
+}
+
 func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (ports.SaveAttemptNoteResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {

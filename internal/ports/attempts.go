@@ -65,10 +65,19 @@ type FinishAttemptResult struct {
 	Artifacts     []domain.Artifact
 }
 
+type ExpireAttemptsCommand struct {
+	OccurredAt time.Time
+}
+
+type ExpireAttemptsResult struct {
+	ExpiredAttemptCount int
+}
+
 // AttemptRepository executes all attempt lifecycle mutations atomically.
 type AttemptRepository interface {
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
+	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
 }

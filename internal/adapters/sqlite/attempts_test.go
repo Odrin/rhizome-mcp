@@ -128,6 +128,123 @@ func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
 	}
 }
 
+func TestExpireAttemptsCleansAllIssuesAtBoundaryAndPreservesState(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "cleanup")
+	defer fixture.close()
+
+	firstIssue := createAttemptIssue(t, fixture, "first cleanup issue", domain.StatusReady)
+	secondIssue := createAttemptIssue(t, fixture, "second cleanup issue", domain.StatusReady)
+	laterIssue := createAttemptIssue(t, fixture, "later cleanup issue", domain.StatusReady)
+	resultIssue := createAttemptIssue(t, fixture, "result preservation issue", domain.StatusReady)
+
+	first, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: firstIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := fixture.attempts.SaveAttemptNote(fixture.ctx, domain.SaveAttemptNoteInput{
+		AttemptID: first.Attempt.ID, LeaseToken: first.LeaseToken,
+		Kind: domain.AttemptNoteKindCheckpoint, Content: "durable checkpoint",
+		Artifacts: []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "checkpoint.txt"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: secondIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: resultIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := finishInput(resultClaim, domain.AttemptOutcomeFailed)
+	finish.FailureReasonCode = failurePointer(domain.FailureReasonOther)
+	finished, err := fixture.attempts.FinishAttempt(fixture.ctx, finish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Advance(time.Second)
+	later, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: laterIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds)*time.Second - time.Second)
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ExpireAttempts(fixture.ctx, ports.ExpireAttemptsCommand{}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("zero cleanup timestamp error = %v", err)
+	}
+	cleaned, err := fixture.attempts.ExpireAttempts(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned.ExpiredAttemptCount != 2 {
+		t.Fatalf("expired attempt count = %d, want 2", cleaned.ExpiredAttemptCount)
+	}
+	repeated, err := fixture.attempts.ExpireAttempts(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.ExpiredAttemptCount != 0 {
+		t.Fatalf("repeated cleanup count = %d, want 0", repeated.ExpiredAttemptCount)
+	}
+
+	var firstStatus, secondStatus, laterStatus, resultStatus string
+	var laterExpiry, resultSummary string
+	var issueStatus string
+	var noteCount, artifactCount, resultEvents int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, first.Attempt.ID).Scan(&firstStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, second.Attempt.ID).Scan(&secondStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, lease_expires_at FROM work_attempts WHERE id = ?`, later.Attempt.ID).Scan(&laterStatus, &laterExpiry); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, result_summary FROM work_attempts WHERE id = ?`, resultClaim.Attempt.ID).Scan(&resultStatus, &resultSummary); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, firstIssue.ID).Scan(&issueStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes WHERE id = ?`, note.Note.ID).Scan(&noteCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, first.Attempt.ID).Scan(&artifactCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_failed'`, resultClaim.Attempt.ID).Scan(&resultEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if finished.Attempt.Status != domain.AttemptStatusFailed ||
+		firstStatus != string(domain.AttemptStatusExpired) || secondStatus != string(domain.AttemptStatusExpired) ||
+		laterStatus != string(domain.AttemptStatusActive) || resultStatus != string(domain.AttemptStatusFailed) ||
+		resultSummary != "summary" || issueStatus != string(domain.StatusReady) ||
+		noteCount != 1 || artifactCount != 1 || resultEvents != 1 {
+		t.Fatalf("cleanup state = first %q second %q later %q later expiry %q result %q/%q issue %q notes %d artifacts %d result events %d",
+			firstStatus, secondStatus, laterStatus, laterExpiry, resultStatus, resultSummary, issueStatus,
+			noteCount, artifactCount, resultEvents)
+	}
+	if countAttemptEvents(t, fixture, first.Attempt.ID, "attempt_expired") != 1 ||
+		countAttemptEvents(t, fixture, second.Attempt.ID, "attempt_expired") != 1 {
+		t.Fatal("cleanup did not write exactly one expiry event per attempt")
+	}
+
+	takeover, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: firstIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if takeover.Attempt.ID == first.Attempt.ID {
+		t.Fatal("cleanup did not release the active-attempt claim")
+	}
+}
+
 func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.T) {
 	ctx := context.Background()
 	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))

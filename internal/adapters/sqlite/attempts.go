@@ -144,7 +144,7 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 			return err
 		}
 		if !leaseExpiry.After(now) {
-			if err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
+			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
 				return err
 			}
 			leaseExpired = true
@@ -174,6 +174,51 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 	}
 	if leaseExpired {
 		return ports.RenewAttemptResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+	}
+	return result, nil
+}
+
+func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command ports.ExpireAttemptsCommand) (ports.ExpireAttemptsResult, error) {
+	if command.OccurredAt.IsZero() {
+		return ports.ExpireAttemptsResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt expiry cleanup command timestamp is required", false)
+	}
+	now := command.OccurredAt.UTC()
+	var result ports.ExpireAttemptsResult
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM work_attempts
+			WHERE status = 'active' AND lease_expires_at <= ? ORDER BY id ASC`, now.Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		var attemptIDs []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			attemptIDs = append(attemptIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range attemptIDs {
+			expired, err := expireAttempt(ctx, tx, id, now)
+			if err != nil {
+				return err
+			}
+			if expired {
+				result.ExpiredAttemptCount++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return ports.ExpireAttemptsResult{}, err
 	}
 	return result, nil
 }
@@ -213,7 +258,7 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 			return err
 		}
 		if !leaseExpiry.After(now) {
-			if err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
+			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
 				return err
 			}
 			leaseExpired = true
@@ -364,7 +409,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			return err
 		}
 		if !expiryTime.After(now) {
-			if err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
+			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
 				return err
 			}
 			leaseExpired = true
@@ -723,40 +768,40 @@ func expireAttemptsForIssue(ctx context.Context, tx Executor, issueID string, no
 		return err
 	}
 	for _, id := range attemptIDs {
-		if err := expireAttempt(ctx, tx, id, now); err != nil {
+		if _, err := expireAttempt(ctx, tx, id, now); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.Time) error {
+func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.Time) (bool, error) {
 	timestamp := now.UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = 'expired', finished_at = ?
 		WHERE id = ? AND status = 'active' AND lease_expires_at <= ?`, timestamp, attemptID, timestamp)
 	if err != nil {
-		return err
+		return false, err
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if affected == 0 {
-		return nil
+		return false, nil
 	}
 	var issueID string
 	if err := tx.QueryRowContext(ctx, `SELECT issue_id FROM work_attempts WHERE id = ?`, attemptID).Scan(&issueID); err != nil {
-		return err
+		return false, err
 	}
 	payload, err := json.Marshal(struct {
 		AttemptID string `json:"attempt_id"`
 	}{AttemptID: attemptID})
 	if err != nil {
-		return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt expiry event", false)
+		return false, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt expiry event", false)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
 		VALUES (?, 'attempt_expired', NULL, ?, ?, ?)`, issueID, attemptID, string(payload), timestamp)
-	return err
+	return true, err
 }
 
 func isActiveAttemptConstraint(err error) bool {

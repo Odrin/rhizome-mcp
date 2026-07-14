@@ -39,6 +39,28 @@ func TestAttemptServiceSaveNoteGeneratesIDHashesTokenAndUsesClock(t *testing.T) 
 	}
 }
 
+func TestAttemptServiceExpireAttemptsUsesUTCClock(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.FixedZone("test", 2*60*60))
+	repository := &recordingAttemptRepository{
+		expireResult: ports.ExpireAttemptsResult{ExpiredAttemptCount: 3},
+	}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(now), fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FAX"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.ExpireAttempts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repository.expireCalled ||
+		!repository.expireCommand.OccurredAt.Equal(now.UTC()) ||
+		repository.expireCommand.OccurredAt.Location() != time.UTC ||
+		result.ExpiredAttemptCount != 3 {
+		t.Fatalf("cleanup command = %#v, result = %#v", repository.expireCommand, result)
+	}
+}
+
 func TestAttemptServiceSaveNoteRejectsInvalidInputBeforeRepository(t *testing.T) {
 	repository := &recordingAttemptRepository{}
 	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)), fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FAX"))
@@ -212,8 +234,11 @@ type recordingAttemptRepository struct {
 	command       ports.SaveAttemptNoteCommand
 	finishCommand ports.FinishAttemptCommand
 	finishResult  ports.FinishAttemptResult
+	expireCommand ports.ExpireAttemptsCommand
+	expireResult  ports.ExpireAttemptsResult
 	called        bool
 	finishCalled  bool
+	expireCalled  bool
 }
 
 func (repository *recordingAttemptRepository) ClaimIssue(context.Context, ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
@@ -222,6 +247,12 @@ func (repository *recordingAttemptRepository) ClaimIssue(context.Context, ports.
 
 func (repository *recordingAttemptRepository) RenewAttempt(context.Context, ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
 	return ports.RenewAttemptResult{}, nil
+}
+
+func (repository *recordingAttemptRepository) ExpireAttempts(_ context.Context, command ports.ExpireAttemptsCommand) (ports.ExpireAttemptsResult, error) {
+	repository.expireCalled = true
+	repository.expireCommand = command
+	return repository.expireResult, nil
 }
 
 func (repository *recordingAttemptRepository) SaveAttemptNote(_ context.Context, command ports.SaveAttemptNoteCommand) (ports.SaveAttemptNoteResult, error) {

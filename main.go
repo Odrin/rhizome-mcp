@@ -22,6 +22,8 @@ import (
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
+const attemptCleanupInterval = time.Minute
+
 func main() {
 	cfg := config.Load()
 
@@ -130,6 +132,27 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		ticker := time.NewTicker(attemptCleanupInterval)
+		defer ticker.Stop()
+		for {
+			if _, err := attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+				slog.Error("attempt expiry cleanup failed", "error", err)
+			}
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	defer func() {
+		stopCleanup()
+		<-cleanupDone
+	}()
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:    issueService,
 		ProjectService:  projectService,
