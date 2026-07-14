@@ -108,6 +108,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	activityRepository, err := sqlite.NewActivityRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
 	if err != nil {
 		return err
@@ -141,6 +145,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	decisionService, err := application.NewDecisionService(decisionRepository, source, generator)
+	if err != nil {
+		return err
+	}
+	activityService, err := application.NewActivityService(activityRepository)
 	if err != nil {
 		return err
 	}
@@ -185,6 +193,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		PlanningService: planningService,
 		CommentService:  commentService,
 		DecisionService: decisionService,
+		ActivityService: activityService,
 		AttemptService:  attemptService,
 		SessionService:  sessionService,
 		ServerName:      cfg.ServerName,

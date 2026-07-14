@@ -628,9 +628,23 @@ next_cursor
 has_more
 ```
 
-Every item contains `entity_type`.
+Every item contains `entity_type` and exactly one matching typed payload among
+`comment`, `decision`, `attempt`, `attempt_note`, `event`, and `artifact`.
 
-This tool intentionally replaces several narrow list tools.
+The `types` input is optional; when omitted or empty, all categories are
+returned. Supported categories are exactly `comments`, `decisions`, `attempts`,
+`attempt_notes`, `events`, and `artifacts`. The default limit is `20`, the
+maximum limit is `100`, and only `newest_first` ordering is supported.
+
+Pagination uses an opaque, versioned cursor; invalid cursors fail with
+structured invalid-argument errors. The response includes `items`,
+`next_cursor`, and `has_more`. Each item carries wrapper identity, scope, and
+occurrence fields plus the typed payload. Attempts do not expose lease tokens
+or lease hashes. Event payloads preserve durable activity metadata. Results are
+returned from one consistent read snapshot and are ordered deterministically by
+`occurred_at` descending, then a fixed category rank, then source ID. Global or
+null-scope decisions and events are excluded from issue activity; full
+issue-owned event history, including issue creation, remains included.
 
 ---
 

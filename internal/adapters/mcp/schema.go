@@ -87,6 +87,16 @@ func schemaGetIssue() *jsonschema.Schema {
 	}, "issue_id")
 }
 
+func schemaGetIssueActivity() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_id": boundedStringSchema(64),
+		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(6), UniqueItems: true},
+		"limit":    boundedIntegerSchema(0, 100),
+		"cursor":   nullableBoundedStringSchema(4096),
+		"order":    enumSchema("newest_first"),
+	}, "issue_id")
+}
+
 func schemaListIssues() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"types": stringsSchema(), "statuses": stringsSchema(), "effective_statuses": stringsSchema(),
@@ -250,10 +260,11 @@ func schemaFinishAttempt() *jsonschema.Schema {
 	}, "attempt_id", "lease_token", "outcome", "result_summary")
 }
 
-func schemaProjectOutput() *jsonschema.Schema    { return typedSchema[projectOutput]() }
-func schemaLabelListOutput() *jsonschema.Schema  { return typedSchema[labelListOutput]() }
-func schemaIssueOutput() *jsonschema.Schema      { return typedSchema[issueDTO]() }
-func schemaAddCommentOutput() *jsonschema.Schema { return typedSchema[addCommentOutput]() }
+func schemaProjectOutput() *jsonschema.Schema          { return typedSchema[projectOutput]() }
+func schemaLabelListOutput() *jsonschema.Schema        { return typedSchema[labelListOutput]() }
+func schemaIssueOutput() *jsonschema.Schema            { return typedSchema[issueDTO]() }
+func schemaGetIssueActivityOutput() *jsonschema.Schema { return typedSchema[issueActivityOutput]() }
+func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addCommentOutput]() }
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()
 }

@@ -92,10 +92,14 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
   newest-first keyset pagination and strict corruption validation, resolves
   canonical and display issue identifiers, preserves full issue event history,
   excludes global/null-scope decisions/events, and does not expose lease
-  secrets. Focused, full, race, vet, and no-CGO validation passed. The
-  immediate next unit is only MCP tool #15/composition/docs wiring for
-  `get_issue_activity`; bounded work-context assembly remains after that, and
-  Phase 5 remains incomplete.
+  secrets. Focused, full, race, vet, and no-CGO validation passed.
+- **Phase 5 activity-MCP exposure completed on 2026-07-14.** Tool #15 is
+  exposed through the thin MCP adapter with schema-bounded input and typed
+  output mapping. Adapter, full, race, vet, and no-CGO validation passed.
+- The immediate next unit is bounded `get_work_context` assembly. Phase 5
+  remains incomplete and the exit gate remains decisions and checkpoints
+  surviving interruption and default context remaining compact and
+  deterministic.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
 - Implement compact default work context with explicitly bounded optional sections.
 - Deliver `add_comment`, `record_decision`, `get_issue_activity`, and `get_work_context`.

@@ -40,7 +40,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -50,6 +50,21 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
+	activityTool := toolNamed(t, tools.Tools, "get_issue_activity")
+	assertRequired(t, activityTool, "issue_id")
+	data, err := json.Marshal(activityTool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(schema.Required, []string{"issue_id"}) {
+		t.Fatalf("get_issue_activity required = %v, want [issue_id]", schema.Required)
+	}
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
@@ -145,6 +160,159 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		decisionOutput.Decision.Status != "active" || decisionOutput.Decision.CreatedBySessionID == nil {
 		t.Fatalf("decision output = %#v", decisionOutput)
 	}
+	activity := call(t, client, "get_issue_activity", map[string]any{
+		"issue_id": issue.DisplayID, "types": []string{"comments", "decisions", "events"}, "limit": 20, "order": "newest_first",
+	})
+	var activityOutput struct {
+		Items []struct {
+			IssueID    string `json:"issue_id"`
+			EntityType string `json:"entity_type"`
+			Comment    *struct {
+				ID      string `json:"id"`
+				Content string `json:"content"`
+			} `json:"comment"`
+			Decision *struct {
+				ID string `json:"id"`
+			} `json:"decision"`
+			Event *struct {
+				ID         int64   `json:"id"`
+				EventType  string  `json:"event_type"`
+				LeaseToken *string `json:"lease_token"`
+			} `json:"event"`
+		} `json:"items"`
+		NextCursor *string `json:"next_cursor"`
+		HasMore    bool    `json:"has_more"`
+	}
+	decodeStructured(t, activity, &activityOutput)
+	if activity.IsError || activityOutput.Items == nil || len(activityOutput.Items) < 3 || activityOutput.NextCursor != nil || activityOutput.HasMore {
+		t.Fatalf("issue activity = %#v", activityOutput)
+	}
+	entityCounts := map[string]int{}
+	for _, item := range activityOutput.Items {
+		if item.IssueID != issue.ID {
+			t.Fatalf("issue activity wrapper issue id = %q, want %q", item.IssueID, issue.ID)
+		}
+		if item.Comment == nil && item.Decision == nil && item.Event == nil {
+			t.Fatalf("issue activity item missing payload = %#v", item)
+		}
+		if item.Comment != nil && item.Decision != nil || item.Comment != nil && item.Event != nil || item.Decision != nil && item.Event != nil {
+			t.Fatalf("issue activity item has unexpected multiple payloads = %#v", item)
+		}
+		if item.EntityType != "comment" && item.EntityType != "decision" && item.EntityType != "event" {
+			t.Fatalf("issue activity unexpected entity type = %q", item.EntityType)
+		}
+		entityCounts[item.EntityType]++
+	}
+	if entityCounts["comment"] != 1 || entityCounts["decision"] != 1 || entityCounts["event"] < 1 {
+		t.Fatalf("issue activity entity counts = %#v", entityCounts)
+	}
+	var commentItem, decisionItem, eventItem struct {
+		IssueID    string `json:"issue_id"`
+		EntityType string `json:"entity_type"`
+		Comment    *struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+		} `json:"comment"`
+		Decision *struct {
+			ID string `json:"id"`
+		} `json:"decision"`
+		Event *struct {
+			ID         int64   `json:"id"`
+			EventType  string  `json:"event_type"`
+			LeaseToken *string `json:"lease_token"`
+		} `json:"event"`
+	}
+	for _, item := range activityOutput.Items {
+		switch item.EntityType {
+		case "comment":
+			commentItem = struct {
+				IssueID    string `json:"issue_id"`
+				EntityType string `json:"entity_type"`
+				Comment    *struct {
+					ID      string `json:"id"`
+					Content string `json:"content"`
+				} `json:"comment"`
+				Decision *struct {
+					ID string `json:"id"`
+				} `json:"decision"`
+				Event *struct {
+					ID         int64   `json:"id"`
+					EventType  string  `json:"event_type"`
+					LeaseToken *string `json:"lease_token"`
+				} `json:"event"`
+			}{IssueID: item.IssueID, EntityType: item.EntityType, Comment: item.Comment}
+		case "decision":
+			decisionItem = struct {
+				IssueID    string `json:"issue_id"`
+				EntityType string `json:"entity_type"`
+				Comment    *struct {
+					ID      string `json:"id"`
+					Content string `json:"content"`
+				} `json:"comment"`
+				Decision *struct {
+					ID string `json:"id"`
+				} `json:"decision"`
+				Event *struct {
+					ID         int64   `json:"id"`
+					EventType  string  `json:"event_type"`
+					LeaseToken *string `json:"lease_token"`
+				} `json:"event"`
+			}{IssueID: item.IssueID, EntityType: item.EntityType, Decision: item.Decision}
+		case "event":
+			eventItem = struct {
+				IssueID    string `json:"issue_id"`
+				EntityType string `json:"entity_type"`
+				Comment    *struct {
+					ID      string `json:"id"`
+					Content string `json:"content"`
+				} `json:"comment"`
+				Decision *struct {
+					ID string `json:"id"`
+				} `json:"decision"`
+				Event *struct {
+					ID         int64   `json:"id"`
+					EventType  string  `json:"event_type"`
+					LeaseToken *string `json:"lease_token"`
+				} `json:"event"`
+			}{IssueID: item.IssueID, EntityType: item.EntityType, Event: item.Event}
+		}
+	}
+	if commentItem.Comment == nil || commentItem.Comment.ID != commentOutput.Comment.ID || commentItem.Comment.Content != commentOutput.Comment.Content {
+		t.Fatalf("comment activity item = %#v", commentItem)
+	}
+	if decisionItem.Decision == nil || decisionItem.Decision.ID != decisionOutput.Decision.ID {
+		t.Fatalf("decision activity item = %#v", decisionItem)
+	}
+	if eventItem.Event == nil || eventItem.Event.ID <= 0 || eventItem.Event.EventType == "" {
+		t.Fatalf("event activity item = %#v", eventItem)
+	}
+	for _, item := range activityOutput.Items {
+		if item.Event != nil && item.Event.LeaseToken != nil {
+			t.Fatalf("event activity item unexpectedly exposed lease token = %#v", item)
+		}
+	}
+
+	activityCommentsOnly := call(t, client, "get_issue_activity", map[string]any{
+		"issue_id": issue.DisplayID, "types": []string{"comments"}, "limit": 1,
+	})
+	var commentsOnlyOutput struct {
+		Items []struct {
+			EntityType string `json:"entity_type"`
+			Comment    *struct {
+				ID      string `json:"id"`
+				Content string `json:"content"`
+			} `json:"comment"`
+		} `json:"items"`
+	}
+	decodeStructured(t, activityCommentsOnly, &commentsOnlyOutput)
+	if activityCommentsOnly.IsError || len(commentsOnlyOutput.Items) != 1 || commentsOnlyOutput.Items[0].EntityType != "comment" || commentsOnlyOutput.Items[0].Comment == nil || commentsOnlyOutput.Items[0].Comment.ID != commentOutput.Comment.ID || commentsOnlyOutput.Items[0].Comment.Content != commentOutput.Comment.Content {
+		t.Fatalf("comments-only activity = %#v", commentsOnlyOutput)
+	}
+	malformedCursor := call(t, client, "get_issue_activity", map[string]any{
+		"issue_id": issue.DisplayID, "cursor": "not-base64",
+	})
+	assertDomainError(t, malformedCursor, "INVALID_ARGUMENT", false)
+
 	originalDecisionID := decisionOutput.Decision.ID
 	replacement := call(t, client, "record_decision", map[string]any{
 		"issue_id": issue.ID, "title": "Use leases 2", "summary": "Updated lease choice.", "content": "",
@@ -383,6 +551,29 @@ func TestGraphToolsLifecycleAndValidation(t *testing.T) {
 	invalid := call(t, client, "get_issue_graph", map[string]any{"root_issue_id": issue.ID, "max_nodes": 0})
 	if !invalid.IsError {
 		t.Fatalf("schema accepted invalid graph limit: %#v", invalid)
+	}
+}
+
+func TestNewServerRequiresActivityService(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "activity-required.db")
+	db, source := openDatabase(t, databasePath)
+	defer func() {
+		if err := db.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	options := composeServices(t, db, source)
+	options.ActivityService = nil
+	_, err := mcpadapter.NewServer(options)
+	if err == nil {
+		t.Fatal("NewServer() succeeded without activity service")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("NewServer() error = %v, want *domain.Error", err)
+	}
+	if domainErr.Code != domain.CodeInvalidArgument || domainErr.Message != "activity service is required" {
+		t.Fatalf("NewServer() error = %#v, want invalid argument with message %q", domainErr, "activity service is required")
 	}
 }
 
@@ -1118,6 +1309,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	activityRepository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1154,6 +1349,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	activities, err := application.NewActivityService(activityRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -1167,7 +1366,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, AttemptService: attempts, SessionService: sessions,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, AttemptService: attempts, SessionService: sessions,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

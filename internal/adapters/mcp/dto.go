@@ -49,6 +49,14 @@ type getIssueInput struct {
 	Limits  map[string]json.RawMessage `json:"limits,omitempty"`
 }
 
+type getIssueActivityInput struct {
+	IssueID string   `json:"issue_id"`
+	Types   []string `json:"types,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+	Cursor  *string  `json:"cursor,omitempty"`
+	Order   string   `json:"order,omitempty"`
+}
+
 type listIssuesInput struct {
 	Types             []string `json:"types,omitempty"`
 	Statuses          []string `json:"statuses,omitempty"`
@@ -418,6 +426,35 @@ type commentDTO struct {
 	EditedAt           *time.Time `json:"edited_at"`
 }
 
+type issueEventDTO struct {
+	ID        int64           `json:"id"`
+	IssueID   *string         `json:"issue_id"`
+	EventType string          `json:"event_type"`
+	SessionID *string         `json:"session_id"`
+	AttemptID *string         `json:"attempt_id"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type activityItemDTO struct {
+	EntityType  string                     `json:"entity_type"`
+	EntityID    string                     `json:"entity_id"`
+	IssueID     string                     `json:"issue_id"`
+	OccurredAt  time.Time                  `json:"occurred_at"`
+	Comment     *commentDTO                `json:"comment,omitempty"`
+	Decision    *recordDecisionDecisionDTO `json:"decision,omitempty"`
+	Attempt     *attemptDTO                `json:"attempt,omitempty"`
+	AttemptNote *attemptNoteDTO            `json:"attempt_note,omitempty"`
+	Event       *issueEventDTO             `json:"event,omitempty"`
+	Artifact    *artifactDTO               `json:"artifact,omitempty"`
+}
+
+type issueActivityOutput struct {
+	Items      []activityItemDTO `json:"items"`
+	NextCursor *string           `json:"next_cursor"`
+	HasMore    bool              `json:"has_more"`
+}
+
 type addCommentOutput struct {
 	Comment commentDTO `json:"comment"`
 }
@@ -744,6 +781,73 @@ func artifactDTOFromDomain(artifact domain.Artifact) artifactDTO {
 		Type: string(artifact.Type), URI: artifact.URI, Title: copyString(artifact.Title),
 		Metadata: append(json.RawMessage(nil), artifact.Metadata...), CreatedAt: artifact.CreatedAt,
 	}
+}
+
+func getIssueActivityInputToDomain(input getIssueActivityInput) domain.GetIssueActivityInput {
+	types := make([]domain.ActivityCategory, len(input.Types))
+	for index, value := range input.Types {
+		types[index] = domain.ActivityCategory(value)
+	}
+	cursor := ""
+	if input.Cursor != nil {
+		cursor = *input.Cursor
+	}
+	return domain.GetIssueActivityInput{
+		IssueID: input.IssueID,
+		Types:   types,
+		Limit:   input.Limit,
+		Cursor:  cursor,
+		Order:   domain.ActivityOrder(input.Order),
+	}
+}
+
+func issueEventDTOFromDomain(event domain.IssueEvent) issueEventDTO {
+	return issueEventDTO{
+		ID:        event.ID,
+		IssueID:   copyString(event.IssueID),
+		EventType: event.EventType,
+		SessionID: copyString(event.SessionID),
+		AttemptID: copyString(event.AttemptID),
+		Payload:   append(json.RawMessage(nil), event.Payload...),
+		CreatedAt: event.CreatedAt,
+	}
+}
+
+func activityItemDTOFromDomain(item domain.ActivityItem) activityItemDTO {
+	result := activityItemDTO{
+		EntityType: string(item.EntityType),
+		EntityID:   item.EntityID,
+		IssueID:    item.IssueID,
+		OccurredAt: item.OccurredAt,
+	}
+	if item.Comment != nil {
+		comment := commentDTOFromDomain(*item.Comment)
+		result.Comment = &comment
+	} else if item.Decision != nil {
+		decision := recordDecisionDTOFromDomain(*item.Decision)
+		result.Decision = &decision
+	} else if item.Attempt != nil {
+		attempt := attemptDTOFromDomain(*item.Attempt)
+		result.Attempt = &attempt
+	} else if item.AttemptNote != nil {
+		note := attemptNoteDTOFromDomain(*item.AttemptNote)
+		result.AttemptNote = &note
+	} else if item.Event != nil {
+		event := issueEventDTOFromDomain(*item.Event)
+		result.Event = &event
+	} else if item.Artifact != nil {
+		artifact := artifactDTOFromDomain(*item.Artifact)
+		result.Artifact = &artifact
+	}
+	return result
+}
+
+func issueActivityOutputFromDomain(activity domain.IssueActivity) issueActivityOutput {
+	items := make([]activityItemDTO, len(activity.Items))
+	for index, item := range activity.Items {
+		items[index] = activityItemDTOFromDomain(item)
+	}
+	return issueActivityOutput{Items: items, NextCursor: copyString(activity.NextCursor), HasMore: activity.HasMore}
 }
 
 func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
