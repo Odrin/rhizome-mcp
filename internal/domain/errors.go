@@ -24,6 +24,8 @@ const (
 	CodeVersionConflict = "VERSION_CONFLICT"
 	// CodeActiveAttemptExists identifies an issue protected by an active attempt.
 	CodeActiveAttemptExists = "ACTIVE_ATTEMPT_EXISTS"
+	// CodeBlocksCycle identifies a forbidden dependency cycle.
+	CodeBlocksCycle = "BLOCKS_CYCLE"
 	// CodeLimitExceeded identifies input beyond a documented bound.
 	CodeLimitExceeded = "LIMIT_EXCEEDED"
 	// CodeIDGeneration identifies failure to generate a canonical internal ID.

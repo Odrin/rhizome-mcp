@@ -1,4 +1,4 @@
-// Package mcp exposes the Phase 2 application services through MCP tools.
+// Package mcp exposes application services through MCP tools.
 package mcp
 
 import (
@@ -14,21 +14,23 @@ import (
 
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
-	IssueService   *application.IssueService
-	ProjectService *application.ProjectService
-	ServerName     string
-	ServerVersion  string
-	ConfigVersion  int
+	IssueService    *application.IssueService
+	ProjectService  *application.ProjectService
+	RelationService *application.RelationService
+	ServerName      string
+	ServerVersion   string
+	ConfigVersion   int
 }
 
 type adapter struct {
 	issues        *application.IssueService
 	projects      *application.ProjectService
+	relations     *application.RelationService
 	appVersion    string
 	configVersion int
 }
 
-// NewServer composes a tools-only Phase 2 MCP server. It has no process-global
+// NewServer composes a tools-only MCP server. It has no process-global
 // dependencies and deliberately exposes no resources or prototype task tools.
 func NewServer(options Options) (*sdkmcp.Server, error) {
 	if options.IssueService == nil {
@@ -36,6 +38,9 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	}
 	if options.ProjectService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "project service is required", false)
+	}
+	if options.RelationService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "relation service is required", false)
 	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
@@ -46,6 +51,7 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	adapter := &adapter{
 		issues:        options.IssueService,
 		projects:      options.ProjectService,
+		relations:     options.RelationService,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 	}
@@ -58,13 +64,14 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 }
 
 func (adapter *adapter) register(server *sdkmcp.Server) {
-	sdkmcp.AddTool(server, tool("get_project", "Return current project metadata and Phase 2 capabilities", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
+	sdkmcp.AddTool(server, tool("get_project", "Return current project metadata and server capabilities", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
 	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels in deterministic order", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
 	sdkmcp.AddTool(server, tool("create_issue", "Create an issue", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
 	sdkmcp.AddTool(server, tool("update_issue", "Apply an optimistic issue patch", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
 	sdkmcp.AddTool(server, tool("get_issue", "Get an issue by internal or display ID", schemaGetIssue(), schemaIssueOutput()), adapter.getIssue)
 	sdkmcp.AddTool(server, tool("list_issues", "List issues in deterministic order", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
 	sdkmcp.AddTool(server, tool("archive_issue", "Archive an issue with an optimistic version precondition", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
+	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one relation between two issues", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
 }
 
 func (adapter *adapter) getProject(ctx context.Context, _ *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
@@ -81,11 +88,49 @@ func (adapter *adapter) getProject(ctx context.Context, _ *sdkmcp.CallToolReques
 		Limits:                 limitsDTO{DefaultIssueListLimit: 20, DefaultLabelListLimit: 50, MaxCollectionLimit: 100},
 		SupportedIssueTypes:    []string{"epic", "task", "bug"},
 		SupportedStatuses:      []string{"open", "ready", "blocked", "review", "done", "cancelled"},
-		SupportedRelationTypes: []string{},
+		SupportedRelationTypes: []string{"blocks", "related_to", "duplicates"},
 		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
 		LatestEventID:          project.LatestEventID,
 	}
 	return success(output, "project metadata returned")
+}
+
+func (adapter *adapter) manageIssueRelation(ctx context.Context, _ *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	result, err := adapter.relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
+		Action:        domain.RelationAction(input.Action),
+		SourceIssueID: input.SourceIssueID,
+		TargetIssueID: input.TargetIssueID,
+		RelationType:  domain.RelationType(input.RelationType),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	affected := make([]issueListItemDTO, len(result.AffectedIssues))
+	for index, issue := range result.AffectedIssues {
+		affected[index] = issueListItemDTO{
+			issueDTO:               issueDTOFromDomain(issue.Issue),
+			EffectiveStatus:        string(issue.EffectiveStatus),
+			UnresolvedBlockerCount: issue.UnresolvedBlockerCount,
+			IsBlocked:              issue.IsBlocked,
+			IsClaimable:            issue.IsClaimable,
+		}
+	}
+	summary := "relation was already absent"
+	if input.Action == string(domain.RelationActionAdd) {
+		summary = "relation already present"
+	}
+	if result.Changed {
+		summary = "relation added"
+		if input.Action == string(domain.RelationActionRemove) {
+			summary = "relation removed"
+		}
+	}
+	return success(manageIssueRelationOutput{
+		Relation: relationDTOFromDomain(result.Relation), AffectedIssues: affected, Changed: result.Changed,
+	}, summary)
 }
 
 func (adapter *adapter) listLabels(ctx context.Context, _ *sdkmcp.CallToolRequest, input listLabelsInput) (*sdkmcp.CallToolResult, any, error) {
@@ -182,10 +227,11 @@ func (adapter *adapter) listIssues(ctx context.Context, _ *sdkmcp.CallToolReques
 	items := make([]issueListItemDTO, len(result.Items))
 	for i, item := range result.Items {
 		items[i] = issueListItemDTO{
-			issueDTO:        issueDTOFromDomain(item.Issue),
-			EffectiveStatus: string(item.EffectiveStatus),
-			IsBlocked:       item.IsBlocked,
-			IsClaimable:     item.IsClaimable,
+			issueDTO:               issueDTOFromDomain(item.Issue),
+			EffectiveStatus:        string(item.EffectiveStatus),
+			UnresolvedBlockerCount: item.UnresolvedBlockerCount,
+			IsBlocked:              item.IsBlocked,
+			IsClaimable:            item.IsClaimable,
 		}
 	}
 	return success(issueListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "issues listed")
@@ -231,7 +277,7 @@ func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) 
 }
 
 func unsupportedField(field string) *domain.Error {
-	return domain.NewError(domain.CodeInvalidArgument, "field is not supported in Phase 2", false,
+	return domain.NewError(domain.CodeInvalidArgument, "field is not supported", false,
 		domain.Detail{Field: field, Code: "UNSUPPORTED"})
 }
 

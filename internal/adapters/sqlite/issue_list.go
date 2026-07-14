@@ -27,8 +27,21 @@ const (
 		WHEN 'medium' THEN 2
 		WHEN 'low' THEN 1
 		ELSE 0 END)`
+	issueUnresolvedBlockerCountSQL = `(SELECT COUNT(*)
+		FROM issue_relations AS blocker_relation
+		JOIN issues AS blocker_source ON blocker_source.id = blocker_relation.source_issue_id
+		WHERE blocker_relation.type = 'blocks'
+			AND blocker_relation.target_issue_id = issues.id
+			AND blocker_source.archived_at IS NULL
+			AND blocker_source.status NOT IN ('done', 'cancelled'))`
+	issueBlockedSQL = `(CASE
+		WHEN issues.status = 'blocked' OR ` + issueUnresolvedBlockerCountSQL + ` > 0
+		THEN 1 ELSE 0 END)`
 	issueClaimableSQL = `(CASE
-		WHEN archived_at IS NULL AND type IN ('task', 'bug') AND status = 'ready'
+		WHEN issues.archived_at IS NULL
+			AND issues.type IN ('task', 'bug')
+			AND issues.status = 'ready'
+			AND ` + issueUnresolvedBlockerCountSQL + ` = 0
 		THEN 1 ELSE 0 END)`
 )
 
@@ -107,6 +120,7 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 			status, priority, parent_id, blocked_reason, version,
 			created_by_session_id, created_at, updated_at, closed_at,
 			archived_at, archived_by_session_id,
+			` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
 			` + issueBlockedSQL + ` AS is_blocked,
 			` + issueClaimableSQL + ` AS is_claimable,
 			` + issuePriorityRankSQL + ` AS priority_rank
@@ -163,20 +177,18 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	return result, nil
 }
 
-const issueBlockedSQL = `(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END)`
-
 func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, error) {
 	var (
-		id, issueType, title, status, priority, createdAt, updatedAt  string
-		description, acceptanceCriteria, parentID, blockedReason      sql.NullString
-		createdBySessionID, closedAt, archivedAt, archivedBySessionID sql.NullString
-		sequenceNo, version, isBlocked, isClaimable, priorityRank     int64
+		id, issueType, title, status, priority, createdAt, updatedAt                      string
+		description, acceptanceCriteria, parentID, blockedReason                          sql.NullString
+		createdBySessionID, closedAt, archivedAt, archivedBySessionID                     sql.NullString
+		sequenceNo, version, unresolvedBlockerCount, isBlocked, isClaimable, priorityRank int64
 	)
 	if err := scanner.Scan(
 		&id, &sequenceNo, &issueType, &title, &description, &acceptanceCriteria,
 		&status, &priority, &parentID, &blockedReason, &version,
 		&createdBySessionID, &createdAt, &updatedAt, &closedAt, &archivedAt, &archivedBySessionID,
-		&isBlocked, &isClaimable, &priorityRank,
+		&unresolvedBlockerCount, &isBlocked, &isClaimable, &priorityRank,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return domain.IssueProjection{}, err
@@ -190,10 +202,11 @@ func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, erro
 		return domain.IssueProjection{}, err
 	}
 	return domain.IssueProjection{
-		Issue:           issue,
-		EffectiveStatus: domain.EffectiveStatus(status),
-		IsBlocked:       isBlocked != 0,
-		IsClaimable:     isClaimable != 0,
+		Issue:                  issue,
+		EffectiveStatus:        domain.EffectiveStatus(status),
+		UnresolvedBlockerCount: unresolvedBlockerCount,
+		IsBlocked:              isBlocked != 0,
+		IsClaimable:            isClaimable != 0,
 	}, nil
 }
 

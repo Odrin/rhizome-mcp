@@ -69,6 +69,14 @@ type archiveIssueInput struct {
 	IdempotencyKey  *string `json:"idempotency_key,omitempty"`
 }
 
+type manageIssueRelationInput struct {
+	Action         string  `json:"action"`
+	SourceIssueID  string  `json:"source_issue_id"`
+	TargetIssueID  string  `json:"target_issue_id"`
+	RelationType   string  `json:"relation_type"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
 // patchInput records field presence independently from a null value.
 type patchInput struct {
 	Title              optionalString
@@ -254,15 +262,30 @@ type updateIssueOutput struct {
 
 type issueListItemDTO struct {
 	issueDTO
-	EffectiveStatus string `json:"effective_status"`
-	IsBlocked       bool   `json:"is_blocked"`
-	IsClaimable     bool   `json:"is_claimable"`
+	EffectiveStatus        string `json:"effective_status"`
+	UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+	IsBlocked              bool   `json:"is_blocked"`
+	IsClaimable            bool   `json:"is_claimable"`
 }
 
 type issueListOutput struct {
 	Items      []issueListItemDTO `json:"items"`
 	NextCursor *string            `json:"next_cursor"`
 	HasMore    bool               `json:"has_more"`
+}
+
+type relationDTO struct {
+	ID            string    `json:"id,omitempty"`
+	SourceIssueID string    `json:"source_issue_id"`
+	TargetIssueID string    `json:"target_issue_id"`
+	Type          string    `json:"type"`
+	CreatedAt     time.Time `json:"created_at,omitempty"`
+}
+
+type manageIssueRelationOutput struct {
+	Relation       relationDTO        `json:"relation"`
+	AffectedIssues []issueListItemDTO `json:"affected_issues"`
+	Changed        bool               `json:"changed"`
 }
 
 func projectDTOFromDomain(project domain.Project, includeInstructions bool) projectDTO {
@@ -294,5 +317,12 @@ func issueDTOFromDomain(issue domain.Issue) issueDTO {
 		Status: string(issue.Status), Priority: string(issue.Priority), ParentIssueID: issue.ParentID,
 		BlockedReason: issue.BlockedReason, Version: issue.Version, CreatedAt: issue.CreatedAt,
 		UpdatedAt: issue.UpdatedAt, ClosedAt: issue.ClosedAt, ArchivedAt: issue.ArchivedAt, Labels: labels,
+	}
+}
+
+func relationDTOFromDomain(relation domain.IssueRelation) relationDTO {
+	return relationDTO{
+		ID: relation.ID, SourceIssueID: relation.SourceIssueID, TargetIssueID: relation.TargetIssueID,
+		Type: string(relation.Type), CreatedAt: relation.CreatedAt,
 	}
 }

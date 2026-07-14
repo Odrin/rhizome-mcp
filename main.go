@@ -86,6 +86,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	relationRepository, err := sqlite.NewRelationRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return err
@@ -98,12 +102,17 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	relationService, err := application.NewRelationService(relationRepository, source, generator)
+	if err != nil {
+		return err
+	}
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
-		IssueService:   issueService,
-		ProjectService: projectService,
-		ServerName:     cfg.ServerName,
-		ServerVersion:  cfg.Version,
-		ConfigVersion:  projectconfig.CurrentIdentityVersion,
+		IssueService:    issueService,
+		ProjectService:  projectService,
+		RelationService: relationService,
+		ServerName:      cfg.ServerName,
+		ServerVersion:   cfg.Version,
+		ConfigVersion:   projectconfig.CurrentIdentityVersion,
 	})
 	if err != nil {
 		return err

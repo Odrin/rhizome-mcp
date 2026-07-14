@@ -27,6 +27,13 @@ func booleanSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "boole
 func stringsSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "array", Items: stringSchema()}
 }
+func enumSchema(values ...string) *jsonschema.Schema {
+	enum := make([]any, len(values))
+	for index, value := range values {
+		enum[index] = value
+	}
+	return &jsonschema.Schema{Type: "string", Enum: enum}
+}
 
 func schemaGetProject() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{"include_instructions": booleanSchema()})
@@ -83,11 +90,24 @@ func schemaArchiveIssue() *jsonschema.Schema {
 	}, "issue_id", "expected_version")
 }
 
+func schemaManageIssueRelation() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"action":          enumSchema("add", "remove"),
+		"source_issue_id": stringSchema(),
+		"target_issue_id": stringSchema(),
+		"relation_type":   enumSchema("blocks", "related_to", "duplicates"),
+		"idempotency_key": nullableStringSchema(),
+	}, "action", "source_issue_id", "target_issue_id", "relation_type")
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
 func schemaUpdateOutput() *jsonschema.Schema    { return typedSchema[updateIssueOutput]() }
 func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOutput]() }
+func schemaManageIssueRelationOutput() *jsonschema.Schema {
+	return typedSchema[manageIssueRelationOutput]()
+}
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

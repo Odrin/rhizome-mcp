@@ -25,9 +25,10 @@ type ListIssuesInput struct {
 // exposed by list_issues.
 type IssueProjection struct {
 	Issue
-	EffectiveStatus EffectiveStatus
-	IsBlocked       bool
-	IsClaimable     bool
+	EffectiveStatus        EffectiveStatus
+	UnresolvedBlockerCount int64
+	IsBlocked              bool
+	IsClaimable            bool
 }
 
 // IssueList is one cursor-paginated deterministic issue page.

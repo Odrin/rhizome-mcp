@@ -16,13 +16,14 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 )
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
-func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
+func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "project.db")
 	db, source := openDatabase(t, databasePath)
@@ -38,7 +39,7 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"archive_issue", "create_issue", "get_issue", "get_project", "list_issues", "list_labels", "update_issue"}
+	wantNames := []string{"archive_issue", "create_issue", "get_issue", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -47,6 +48,7 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
+	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 
 	project := call(t, client, "get_project", map[string]any{})
 	if project.IsError {
@@ -63,7 +65,8 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 	}
 	decodeStructured(t, project, &projectOutput)
 	if projectOutput.Session != nil || projectOutput.AppVersion != "test-version" || projectOutput.ConfigVersion != 1 ||
-		projectOutput.Project.Instructions != nil || len(projectOutput.SupportedRelationTypes) != 0 {
+		projectOutput.Project.Instructions != nil ||
+		!reflect.DeepEqual(projectOutput.SupportedRelationTypes, []string{"blocks", "related_to", "duplicates"}) {
 		t.Fatalf("project output = %#v", projectOutput)
 	}
 	projectWithInstructions := call(t, client, "get_project", map[string]any{"include_instructions": true})
@@ -150,6 +153,61 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("list output = %#v", issuePage)
 	}
 
+	relatedIssue := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Related"})
+	var related struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, relatedIssue, &related)
+	relation := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": related.ID, "target_issue_id": issue.ID, "relation_type": "related_to",
+	})
+	var relationOutput struct {
+		Relation struct {
+			ID            string `json:"id"`
+			SourceIssueID string `json:"source_issue_id"`
+			TargetIssueID string `json:"target_issue_id"`
+			Type          string `json:"type"`
+		} `json:"relation"`
+		AffectedIssues []struct {
+			ID                     string `json:"id"`
+			UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+			IsBlocked              bool   `json:"is_blocked"`
+			IsClaimable            bool   `json:"is_claimable"`
+		} `json:"affected_issues"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, relation, &relationOutput)
+	if relation.IsError || !relationOutput.Changed || relationOutput.Relation.Type != "related_to" ||
+		relationOutput.Relation.SourceIssueID > relationOutput.Relation.TargetIssueID ||
+		len(relationOutput.AffectedIssues) != 2 {
+		t.Fatalf("relation output = %#v", relationOutput)
+	}
+	duplicateRelation := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": issue.ID, "target_issue_id": related.ID, "relation_type": "related_to",
+	})
+	var duplicateRelationOutput struct {
+		Relation struct {
+			ID string `json:"id"`
+		} `json:"relation"`
+		AffectedIssues []struct {
+			ID string `json:"id"`
+		} `json:"affected_issues"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, duplicateRelation, &duplicateRelationOutput)
+	if duplicateRelation.IsError || duplicateRelationOutput.Changed ||
+		duplicateRelationOutput.Relation.ID != relationOutput.Relation.ID ||
+		len(duplicateRelationOutput.AffectedIssues) != 2 {
+		t.Fatalf("duplicate relation output = %#v", duplicateRelationOutput)
+	}
+	removedRelation := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "remove", "source_issue_id": issue.ID, "target_issue_id": related.ID, "relation_type": "related_to",
+	})
+	decodeStructured(t, removedRelation, &relationOutput)
+	if removedRelation.IsError || !relationOutput.Changed {
+		t.Fatalf("remove relation output = %#v", relationOutput)
+	}
+
 	conflict := call(t, client, "update_issue", map[string]any{
 		"issue_id": issue.DisplayID, "expected_version": 1, "changes": map[string]any{"title": "stale"},
 	})
@@ -192,12 +250,12 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 	}
 	hidden := call(t, client, "list_issues", map[string]any{})
 	decodeStructured(t, hidden, &issuePage)
-	if hidden.IsError || len(issuePage.Items) != 0 {
+	if hidden.IsError || len(issuePage.Items) != 1 {
 		t.Fatalf("default archive visibility = %#v", issuePage)
 	}
 	visible := call(t, client, "list_issues", map[string]any{"include_archived": true})
 	decodeStructured(t, visible, &issuePage)
-	if visible.IsError || len(issuePage.Items) != 1 {
+	if visible.IsError || len(issuePage.Items) != 2 {
 		t.Fatalf("archived list visibility = %#v", issuePage)
 	}
 
@@ -215,6 +273,154 @@ func TestPhase2ToolsLifecycleAndContracts(t *testing.T) {
 	restartedStop()
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("close after restart: %v", err)
+	}
+}
+
+func TestNewServerRequiresRelationService(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "project.db")
+	db, source := openDatabase(t, databasePath)
+	defer func() {
+		if err := db.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	options := composeServices(t, db, source)
+	options.RelationService = nil
+	_, err := mcpadapter.NewServer(options)
+	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("NewServer() error = %v, want missing relation service error", err)
+	}
+}
+
+func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer func() {
+		stop()
+		if err := db.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	type issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+		Version   int64  `json:"version"`
+	}
+	create := func(title string) issue {
+		result := call(t, client, "create_issue", map[string]any{
+			"type": "task", "title": title, "status": "ready",
+		})
+		var created issue
+		decodeStructured(t, result, &created)
+		if result.IsError {
+			t.Fatalf("create %s = %#v", title, result)
+		}
+		return created
+	}
+	target, blocker := create("Target"), create("Blocker")
+	add := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": blocker.ID, "target_issue_id": target.ID, "relation_type": "blocks",
+	})
+	var relation struct {
+		Relation struct {
+			ID string `json:"id"`
+		} `json:"relation"`
+		AffectedIssues []struct {
+			ID                     string `json:"id"`
+			UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+			IsBlocked              bool   `json:"is_blocked"`
+			IsClaimable            bool   `json:"is_claimable"`
+		} `json:"affected_issues"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, add, &relation)
+	if add.IsError || !relation.Changed || relation.Relation.ID == "" ||
+		len(relation.AffectedIssues) != 2 ||
+		relation.AffectedIssues[1].ID != target.ID ||
+		relation.AffectedIssues[1].UnresolvedBlockerCount != 1 ||
+		!relation.AffectedIssues[1].IsBlocked || relation.AffectedIssues[1].IsClaimable {
+		t.Fatalf("add blocker output = %#v", relation)
+	}
+
+	repeat := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": blocker.DisplayID, "target_issue_id": target.DisplayID, "relation_type": "blocks",
+	})
+	var repeated struct {
+		Relation struct {
+			ID string `json:"id"`
+		} `json:"relation"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, repeat, &repeated)
+	if repeat.IsError || repeated.Changed || repeated.Relation.ID != relation.Relation.ID {
+		t.Fatalf("repeated add output = %#v", repeated)
+	}
+
+	done := call(t, client, "update_issue", map[string]any{
+		"issue_id": blocker.ID, "expected_version": blocker.Version, "changes": map[string]any{"status": "done"},
+	})
+	if done.IsError {
+		t.Fatalf("complete blocker = %#v", done)
+	}
+	listed := call(t, client, "list_issues", map[string]any{"is_claimable": true})
+	var page struct {
+		Items []struct {
+			ID                     string `json:"id"`
+			UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+			IsBlocked              bool   `json:"is_blocked"`
+			IsClaimable            bool   `json:"is_claimable"`
+		} `json:"items"`
+	}
+	decodeStructured(t, listed, &page)
+	foundTarget := false
+	for _, item := range page.Items {
+		if item.ID == target.ID {
+			foundTarget = item.UnresolvedBlockerCount == 0 && !item.IsBlocked && item.IsClaimable
+		}
+	}
+	if listed.IsError || !foundTarget {
+		t.Fatalf("claimable target after blocker completion = %#v", page)
+	}
+
+	archivedTarget := call(t, client, "archive_issue", map[string]any{
+		"issue_id": target.ID, "expected_version": target.Version,
+	})
+	if archivedTarget.IsError {
+		t.Fatalf("archive target = %#v", archivedTarget)
+	}
+	archivedTargetAdd := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": blocker.ID, "target_issue_id": target.ID, "relation_type": "related_to",
+	})
+	assertDomainError(t, archivedTargetAdd, "ISSUE_ARCHIVED", false)
+
+	secondTarget, secondSource := create("Second target"), create("Second source")
+	if result := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": secondSource.ID, "target_issue_id": secondTarget.ID, "relation_type": "blocks",
+	}); result.IsError {
+		t.Fatalf("prepare source archive relation = %#v", result)
+	}
+	archivedSource := call(t, client, "archive_issue", map[string]any{
+		"issue_id": secondSource.ID, "expected_version": secondSource.Version,
+	})
+	if archivedSource.IsError {
+		t.Fatalf("archive source = %#v", archivedSource)
+	}
+	archivedSourceRemove := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "remove", "source_issue_id": secondSource.ID, "target_issue_id": secondTarget.ID, "relation_type": "blocks",
+	})
+	assertDomainError(t, archivedSourceRemove, "ISSUE_ARCHIVED", false)
+
+	missing := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "remove", "source_issue_id": blocker.ID, "target_issue_id": secondTarget.ID, "relation_type": "duplicates",
+	})
+	var missingOutput struct {
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, missing, &missingOutput)
+	if missing.IsError || missingOutput.Changed {
+		t.Fatalf("missing remove output = %#v", missingOutput)
 	}
 }
 
@@ -260,6 +466,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	relationRepository, err := sqlite.NewRelationRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -272,8 +482,13 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	relations, err := application.NewRelationService(relationRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
+		IssueService: issues, ProjectService: projects, RelationService: relations,
+		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }
 

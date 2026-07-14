@@ -72,6 +72,17 @@ type fixedIDGenerator struct {
 
 func (generator fixedIDGenerator) New() (string, error) { return generator.id, generator.err }
 
+type recordingRelationRepository struct {
+	command ports.ManageIssueRelationCommand
+	called  bool
+}
+
+func (repository *recordingRelationRepository) ManageIssueRelation(_ context.Context, command ports.ManageIssueRelationCommand) (ports.ManageIssueRelationResult, error) {
+	repository.called = true
+	repository.command = command
+	return ports.ManageIssueRelationResult{}, nil
+}
+
 func TestIssueServiceCreateIssueValidatesGeneratesAndDelegates(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 9, 10, 0, time.FixedZone("test", 2*60*60))
 	repository := &recordingIssueRepository{}
@@ -206,5 +217,45 @@ func TestIssueServiceArchiveIssueRejectsInvalidInputBeforeRepository(t *testing.
 		if repository.archiveCalled {
 			t.Fatal("repository called for invalid archive input")
 		}
+	}
+}
+
+func TestRelationServiceNormalizesAndDelegates(t *testing.T) {
+	now := time.Date(2026, 7, 14, 8, 9, 10, 0, time.FixedZone("test", 2*60*60))
+	repository := &recordingRelationRepository{}
+	service, err := application.NewRelationService(repository, clock.NewFakeClock(now),
+		fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ManageIssueRelation(context.Background(), domain.ManageIssueRelationInput{
+		Action: domain.RelationActionAdd, SourceIssueID: "issue-7", TargetIssueID: "ISSUE-8",
+		RelationType: domain.RelationTypeBlocks,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.called || repository.command.SourceIdentifier.Value != "ISSUE-7" ||
+		repository.command.TargetIdentifier.Value != "ISSUE-8" ||
+		repository.command.RelationID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" ||
+		!repository.command.OccurredAt.Equal(now.UTC()) {
+		t.Fatalf("relation command = %#v", repository.command)
+	}
+}
+
+func TestRelationServiceRemoveDoesNotGenerateID(t *testing.T) {
+	repository := &recordingRelationRepository{}
+	service, err := application.NewRelationService(repository, clock.NewFakeClock(time.Unix(0, 0)),
+		fixedIDGenerator{err: errors.New("must not generate")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ManageIssueRelation(context.Background(), domain.ManageIssueRelationInput{
+		Action: domain.RelationActionRemove, SourceIssueID: "ISSUE-7", TargetIssueID: "ISSUE-8",
+		RelationType: domain.RelationTypeDuplicates,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.called || repository.command.RelationID != "" {
+		t.Fatalf("remove command = %#v", repository.command)
 	}
 }
