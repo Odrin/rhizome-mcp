@@ -110,6 +110,18 @@ func schemaAddComment() *jsonschema.Schema {
 	}, "issue_id", "content")
 }
 
+func schemaRecordDecision() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_id":        nullableBoundedStringSchema(64),
+		"title":           boundedStringSchema(300),
+		"summary":         boundedStringSchema(2_000),
+		"content":         boundedStringSchema(100_000),
+		"status":          enumSchema("active", "superseded", "rejected"),
+		"supersedes_id":   nullableBoundedStringSchema(26),
+		"idempotency_key": nullableBoundedStringSchema(128),
+	}, "title", "summary", "content")
+}
+
 func schemaManageIssueRelation() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"action":          enumSchema("add", "remove"),
@@ -242,8 +254,11 @@ func schemaProjectOutput() *jsonschema.Schema    { return typedSchema[projectOut
 func schemaLabelListOutput() *jsonschema.Schema  { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema      { return typedSchema[issueDTO]() }
 func schemaAddCommentOutput() *jsonschema.Schema { return typedSchema[addCommentOutput]() }
-func schemaUpdateOutput() *jsonschema.Schema     { return typedSchema[updateIssueOutput]() }
-func schemaIssueListOutput() *jsonschema.Schema  { return typedSchema[issueListOutput]() }
+func schemaRecordDecisionOutput() *jsonschema.Schema {
+	return typedSchema[recordDecisionOutput]()
+}
+func schemaUpdateOutput() *jsonschema.Schema    { return typedSchema[updateIssueOutput]() }
+func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOutput]() }
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }

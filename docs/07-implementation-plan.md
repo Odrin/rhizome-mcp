@@ -79,6 +79,13 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
   and `CGO_ENABLED=0 go test -count=1 ./...`. Remaining Phase 5 work is
   decisions and supersession, unified activity, and bounded work context;
   Phase 5 is not complete.
+- **Phase 5 decisions subunit implemented on 2026-07-14.** Standalone
+  `record_decision` now persists immutable project- and issue-level decisions,
+  atomically supersedes one active same-scope predecessor, and writes a compact
+  session-attributed `decision_recorded` event. Only null idempotency keys are
+  accepted. Verification: focused, full, race-enabled, vet, no-CGO, and
+  diff-check tests passed. Remaining Phase 5 work is unified activity and
+  bounded work context; Phase 5 is not complete.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
 - Implement compact default work context with explicitly bounded optional sections.
 - Deliver `add_comment`, `record_decision`, `get_issue_activity`, and `get_work_context`.

@@ -592,6 +592,13 @@ decision
 superseded_decision_id
 ```
 
+Decisions are append-only records and may be project-level or issue-level.
+Supplying `supersedes_id` atomically creates an active replacement and marks
+one active predecessor superseded; the predecessor must have the same scope.
+The standalone operation writes one compact, session-attributed
+`decision_recorded` event. Only a null `idempotency_key` is accepted; replay
+semantics are not provided.
+
 ### 8.3. `get_issue_activity`
 
 Input:

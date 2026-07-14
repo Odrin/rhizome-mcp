@@ -24,6 +24,7 @@ type Options struct {
 	GraphService    *application.GraphService
 	PlanningService *application.PlanningService
 	CommentService  *application.CommentService
+	DecisionService *application.DecisionService
 	AttemptService  *application.AttemptService
 	SessionService  *application.AgentSessionService
 	ServerName      string
@@ -38,6 +39,7 @@ type adapter struct {
 	graphs        *application.GraphService
 	plans         *application.PlanningService
 	comments      *application.CommentService
+	decisions     *application.DecisionService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
 	appVersion    string
@@ -76,6 +78,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.CommentService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "comment service is required", false)
 	}
+	if options.DecisionService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "decision service is required", false)
+	}
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
@@ -95,6 +100,7 @@ func NewServer(options Options) (*Server, error) {
 		graphs:             options.GraphService,
 		plans:              options.PlanningService,
 		comments:           options.CommentService,
+		decisions:          options.DecisionService,
 		attempts:           options.AttemptService,
 		sessions:           options.SessionService,
 		appVersion:         options.ServerVersion,
@@ -247,6 +253,7 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Validate a bounded issue plan without changes", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
 	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
 	sdkmcp.AddTool(server, tool("add_comment", "Append a comment to an issue", schemaAddComment(), schemaAddCommentOutput()), adapter.addComment)
+	sdkmcp.AddTool(server, tool("record_decision", "Record an append-only project or issue decision", schemaRecordDecision(), schemaRecordDecisionOutput()), adapter.recordDecision)
 	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
 	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
@@ -403,6 +410,25 @@ func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallTool
 		return adapter.failure(err)
 	}
 	return success(addCommentOutput{Comment: commentDTOFromDomain(comment)}, "comment added")
+}
+
+func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.CallToolRequest, input recordDecisionInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	result, err := adapter.decisions.RecordDecision(ctx, domain.RecordDecisionInput{
+		IssueID: input.IssueID, Title: input.Title, Summary: input.Summary, Content: input.Content,
+		Status: domain.DecisionStatus(input.Status), SupersedesID: input.SupersedesID,
+		SessionID: adapter.sessionIDFor(request.Session),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(recordDecisionOutput{
+		Decision:             recordDecisionDTOFromDomain(result.Decision),
+		SupersededDecisionID: copyString(result.SupersededDecisionID),
+	}, "decision recorded")
 }
 
 func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {

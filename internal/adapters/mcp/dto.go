@@ -76,6 +76,16 @@ type addCommentInput struct {
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
 }
 
+type recordDecisionInput struct {
+	IssueID        *string `json:"issue_id,omitempty"`
+	Title          string  `json:"title"`
+	Summary        string  `json:"summary"`
+	Content        string  `json:"content"`
+	Status         string  `json:"status,omitempty"`
+	SupersedesID   *string `json:"supersedes_id,omitempty"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
 type claimIssueInput struct {
 	IssueID        string  `json:"issue_id"`
 	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
@@ -412,6 +422,23 @@ type addCommentOutput struct {
 	Comment commentDTO `json:"comment"`
 }
 
+type recordDecisionDecisionDTO struct {
+	ID                 string    `json:"id"`
+	IssueID            *string   `json:"issue_id"`
+	Title              string    `json:"title"`
+	Summary            string    `json:"summary"`
+	Content            string    `json:"content"`
+	Status             string    `json:"status"`
+	SupersedesID       *string   `json:"supersedes_id"`
+	CreatedBySessionID *string   `json:"created_by_session_id"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type recordDecisionOutput struct {
+	Decision             recordDecisionDecisionDTO `json:"decision"`
+	SupersededDecisionID *string                   `json:"superseded_decision_id"`
+}
+
 type updateIssueOutput struct {
 	Issue         issueDTO `json:"issue"`
 	ChangedFields []string `json:"changed_fields"`
@@ -648,6 +675,14 @@ func commentDTOFromDomain(comment domain.Comment) commentDTO {
 		ID: comment.ID, IssueID: comment.IssueID, Content: comment.Content,
 		CreatedBySessionID: copyString(comment.CreatedBySessionID), AuthorLabel: copyString(comment.AuthorLabel),
 		CreatedAt: comment.CreatedAt, EditedAt: copyTime(comment.EditedAt),
+	}
+}
+
+func recordDecisionDTOFromDomain(decision domain.Decision) recordDecisionDecisionDTO {
+	return recordDecisionDecisionDTO{
+		ID: decision.ID, IssueID: copyString(decision.IssueID), Title: decision.Title, Summary: decision.Summary,
+		Content: decision.Content, Status: string(decision.Status), SupersedesID: copyString(decision.SupersedesID),
+		CreatedBySessionID: copyString(decision.CreatedBySessionID), CreatedAt: decision.CreatedAt,
 	}
 }
 

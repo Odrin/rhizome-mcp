@@ -40,12 +40,13 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "create_issue"), "type", "title")
 	assertRequired(t, toolNamed(t, tools.Tools, "add_comment"), "issue_id", "content")
+	assertRequired(t, toolNamed(t, tools.Tools, "record_decision"), "title", "summary", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
@@ -127,6 +128,42 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	if !invalidComment.IsError {
 		t.Fatal("add_comment accepted invalid issue identifier")
 	}
+	decision := call(t, client, "record_decision", map[string]any{
+		"issue_id": issue.DisplayID, "title": "Use leases", "summary": "Leases are renewable.", "content": "Detailed reasoning.",
+	})
+	var decisionOutput struct {
+		Decision struct {
+			ID                 string  `json:"id"`
+			IssueID            string  `json:"issue_id"`
+			Status             string  `json:"status"`
+			CreatedBySessionID *string `json:"created_by_session_id"`
+		} `json:"decision"`
+		SupersededDecisionID *string `json:"superseded_decision_id"`
+	}
+	decodeStructured(t, decision, &decisionOutput)
+	if decision.IsError || decisionOutput.Decision.ID == "" || decisionOutput.Decision.IssueID != issue.ID ||
+		decisionOutput.Decision.Status != "active" || decisionOutput.Decision.CreatedBySessionID == nil {
+		t.Fatalf("decision output = %#v", decisionOutput)
+	}
+	originalDecisionID := decisionOutput.Decision.ID
+	replacement := call(t, client, "record_decision", map[string]any{
+		"issue_id": issue.ID, "title": "Use leases 2", "summary": "Updated lease choice.", "content": "",
+		"supersedes_id": originalDecisionID,
+	})
+	decodeStructured(t, replacement, &decisionOutput)
+	if replacement.IsError || decisionOutput.SupersededDecisionID == nil || *decisionOutput.SupersededDecisionID != originalDecisionID {
+		t.Fatalf("replacement output = %#v", decisionOutput)
+	}
+	projectDecision := call(t, client, "record_decision", map[string]any{
+		"title": "Project choice", "summary": "Project summary", "content": "",
+	})
+	if projectDecision.IsError {
+		t.Fatalf("project decision = %#v", projectDecision)
+	}
+	unsupportedDecision := call(t, client, "record_decision", map[string]any{
+		"title": "Unsupported retry", "summary": "No replay", "content": "", "idempotency_key": "decision-key",
+	})
+	assertDomainError(t, unsupportedDecision, "INVALID_ARGUMENT", false)
 
 	labels := call(t, client, "list_labels", map[string]any{})
 	var labelPage struct {
@@ -377,6 +414,21 @@ func TestNewServerRequiresSessionService(t *testing.T) {
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing session service error", err)
+	}
+}
+
+func TestNewServerRequiresDecisionService(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "decision-required.db"))
+	defer func() {
+		if err := db.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	options := composeServices(t, db, source)
+	options.DecisionService = nil
+	_, err := mcpadapter.NewServer(options)
+	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("NewServer() error = %v, want missing decision service error", err)
 	}
 }
 
@@ -1062,6 +1114,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	decisionRepository, err := sqlite.NewDecisionRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1094,6 +1150,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	decisions, err := application.NewDecisionService(decisionRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -1107,7 +1167,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, AttemptService: attempts, SessionService: sessions,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, AttemptService: attempts, SessionService: sessions,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }
