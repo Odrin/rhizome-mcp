@@ -23,6 +23,10 @@ func nullableStringSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Types: []string{"string", "null"}}
 }
 func integerSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "integer"} }
+func boundedIntegerSchema(minimum, maximum int) *jsonschema.Schema {
+	min, max := float64(minimum), float64(maximum)
+	return &jsonschema.Schema{Type: "integer", Minimum: &min, Maximum: &max}
+}
 func booleanSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "boolean"} }
 func stringsSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "array", Items: stringSchema()}
@@ -100,6 +104,23 @@ func schemaManageIssueRelation() *jsonschema.Schema {
 	}, "action", "source_issue_id", "target_issue_id", "relation_type")
 }
 
+func schemaGetIssueGraph() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"root_issue_id": stringSchema(), "depth": boundedIntegerSchema(0, 5),
+		"direction":         enumSchema("outgoing", "incoming", "both"),
+		"relation_types":    &jsonschema.Schema{Type: "array", Items: enumSchema("blocks", "related_to", "duplicates"), UniqueItems: true},
+		"include_hierarchy": booleanSchema(), "include_terminal": booleanSchema(),
+		"max_nodes": boundedIntegerSchema(1, 500), "view": enumSchema("compact"),
+	}, "root_issue_id")
+}
+
+func schemaGetPlanningGraph() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"root_issue_id": nullableStringSchema(), "depth": boundedIntegerSchema(0, 5), "max_nodes": boundedIntegerSchema(1, 500),
+		"include_review": booleanSchema(), "include_related": booleanSchema(),
+	})
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
@@ -108,6 +129,7 @@ func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOu
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }
+func schemaGraphOutput() *jsonschema.Schema { return typedSchema[graphOutput]() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

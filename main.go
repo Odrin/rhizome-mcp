@@ -90,6 +90,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	graphRepository, err := sqlite.NewGraphRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return err
@@ -106,10 +110,15 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	graphService, err := application.NewGraphService(graphRepository)
+	if err != nil {
+		return err
+	}
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:    issueService,
 		ProjectService:  projectService,
 		RelationService: relationService,
+		GraphService:    graphService,
 		ServerName:      cfg.ServerName,
 		ServerVersion:   cfg.Version,
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,

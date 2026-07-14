@@ -39,7 +39,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"archive_issue", "create_issue", "get_issue", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue"}
+	wantNames := []string{"archive_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -49,11 +49,13 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
+	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 
 	project := call(t, client, "get_project", map[string]any{})
 	if project.IsError {
 		t.Fatalf("get_project result = %#v", project)
 	}
+
 	var projectOutput struct {
 		Session                any      `json:"session"`
 		AppVersion             string   `json:"app_version"`
@@ -276,6 +278,45 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 }
 
+func TestGraphToolsLifecycleAndValidation(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer func() {
+		if err := db.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	root := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Root", "status": "ready"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, root, &issue)
+	graph := call(t, client, "get_issue_graph", map[string]any{"root_issue_id": issue.ID, "depth": 0, "max_nodes": 1})
+	var output struct {
+		RootIssueID string `json:"root_issue_id"`
+		Nodes       []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+		Truncated        bool    `json:"truncated"`
+		TruncationReason *string `json:"truncation_reason"`
+	}
+	decodeStructured(t, graph, &output)
+	if graph.IsError || output.RootIssueID != issue.ID || len(output.Nodes) != 1 || output.Truncated || output.TruncationReason != nil {
+		t.Fatalf("issue graph = %#v", output)
+	}
+	planning := call(t, client, "get_planning_graph", map[string]any{"max_nodes": 1})
+	if planning.IsError {
+		t.Fatalf("planning graph = %#v", planning)
+	}
+	invalid := call(t, client, "get_issue_graph", map[string]any{"root_issue_id": issue.ID, "max_nodes": 0})
+	if !invalid.IsError {
+		t.Fatalf("schema accepted invalid graph limit: %#v", invalid)
+	}
+}
+
 func TestNewServerRequiresRelationService(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "project.db")
 	db, source := openDatabase(t, databasePath)
@@ -470,6 +511,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	graphRepository, err := sqlite.NewGraphRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -486,8 +531,12 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	graphs, err := application.NewGraphService(graphRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

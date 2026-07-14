@@ -77,6 +77,25 @@ type manageIssueRelationInput struct {
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
 }
 
+type getIssueGraphInput struct {
+	RootIssueID      string   `json:"root_issue_id"`
+	Depth            *int     `json:"depth,omitempty"`
+	Direction        string   `json:"direction,omitempty"`
+	RelationTypes    []string `json:"relation_types,omitempty"`
+	IncludeHierarchy *bool    `json:"include_hierarchy,omitempty"`
+	IncludeTerminal  *bool    `json:"include_terminal,omitempty"`
+	MaxNodes         *int     `json:"max_nodes,omitempty"`
+	View             string   `json:"view,omitempty"`
+}
+
+type getPlanningGraphInput struct {
+	RootIssueID    *string `json:"root_issue_id,omitempty"`
+	Depth          *int    `json:"depth,omitempty"`
+	MaxNodes       *int    `json:"max_nodes,omitempty"`
+	IncludeReview  *bool   `json:"include_review,omitempty"`
+	IncludeRelated *bool   `json:"include_related,omitempty"`
+}
+
 // patchInput records field presence independently from a null value.
 type patchInput struct {
 	Title              optionalString
@@ -288,6 +307,31 @@ type manageIssueRelationOutput struct {
 	Changed        bool               `json:"changed"`
 }
 
+type graphEdgeDTO struct {
+	SourceIssueID string `json:"source_issue_id"`
+	TargetIssueID string `json:"target_issue_id"`
+	Type          string `json:"type"`
+}
+
+type graphSummaryDTO struct {
+	NodeCount         int `json:"node_count"`
+	EdgeCount         int `json:"edge_count"`
+	EntryPointCount   int `json:"entry_point_count"`
+	BlockingNodeCount int `json:"blocking_node_count"`
+}
+
+type graphOutput struct {
+	RootIssueID      *string            `json:"root_issue_id,omitempty"`
+	Nodes            []issueListItemDTO `json:"nodes"`
+	Edges            []graphEdgeDTO     `json:"edges"`
+	EntryPoints      []string           `json:"entry_points"`
+	BlockingNodes    []string           `json:"blocking_nodes,omitempty"`
+	Summary          graphSummaryDTO    `json:"summary"`
+	Warnings         []string           `json:"warnings,omitempty"`
+	Truncated        bool               `json:"truncated"`
+	TruncationReason *string            `json:"truncation_reason,omitempty"`
+}
+
 func projectDTOFromDomain(project domain.Project, includeInstructions bool) projectDTO {
 	instructions := project.Instructions
 	if !includeInstructions {
@@ -324,5 +368,26 @@ func relationDTOFromDomain(relation domain.IssueRelation) relationDTO {
 	return relationDTO{
 		ID: relation.ID, SourceIssueID: relation.SourceIssueID, TargetIssueID: relation.TargetIssueID,
 		Type: string(relation.Type), CreatedAt: relation.CreatedAt,
+	}
+}
+
+func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
+	nodes := make([]issueListItemDTO, len(graph.Nodes))
+	for index, node := range graph.Nodes {
+		nodes[index] = issueListItemDTO{
+			issueDTO: issueDTOFromDomain(node.Issue), EffectiveStatus: string(node.EffectiveStatus),
+			UnresolvedBlockerCount: node.UnresolvedBlockerCount, IsBlocked: node.IsBlocked, IsClaimable: node.IsClaimable,
+		}
+	}
+	edges := make([]graphEdgeDTO, len(graph.Edges))
+	for index, edge := range graph.Edges {
+		edges[index] = graphEdgeDTO{SourceIssueID: edge.SourceIssueID, TargetIssueID: edge.TargetIssueID, Type: edge.Type}
+	}
+	return graphOutput{
+		RootIssueID: graph.RootIssueID, Nodes: nodes, Edges: edges,
+		EntryPoints: append([]string{}, graph.EntryPoints...), BlockingNodes: append([]string{}, graph.BlockingNodes...),
+		Summary: graphSummaryDTO{NodeCount: graph.Summary.NodeCount, EdgeCount: graph.Summary.EdgeCount,
+			EntryPointCount: graph.Summary.EntryPointCount, BlockingNodeCount: graph.Summary.BlockingNodeCount},
+		Warnings: append([]string{}, graph.Warnings...), Truncated: graph.Truncated, TruncationReason: graph.TruncationReason,
 	}
 }

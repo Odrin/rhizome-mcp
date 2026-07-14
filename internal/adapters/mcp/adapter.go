@@ -17,6 +17,7 @@ type Options struct {
 	IssueService    *application.IssueService
 	ProjectService  *application.ProjectService
 	RelationService *application.RelationService
+	GraphService    *application.GraphService
 	ServerName      string
 	ServerVersion   string
 	ConfigVersion   int
@@ -26,6 +27,7 @@ type adapter struct {
 	issues        *application.IssueService
 	projects      *application.ProjectService
 	relations     *application.RelationService
+	graphs        *application.GraphService
 	appVersion    string
 	configVersion int
 }
@@ -42,6 +44,9 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	if options.RelationService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "relation service is required", false)
 	}
+	if options.GraphService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "graph service is required", false)
+	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
 	}
@@ -52,6 +57,7 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 		issues:        options.IssueService,
 		projects:      options.ProjectService,
 		relations:     options.RelationService,
+		graphs:        options.GraphService,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 	}
@@ -72,6 +78,35 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("list_issues", "List issues in deterministic order", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
 	sdkmcp.AddTool(server, tool("archive_issue", "Archive an issue with an optimistic version precondition", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
 	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one relation between two issues", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
+	sdkmcp.AddTool(server, tool("get_issue_graph", "Return a bounded compact issue graph", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
+	sdkmcp.AddTool(server, tool("get_planning_graph", "Return a bounded planning graph", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
+}
+
+func (adapter *adapter) getIssueGraph(ctx context.Context, _ *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {
+	relationTypes := make([]domain.RelationType, len(input.RelationTypes))
+	for index, relationType := range input.RelationTypes {
+		relationTypes[index] = domain.RelationType(relationType)
+	}
+	graph, err := adapter.graphs.GetIssueGraph(ctx, domain.GetIssueGraphInput{
+		RootIssueID: input.RootIssueID, Depth: input.Depth, Direction: domain.GraphDirection(input.Direction),
+		RelationTypes: relationTypes, IncludeHierarchy: input.IncludeHierarchy, IncludeTerminal: input.IncludeTerminal,
+		MaxNodes: input.MaxNodes, View: input.View,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(graphOutputFromDomain(graph), "issue graph returned")
+}
+
+func (adapter *adapter) getPlanningGraph(ctx context.Context, _ *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
+	graph, err := adapter.graphs.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
+		RootIssueID: input.RootIssueID, Depth: input.Depth, MaxNodes: input.MaxNodes,
+		IncludeReview: input.IncludeReview, IncludeRelated: input.IncludeRelated,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(graphOutputFromDomain(graph), "planning graph returned")
 }
 
 func (adapter *adapter) getProject(ctx context.Context, _ *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
