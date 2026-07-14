@@ -28,6 +28,10 @@ const (
 	CodeAttemptNotFound = "ATTEMPT_NOT_FOUND"
 	// CodeAttemptNotActive identifies an attempt that cannot be renewed.
 	CodeAttemptNotActive = "ATTEMPT_NOT_ACTIVE"
+	// CodeSessionNotFound identifies a missing agent session.
+	CodeSessionNotFound = "SESSION_NOT_FOUND"
+	// CodeSessionNotActive identifies an ended agent session.
+	CodeSessionNotActive = "SESSION_NOT_ACTIVE"
 	// CodeLeaseExpired identifies an active attempt whose lease reached its boundary.
 	CodeLeaseExpired = "LEASE_EXPIRED"
 	// CodeInvalidLeaseToken identifies a mismatched opaque lease token.
