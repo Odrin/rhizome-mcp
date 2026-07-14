@@ -15,6 +15,7 @@ func TestAttemptLeaseInputValidation(t *testing.T) {
 		if _, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1", LeaseSeconds: &seconds}).Validate(); err == nil {
 			t.Fatalf("lease %d was accepted", seconds)
 		}
+
 	}
 	input, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1"}).Validate()
 	if err != nil || input.LeaseSeconds == nil || *input.LeaseSeconds != domain.DefaultLeaseSeconds {
@@ -86,6 +87,7 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 			Type: domain.ArtifactTypeFile, URI: "build/result.txt", Title: &title, Metadata: metadata,
 		}},
 	}
+
 	normalized, err := input.Validate()
 	if err != nil {
 		t.Fatal(err)
@@ -131,3 +133,59 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 		t.Fatal("invalid acknowledgement accepted")
 	}
 }
+
+func TestAttemptInputsNormalizeOptionalSessionIDs(t *testing.T) {
+	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+	claim, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1", SessionID: &sessionID}).Validate()
+	if err != nil || claim.SessionID == nil || *claim.SessionID != sessionID || claim.SessionID == &sessionID {
+		t.Fatalf("claim session = %#v, %v", claim.SessionID, err)
+	}
+	renew, err := (domain.RenewAttemptInput{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", SessionID: &sessionID}).Validate()
+	if err != nil || renew.SessionID == nil || *renew.SessionID != sessionID {
+		t.Fatalf("renew session = %#v, %v", renew.SessionID, err)
+	}
+	note, err := (domain.SaveAttemptNoteInput{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Kind: domain.AttemptNoteKindCheckpoint, Content: "checkpoint", SessionID: &sessionID}).Validate()
+	if err != nil || note.SessionID == nil || *note.SessionID != sessionID {
+		t.Fatalf("note session = %#v, %v", note.SessionID, err)
+	}
+	finish, err := (domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Outcome: domain.AttemptOutcomeFailed,
+		ResultSummary: "failed", FailureReasonCode: optionalFailurePointer(domain.FailureReasonOther), SessionID: &sessionID,
+	}).Validate()
+	if err != nil || finish.SessionID == nil || *finish.SessionID != sessionID {
+		t.Fatalf("finish session = %#v, %v", finish.SessionID, err)
+	}
+	sessionID = "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	if *claim.SessionID != "01BX5ZZKBKACTAV9WEVGEMMVRZ" || *renew.SessionID != "01BX5ZZKBKACTAV9WEVGEMMVRZ" ||
+		*note.SessionID != "01BX5ZZKBKACTAV9WEVGEMMVRZ" || *finish.SessionID != "01BX5ZZKBKACTAV9WEVGEMMVRZ" {
+		t.Fatal("session IDs were not defensively copied")
+	}
+	for _, input := range []struct {
+		name string
+		err  error
+	}{
+		{"claim", func() error {
+			_, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1", SessionID: optionalStringPointer("bad")}).Validate()
+			return err
+		}()},
+		{"renew", func() error {
+			_, err := (domain.RenewAttemptInput{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", SessionID: optionalStringPointer("bad")}).Validate()
+			return err
+		}()},
+		{"note", func() error {
+			_, err := (domain.SaveAttemptNoteInput{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: "note", SessionID: optionalStringPointer("bad")}).Validate()
+			return err
+		}()},
+		{"finish", func() error {
+			_, err := (domain.FinishAttemptInput{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Outcome: domain.AttemptOutcomeFailed, ResultSummary: "failed", FailureReasonCode: optionalFailurePointer(domain.FailureReasonOther), SessionID: optionalStringPointer("bad")}).Validate()
+			return err
+		}()},
+	} {
+		if !errors.Is(input.err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+			t.Fatalf("%s session error = %v", input.name, input.err)
+		}
+	}
+}
+
+func optionalStringPointer(value string) *string                                      { return &value }
+func optionalFailurePointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }

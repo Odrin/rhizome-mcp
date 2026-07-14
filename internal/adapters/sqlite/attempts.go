@@ -26,6 +26,9 @@ func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
 }
 
 func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
+	}
 	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 || command.LeaseDuration <= 0 {
 		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
 	}
@@ -82,8 +85,8 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 			id, issue_id, session_id, agent_label, kind, status, issue_version_at_start,
 			context_event_id_at_start, lease_token_hash, lease_expires_at, started_at,
 			last_heartbeat_at, finished_at
-		) VALUES (?, ?, NULL, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, NULL)`,
-			command.AttemptID, issue.ID, kind, issue.Version, latestEventID, command.TokenHash,
+		) VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, NULL)`,
+			command.AttemptID, issue.ID, nullableStringValuePtr(command.SessionID), kind, issue.Version, latestEventID, command.TokenHash,
 			expiresTimestamp, timestamp, timestamp); err != nil {
 			if isActiveAttemptConstraint(err) {
 				return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
@@ -99,12 +102,12 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
 			issue_id, event_type, session_id, attempt_id, payload, created_at
-		) VALUES (?, 'attempt_started', NULL, ?, ?, ?)`, issue.ID, command.AttemptID, string(payload), timestamp); err != nil {
+		) VALUES (?, 'attempt_started', ?, ?, ?, ?)`, issue.ID, nullableStringValuePtr(command.SessionID), command.AttemptID, string(payload), timestamp); err != nil {
 			return err
 		}
 		result.Issue = issue
 		result.Attempt = domain.WorkAttempt{
-			ID: command.AttemptID, IssueID: issue.ID, Kind: kind, Status: domain.AttemptStatusActive,
+			ID: command.AttemptID, IssueID: issue.ID, SessionID: copyOptionalString(command.SessionID), Kind: kind, Status: domain.AttemptStatusActive,
 			IssueVersionAtStart: issue.Version, ContextEventIDAtStart: latestEventID,
 			LeaseExpiresAt: expires, StartedAt: now, LastHeartbeatAt: now,
 		}
@@ -117,6 +120,9 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 }
 
 func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.RenewAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt renewal command is invalid", false)
+	}
 	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 || command.LeaseDuration <= 0 {
 		return ports.RenewAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt renewal command is invalid", false)
 	}
@@ -224,6 +230,9 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 }
 
 func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, command ports.SaveAttemptNoteCommand) (ports.SaveAttemptNoteResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
+	}
 	if _, err := ids.ParseStrict(command.NoteID); err != nil {
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
 	}
@@ -318,7 +327,7 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
 			issue_id, event_type, session_id, attempt_id, payload, created_at
-		) VALUES (?, ?, NULL, ?, ?, ?)`, issueID, eventType, command.AttemptID, string(payload), timestamp); err != nil {
+		) VALUES (?, ?, ?, ?, ?, ?)`, issueID, eventType, nullableStringValuePtr(command.SessionID), command.AttemptID, string(payload), timestamp); err != nil {
 			return err
 		}
 		result.Note = domain.AttemptNote{
@@ -366,6 +375,9 @@ func validateAttemptArtifacts(values []domain.Artifact, occurredAt time.Time) ([
 	return result, nil
 }
 func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command ports.FinishAttemptCommand) (ports.FinishAttemptResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt completion command is invalid", false)
+	}
 	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 {
 		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt completion command is invalid", false)
 	}
@@ -577,7 +589,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			eventType = "attempt_interrupted"
 		}
 		if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-				VALUES (?, ?, NULL, ?, ?, ?) RETURNING id`, issue.ID, eventType, command.AttemptID, string(encoded), timestamp).Scan(&latestEventID); err != nil {
+				VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, issue.ID, eventType, nullableStringValuePtr(command.SessionID), command.AttemptID, string(encoded), timestamp).Scan(&latestEventID); err != nil {
 			return err
 		}
 		parsedStarted, err := parseNullableAttemptTimestamp(started)
@@ -715,6 +727,15 @@ func nullableStringValuePtr(v *string) any {
 	}
 	return *v
 }
+
+func validAttemptSessionID(v *string) bool {
+	if v == nil {
+		return true
+	}
+	_, err := ids.ParseStrict(*v)
+	return err == nil && len(*v) == 26
+}
+
 func parseNullableAttemptTimestamp(v sql.NullString) (time.Time, error) {
 	if !v.Valid {
 		return time.Time{}, nil

@@ -10,6 +10,7 @@ import (
 type ClaimIssueCommand struct {
 	Identifier    domain.IssueIdentifier
 	AttemptID     string
+	SessionID     *string
 	TokenHash     []byte
 	LeaseDuration time.Duration
 	OccurredAt    time.Time
@@ -22,6 +23,7 @@ type ClaimIssueResult struct {
 
 type RenewAttemptCommand struct {
 	AttemptID     string
+	SessionID     *string
 	TokenHash     []byte
 	LeaseDuration time.Duration
 	OccurredAt    time.Time
@@ -35,6 +37,7 @@ type RenewAttemptResult struct {
 type SaveAttemptNoteCommand struct {
 	NoteID     string
 	AttemptID  string
+	SessionID  *string
 	TokenHash  []byte
 	Kind       domain.AttemptNoteKind
 	Content    string
@@ -51,6 +54,7 @@ type SaveAttemptNoteResult struct {
 
 type FinishAttemptCommand struct {
 	AttemptID  string
+	SessionID  *string
 	TokenHash  []byte
 	Input      domain.FinishAttemptInput
 	Artifacts  []domain.Artifact

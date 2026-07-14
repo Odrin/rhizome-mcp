@@ -388,6 +388,79 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 	}
 }
 
+func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "attempt-sessions.db"))
+	defer db.Close(ctx)
+	clientA, stopA := newClient(t, composeServices(t, db, source))
+	created := call(t, clientA, "create_issue", map[string]any{"type": "task", "title": "handoff", "status": "ready"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	claimed := call(t, clientA, "claim_issue", map[string]any{"issue_id": issue.ID})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if created.IsError || claimed.IsError || claim.Attempt.ID == "" || claim.LeaseToken == "" {
+		t.Fatalf("connection A outputs = created %#v claimed %#v", created, claimed)
+	}
+	stopA()
+	clientB, stopB := newClient(t, composeServices(t, db, source))
+	defer stopB()
+	note := call(t, clientB, "save_attempt_note", map[string]any{
+		"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken, "kind": "checkpoint", "content": "handoff checkpoint",
+	})
+	if note.IsError {
+		t.Fatalf("connection B note = %#v", note)
+	}
+	finished := call(t, clientB, "finish_attempt", map[string]any{
+		"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken,
+		"outcome": "completed", "result_summary": "done", "target_issue_status": "done",
+	})
+	if finished.IsError {
+		t.Fatalf("connection B finish = %#v", finished)
+	}
+	var attemptSession string
+	var events []struct {
+		Type    string
+		Session sql.NullString
+	}
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT session_id FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&attemptSession); err != nil {
+			return err
+		}
+		rows, err := query.QueryContext(ctx, `SELECT event_type, session_id FROM issue_events WHERE attempt_id = ? ORDER BY id`, claim.Attempt.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var event struct {
+				Type    string
+				Session sql.NullString
+			}
+			if err := rows.Scan(&event.Type, &event.Session); err != nil {
+				return err
+			}
+			events = append(events, event)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptSession == "" || len(events) != 3 || !events[0].Session.Valid || !events[1].Session.Valid || !events[2].Session.Valid ||
+		events[0].Type != "attempt_started" || events[1].Type != "checkpoint_saved" || events[2].Type != "attempt_completed" ||
+		events[0].Session.String == events[1].Session.String || events[1].Session.String != events[2].Session.String ||
+		attemptSession != events[0].Session.String {
+		t.Fatalf("attempt session attribution = attempt %q events %#v", attemptSession, events)
+	}
+}
+
 func waitForAgentSession(t *testing.T, db *sqlite.DB) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -420,9 +493,36 @@ func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("get_project result after session creation failure = %#v", result)
 	}
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "unmapped", "status": "ready"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" {
+		t.Fatalf("claim after session creation failure = %#v", claimed)
+	}
 	stop()
 	if session := readAgentSession(t, db); session.Count != 0 {
 		t.Fatalf("agent sessions after creation failure = %#v", session)
+	}
+	var attemptSession, eventSession sql.NullString
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT session_id FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&attemptSession); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_started'`, claim.Attempt.ID).Scan(&eventSession)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptSession.Valid || eventSession.Valid {
+		t.Fatalf("unmapped claim sessions = attempt %#v event %#v", attemptSession, eventSession)
 	}
 }
 

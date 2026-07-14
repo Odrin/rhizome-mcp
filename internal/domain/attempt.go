@@ -161,6 +161,7 @@ type AttemptAcknowledgement struct {
 type FinishAttemptInput struct {
 	AttemptID              string
 	LeaseToken             string
+	SessionID              *string
 	Outcome                AttemptOutcome
 	ResultSummary          string
 	NextSteps              []string
@@ -276,6 +277,10 @@ func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
 	if input.AcknowledgedChanges != nil {
 		ack := *input.AcknowledgedChanges
 		normalized.AcknowledgedChanges = &ack
+	}
+	normalized.SessionID, err = copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return FinishAttemptInput{}, err
 	}
 	return normalized, nil
 }
@@ -401,6 +406,7 @@ type AttemptNote struct {
 type ClaimIssueInput struct {
 	IssueID      string
 	LeaseSeconds *int
+	SessionID    *string
 }
 
 func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
@@ -411,13 +417,18 @@ func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
 	if err != nil {
 		return ClaimIssueInput{}, err
 	}
-	return ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: lease}, nil
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ClaimIssueInput{}, err
+	}
+	return ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: lease, SessionID: sessionID}, nil
 }
 
 type RenewAttemptInput struct {
 	AttemptID    string
 	LeaseToken   string
 	LeaseSeconds *int
+	SessionID    *string
 }
 
 func (input RenewAttemptInput) Validate() (RenewAttemptInput, error) {
@@ -434,12 +445,17 @@ func (input RenewAttemptInput) Validate() (RenewAttemptInput, error) {
 	if err != nil {
 		return RenewAttemptInput{}, err
 	}
-	return RenewAttemptInput{AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: lease}, nil
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return RenewAttemptInput{}, err
+	}
+	return RenewAttemptInput{AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: lease, SessionID: sessionID}, nil
 }
 
 type SaveAttemptNoteInput struct {
 	AttemptID  string
 	LeaseToken string
+	SessionID  *string
 	Kind       AttemptNoteKind
 	Content    string
 	NextSteps  []string
@@ -484,10 +500,26 @@ func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
 	if err != nil {
 		return SaveAttemptNoteInput{}, err
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return SaveAttemptNoteInput{}, err
+	}
 	return SaveAttemptNoteInput{
-		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: input.Kind, Content: input.Content,
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID, Kind: input.Kind, Content: input.Content,
 		NextSteps: nextSteps, Important: input.Important, Artifacts: artifacts,
 	}, nil
+}
+
+func copyOptionalSessionID(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	parsed, err := ulid.ParseStrict(*value)
+	if err != nil || len(*value) != 26 || parsed.String() != *value {
+		return nil, validationError("session_id", "INVALID_ULID", "must be a canonical ULID")
+	}
+	copied := *value
+	return &copied, nil
 }
 
 func validateLeaseSeconds(value *int) (*int, error) {

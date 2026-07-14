@@ -57,7 +57,7 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 	hash := sha256.Sum256([]byte(token))
 	now := service.clock.Now().UTC()
 	result, err := service.repository.ClaimIssue(ctx, ports.ClaimIssueCommand{
-		Identifier: identifier, AttemptID: id, TokenHash: hash[:],
+		Identifier: identifier, AttemptID: id, SessionID: normalized.SessionID, TokenHash: hash[:],
 		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
 	})
 	if err != nil {
@@ -74,7 +74,7 @@ func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.Re
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	now := service.clock.Now().UTC()
 	return service.repository.RenewAttempt(ctx, ports.RenewAttemptCommand{
-		AttemptID: normalized.AttemptID, TokenHash: hash[:],
+		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:],
 		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
 	})
 }
@@ -117,7 +117,7 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	result, err := service.repository.SaveAttemptNote(ctx, ports.SaveAttemptNoteCommand{
-		NoteID: id, AttemptID: normalized.AttemptID, TokenHash: hash[:], Kind: normalized.Kind,
+		NoteID: id, AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Kind: normalized.Kind,
 		Content: normalized.Content, NextSteps: normalized.NextSteps, Important: normalized.Important,
 		Artifacts: artifacts, OccurredAt: now,
 	})
@@ -156,6 +156,6 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	return service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
-		AttemptID: normalized.AttemptID, TokenHash: hash[:], Input: normalized, Artifacts: artifacts, OccurredAt: now,
+		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Input: normalized, Artifacts: artifacts, OccurredAt: now,
 	})
 }

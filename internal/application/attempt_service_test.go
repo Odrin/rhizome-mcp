@@ -134,6 +134,7 @@ func TestAttemptServiceFinishHashesTokenAndUsesUTCClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	summary := "summary"
 	result, err := service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
 		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "opaque-token",
@@ -149,6 +150,72 @@ func TestAttemptServiceFinishHashesTokenAndUsesUTCClock(t *testing.T) {
 		!repository.finishCommand.OccurredAt.Equal(now.UTC()) || repository.finishCommand.OccurredAt.Location() != time.UTC ||
 		repository.finishCommand.Input.ResultSummary != summary || result.LatestEventID != repository.finishResult.LatestEventID {
 		t.Fatalf("finish command = %#v, result = %#v", repository.finishCommand, result)
+	}
+}
+
+func TestAttemptServicePropagatesSessionIDsAndRejectsInvalidOnes(t *testing.T) {
+	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+	repository := &recordingAttemptRepository{}
+	generator := sequenceAttemptIDGenerator{ids: []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FAX",
+		"01ARZ3NDEKTSV4RRFFQ69G5FAY",
+	}}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Now()), &generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ClaimIssue(context.Background(), domain.ClaimIssueInput{IssueID: "ISSUE-1", SessionID: &sessionID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RenewAttempt(context.Background(), domain.RenewAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", SessionID: &sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Kind: domain.AttemptNoteKindProgress, Content: "note", SessionID: &sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeFailed, ResultSummary: "failed",
+		FailureReasonCode: failureReasonPointer(domain.FailureReasonOther), SessionID: &sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID = "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	for name, value := range map[string]*string{
+		"claim": repository.claimCommand.SessionID, "renew": repository.renewCommand.SessionID,
+		"note": repository.command.SessionID, "finish": repository.finishCommand.SessionID,
+	} {
+		if value == nil || *value != "01BX5ZZKBKACTAV9WEVGEMMVRZ" {
+			t.Fatalf("%s command session = %#v", name, value)
+		}
+	}
+	invalid := "bad"
+	repository.claimCalled, repository.renewCalled, repository.called, repository.finishCalled = false, false, false, false
+	if _, err := service.ClaimIssue(context.Background(), domain.ClaimIssueInput{IssueID: "ISSUE-1", SessionID: &invalid}); err == nil || repository.claimCalled {
+		t.Fatalf("invalid claim session error = %v, called = %t", err, repository.claimCalled)
+	}
+	if _, err := service.RenewAttempt(context.Background(), domain.RenewAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", SessionID: &invalid,
+	}); err == nil || repository.renewCalled {
+		t.Fatalf("invalid renew session error = %v, called = %t", err, repository.renewCalled)
+	}
+	if _, err := service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Kind: domain.AttemptNoteKindProgress, Content: "note", SessionID: &invalid,
+	}); err == nil || repository.called {
+		t.Fatalf("invalid note session error = %v, called = %t", err, repository.called)
+	}
+	if _, err := service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeFailed, ResultSummary: "failed",
+		FailureReasonCode: failureReasonPointer(domain.FailureReasonOther), SessionID: &invalid,
+	}); err == nil || repository.finishCalled {
+		t.Fatalf("invalid finish session error = %v, called = %t", err, repository.finishCalled)
 	}
 }
 
@@ -231,21 +298,29 @@ func TestAttemptServiceFinishRejectsInvalidGeneratedArtifactIDBeforeRepository(t
 }
 
 type recordingAttemptRepository struct {
+	claimCommand  ports.ClaimIssueCommand
+	renewCommand  ports.RenewAttemptCommand
 	command       ports.SaveAttemptNoteCommand
 	finishCommand ports.FinishAttemptCommand
 	finishResult  ports.FinishAttemptResult
 	expireCommand ports.ExpireAttemptsCommand
 	expireResult  ports.ExpireAttemptsResult
 	called        bool
+	claimCalled   bool
+	renewCalled   bool
 	finishCalled  bool
 	expireCalled  bool
 }
 
-func (repository *recordingAttemptRepository) ClaimIssue(context.Context, ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
+func (repository *recordingAttemptRepository) ClaimIssue(_ context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
+	repository.claimCalled = true
+	repository.claimCommand = command
 	return ports.ClaimIssueResult{}, nil
 }
 
-func (repository *recordingAttemptRepository) RenewAttempt(context.Context, ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
+func (repository *recordingAttemptRepository) RenewAttempt(_ context.Context, command ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
+	repository.renewCalled = true
+	repository.renewCommand = command
 	return ports.RenewAttemptResult{}, nil
 }
 

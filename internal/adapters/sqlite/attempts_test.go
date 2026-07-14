@@ -30,6 +30,7 @@ func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = db.Close(ctx) }()
 	if _, err := migrations.Migrate(ctx, db, source); err != nil {
 		t.Fatal(err)
@@ -242,6 +243,111 @@ func TestExpireAttemptsCleansAllIssuesAtBoundaryAndPreservesState(t *testing.T) 
 	}
 	if takeover.Attempt.ID == first.Attempt.ID {
 		t.Fatal("cleanup did not release the active-attempt claim")
+	}
+}
+
+func TestAttemptSessionAttributionAndExpiryFallback(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "session-attribution")
+	defer fixture.close()
+	sessionA := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+	sessionB := "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		timestamp := fixture.clock.Now().Format(time.RFC3339Nano)
+		for _, id := range []string{sessionA, sessionB} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'test', ?, ?)`, id, timestamp, timestamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issue := createAttemptIssue(t, fixture, "session attribution", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID, SessionID: stringPointer(sessionA)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.attempts.SaveAttemptNote(fixture.ctx, domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, SessionID: stringPointer(sessionB),
+		Kind: domain.AttemptNoteKindCheckpoint, Content: "handoff",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := finishInput(claim, domain.AttemptOutcomeCompleted)
+	finish.SessionID = stringPointer(sessionB)
+	finish.TargetIssueStatus = statusPointer(domain.StatusDone)
+	finished, err := fixture.attempts.FinishAttempt(fixture.ctx, finish)
+	if err != nil || finished.Attempt.SessionID == nil || *finished.Attempt.SessionID != sessionA {
+		t.Fatalf("continuation result = %#v, %v", finished.Attempt, err)
+	}
+	var events []struct {
+		Type    string
+		Session sql.NullString
+	}
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		rows, err := query.QueryContext(ctx, `SELECT event_type, session_id FROM issue_events WHERE attempt_id = ? ORDER BY id`, claim.Attempt.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var event struct {
+				Type    string
+				Session sql.NullString
+			}
+			if err := rows.Scan(&event.Type, &event.Session); err != nil {
+				return err
+			}
+			events = append(events, event)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Type != "attempt_started" || !events[0].Session.Valid || events[0].Session.String != sessionA ||
+		events[1].Type != "checkpoint_saved" || !events[1].Session.Valid || events[1].Session.String != sessionB ||
+		events[2].Type != "attempt_completed" || !events[2].Session.Valid || events[2].Session.String != sessionB {
+		t.Fatalf("attempt events = %#v", events)
+	}
+	unknownIssue := createAttemptIssue(t, fixture, "unknown session", domain.StatusReady)
+	unknown := "01BX5ZZKBKACTAV9WEVGEMMVS1"
+	if _, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: unknownIssue.ID, SessionID: &unknown}); err == nil {
+		t.Fatal("unknown session claim succeeded")
+	}
+	var attempts, starts int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM work_attempts WHERE issue_id = ?`, unknownIssue.ID).Scan(&attempts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_started'`, unknownIssue.ID).Scan(&starts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || starts != 0 {
+		t.Fatalf("unknown session rollback = attempts %d starts %d", attempts, starts)
+	}
+	expiryIssue := createAttemptIssue(t, fixture, "expiry attribution", domain.StatusReady)
+	expiryClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: expiryIssue.ID, SessionID: stringPointer(sessionA)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds) * time.Second)
+	_, err = fixture.attempts.SaveAttemptNote(fixture.ctx, domain.SaveAttemptNoteInput{
+		AttemptID: expiryClaim.Attempt.ID, LeaseToken: expiryClaim.LeaseToken, SessionID: stringPointer(sessionB),
+		Kind: domain.AttemptNoteKindCheckpoint, Content: "too late",
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
+		t.Fatalf("expired note error = %v", err)
+	}
+	var expirySession sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_expired'`, expiryClaim.Attempt.ID).Scan(&expirySession)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if expirySession.Valid {
+		t.Fatalf("expiry session = %#v, want NULL", expirySession)
 	}
 }
 
