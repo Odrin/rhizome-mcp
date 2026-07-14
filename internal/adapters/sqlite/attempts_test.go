@@ -3,6 +3,8 @@ package sqlite_test
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -342,4 +344,691 @@ func TestAttemptSimultaneousClaimsHaveOneWinner(t *testing.T) {
 	if succeeded != 1 || activeExists != 1 {
 		t.Fatalf("successes %d active errors %d", succeeded, activeExists)
 	}
+}
+
+type attemptTestFixture struct {
+	ctx       context.Context
+	clock     *clock.FakeClock
+	db        *sqlite.DB
+	issues    *application.IssueService
+	attempts  *application.AttemptService
+	relations *application.RelationService
+}
+
+func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
+	t.Helper()
+	ctx := context.Background()
+	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), name+".db"), sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			sqliteTestProjectID, source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	issueRepository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	attemptRepository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	relationRepository, err := sqlite.NewRelationRepository(db)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	issues, err := application.NewIssueService(issueRepository, source, generator)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	relations, err := application.NewRelationService(relationRepository, source, generator)
+	if err != nil {
+		_ = db.Close(ctx)
+		t.Fatal(err)
+	}
+	return &attemptTestFixture{ctx: ctx, clock: source, db: db, issues: issues, attempts: attempts, relations: relations}
+}
+
+func (fixture *attemptTestFixture) close() {
+	_ = fixture.db.Close(fixture.ctx)
+}
+
+func createAttemptIssue(t *testing.T, fixture *attemptTestFixture, title string, status domain.Status) application.CreateIssueResult {
+	t.Helper()
+	issue, err := fixture.issues.CreateIssue(fixture.ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: title, Status: status,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issue
+}
+
+func finishInput(claim application.ClaimIssueResult, outcome domain.AttemptOutcome) domain.FinishAttemptInput {
+	return domain.FinishAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+		Outcome: outcome, ResultSummary: "summary",
+	}
+}
+
+func statusPointer(value domain.Status) *domain.Status { return &value }
+
+func reviewPointer(value domain.ReviewOutcome) *domain.ReviewOutcome { return &value }
+
+func failurePointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }
+
+func interruptionPointer(value domain.InterruptionReasonCode) *domain.InterruptionReasonCode {
+	return &value
+}
+
+func countAttemptEvents(t *testing.T, fixture *attemptTestFixture, attemptID, eventType string) int {
+	t.Helper()
+	var count int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = ?`, attemptID, eventType).Scan(&count)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func requireAttemptActive(t *testing.T, fixture *attemptTestFixture, claim application.ClaimIssueResult) {
+	t.Helper()
+	if _, err := fixture.attempts.RenewAttempt(fixture.ctx, domain.RenewAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+	}); err != nil {
+		t.Fatalf("attempt is not active: %v", err)
+	}
+}
+
+func requireAttemptInactive(t *testing.T, fixture *attemptTestFixture, claim application.ClaimIssueResult) {
+	t.Helper()
+	if _, err := fixture.attempts.RenewAttempt(fixture.ctx, domain.RenewAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("attempt renewal after finish = %v", err)
+	}
+}
+
+func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "complete")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "complete work", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := fixture.attempts.FinishAttempt(fixture.ctx, domain.FinishAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+		Outcome: domain.AttemptOutcomeCompleted, TargetIssueStatus: statusPointer(domain.StatusDone),
+		ResultSummary: "implemented", NextSteps: []string{"follow up"},
+		Verification: []string{"go test ./..."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Attempt.Status != domain.AttemptStatusCompleted ||
+		finished.Attempt.FinishedAt == nil || !finished.Attempt.FinishedAt.Equal(fixture.clock.Now()) ||
+		finished.Attempt.ResultSummary == nil || *finished.Attempt.ResultSummary != "implemented" ||
+		!equalStrings(finished.Attempt.NextSteps, []string{"follow up"}) ||
+		!equalStrings(finished.Attempt.Verification, []string{"go test ./..."}) {
+		t.Fatalf("finished attempt = %#v", finished.Attempt)
+	}
+	if finished.Issue.Status != domain.StatusDone || finished.Issue.Version != claim.Issue.Version+1 ||
+		finished.Issue.ClosedAt == nil || !finished.Issue.ClosedAt.Equal(fixture.clock.Now()) {
+		t.Fatalf("finished issue = %#v", finished.Issue)
+	}
+	var status, resultSummary, nextJSON, verificationJSON string
+	var finishedAt, failureCode, interruptionCode sql.NullString
+	var eventPayload string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status, finished_at, result_summary, next_steps_json,
+			verification_json, failure_reason_code, interruption_reason_code
+			FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&status, &finishedAt, &resultSummary,
+			&nextJSON, &verificationJSON, &failureCode, &interruptionCode); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT payload FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed' ORDER BY id`, claim.Attempt.ID).Scan(&eventPayload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(domain.AttemptStatusCompleted) || !finishedAt.Valid || !finishedAtTimeIs(finishedAt.String, fixture.clock.Now()) ||
+		resultSummary != "implemented" || nextJSON != `["follow up"]` ||
+		verificationJSON != `["go test ./..."]` || failureCode.Valid || interruptionCode.Valid {
+		t.Fatalf("stored completion = status %q finished %q summary %q next %q verification %q failure %#v interruption %#v",
+			status, finishedAt.String, resultSummary, nextJSON, verificationJSON, failureCode, interruptionCode)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(eventPayload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["attempt_id"] != claim.Attempt.ID || payload["outcome"] != string(domain.AttemptOutcomeCompleted) ||
+		payload["target_status"] != string(domain.StatusDone) ||
+		strings.Contains(eventPayload, claim.LeaseToken) || strings.Contains(eventPayload, "implemented") ||
+		strings.Contains(eventPayload, "follow up") || strings.Contains(eventPayload, "go test ./...") {
+		t.Fatalf("unsafe completion event = %q", eventPayload)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 1 {
+		t.Fatal("completion event count is not exactly one")
+	}
+	requireAttemptInactive(t, fixture, claim)
+}
+
+func finishedAtTimeIs(value string, want time.Time) bool {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil && parsed.Equal(want)
+}
+
+func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "outcomes")
+	defer fixture.close()
+
+	tests := []struct {
+		name         string
+		outcome      domain.AttemptOutcome
+		eventType    string
+		failure      *domain.FailureReasonCode
+		interruption *domain.InterruptionReasonCode
+	}{
+		{name: "failed", outcome: domain.AttemptOutcomeFailed, eventType: "attempt_failed", failure: failurePointer(domain.FailureReasonTestsFailed)},
+		{name: "interrupted", outcome: domain.AttemptOutcomeInterrupted, eventType: "attempt_interrupted", interruption: interruptionPointer(domain.InterruptionReasonHandoff)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createAttemptIssue(t, fixture, test.name, domain.StatusReady)
+			claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := claim.Issue
+			input := finishInput(claim, test.outcome)
+			input.FailureReasonCode = test.failure
+			input.InterruptionReasonCode = test.interruption
+			input.ReasonDetails = pointer("private diagnostic")
+			finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finished.Attempt.Status != domain.AttemptStatus(test.outcome) ||
+				finished.Issue.Status != before.Status || finished.Issue.Version != before.Version ||
+				!finished.Issue.UpdatedAt.Equal(before.UpdatedAt) ||
+				(finished.Issue.ClosedAt != nil && before.ClosedAt == nil) ||
+				(finished.Issue.ClosedAt == nil && before.ClosedAt != nil) {
+				t.Fatalf("finish state changed issue: before=%#v after=%#v", before, finished.Issue)
+			}
+			var status, payload string
+			var storedFailure, storedInterruption, storedDetails sql.NullString
+			if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+				if err := query.QueryRowContext(ctx, `SELECT status, failure_reason_code,
+					interruption_reason_code, reason_details FROM work_attempts WHERE id = ?`,
+					claim.Attempt.ID).Scan(&status, &storedFailure, &storedInterruption, &storedDetails); err != nil {
+					return err
+				}
+				return query.QueryRowContext(ctx, `SELECT payload FROM issue_events
+					WHERE attempt_id = ? AND event_type = ? ORDER BY id`, claim.Attempt.ID, test.eventType).Scan(&payload)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(test.outcome) || !storedDetails.Valid || storedDetails.String != "private diagnostic" ||
+				(test.failure == nil && storedFailure.Valid) || (test.failure != nil && (!storedFailure.Valid || storedFailure.String != string(*test.failure))) ||
+				(test.interruption == nil && storedInterruption.Valid) || (test.interruption != nil && (!storedInterruption.Valid || storedInterruption.String != string(*test.interruption))) ||
+				strings.Contains(payload, "summary") || strings.Contains(payload, "private diagnostic") ||
+				strings.Contains(payload, claim.LeaseToken) {
+				t.Fatalf("stored outcome = status %q failure %#v interruption %#v details %#v payload %q",
+					status, storedFailure, storedInterruption, storedDetails, payload)
+			}
+			if !strings.Contains(payload, string(testReasonCode(test.failure, test.interruption))) {
+				t.Fatalf("event does not contain reason code: %q", payload)
+			}
+			if countAttemptEvents(t, fixture, claim.Attempt.ID, test.eventType) != 1 {
+				t.Fatalf("event count = %d", countAttemptEvents(t, fixture, claim.Attempt.ID, test.eventType))
+			}
+		})
+	}
+}
+
+func testReasonCode(failure *domain.FailureReasonCode, interruption *domain.InterruptionReasonCode) string {
+	if failure != nil {
+		return string(*failure)
+	}
+	return string(*interruption)
+}
+
+func TestFinishAttemptReviewMappingAndShapeRejection(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review")
+	defer fixture.close()
+
+	tests := []struct {
+		name          string
+		review        domain.ReviewOutcome
+		wantStatus    domain.Status
+		blockedReason *string
+	}{
+		{name: "approved", review: domain.ReviewOutcomeApproved, wantStatus: domain.StatusDone},
+		{name: "changes requested", review: domain.ReviewOutcomeChangesRequested, wantStatus: domain.StatusReady},
+		{name: "blocked", review: domain.ReviewOutcomeBlocked, wantStatus: domain.StatusBlocked, blockedReason: pointer("needs revision")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createAttemptIssue(t, fixture, test.name, domain.StatusReview)
+			claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := finishInput(claim, domain.AttemptOutcomeCompleted)
+			input.ReviewOutcome = reviewPointer(test.review)
+			input.BlockedReason = test.blockedReason
+			finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finished.Issue.Status != test.wantStatus {
+				t.Fatalf("review %q status = %q, want %q", test.review, finished.Issue.Status, test.wantStatus)
+			}
+			if test.blockedReason == nil && finished.Issue.BlockedReason != nil {
+				t.Fatalf("review %q blocked reason = %v", test.review, finished.Issue.BlockedReason)
+			}
+			if test.blockedReason != nil && (finished.Issue.BlockedReason == nil || *finished.Issue.BlockedReason != *test.blockedReason) {
+				t.Fatalf("blocked review reason = %v", finished.Issue.BlockedReason)
+			}
+		})
+	}
+
+	work := createAttemptIssue(t, fixture, "work shape", domain.StatusReady)
+	workClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: work.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, finishInput(workClaim, domain.AttemptOutcomeCompleted)); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("missing work target error = %v", err)
+	}
+	requireAttemptActive(t, fixture, workClaim)
+	if countAttemptEvents(t, fixture, workClaim.Attempt.ID, "attempt_completed") != 0 {
+		t.Fatal("invalid work shape appended completion event")
+	}
+
+	review := createAttemptIssue(t, fixture, "review shape", domain.StatusReview)
+	reviewClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: review.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewInput := finishInput(reviewClaim, domain.AttemptOutcomeCompleted)
+	reviewInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	reviewInput.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, reviewInput); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("invalid review shape error = %v", err)
+	}
+	requireAttemptActive(t, fixture, reviewClaim)
+	if countAttemptEvents(t, fixture, reviewClaim.Attempt.ID, "attempt_completed") != 0 {
+		t.Fatal("invalid review shape appended completion event")
+	}
+}
+
+func TestFinishAttemptAuthorizationAndExpiryPreserveCompletionData(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "authorization")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "authorize finish", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongToken := finishInput(claim, domain.AttemptOutcomeCompleted)
+	wrongToken.LeaseToken = "wrong-token"
+	wrongToken.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, wrongToken); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidLeaseToken}) {
+		t.Fatalf("wrong token error = %v", err)
+	}
+	requireAttemptActive(t, fixture, claim)
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+		t.Fatal("wrong token appended completion event")
+	}
+	missing := finishInput(claim, domain.AttemptOutcomeCompleted)
+	missing.AttemptID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	missing.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, missing); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotFound}) {
+		t.Fatalf("missing attempt error = %v", err)
+	}
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds) * time.Second)
+	valid := finishInput(claim, domain.AttemptOutcomeCompleted)
+	valid.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, valid); !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
+		t.Fatalf("boundary finish error = %v", err)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_expired") != 1 ||
+		countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+		t.Fatalf("expiry events = expired %d completed %d",
+			countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_expired"),
+			countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed"))
+	}
+	var status string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&status)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(domain.AttemptStatusExpired) {
+		t.Fatalf("expired attempt status = %q", status)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, valid); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("second finish after expiry = %v", err)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_expired") != 1 {
+		t.Fatal("second finish duplicated expiry event")
+	}
+}
+
+func TestFinishAttemptChangeAcknowledgementsAndWarnings(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "changes")
+	defer fixture.close()
+
+	t.Run("description requires exact acknowledgement", func(t *testing.T) {
+		issue := createAttemptIssue(t, fixture, "description", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+			IssueID: issue.ID, ExpectedVersion: claim.Issue.Version,
+			Changes: domain.IssuePatch{Description: domain.OptionalString{Set: true, Value: pointer("new description")}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+		requireAcknowledgementError(t, err, "description")
+		if finished.Attempt.ID != "" {
+			t.Fatal("rejected completion returned an attempt")
+		}
+		requireAttemptActive(t, fixture, claim)
+		if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+			t.Fatal("description rejection appended completion event")
+		}
+		version, latestEventID := currentIssueVersionAndLatestEvent(t, fixture, issue.ID)
+		if version != updated.Issue.Version {
+			t.Fatalf("current version = %d, update version = %d", version, updated.Issue.Version)
+		}
+		input.AcknowledgedChanges = &domain.AttemptAcknowledgement{IssueVersion: version, LatestEventID: latestEventID}
+		if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("acceptance criteria rejects missing mismatched and stale acknowledgements", func(t *testing.T) {
+		issue := createAttemptIssue(t, fixture, "criteria", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+			IssueID: issue.ID, ExpectedVersion: claim.Issue.Version,
+			Changes: domain.IssuePatch{AcceptanceCriteria: domain.OptionalString{Set: true, Value: pointer("new criteria")}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err == nil {
+			t.Fatal("missing acceptance acknowledgement succeeded")
+		} else {
+			requireAcknowledgementError(t, err, "acceptance_criteria")
+		}
+		version, latestEventID := currentIssueVersionAndLatestEvent(t, fixture, issue.ID)
+		for _, ack := range []*domain.AttemptAcknowledgement{
+			{IssueVersion: version - 1, LatestEventID: latestEventID},
+			{IssueVersion: version, LatestEventID: latestEventID - 1},
+		} {
+			input.AcknowledgedChanges = ack
+			if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err == nil {
+				t.Fatalf("mismatched acknowledgement %+v succeeded", ack)
+			} else {
+				requireAcknowledgementError(t, err, "acceptance_criteria")
+			}
+			requireAttemptActive(t, fixture, claim)
+			if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+				t.Fatal("invalid acknowledgement appended completion event")
+			}
+		}
+		input.AcknowledgedChanges = &domain.AttemptAcknowledgement{IssueVersion: version, LatestEventID: latestEventID}
+		if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("title priority and labels are warnings", func(t *testing.T) {
+		issue := createAttemptIssue(t, fixture, "warnings", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+			IssueID: issue.ID, ExpectedVersion: claim.Issue.Version, CreateMissingLabels: true,
+			Changes: domain.IssuePatch{
+				Title:    domain.OptionalValue[string]{Set: true, Value: "renamed"},
+				Priority: domain.OptionalValue[domain.Priority]{Set: true, Value: domain.PriorityHigh},
+				Labels:   domain.OptionalValue[[]string]{Set: true, Value: []string{"changed-label"}},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWarnings := []string{"ISSUE_CHANGED:labels", "ISSUE_CHANGED:priority", "ISSUE_CHANGED:title"}
+		if !equalStrings(finished.Warnings, wantWarnings) {
+			t.Fatalf("warnings = %v, want %v", finished.Warnings, wantWarnings)
+		}
+	})
+
+	t.Run("attempt note does not require acknowledgement", func(t *testing.T) {
+		issue := createAttemptIssue(t, fixture, "note", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.attempts.SaveAttemptNote(fixture.ctx, domain.SaveAttemptNoteInput{
+			AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+			Kind: domain.AttemptNoteKindProgress, Content: "progress",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(finished.Warnings) != 0 {
+			t.Fatalf("note completion warnings = %v", finished.Warnings)
+		}
+	})
+}
+
+func currentIssueVersionAndLatestEvent(t *testing.T, fixture *attemptTestFixture, issueID string) (int64, int64) {
+	t.Helper()
+	var version, latestEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return version, latestEventID
+}
+
+func requireAcknowledgementError(t *testing.T, err error, field string) {
+	t.Helper()
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeIssueChangedDuringAttempt ||
+		!domainErr.Retryable || len(domainErr.Details) != 1 || domainErr.Details[0].Field != field {
+		t.Fatalf("acknowledgement error = %#v", err)
+	}
+}
+
+func TestFinishAttemptBlockerAndCompletionUpdateRace(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "race")
+	defer fixture.close()
+
+	t.Run("blocker added after claim", func(t *testing.T) {
+		target := createAttemptIssue(t, fixture, "blocked target", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: target.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocker := createAttemptIssue(t, fixture, "unresolved blocker", domain.StatusReady)
+		if _, err := fixture.relations.ManageIssueRelation(fixture.ctx, domain.ManageIssueRelationInput{
+			Action: domain.RelationActionAdd, SourceIssueID: blocker.ID, TargetIssueID: target.ID,
+			RelationType: domain.RelationTypeBlocks,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeUnresolvedBlockersAdded}) {
+			t.Fatalf("blocker completion error = %v", err)
+		} else {
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || !domainErr.Retryable {
+				t.Fatalf("blocker error is not retryable: %v", err)
+			}
+		}
+		requireAttemptActive(t, fixture, claim)
+		if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+			t.Fatal("blocker rejection appended completion event")
+		}
+	})
+
+	t.Run("completion and optimistic update have one winner", func(t *testing.T) {
+		issue := createAttemptIssue(t, fixture, "race target", domain.StatusReady)
+		claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		type raceResult struct {
+			finish bool
+			err    error
+		}
+		results := make(chan raceResult, 2)
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			<-start
+			input := finishInput(claim, domain.AttemptOutcomeCompleted)
+			input.TargetIssueStatus = statusPointer(domain.StatusDone)
+			_, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+			results <- raceResult{finish: true, err: err}
+		}()
+		go func() {
+			defer group.Done()
+			<-start
+			_, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+				IssueID: issue.ID, ExpectedVersion: claim.Issue.Version,
+				Changes: domain.IssuePatch{
+					Title:       domain.OptionalValue[string]{Set: true, Value: "race updated"},
+					Description: domain.OptionalString{Set: true, Value: pointer("race description")},
+				},
+			})
+			results <- raceResult{err: err}
+		}()
+		close(start)
+		group.Wait()
+		close(results)
+		var finishErr, updateErr error
+		for result := range results {
+			if result.finish {
+				finishErr = result.err
+			} else {
+				updateErr = result.err
+			}
+		}
+		finishSucceeded := finishErr == nil
+		updateSucceeded := updateErr == nil
+		if finishSucceeded == updateSucceeded {
+			t.Fatalf("race outcomes: finish=%v update=%v", finishErr, updateErr)
+		}
+		if finishSucceeded {
+			if !errors.Is(updateErr, &domain.Error{Code: domain.CodeVersionConflict}) {
+				t.Fatalf("update loser error = %v", updateErr)
+			}
+			var status, title string
+			if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+				if err := query.QueryRowContext(ctx, `SELECT status, title FROM issues WHERE id = ?`, issue.ID).Scan(&status, &title); err != nil {
+					return err
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(domain.StatusDone) || title != "race target" {
+				t.Fatalf("completion winner state = status %q title %q", status, title)
+			}
+			if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 1 {
+				t.Fatal("completion winner did not persist one completion event")
+			}
+			requireAttemptInactive(t, fixture, claim)
+		} else {
+			if !errors.Is(finishErr, &domain.Error{Code: domain.CodeIssueChangedDuringAttempt}) {
+				t.Fatalf("finish loser error = %v", finishErr)
+			}
+			var domainErr *domain.Error
+			if !errors.As(finishErr, &domainErr) || !domainErr.Retryable {
+				t.Fatalf("finish loser error is not retryable: %v", finishErr)
+			}
+			var status, title string
+			var description sql.NullString
+			if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+				if err := query.QueryRowContext(ctx, `SELECT status, title, description FROM issues WHERE id = ?`, issue.ID).Scan(&status, &title, &description); err != nil {
+					return err
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(domain.StatusReady) || title != "race updated" ||
+				!description.Valid || description.String != "race description" {
+				t.Fatalf("update winner state = status %q title %q description %#v", status, title, description)
+			}
+			if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
+				t.Fatal("update winner persisted completion event")
+			}
+			requireAttemptActive(t, fixture, claim)
+		}
+	})
 }

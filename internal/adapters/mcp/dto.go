@@ -93,6 +93,29 @@ type saveAttemptNoteInput struct {
 	IdempotencyKey *string           `json:"idempotency_key,omitempty"`
 }
 
+type acknowledgementInput struct {
+	IssueVersion  int64 `json:"issue_version"`
+	LatestEventID int64 `json:"latest_event_id"`
+}
+
+type finishAttemptInput struct {
+	AttemptID              string                `json:"attempt_id"`
+	LeaseToken             string                `json:"lease_token"`
+	Outcome                string                `json:"outcome"`
+	ResultSummary          string                `json:"result_summary"`
+	NextSteps              []string              `json:"next_steps,omitempty"`
+	Verification           []string              `json:"verification,omitempty"`
+	TargetIssueStatus      *string               `json:"target_issue_status,omitempty"`
+	BlockedReason          *string               `json:"blocked_reason,omitempty"`
+	ReviewOutcome          *string               `json:"review_outcome,omitempty"`
+	FailureReasonCode      *string               `json:"failure_reason_code,omitempty"`
+	InterruptionReasonCode *string               `json:"interruption_reason_code,omitempty"`
+	ReasonDetails          *string               `json:"reason_details,omitempty"`
+	AcknowledgedChanges    *acknowledgementInput `json:"acknowledged_changes,omitempty"`
+	Artifacts              []json.RawMessage     `json:"artifacts,omitempty"`
+	IdempotencyKey         *string               `json:"idempotency_key,omitempty"`
+}
+
 type manageIssueRelationInput struct {
 	Action         string  `json:"action"`
 	SourceIssueID  string  `json:"source_issue_id"`
@@ -377,15 +400,29 @@ type issueListItemDTO struct {
 }
 
 type attemptDTO struct {
-	ID                    string    `json:"id"`
-	IssueID               string    `json:"issue_id"`
-	Kind                  string    `json:"kind"`
-	Status                string    `json:"status"`
-	IssueVersionAtStart   int64     `json:"issue_version_at_start"`
-	ContextEventIDAtStart int64     `json:"context_event_id_at_start"`
-	LeaseExpiresAt        time.Time `json:"lease_expires_at"`
-	StartedAt             time.Time `json:"started_at"`
-	LastHeartbeatAt       time.Time `json:"last_heartbeat_at"`
+	ID                     string     `json:"id"`
+	IssueID                string     `json:"issue_id"`
+	Kind                   string     `json:"kind"`
+	Status                 string     `json:"status"`
+	IssueVersionAtStart    int64      `json:"issue_version_at_start"`
+	ContextEventIDAtStart  int64      `json:"context_event_id_at_start"`
+	LeaseExpiresAt         time.Time  `json:"lease_expires_at"`
+	StartedAt              time.Time  `json:"started_at"`
+	LastHeartbeatAt        time.Time  `json:"last_heartbeat_at"`
+	FinishedAt             *time.Time `json:"finished_at"`
+	ResultSummary          *string    `json:"result_summary"`
+	NextSteps              []string   `json:"next_steps"`
+	Verification           []string   `json:"verification"`
+	FailureReasonCode      *string    `json:"failure_reason_code"`
+	InterruptionReasonCode *string    `json:"interruption_reason_code"`
+	ReasonDetails          *string    `json:"reason_details"`
+}
+
+type finishAttemptOutput struct {
+	Attempt       attemptDTO `json:"attempt"`
+	Issue         issueDTO   `json:"issue"`
+	Warnings      []string   `json:"warnings"`
+	LatestEventID int64      `json:"latest_event_id"`
 }
 
 type emptyWorkContextDTO struct{}
@@ -575,9 +612,41 @@ func relationDTOFromDomain(relation domain.IssueRelation) relationDTO {
 }
 
 func attemptDTOFromDomain(attempt domain.WorkAttempt) attemptDTO {
+	nextSteps := append([]string{}, attempt.NextSteps...)
+	verification := append([]string{}, attempt.Verification...)
+	finishedAt := copyTime(attempt.FinishedAt)
+	resultSummary := copyString(attempt.ResultSummary)
+	reasonDetails := copyString(attempt.ReasonDetails)
 	return attemptDTO{ID: attempt.ID, IssueID: attempt.IssueID, Kind: string(attempt.Kind), Status: string(attempt.Status),
 		IssueVersionAtStart: attempt.IssueVersionAtStart, ContextEventIDAtStart: attempt.ContextEventIDAtStart,
-		LeaseExpiresAt: attempt.LeaseExpiresAt, StartedAt: attempt.StartedAt, LastHeartbeatAt: attempt.LastHeartbeatAt}
+		LeaseExpiresAt: attempt.LeaseExpiresAt, StartedAt: attempt.StartedAt, LastHeartbeatAt: attempt.LastHeartbeatAt,
+		FinishedAt: finishedAt, ResultSummary: resultSummary, NextSteps: nextSteps, Verification: verification,
+		FailureReasonCode: stringPointer(attempt.FailureReasonCode), InterruptionReasonCode: stringPointer(attempt.InterruptionReasonCode),
+		ReasonDetails: reasonDetails}
+}
+
+func stringPointer[T ~string](value *T) *string {
+	if value == nil {
+		return nil
+	}
+	result := string(*value)
+	return &result
+}
+
+func copyString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
+
+func copyTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
 }
 
 func attemptNoteDTOFromDomain(note domain.AttemptNote) attemptNoteDTO {

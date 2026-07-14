@@ -31,7 +31,9 @@ const (
 	// CodeLeaseExpired identifies an active attempt whose lease reached its boundary.
 	CodeLeaseExpired = "LEASE_EXPIRED"
 	// CodeInvalidLeaseToken identifies a mismatched opaque lease token.
-	CodeInvalidLeaseToken = "INVALID_LEASE_TOKEN"
+	CodeInvalidLeaseToken         = "INVALID_LEASE_TOKEN"
+	CodeIssueChangedDuringAttempt = "ISSUE_CHANGED_DURING_ATTEMPT"
+	CodeUnresolvedBlockersAdded   = "UNRESOLVED_BLOCKERS_ADDED"
 	// CodeBlocksCycle identifies a forbidden dependency cycle.
 	CodeBlocksCycle = "BLOCKS_CYCLE"
 	// CodeLimitExceeded identifies input beyond a documented bound.

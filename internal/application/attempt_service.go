@@ -83,6 +83,7 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 	if err != nil {
 		return domain.AttemptNote{}, err
 	}
+
 	id, err := service.ids.New()
 	if err != nil {
 		return domain.AttemptNote{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
@@ -100,4 +101,16 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 		return domain.AttemptNote{}, err
 	}
 	return result.Note, nil
+}
+
+func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.FinishAttemptInput) (ports.FinishAttemptResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return ports.FinishAttemptResult{}, err
+	}
+	hash := sha256.Sum256([]byte(normalized.LeaseToken))
+	now := service.clock.Now().UTC()
+	return service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
+		AttemptID: normalized.AttemptID, TokenHash: hash[:], Input: normalized, OccurredAt: now,
+	})
 }

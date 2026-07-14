@@ -39,7 +39,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -51,6 +51,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
+	assertRequired(t, toolNamed(t, tools.Tools, "finish_attempt"), "attempt_id", "lease_token", "outcome", "result_summary")
 
 	project := call(t, client, "get_project", map[string]any{})
 	if project.IsError {
@@ -414,6 +415,39 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	}
 	invalid := call(t, client, "renew_attempt", map[string]any{"attempt_id": output.Attempt.ID, "lease_token": "bad"})
 	assertDomainError(t, invalid, "INVALID_LEASE_TOKEN", false)
+	unsupportedFinishArtifacts := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
+		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"uri": "file"}},
+	})
+	assertDomainError(t, unsupportedFinishArtifacts, "INVALID_ARGUMENT", false)
+	unsupportedFinishIdempotency := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
+		"result_summary": "done", "failure_reason_code": "other", "idempotency_key": "unsupported",
+	})
+	assertDomainError(t, unsupportedFinishIdempotency, "INVALID_ARGUMENT", false)
+	finished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
+		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
+	})
+	var finishOutput struct {
+		Attempt struct {
+			Status        string   `json:"status"`
+			ResultSummary *string  `json:"result_summary"`
+			Verification  []string `json:"verification"`
+		} `json:"attempt"`
+		Issue struct {
+			Status string `json:"status"`
+		} `json:"issue"`
+		LatestEventID int64    `json:"latest_event_id"`
+		Warnings      []string `json:"warnings"`
+	}
+	decodeStructured(t, finished, &finishOutput)
+	if finished.IsError || finishOutput.Attempt.Status != "completed" || finishOutput.Issue.Status != "done" ||
+		finishOutput.Attempt.ResultSummary == nil || *finishOutput.Attempt.ResultSummary != "implemented" ||
+		!reflect.DeepEqual(finishOutput.Attempt.Verification, []string{"tests"}) || finishOutput.LatestEventID <= 0 ||
+		finishOutput.Warnings == nil {
+		t.Fatalf("finish output = %#v", finishOutput)
+	}
 }
 
 func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.T) {

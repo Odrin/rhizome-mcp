@@ -29,6 +29,7 @@ func TestSaveAttemptNoteInputValidation(t *testing.T) {
 		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Kind: domain.AttemptNoteKindCheckpoint,
 		Content: "checkpoint", NextSteps: []string{"resume tests"}, Important: true,
 	}
+
 	normalized, err := valid.Validate()
 	if err != nil || normalized.NextSteps[0] != "resume tests" || !normalized.Important {
 		t.Fatalf("valid input = %#v, %v", normalized, err)
@@ -54,5 +55,50 @@ func TestSaveAttemptNoteInputValidation(t *testing.T) {
 			!errors.Is(err, &domain.Error{Code: domain.CodeLimitExceeded}) {
 			t.Fatalf("input %#v error = %v", input, err)
 		}
+	}
+}
+
+func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
+	target := domain.StatusReview
+	next := []string{"resume"}
+	verification := []string{"tests passed"}
+	input := domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
+		NextSteps: next, Verification: verification, TargetIssueStatus: &target,
+	}
+	normalized, err := input.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next[0], verification[0] = "changed", "changed"
+	if normalized.NextSteps[0] != "resume" || normalized.Verification[0] != "tests passed" {
+		t.Fatal("finish slices were not copied")
+	}
+	if err := domain.ValidateFinishAttemptForKind(normalized, domain.AttemptKindWork); err != nil {
+		t.Fatal(err)
+	}
+	if err := domain.ValidateFinishAttemptForKind(normalized, domain.AttemptKindReview); err == nil {
+		t.Fatal("work shape accepted for review")
+	}
+	for _, bad := range []domain.FinishAttemptInput{
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: "bad", ResultSummary: "summary"},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeFailed, ResultSummary: "summary"},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeInterrupted, ResultSummary: "summary"},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary", NextSteps: []string{" "}},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary", Verification: []string{" "}},
+	} {
+		if _, err := bad.Validate(); err == nil {
+			t.Fatalf("invalid finish input accepted: %#v", bad)
+		}
+	}
+	ack := domain.AttemptAcknowledgement{IssueVersion: 1, LatestEventID: 0}
+	input.AcknowledgedChanges = &ack
+	if _, err := input.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ack.IssueVersion = 0
+	if _, err := input.Validate(); err == nil {
+		t.Fatal("invalid acknowledgement accepted")
 	}
 }

@@ -195,6 +195,28 @@ func schemaSaveAttemptNote() *jsonschema.Schema {
 	}, "attempt_id", "lease_token", "kind", "content")
 }
 
+func schemaFinishAttempt() *jsonschema.Schema {
+	acknowledgement := object(map[string]*jsonschema.Schema{
+		"issue_version":   boundedIntegerSchema(1, 9_223_372_036_854_775_807),
+		"latest_event_id": boundedIntegerSchema(0, 9_223_372_036_854_775_807),
+	}, "issue_version", "latest_event_id")
+	return object(map[string]*jsonschema.Schema{
+		"attempt_id": boundedStringSchema(26), "lease_token": boundedStringSchema(512),
+		"outcome":        enumSchema("completed", "failed", "interrupted"),
+		"result_summary": boundedStringSchema(50_000),
+		"next_steps":     boundedStringsSchema(20, 1_000), "verification": boundedStringsSchema(20, 1_000),
+		"target_issue_status":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"done", "review", "ready", "blocked", nil}},
+		"blocked_reason":           nullableBoundedStringSchema(50_000),
+		"review_outcome":           &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"approved", "changes_requested", "blocked", nil}},
+		"failure_reason_code":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"implementation_error", "environment_error", "missing_dependency", "invalid_requirements", "tests_failed", "context_lost", "timeout", "other", nil}},
+		"interruption_reason_code": &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}},
+		"reason_details":           nullableBoundedStringSchema(50_000),
+		"acknowledged_changes":     &jsonschema.Schema{Types: []string{"object", "null"}, OneOf: []*jsonschema.Schema{acknowledgement}},
+		"artifacts":                &jsonschema.Schema{Type: "array", MaxItems: intPointer(20)},
+		"idempotency_key":          nullableBoundedStringSchema(128),
+	}, "attempt_id", "lease_token", "outcome", "result_summary")
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
@@ -209,6 +231,7 @@ func schemaApplyIssuePlanOutput() *jsonschema.Schema  { return typedSchema[apply
 func schemaClaimIssueOutput() *jsonschema.Schema      { return typedSchema[claimIssueOutput]() }
 func schemaRenewAttemptOutput() *jsonschema.Schema    { return typedSchema[renewAttemptOutput]() }
 func schemaSaveAttemptNoteOutput() *jsonschema.Schema { return typedSchema[saveAttemptNoteOutput]() }
+func schemaFinishAttemptOutput() *jsonschema.Schema   { return typedSchema[finishAttemptOutput]() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

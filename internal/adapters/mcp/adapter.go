@@ -97,6 +97,7 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
 	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
+	sdkmcp.AddTool(server, tool("finish_attempt", "Finish an active leased work or review attempt", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -130,6 +131,7 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolR
 	if len(input.Artifacts) != 0 {
 		return adapter.failure(unsupportedField("artifacts"))
 	}
+
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
@@ -141,6 +143,61 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolR
 		return adapter.failure(err)
 	}
 	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(note), Artifacts: []struct{}{}}, "attempt note saved")
+}
+
+func (adapter *adapter) finishAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+	if len(input.Artifacts) != 0 {
+		return adapter.failure(unsupportedField("artifacts"))
+	}
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	var acknowledgement *domain.AttemptAcknowledgement
+	if input.AcknowledgedChanges != nil {
+		acknowledgement = &domain.AttemptAcknowledgement{IssueVersion: input.AcknowledgedChanges.IssueVersion, LatestEventID: input.AcknowledgedChanges.LatestEventID}
+	}
+	result, err := adapter.attempts.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Outcome: domain.AttemptOutcome(input.Outcome),
+		ResultSummary: input.ResultSummary, NextSteps: input.NextSteps, Verification: input.Verification,
+		TargetIssueStatus: statusPointer(input.TargetIssueStatus), BlockedReason: input.BlockedReason,
+		ReviewOutcome: reviewPointer(input.ReviewOutcome), FailureReasonCode: failurePointer(input.FailureReasonCode),
+		InterruptionReasonCode: interruptionPointer(input.InterruptionReasonCode), ReasonDetails: input.ReasonDetails,
+		AcknowledgedChanges: acknowledgement,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
+		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID}, "attempt finished")
+}
+
+func statusPointer(value *string) *domain.Status {
+	if value == nil {
+		return nil
+	}
+	result := domain.Status(*value)
+	return &result
+}
+func reviewPointer(value *string) *domain.ReviewOutcome {
+	if value == nil {
+		return nil
+	}
+	result := domain.ReviewOutcome(*value)
+	return &result
+}
+func failurePointer(value *string) *domain.FailureReasonCode {
+	if value == nil {
+		return nil
+	}
+	result := domain.FailureReasonCode(*value)
+	return &result
+}
+func interruptionPointer(value *string) *domain.InterruptionReasonCode {
+	if value == nil {
+		return nil
+	}
+	result := domain.InterruptionReasonCode(*value)
+	return &result
 }
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
