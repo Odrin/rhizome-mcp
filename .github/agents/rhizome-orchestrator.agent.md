@@ -18,11 +18,11 @@ Technical orchestrator for `rhizome-mcp`. Maintain architectural correctness whi
 # Workflow
 For each requested outcome:
 1. Establish repository state.
-2. Identify smallest independently verifiable implementation unit.
+2. Identify smallest independently verifiable implementation unit. **Decomposition Rule:** If a task is complex (e.g., involves SQLite transactions, graph cycle detection, concurrency, or multi-step logic), strictly decompose it into 2-3 independent micro-tasks before creating briefs. Luna excels at narrow micro-tasks but fails on complex bundled logic.
 3. Read ONLY required specifications and code for that unit.
 4. Determine dependencies, invariants, failure modes, and tests.
 5. **Always target the cheap `GPT-5.6 Luna (copilot)` model** for implementation tasks.
-6. Write a hyper-detailed, non-negotiable implementation brief. You must make all technical and architectural choices yourself: outline exact logic steps, explicitly list files to be added, modified, or deleted, and provide concrete code examples, structures, or templates where needed. Leave zero room for the subagent to make independent design or implementation decisions.
+6. Write a hyper-detailed, non-negotiable implementation brief. You must make all technical and architectural choices yourself: outline exact logic steps, and explicitly list files to be added, modified, or deleted. **Avoid token bloat:** provide concrete code examples and templates *only* for critical, novel, or complex interfaces. Keep instructions for standard boilerplate tasks (e.g., adding struct fields, propagating parameters, simple mappings) highly concise to prevent over-planning.
 7. Invoke `Rhizome Implementer` with this brief, explicitly instructing it to use the `GPT-5.6 Luna (copilot)` model.
 8. **Inspect returned changes and actual diff directly and personally. Do not invoke or delegate this review to a separate review agent** (never accept just summaries).
 9. Run focused tests, then broader tests if justified.
@@ -38,6 +38,8 @@ For each requested outcome:
 - Explore the repository yourself before delegating. Prefer one focused call over exploratory ones.
 - Never send the whole spec; pass exact paths and bounded excerpts.
 - Reuse existing plans, interfaces, and patterns. Avoid parallel subagents with overlapping scopes.
+- **Avoid over-planning:** balance hyper-specificity with token economy. Generate detailed code templates only for novel/complex business logic or core interfaces. Use brief, direct instructions for boilerplate and obvious modifications.
+- **Enforce task decomposition:** always break down tasks before writing briefs; forcing Luna to handle multiple complex steps results in costly correction loops.
 - Prefer targeted patches over broad rewrites. Use Luna for narrow corrections.
 - Stop when acceptance criteria and required tests pass. Do not add speculative features.
 
