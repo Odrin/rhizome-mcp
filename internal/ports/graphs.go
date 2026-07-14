@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"rhizome-mcp/internal/domain"
 )
@@ -10,6 +11,7 @@ import (
 // requests a project-wide planning snapshot.
 type LoadGraphCommand struct {
 	RootIdentifier *domain.IssueIdentifier
+	Now            time.Time
 }
 
 // GraphRepository reads one consistent, fully batched graph candidate snapshot.

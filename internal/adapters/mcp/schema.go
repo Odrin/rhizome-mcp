@@ -168,6 +168,20 @@ func schemaApplyIssuePlan() *jsonschema.Schema {
 	return object(properties, "issues", "relations", "decisions", "idempotency_key")
 }
 
+func schemaClaimIssue() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_id": boundedStringSchema(64), "lease_seconds": boundedIntegerSchema(60, 3600),
+		"idempotency_key": nullableBoundedStringSchema(128),
+	}, "issue_id")
+}
+
+func schemaRenewAttempt() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"attempt_id": boundedStringSchema(26), "lease_token": boundedStringSchema(512),
+		"lease_seconds": boundedIntegerSchema(60, 3600),
+	}, "attempt_id", "lease_token")
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
@@ -179,6 +193,8 @@ func schemaManageIssueRelationOutput() *jsonschema.Schema {
 func schemaGraphOutput() *jsonschema.Schema          { return typedSchema[graphOutput]() }
 func schemaPlanValidationOutput() *jsonschema.Schema { return typedSchema[planValidationOutput]() }
 func schemaApplyIssuePlanOutput() *jsonschema.Schema { return typedSchema[applyIssuePlanOutput]() }
+func schemaClaimIssueOutput() *jsonschema.Schema     { return typedSchema[claimIssueOutput]() }
+func schemaRenewAttemptOutput() *jsonschema.Schema   { return typedSchema[renewAttemptOutput]() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

@@ -8,6 +8,7 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 )
 
@@ -18,7 +19,7 @@ func TestGraphRepositorySnapshotHierarchyArchiveAndPlanningCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	graphs, err := application.NewGraphService(repository)
+	graphs, err := application.NewGraphService(repository, clock.NewFakeClock(now))
 	if err != nil {
 		t.Fatal(err)
 	}

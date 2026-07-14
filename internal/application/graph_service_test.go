@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
 )
 
 func TestGraphServiceDelegatesAndPropagatesRepositoryErrors(t *testing.T) {
 	repository := &graphRepositoryStub{err: errors.New("snapshot failed")}
-	service, err := NewGraphService(repository)
+	service, err := NewGraphService(repository, clock.NewFakeClock(time.Unix(0, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +26,7 @@ func TestGraphServiceDelegatesAndPropagatesRepositoryErrors(t *testing.T) {
 	if repository.command.RootIdentifier == nil {
 		t.Fatal("root identifier was not delegated")
 	}
-	if _, err := NewGraphService(nil); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+	if _, err := NewGraphService(nil, clock.NewFakeClock(time.Unix(0, 0))); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewGraphService(nil) error = %v", err)
 	}
 }

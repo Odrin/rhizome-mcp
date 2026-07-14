@@ -56,6 +56,7 @@ type ListLabelsCommand struct {
 // ListIssuesCommand contains a validated page request.
 type ListIssuesCommand struct {
 	Input domain.ListIssuesInput
+	Now   time.Time
 }
 
 // IssueRepository reads issue projections and persists issue mutations.

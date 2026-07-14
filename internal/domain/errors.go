@@ -24,6 +24,14 @@ const (
 	CodeVersionConflict = "VERSION_CONFLICT"
 	// CodeActiveAttemptExists identifies an issue protected by an active attempt.
 	CodeActiveAttemptExists = "ACTIVE_ATTEMPT_EXISTS"
+	// CodeAttemptNotFound identifies a missing attempt.
+	CodeAttemptNotFound = "ATTEMPT_NOT_FOUND"
+	// CodeAttemptNotActive identifies an attempt that cannot be renewed.
+	CodeAttemptNotActive = "ATTEMPT_NOT_ACTIVE"
+	// CodeLeaseExpired identifies an active attempt whose lease reached its boundary.
+	CodeLeaseExpired = "LEASE_EXPIRED"
+	// CodeInvalidLeaseToken identifies a mismatched opaque lease token.
+	CodeInvalidLeaseToken = "INVALID_LEASE_TOKEN"
 	// CodeBlocksCycle identifies a forbidden dependency cycle.
 	CodeBlocksCycle = "BLOCKS_CYCLE"
 	// CodeLimitExceeded identifies input beyond a documented bound.

@@ -26,6 +26,9 @@ func NewGraphRepository(database *DB) (*GraphRepository, error) {
 // short read transaction in the domain graph engine.
 func (repository *GraphRepository) LoadGraph(ctx context.Context, command ports.LoadGraphCommand) (domain.GraphSnapshot, error) {
 	result := domain.GraphSnapshot{Nodes: []domain.IssueProjection{}, Edges: []domain.GraphEdge{}, TopLevelIssueIDs: []string{}}
+	claimableSQL := issueClaimableSQLAt(command.Now)
+	effectiveStatusSQL := issueEffectiveStatusSQL(command.Now)
+	activeAttemptSQL := issueActiveAttemptIDSQL(command.Now)
 	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		if command.RootIdentifier != nil {
 			rootID, archived, err := loadGraphRoot(ctx, query, *command.RootIdentifier)
@@ -44,7 +47,9 @@ func (repository *GraphRepository) LoadGraph(ctx context.Context, command ports.
 			archived_at, archived_by_session_id,
 			`+issueUnresolvedBlockerCountSQL+` AS unresolved_blocker_count,
 			`+issueBlockedSQL+` AS is_blocked,
-			`+issueClaimableSQL+` AS is_claimable,
+			`+claimableSQL+` AS is_claimable,
+			`+effectiveStatusSQL+` AS effective_status,
+			`+activeAttemptSQL+` AS active_attempt_id,
 			`+issuePriorityRankSQL+` AS priority_rank
 			FROM issues WHERE archived_at IS NULL ORDER BY sequence_no ASC, id ASC`)
 		if err != nil {

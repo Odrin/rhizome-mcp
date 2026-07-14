@@ -14,7 +14,7 @@ func TestListIssuesInputValidateDefaultsCopiesAndNormalizes(t *testing.T) {
 	input := domain.ListIssuesInput{
 		Types:             []domain.Type{domain.TypeBug},
 		Statuses:          []domain.Status{domain.StatusReady},
-		EffectiveStatuses: []domain.Status{domain.StatusBlocked},
+		EffectiveStatuses: []domain.EffectiveStatus{domain.EffectiveStatusBlocked},
 		Priorities:        []domain.Priority{domain.PriorityHigh},
 		Labels:            []string{" Zebra ", "alpha", "ALPHA"},
 		ParentIssueID:     &parent,

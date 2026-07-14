@@ -98,6 +98,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return err
@@ -114,11 +118,15 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	graphService, err := application.NewGraphService(graphRepository)
+	graphService, err := application.NewGraphService(graphRepository, source)
 	if err != nil {
 		return err
 	}
 	planningService, err := application.NewPlanningService(planningRepository, source, generator)
+	if err != nil {
+		return err
+	}
+	attemptService, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		return err
 	}
@@ -128,6 +136,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		RelationService: relationService,
 		GraphService:    graphService,
 		PlanningService: planningService,
+		AttemptService:  attemptService,
 		ServerName:      cfg.ServerName,
 		ServerVersion:   cfg.Version,
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,

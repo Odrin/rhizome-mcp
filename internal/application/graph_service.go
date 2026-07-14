@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
 )
@@ -11,14 +12,15 @@ import (
 // shared domain traversal engine.
 type GraphService struct {
 	repository ports.GraphRepository
+	clock      clock.Clock
 }
 
 // NewGraphService composes graph queries from their snapshot repository.
-func NewGraphService(repository ports.GraphRepository) (*GraphService, error) {
-	if repository == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "graph repository is required", false)
+func NewGraphService(repository ports.GraphRepository, source clock.Clock) (*GraphService, error) {
+	if repository == nil || source == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "graph dependencies are required", false)
 	}
-	return &GraphService{repository: repository}, nil
+	return &GraphService{repository: repository, clock: source}, nil
 }
 
 // GetIssueGraph returns the requested graph rooted at one current issue.
@@ -31,7 +33,7 @@ func (service *GraphService) GetIssueGraph(ctx context.Context, input domain.Get
 	if err != nil {
 		return domain.GraphResult{}, err
 	}
-	snapshot, err := service.repository.LoadGraph(ctx, ports.LoadGraphCommand{RootIdentifier: &identifier})
+	snapshot, err := service.repository.LoadGraph(ctx, ports.LoadGraphCommand{RootIdentifier: &identifier, Now: service.clock.Now().UTC()})
 	if err != nil {
 		return domain.GraphResult{}, err
 	}
@@ -50,7 +52,7 @@ func (service *GraphService) GetPlanningGraph(ctx context.Context, input domain.
 	if err != nil {
 		return domain.GraphResult{}, err
 	}
-	command := ports.LoadGraphCommand{}
+	command := ports.LoadGraphCommand{Now: service.clock.Now().UTC()}
 	if normalized.RootIssueID != nil {
 		identifier, err := domain.ParseIssueIdentifier(*normalized.RootIssueID)
 		if err != nil {

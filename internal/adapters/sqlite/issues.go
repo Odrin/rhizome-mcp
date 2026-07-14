@@ -280,7 +280,9 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 		if current.Version != command.ExpectedVersion {
 			return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
 		}
-
+		if err := expireAttemptsForIssue(ctx, tx, current.ID, now); err != nil {
+			return err
+		}
 		var hasActiveAttempt bool
 		if err := tx.QueryRowContext(ctx, `
 			SELECT EXISTS(

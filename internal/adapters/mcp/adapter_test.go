@@ -39,7 +39,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"apply_issue_plan", "archive_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -333,6 +333,55 @@ func TestNewServerRequiresRelationService(t *testing.T) {
 	}
 }
 
+func TestAttemptToolsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "leased", "status": "ready"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID, "lease_seconds": 60})
+	var output struct {
+		Issue struct {
+			EffectiveStatus string  `json:"effective_status"`
+			ActiveAttemptID *string `json:"active_attempt_id"`
+		} `json:"issue"`
+		Attempt struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &output)
+	if claimed.IsError || output.Issue.EffectiveStatus != "in_progress" || output.Issue.ActiveAttemptID == nil ||
+		*output.Issue.ActiveAttemptID != output.Attempt.ID || output.Attempt.Kind != "work" || output.LeaseToken == "" {
+		t.Fatalf("claim metadata = status %q active ID present %t kind %q token present %t",
+			output.Issue.EffectiveStatus, output.Issue.ActiveAttemptID != nil, output.Attempt.Kind, output.LeaseToken != "")
+	}
+	listed := call(t, client, "list_issues", map[string]any{"effective_statuses": []string{"in_progress"}})
+	var listedOutput struct {
+		Items []struct {
+			EffectiveStatus string  `json:"effective_status"`
+			ActiveAttemptID *string `json:"active_attempt_id"`
+		} `json:"items"`
+	}
+	decodeStructured(t, listed, &listedOutput)
+	if listed.IsError || len(listedOutput.Items) != 1 || listedOutput.Items[0].EffectiveStatus != "in_progress" ||
+		listedOutput.Items[0].ActiveAttemptID == nil || *listedOutput.Items[0].ActiveAttemptID != output.Attempt.ID {
+		t.Fatalf("listed output = %#v", listedOutput)
+	}
+	renewed := call(t, client, "renew_attempt", map[string]any{"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "lease_seconds": 60})
+	if renewed.IsError {
+		t.Fatalf("renew result = %#v", renewed)
+	}
+	invalid := call(t, client, "renew_attempt", map[string]any{"attempt_id": output.Attempt.ID, "lease_token": "bad"})
+	assertDomainError(t, invalid, "INVALID_LEASE_TOKEN", false)
+}
+
 func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
@@ -572,6 +621,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	attemptRepository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -588,7 +641,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
-	graphs, err := application.NewGraphService(graphRepository)
+	graphs, err := application.NewGraphService(graphRepository, source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,8 +649,12 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, AttemptService: attempts,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

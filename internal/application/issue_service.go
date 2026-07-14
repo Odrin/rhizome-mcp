@@ -139,7 +139,7 @@ func (service *IssueService) ListIssues(ctx context.Context, input domain.ListIs
 	if err != nil {
 		return domain.IssueList{}, err
 	}
-	return service.repository.ListIssues(ctx, ports.ListIssuesCommand{Input: normalized})
+	return service.repository.ListIssues(ctx, ports.ListIssuesCommand{Input: normalized, Now: service.clock.Now().UTC()})
 }
 
 func (service *IssueService) newLabelIDs(labels []string, enabled bool) ([]string, error) {

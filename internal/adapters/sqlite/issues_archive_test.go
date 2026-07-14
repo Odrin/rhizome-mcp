@@ -10,6 +10,7 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestIssueArchivePersistsProjectionByULIDAndDisplayIDAndEvent(t *testing.T) {
@@ -111,7 +112,8 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
 			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
 		) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?)`,
-			"01BX5ZZKBKACTAV9WEVGEMMVS2", issue.ID, []byte("hash"), timestamp, timestamp, timestamp)
+			"01BX5ZZKBKACTAV9WEVGEMMVS2", issue.ID, []byte("hash"),
+			now.Add(time.Minute).Format(time.RFC3339Nano), timestamp, timestamp)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -197,6 +199,67 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 	if after.version != 2 || after.archived != 1 || after.labels != before.labels ||
 		after.relations != before.relations || after.comments != before.comments || after.events != before.events+1 {
 		t.Fatalf("related data changed on archive: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestIssueArchiveExpiresAttemptAtLeaseBoundary(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Archive after lease expiry", Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := now.Add(time.Duration(domain.DefaultLeaseSeconds) * time.Second)
+	claimed, err := attempts.ClaimIssue(ctx, ports.ClaimIssueCommand{
+		Identifier:    domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: issue.ID},
+		AttemptID:     "01BX5ZZKBKACTAV9WEVGEMMVS2",
+		TokenHash:     make([]byte, 32),
+		LeaseDuration: time.Duration(domain.DefaultLeaseSeconds) * time.Second,
+		OccurredAt:    now,
+	})
+	if err != nil {
+		t.Fatalf("claim ready issue: %v", err)
+	}
+	if !claimed.Attempt.LeaseExpiresAt.Equal(expiry) {
+		t.Fatalf("lease expiry = %v, want %v", claimed.Attempt.LeaseExpiresAt, expiry)
+	}
+
+	repository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ArchiveIssue(ctx, ports.ArchiveIssueCommand{
+		Identifier:      domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: issue.ID},
+		ExpectedVersion: issue.Issue.Version,
+		ArchivedAt:      expiry,
+	}); err != nil {
+		t.Fatalf("archive at lease expiry: %v", err)
+	}
+
+	var expiredEvents, activeAttempts, expiredAttempts int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `
+			SELECT count(*) FROM issue_events
+			WHERE issue_id = ? AND event_type = 'attempt_expired'`, issue.ID).Scan(&expiredEvents); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `
+			SELECT count(*) FROM work_attempts WHERE issue_id = ? AND status = 'active'`, issue.ID).Scan(&activeAttempts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `
+			SELECT count(*) FROM work_attempts WHERE issue_id = ? AND status = 'expired'`, issue.ID).Scan(&expiredAttempts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if expiredEvents != 1 || activeAttempts != 0 || expiredAttempts != 1 {
+		t.Fatalf("expiry state: events=%d active=%d expired=%d", expiredEvents, activeAttempts, expiredAttempts)
 	}
 }
 

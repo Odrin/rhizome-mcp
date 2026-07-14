@@ -40,10 +40,23 @@ const (
 	issueClaimableSQL = `(CASE
 		WHEN issues.archived_at IS NULL
 			AND issues.type IN ('task', 'bug')
-			AND issues.status = 'ready'
+			AND issues.status IN ('ready', 'review')
 			AND ` + issueUnresolvedBlockerCountSQL + ` = 0
 		THEN 1 ELSE 0 END)`
 )
+
+func issueActiveAttemptIDSQL(now time.Time) string {
+	return `(SELECT id FROM work_attempts WHERE issue_id = issues.id AND status = 'active' AND lease_expires_at > '` +
+		now.UTC().Format(time.RFC3339Nano) + `' LIMIT 1)`
+}
+
+func issueClaimableSQLAt(now time.Time) string {
+	return `(CASE WHEN ` + issueClaimableSQL + ` = 1 AND ` + issueActiveAttemptIDSQL(now) + ` IS NULL THEN 1 ELSE 0 END)`
+}
+
+func issueEffectiveStatusSQL(now time.Time) string {
+	return `(CASE WHEN ` + issueActiveAttemptIDSQL(now) + ` IS NOT NULL THEN 'in_progress' ELSE issues.status END)`
+}
 
 // ListIssues returns a bounded, deterministic issue page. Label filters have
 // any-label semantics, and the base projection plus batched labels are read
@@ -67,7 +80,11 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	}
 
 	var result domain.IssueList
+	now := command.Now.UTC()
 	err = repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
+		claimableSQL := issueClaimableSQLAt(now)
+		effectiveStatusSQL := issueEffectiveStatusSQL(now)
+		activeAttemptSQL := issueActiveAttemptIDSQL(now)
 		where := []string{"1 = 1"}
 		args := make([]any, 0, 16)
 		if !input.IncludeArchived {
@@ -75,7 +92,7 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 		}
 		appendIssueListInFilter(&where, &args, "type", input.Types)
 		appendIssueListInFilter(&where, &args, "status", input.Statuses)
-		appendIssueListInFilter(&where, &args, "status", input.EffectiveStatuses)
+		appendIssueListInFilter(&where, &args, effectiveStatusSQL, input.EffectiveStatuses)
 		appendIssueListInFilter(&where, &args, "priority", input.Priorities)
 		if input.ParentIssueID != nil {
 			identifier, err := domain.ParseIssueIdentifier(*input.ParentIssueID)
@@ -95,7 +112,7 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 			args = append(args, boolInt(*input.IsBlocked))
 		}
 		if input.IsClaimable != nil {
-			where = append(where, issueClaimableSQL+" = ?")
+			where = append(where, claimableSQL+" = ?")
 			args = append(args, boolInt(*input.IsClaimable))
 		}
 		if len(input.Labels) > 0 {
@@ -109,7 +126,6 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 		}
 		if after != nil {
 			prioritySQL := issuePriorityRankSQL
-			claimableSQL := issueClaimableSQL
 			where = append(where, "("+prioritySQL+" < ? OR ("+prioritySQL+" = ? AND ("+
 				claimableSQL+" < ? OR ("+claimableSQL+" = ? AND sequence_no > ?))))")
 			args = append(args, after.PriorityRank, after.PriorityRank, boolInt(after.IsClaimable),
@@ -122,7 +138,9 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 			archived_at, archived_by_session_id,
 			` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
 			` + issueBlockedSQL + ` AS is_blocked,
-			` + issueClaimableSQL + ` AS is_claimable,
+			` + claimableSQL + ` AS is_claimable,
+			` + effectiveStatusSQL + ` AS effective_status,
+			` + activeAttemptSQL + ` AS active_attempt_id,
 			` + issuePriorityRankSQL + ` AS priority_rank
 			FROM issues WHERE ` + strings.Join(where, " AND ") +
 			` ORDER BY priority_rank DESC, is_claimable DESC, sequence_no ASC LIMIT ?`
@@ -181,14 +199,15 @@ func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, erro
 	var (
 		id, issueType, title, status, priority, createdAt, updatedAt                      string
 		description, acceptanceCriteria, parentID, blockedReason                          sql.NullString
-		createdBySessionID, closedAt, archivedAt, archivedBySessionID                     sql.NullString
+		createdBySessionID, closedAt, archivedAt, archivedBySessionID, activeAttemptID    sql.NullString
+		effectiveStatus                                                                   string
 		sequenceNo, version, unresolvedBlockerCount, isBlocked, isClaimable, priorityRank int64
 	)
 	if err := scanner.Scan(
 		&id, &sequenceNo, &issueType, &title, &description, &acceptanceCriteria,
 		&status, &priority, &parentID, &blockedReason, &version,
 		&createdBySessionID, &createdAt, &updatedAt, &closedAt, &archivedAt, &archivedBySessionID,
-		&unresolvedBlockerCount, &isBlocked, &isClaimable, &priorityRank,
+		&unresolvedBlockerCount, &isBlocked, &isClaimable, &effectiveStatus, &activeAttemptID, &priorityRank,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return domain.IssueProjection{}, err
@@ -203,10 +222,11 @@ func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, erro
 	}
 	return domain.IssueProjection{
 		Issue:                  issue,
-		EffectiveStatus:        domain.EffectiveStatus(status),
+		EffectiveStatus:        domain.EffectiveStatus(effectiveStatus),
 		UnresolvedBlockerCount: unresolvedBlockerCount,
 		IsBlocked:              isBlocked != 0,
 		IsClaimable:            isClaimable != 0,
+		ActiveAttemptID:        nullableStringPointer(activeAttemptID),
 	}, nil
 }
 

@@ -70,6 +70,18 @@ type archiveIssueInput struct {
 	IdempotencyKey  *string `json:"idempotency_key,omitempty"`
 }
 
+type claimIssueInput struct {
+	IssueID        string  `json:"issue_id"`
+	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
+type renewAttemptInput struct {
+	AttemptID    string `json:"attempt_id"`
+	LeaseToken   string `json:"lease_token"`
+	LeaseSeconds *int   `json:"lease_seconds,omitempty"`
+}
+
 type manageIssueRelationInput struct {
 	Action         string  `json:"action"`
 	SourceIssueID  string  `json:"source_issue_id"`
@@ -346,10 +358,39 @@ type updateIssueOutput struct {
 
 type issueListItemDTO struct {
 	issueDTO
-	EffectiveStatus        string `json:"effective_status"`
-	UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
-	IsBlocked              bool   `json:"is_blocked"`
-	IsClaimable            bool   `json:"is_claimable"`
+	EffectiveStatus        string  `json:"effective_status"`
+	UnresolvedBlockerCount int64   `json:"unresolved_blocker_count"`
+	IsBlocked              bool    `json:"is_blocked"`
+	IsClaimable            bool    `json:"is_claimable"`
+	ActiveAttemptID        *string `json:"active_attempt_id"`
+}
+
+type attemptDTO struct {
+	ID                    string    `json:"id"`
+	IssueID               string    `json:"issue_id"`
+	Kind                  string    `json:"kind"`
+	Status                string    `json:"status"`
+	IssueVersionAtStart   int64     `json:"issue_version_at_start"`
+	ContextEventIDAtStart int64     `json:"context_event_id_at_start"`
+	LeaseExpiresAt        time.Time `json:"lease_expires_at"`
+	StartedAt             time.Time `json:"started_at"`
+	LastHeartbeatAt       time.Time `json:"last_heartbeat_at"`
+}
+
+type emptyWorkContextDTO struct{}
+
+type claimIssueOutput struct {
+	Issue              issueListItemDTO    `json:"issue"`
+	Attempt            attemptDTO          `json:"attempt"`
+	LeaseToken         string              `json:"lease_token"`
+	LeaseExpiresAt     time.Time           `json:"lease_expires_at"`
+	MinimalWorkContext emptyWorkContextDTO `json:"minimal_work_context"`
+	Warnings           []string            `json:"warnings"`
+}
+
+type renewAttemptOutput struct {
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	ServerTime     time.Time `json:"server_time"`
 }
 
 type issueListOutput struct {
@@ -507,12 +548,19 @@ func relationDTOFromDomain(relation domain.IssueRelation) relationDTO {
 	}
 }
 
+func attemptDTOFromDomain(attempt domain.WorkAttempt) attemptDTO {
+	return attemptDTO{ID: attempt.ID, IssueID: attempt.IssueID, Kind: string(attempt.Kind), Status: string(attempt.Status),
+		IssueVersionAtStart: attempt.IssueVersionAtStart, ContextEventIDAtStart: attempt.ContextEventIDAtStart,
+		LeaseExpiresAt: attempt.LeaseExpiresAt, StartedAt: attempt.StartedAt, LastHeartbeatAt: attempt.LastHeartbeatAt}
+}
+
 func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
 	nodes := make([]issueListItemDTO, len(graph.Nodes))
 	for index, node := range graph.Nodes {
 		nodes[index] = issueListItemDTO{
 			issueDTO: issueDTOFromDomain(node.Issue), EffectiveStatus: string(node.EffectiveStatus),
 			UnresolvedBlockerCount: node.UnresolvedBlockerCount, IsBlocked: node.IsBlocked, IsClaimable: node.IsClaimable,
+			ActiveAttemptID: node.ActiveAttemptID,
 		}
 	}
 	edges := make([]graphEdgeDTO, len(graph.Edges))

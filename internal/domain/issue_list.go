@@ -3,14 +3,12 @@ package domain
 import "sort"
 
 // ListIssuesInput requests one deterministic page of issue projections.
-// EffectiveStatuses uses stored Status values because this Phase 2 slice has
-// no active-attempt persistence; effective status therefore equals stored
-// status. Labels use any-label semantics: an issue matches when it has at
-// least one of the supplied labels.
+// Labels use any-label semantics: an issue matches when it has at least one
+// of the supplied labels.
 type ListIssuesInput struct {
 	Types             []Type
 	Statuses          []Status
-	EffectiveStatuses []Status
+	EffectiveStatuses []EffectiveStatus
 	Priorities        []Priority
 	Labels            []string
 	ParentIssueID     *string
@@ -29,6 +27,7 @@ type IssueProjection struct {
 	UnresolvedBlockerCount int64
 	IsBlocked              bool
 	IsClaimable            bool
+	ActiveAttemptID        *string
 }
 
 // IssueList is one cursor-paginated deterministic issue page.
@@ -52,7 +51,7 @@ func (input ListIssuesInput) Validate() (ListIssuesInput, error) {
 	if err != nil {
 		return ListIssuesInput{}, err
 	}
-	effectiveStatuses, err := copyIssueListEnums("effective_statuses", input.EffectiveStatuses, func(value Status) bool { return value.Valid() })
+	effectiveStatuses, err := copyIssueListEnums("effective_statuses", input.EffectiveStatuses, func(value EffectiveStatus) bool { return value.Valid() })
 	if err != nil {
 		return ListIssuesInput{}, err
 	}

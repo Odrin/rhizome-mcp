@@ -19,6 +19,7 @@ type Options struct {
 	RelationService *application.RelationService
 	GraphService    *application.GraphService
 	PlanningService *application.PlanningService
+	AttemptService  *application.AttemptService
 	ServerName      string
 	ServerVersion   string
 	ConfigVersion   int
@@ -30,6 +31,7 @@ type adapter struct {
 	relations     *application.RelationService
 	graphs        *application.GraphService
 	plans         *application.PlanningService
+	attempts      *application.AttemptService
 	appVersion    string
 	configVersion int
 }
@@ -52,6 +54,9 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	if options.PlanningService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
 	}
+	if options.AttemptService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
+	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
 	}
@@ -64,6 +69,7 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 		relations:     options.RelationService,
 		graphs:        options.GraphService,
 		plans:         options.PlanningService,
+		attempts:      options.AttemptService,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 	}
@@ -88,6 +94,35 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Return a bounded planning graph", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Validate a bounded issue plan without changes", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
 	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
+	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
+	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
+}
+
+func (adapter *adapter) claimIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	attempt := attemptDTOFromDomain(result.Attempt)
+	return success(claimIssueOutput{
+		Issue: issueListItemDTO{issueDTO: issueDTOFromDomain(result.Issue), EffectiveStatus: string(domain.EffectiveStatusInProgress),
+			UnresolvedBlockerCount: 0, IsBlocked: false, IsClaimable: false, ActiveAttemptID: &result.Attempt.ID},
+		Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
+		MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
+	}, "issue claimed")
+}
+
+func (adapter *adapter) renewAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.attempts.RenewAttempt(ctx, domain.RenewAttemptInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: input.LeaseSeconds,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(renewAttemptOutput{LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime}, "attempt lease renewed")
 }
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
@@ -175,6 +210,7 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, _ *sdkmcp.CallT
 			UnresolvedBlockerCount: issue.UnresolvedBlockerCount,
 			IsBlocked:              issue.IsBlocked,
 			IsClaimable:            issue.IsClaimable,
+			ActiveAttemptID:        issue.ActiveAttemptID,
 		}
 	}
 	summary := "relation was already absent"
@@ -270,7 +306,7 @@ func (adapter *adapter) listIssues(ctx context.Context, _ *sdkmcp.CallToolReques
 	result, err := adapter.issues.ListIssues(ctx, domain.ListIssuesInput{
 		Types:             stringsToTypes(input.Types),
 		Statuses:          stringsToStatuses(input.Statuses),
-		EffectiveStatuses: stringsToStatuses(input.EffectiveStatuses),
+		EffectiveStatuses: stringsToEffectiveStatuses(input.EffectiveStatuses),
 		Priorities:        stringsToPriorities(input.Priorities),
 		Labels:            input.Labels,
 		ParentIssueID:     input.ParentIssueID,
@@ -291,6 +327,7 @@ func (adapter *adapter) listIssues(ctx context.Context, _ *sdkmcp.CallToolReques
 			UnresolvedBlockerCount: item.UnresolvedBlockerCount,
 			IsBlocked:              item.IsBlocked,
 			IsClaimable:            item.IsClaimable,
+			ActiveAttemptID:        item.ActiveAttemptID,
 		}
 	}
 	return success(issueListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "issues listed")
@@ -359,6 +396,14 @@ func stringsToStatuses(values []string) []domain.Status {
 	result := make([]domain.Status, len(values))
 	for i, value := range values {
 		result[i] = domain.Status(value)
+	}
+	return result
+}
+
+func stringsToEffectiveStatuses(values []string) []domain.EffectiveStatus {
+	result := make([]domain.EffectiveStatus, len(values))
+	for index, value := range values {
+		result[index] = domain.EffectiveStatus(value)
 	}
 	return result
 }

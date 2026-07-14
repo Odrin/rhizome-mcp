@@ -117,7 +117,7 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 			}
 		}
 		result.Relation = relation
-		result.AffectedIssues, err = loadRelationAffectedIssues(ctx, tx, relation.SourceIssueID, relation.TargetIssueID)
+		result.AffectedIssues, err = loadRelationAffectedIssues(ctx, tx, relation.SourceIssueID, relation.TargetIssueID, now)
 		if err != nil {
 			return err
 		}
@@ -181,14 +181,19 @@ type relationEventPayload struct {
 	RelationType  domain.RelationType `json:"relation_type"`
 }
 
-func loadRelationAffectedIssues(ctx context.Context, tx Executor, sourceID, targetID string) ([]domain.IssueProjection, error) {
+func loadRelationAffectedIssues(ctx context.Context, tx Executor, sourceID, targetID string, now time.Time) ([]domain.IssueProjection, error) {
+	claimableSQL := issueClaimableSQLAt(now)
+	effectiveStatusSQL := issueEffectiveStatusSQL(now)
+	activeAttemptSQL := issueActiveAttemptIDSQL(now)
 	rows, err := tx.QueryContext(ctx, `SELECT id, sequence_no, type, title, description, acceptance_criteria,
 		status, priority, parent_id, blocked_reason, version,
 		created_by_session_id, created_at, updated_at, closed_at,
 		archived_at, archived_by_session_id,
 		`+issueUnresolvedBlockerCountSQL+` AS unresolved_blocker_count,
 		`+issueBlockedSQL+` AS is_blocked,
-		`+issueClaimableSQL+` AS is_claimable,
+		`+claimableSQL+` AS is_claimable,
+		`+effectiveStatusSQL+` AS effective_status,
+		`+activeAttemptSQL+` AS active_attempt_id,
 		`+issuePriorityRankSQL+` AS priority_rank
 		FROM issues WHERE id IN (?, ?) ORDER BY id ASC`, sourceID, targetID)
 	if err != nil {

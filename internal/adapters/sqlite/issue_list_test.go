@@ -102,7 +102,7 @@ func TestListIssuesFiltersComputedFieldsOrderingAndLabels(t *testing.T) {
 	}{
 		{"type", domain.ListIssuesInput{Types: []domain.Type{domain.TypeBug}}, blocked.ID},
 		{"status", domain.ListIssuesInput{Statuses: []domain.Status{domain.StatusReady}}, ready.ID},
-		{"effective status", domain.ListIssuesInput{EffectiveStatuses: []domain.Status{domain.StatusBlocked}}, blocked.ID},
+		{"effective status", domain.ListIssuesInput{EffectiveStatuses: []domain.EffectiveStatus{domain.EffectiveStatusBlocked}}, blocked.ID},
 		{"priority", domain.ListIssuesInput{Priorities: []domain.Priority{domain.PriorityCritical}}, critical.ID},
 		{"any label", domain.ListIssuesInput{Labels: []string{" FRONTEND ", "missing"}}, critical.ID},
 		{"parent", domain.ListIssuesInput{ParentIssueID: stringPointer(parent)}, ready.ID},

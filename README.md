@@ -64,4 +64,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-Phases 1 and 2 are complete. Phase 3 now includes relation management, bounded issue and planning graph reads, deterministic issue-plan validation, and atomic idempotent issue-plan application. Attempts, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
+Phases 1 and 2 are complete. Phase 3 includes relation management, bounded issue and planning graph reads, deterministic issue-plan validation, and atomic idempotent issue-plan application. The first Phase 4 subunit adds atomic issue claiming, renewable hashed-token leases, and lazy expiry/takeover; sessions, attempt completion, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
