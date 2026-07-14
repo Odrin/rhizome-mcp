@@ -39,7 +39,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"archive_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue"}
+	wantNames := []string{"apply_issue_plan", "archive_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -342,6 +342,7 @@ func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.
 		if err := db.Close(ctx); err != nil {
 			t.Error(err)
 		}
+
 	}()
 
 	type issue struct {
@@ -465,6 +466,58 @@ func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.
 	}
 }
 
+func TestIssuePlanToolsValidateAndApply(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "plan.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+	plan := map[string]any{
+		"issues": []any{
+			map[string]any{"ref": "epic", "type": "epic", "title": "Plan epic"},
+			map[string]any{"ref": "task", "type": "task", "title": "Plan task", "parent_ref": "epic"},
+		},
+		"relations": []any{map[string]any{"source_ref": "epic", "target_ref": "task", "type": "blocks"}},
+		"decisions": []any{map[string]any{"issue_ref": "task", "title": "Choice", "summary": "short", "content": "long"}},
+	}
+	validation := call(t, client, "validate_issue_plan", plan)
+	var checked struct {
+		Valid          bool `json:"valid"`
+		NormalizedPlan struct {
+			Issues []struct {
+				Status string `json:"status"`
+			} `json:"issues"`
+		} `json:"normalized_plan"`
+	}
+	decodeStructured(t, validation, &checked)
+	if validation.IsError || !checked.Valid || checked.NormalizedPlan.Issues[0].Status != "open" {
+		t.Fatalf("validation = %#v, output = %#v", validation, checked)
+	}
+	plan["idempotency_key"] = "mcp-plan-key"
+	applied := call(t, client, "apply_issue_plan", plan)
+	var result struct {
+		CreatedIssues []struct {
+			Ref string `json:"ref"`
+		} `json:"created_issues"`
+		CreatedRelations []struct {
+			Type string `json:"type"`
+		} `json:"created_relations"`
+		CreatedDecisions []struct {
+			ID string `json:"id"`
+		} `json:"created_decisions"`
+		LatestEventID int64 `json:"latest_event_id"`
+	}
+	decodeStructured(t, applied, &result)
+	if applied.IsError || len(result.CreatedIssues) != 2 || result.CreatedIssues[1].Ref != "task" ||
+		len(result.CreatedRelations) != 1 || len(result.CreatedDecisions) != 1 || result.LatestEventID == 0 {
+		t.Fatalf("apply = %#v, output = %#v", applied, result)
+	}
+	replay := call(t, client, "apply_issue_plan", plan)
+	if replay.IsError {
+		t.Fatalf("replay = %#v", replay)
+	}
+	_ = ctx
+}
+
 func openDatabase(t *testing.T, path string) (*sqlite.DB, *clock.FakeClock) {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), path, sqlite.Options{})
@@ -515,6 +568,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	planningRepository, err := sqlite.NewPlanningRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -535,8 +592,12 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans, err := application.NewPlanningService(planningRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

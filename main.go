@@ -94,6 +94,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	planningRepository, err := sqlite.NewPlanningRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return err
@@ -114,11 +118,16 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	planningService, err := application.NewPlanningService(planningRepository, source, generator)
+	if err != nil {
+		return err
+	}
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:    issueService,
 		ProjectService:  projectService,
 		RelationService: relationService,
 		GraphService:    graphService,
+		PlanningService: planningService,
 		ServerName:      cfg.ServerName,
 		ServerVersion:   cfg.Version,
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,

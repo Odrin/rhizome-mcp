@@ -18,6 +18,7 @@ type Options struct {
 	ProjectService  *application.ProjectService
 	RelationService *application.RelationService
 	GraphService    *application.GraphService
+	PlanningService *application.PlanningService
 	ServerName      string
 	ServerVersion   string
 	ConfigVersion   int
@@ -28,6 +29,7 @@ type adapter struct {
 	projects      *application.ProjectService
 	relations     *application.RelationService
 	graphs        *application.GraphService
+	plans         *application.PlanningService
 	appVersion    string
 	configVersion int
 }
@@ -47,6 +49,9 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 	if options.GraphService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "graph service is required", false)
 	}
+	if options.PlanningService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
+	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
 	}
@@ -58,6 +63,7 @@ func NewServer(options Options) (*sdkmcp.Server, error) {
 		projects:      options.ProjectService,
 		relations:     options.RelationService,
 		graphs:        options.GraphService,
+		plans:         options.PlanningService,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 	}
@@ -80,6 +86,24 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one relation between two issues", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
 	sdkmcp.AddTool(server, tool("get_issue_graph", "Return a bounded compact issue graph", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Return a bounded planning graph", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
+	sdkmcp.AddTool(server, tool("validate_issue_plan", "Validate a bounded issue plan without changes", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
+	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
+}
+
+func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+	validation, err := adapter.plans.ValidateIssuePlan(ctx, input.domainPlan())
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(planValidationOutputFromDomain(validation), "issue plan validated")
+}
+
+func (adapter *adapter) applyIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.plans.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(applyIssuePlanOutputFromPort(result), "issue plan applied")
 }
 
 func (adapter *adapter) getIssueGraph(ctx context.Context, _ *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {

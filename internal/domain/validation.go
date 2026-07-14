@@ -30,6 +30,14 @@ const (
 	MaxRelationsPerOperation = 100
 	// MaxBatchIssues is the maximum issue count in one batch.
 	MaxBatchIssues = 50
+	// MaxBatchLabelAssignments is the maximum total label assignments in a plan.
+	MaxBatchLabelAssignments = 50
+	// MaxBatchDecisions is the maximum decision count in a plan.
+	MaxBatchDecisions = 20
+	// MaxLocalRefRunes bounds plan-local issue references.
+	MaxLocalRefRunes = 64
+	// MaxIdempotencyKeyRunes bounds an idempotency record key.
+	MaxIdempotencyKeyRunes = 128
 	// MaxGraphDepth is the maximum graph traversal depth.
 	MaxGraphDepth = 5
 	// MaxGraphNodes is the maximum graph node count.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 type getProjectInput struct {
@@ -94,6 +95,70 @@ type getPlanningGraphInput struct {
 	MaxNodes       *int    `json:"max_nodes,omitempty"`
 	IncludeReview  *bool   `json:"include_review,omitempty"`
 	IncludeRelated *bool   `json:"include_related,omitempty"`
+}
+
+type issuePlanInput struct {
+	Issues    []planIssueInput    `json:"issues"`
+	Relations []planRelationInput `json:"relations"`
+	Decisions []planDecisionInput `json:"decisions"`
+}
+
+type applyIssuePlanInput struct {
+	Issues         []planIssueInput    `json:"issues"`
+	Relations      []planRelationInput `json:"relations"`
+	Decisions      []planDecisionInput `json:"decisions"`
+	IdempotencyKey string              `json:"idempotency_key"`
+}
+
+func (input applyIssuePlanInput) domainPlan() domain.IssuePlan {
+	return issuePlanInput{Issues: input.Issues, Relations: input.Relations, Decisions: input.Decisions}.domainPlan()
+}
+
+type planIssueInput struct {
+	Ref                 string   `json:"ref,omitempty"`
+	Type                string   `json:"type"`
+	Title               string   `json:"title"`
+	Description         *string  `json:"description,omitempty"`
+	AcceptanceCriteria  *string  `json:"acceptance_criteria,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	Priority            string   `json:"priority,omitempty"`
+	ParentRef           *string  `json:"parent_ref,omitempty"`
+	BlockedReason       *string  `json:"blocked_reason,omitempty"`
+	Labels              []string `json:"labels,omitempty"`
+	CreateMissingLabels bool     `json:"create_missing_labels,omitempty"`
+}
+type planRelationInput struct {
+	SourceRef string `json:"source_ref"`
+	TargetRef string `json:"target_ref"`
+	Type      string `json:"type"`
+}
+type planDecisionInput struct {
+	IssueRef *string `json:"issue_ref,omitempty"`
+	Title    string  `json:"title"`
+	Summary  string  `json:"summary"`
+	Content  string  `json:"content"`
+	Status   string  `json:"status,omitempty"`
+}
+
+func (input issuePlanInput) domainPlan() domain.IssuePlan {
+	plan := domain.IssuePlan{
+		Issues:    make([]domain.PlannedIssue, len(input.Issues)),
+		Relations: make([]domain.PlannedRelation, len(input.Relations)),
+		Decisions: make([]domain.PlannedDecision, len(input.Decisions)),
+	}
+	for i, issue := range input.Issues {
+		plan.Issues[i] = domain.PlannedIssue{Ref: issue.Ref, Type: domain.Type(issue.Type), Title: issue.Title,
+			Description: issue.Description, AcceptanceCriteria: issue.AcceptanceCriteria, Status: domain.Status(issue.Status),
+			Priority: domain.Priority(issue.Priority), ParentRef: issue.ParentRef, BlockedReason: issue.BlockedReason,
+			Labels: issue.Labels, CreateMissingLabels: issue.CreateMissingLabels}
+	}
+	for i, relation := range input.Relations {
+		plan.Relations[i] = domain.PlannedRelation{SourceRef: relation.SourceRef, TargetRef: relation.TargetRef, Type: domain.RelationType(relation.Type)}
+	}
+	for i, decision := range input.Decisions {
+		plan.Decisions[i] = domain.PlannedDecision{IssueRef: decision.IssueRef, Title: decision.Title, Summary: decision.Summary, Content: decision.Content, Status: decision.Status}
+	}
+	return plan
 }
 
 // patchInput records field presence independently from a null value.
@@ -330,6 +395,77 @@ type graphOutput struct {
 	Warnings         []string           `json:"warnings,omitempty"`
 	Truncated        bool               `json:"truncated"`
 	TruncationReason *string            `json:"truncation_reason,omitempty"`
+}
+
+type planSummaryDTO struct {
+	IssueCount           int `json:"issue_count"`
+	RelationCount        int `json:"relation_count"`
+	DecisionCount        int `json:"decision_count"`
+	LabelAssignmentCount int `json:"label_assignment_count"`
+}
+type normalizedPlanDTO struct {
+	Issues    []planIssueInput    `json:"issues"`
+	Relations []planRelationInput `json:"relations"`
+	Decisions []planDecisionInput `json:"decisions"`
+}
+type planValidationOutput struct {
+	Valid          bool              `json:"valid"`
+	Errors         []domain.Detail   `json:"errors"`
+	Warnings       []string          `json:"warnings"`
+	Summary        planSummaryDTO    `json:"summary"`
+	NormalizedPlan normalizedPlanDTO `json:"normalized_plan"`
+}
+type createdPlanIssueDTO struct {
+	Ref   string   `json:"ref,omitempty"`
+	Issue issueDTO `json:"issue"`
+}
+type decisionDTO struct {
+	ID        string    `json:"id"`
+	IssueID   *string   `json:"issue_id,omitempty"`
+	Title     string    `json:"title"`
+	Summary   string    `json:"summary"`
+	Content   string    `json:"content"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+type applyIssuePlanOutput struct {
+	CreatedIssues    []createdPlanIssueDTO `json:"created_issues"`
+	CreatedRelations []relationDTO         `json:"created_relations"`
+	CreatedDecisions []decisionDTO         `json:"created_decisions"`
+	LatestEventID    int64                 `json:"latest_event_id"`
+}
+
+func planValidationOutputFromDomain(value domain.PlanValidation) planValidationOutput {
+	plan := issuePlanInputFromDomain(value.NormalizedPlan)
+	return planValidationOutput{Valid: value.Valid, Errors: append([]domain.Detail{}, value.Errors...), Warnings: append([]string{}, value.Warnings...),
+		Summary:        planSummaryDTO{IssueCount: value.Summary.IssueCount, RelationCount: value.Summary.RelationCount, DecisionCount: value.Summary.DecisionCount, LabelAssignmentCount: value.Summary.LabelAssignmentCount},
+		NormalizedPlan: normalizedPlanDTO{Issues: plan.Issues, Relations: plan.Relations, Decisions: plan.Decisions}}
+}
+func issuePlanInputFromDomain(value domain.IssuePlan) issuePlanInput {
+	result := issuePlanInput{Issues: make([]planIssueInput, len(value.Issues)), Relations: make([]planRelationInput, len(value.Relations)), Decisions: make([]planDecisionInput, len(value.Decisions))}
+	for i, issue := range value.Issues {
+		result.Issues[i] = planIssueInput{Ref: issue.Ref, Type: string(issue.Type), Title: issue.Title, Description: issue.Description, AcceptanceCriteria: issue.AcceptanceCriteria, Status: string(issue.Status), Priority: string(issue.Priority), ParentRef: issue.ParentRef, BlockedReason: issue.BlockedReason, Labels: issue.Labels, CreateMissingLabels: issue.CreateMissingLabels}
+	}
+	for i, relation := range value.Relations {
+		result.Relations[i] = planRelationInput{SourceRef: relation.SourceRef, TargetRef: relation.TargetRef, Type: string(relation.Type)}
+	}
+	for i, decision := range value.Decisions {
+		result.Decisions[i] = planDecisionInput{IssueRef: decision.IssueRef, Title: decision.Title, Summary: decision.Summary, Content: decision.Content, Status: decision.Status}
+	}
+	return result
+}
+func applyIssuePlanOutputFromPort(value ports.ApplyIssuePlanResult) applyIssuePlanOutput {
+	result := applyIssuePlanOutput{CreatedIssues: make([]createdPlanIssueDTO, len(value.CreatedIssues)), CreatedRelations: make([]relationDTO, len(value.CreatedRelations)), CreatedDecisions: make([]decisionDTO, len(value.CreatedDecisions)), LatestEventID: value.LatestEventID}
+	for i, issue := range value.CreatedIssues {
+		result.CreatedIssues[i] = createdPlanIssueDTO{Ref: issue.Ref, Issue: issueDTOFromDomain(issue.Issue)}
+	}
+	for i, relation := range value.CreatedRelations {
+		result.CreatedRelations[i] = relationDTOFromDomain(relation)
+	}
+	for i, decision := range value.CreatedDecisions {
+		result.CreatedDecisions[i] = decisionDTO{ID: decision.ID, IssueID: decision.IssueID, Title: decision.Title, Summary: decision.Summary, Content: decision.Content, Status: decision.Status, CreatedAt: decision.CreatedAt}
+	}
+	return result
 }
 
 func projectDTOFromDomain(project domain.Project, includeInstructions bool) projectDTO {

@@ -30,6 +30,9 @@ const (
 	CodeLimitExceeded = "LIMIT_EXCEEDED"
 	// CodeIDGeneration identifies failure to generate a canonical internal ID.
 	CodeIDGeneration = "ID_GENERATION_FAILED"
+	// CodeIdempotencyConflict identifies reuse of an idempotency key with a
+	// different normalized request.
+	CodeIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
 	// CodeProjectNotInitialized identifies a database without its required project row.
 	CodeProjectNotInitialized = "PROJECT_NOT_INITIALIZED"
 	// CodeStorageBusy identifies exhausted SQLite lock-contention retries.

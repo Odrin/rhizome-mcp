@@ -64,4 +64,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-Phases 1 and 2 are complete, and relation management plus bounded issue and planning graph reads are available alongside the issue lifecycle tools. Attempts, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
+Phases 1 and 2 are complete. Phase 3 now includes relation management, bounded issue and planning graph reads, deterministic issue-plan validation, and atomic idempotent issue-plan application. Attempts, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.

@@ -337,7 +337,7 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 	return result, nil
 }
 
-func loadIssueForMutation(ctx context.Context, tx Executor, identifier domain.IssueIdentifier) (domain.Issue, error) {
+func loadIssueForMutation(ctx context.Context, tx Queryer, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	var row *sql.Row
 	switch identifier.Kind {
 	case domain.IssueIdentifierInternalID:

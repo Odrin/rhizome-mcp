@@ -22,6 +22,9 @@ func stringSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "string
 func nullableStringSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Types: []string{"string", "null"}}
 }
+func nullableBoundedStringSchema(maximum int) *jsonschema.Schema {
+	return &jsonschema.Schema{Types: []string{"string", "null"}, MaxLength: &maximum}
+}
 func integerSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "integer"} }
 func boundedIntegerSchema(minimum, maximum int) *jsonschema.Schema {
 	min, max := float64(minimum), float64(maximum)
@@ -30,6 +33,12 @@ func boundedIntegerSchema(minimum, maximum int) *jsonschema.Schema {
 func booleanSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "boolean"} }
 func stringsSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "array", Items: stringSchema()}
+}
+func boundedStringSchema(maximum int) *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "string", MaxLength: &maximum}
+}
+func boundedStringsSchema(maximum, itemMaximum int) *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "array", Items: boundedStringSchema(itemMaximum), MaxItems: &maximum}
 }
 func enumSchema(values ...string) *jsonschema.Schema {
 	enum := make([]any, len(values))
@@ -121,6 +130,44 @@ func schemaGetPlanningGraph() *jsonschema.Schema {
 	})
 }
 
+func schemaPlanIssue() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"ref": boundedStringSchema(64), "type": enumSchema("epic", "task", "bug"), "title": boundedStringSchema(300),
+		"description": nullableBoundedStringSchema(100000), "acceptance_criteria": nullableBoundedStringSchema(50000),
+		"status":   enumSchema("open", "ready", "blocked", "review", "done", "cancelled"),
+		"priority": enumSchema("low", "medium", "high", "critical"), "parent_ref": nullableBoundedStringSchema(64),
+		"blocked_reason": nullableBoundedStringSchema(100000), "labels": boundedStringsSchema(50, 64), "create_missing_labels": booleanSchema(),
+	}, "type", "title")
+}
+func schemaPlanRelation() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"source_ref": boundedStringSchema(64), "target_ref": boundedStringSchema(64),
+		"type": enumSchema("blocks", "related_to", "duplicates"),
+	}, "source_ref", "target_ref", "type")
+}
+func schemaPlanDecision() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_ref": nullableBoundedStringSchema(64), "title": boundedStringSchema(300), "summary": boundedStringSchema(2000),
+		"content": boundedStringSchema(100000), "status": enumSchema("active", "superseded", "rejected"),
+	}, "title", "summary", "content")
+}
+func schemaPlanFields(properties map[string]*jsonschema.Schema) {
+	properties["issues"] = &jsonschema.Schema{Type: "array", Items: schemaPlanIssue(), MaxItems: intPointer(50)}
+	properties["relations"] = &jsonschema.Schema{Type: "array", Items: schemaPlanRelation(), MaxItems: intPointer(100)}
+	properties["decisions"] = &jsonschema.Schema{Type: "array", Items: schemaPlanDecision(), MaxItems: intPointer(20)}
+}
+func intPointer(value int) *int { return &value }
+func schemaValidateIssuePlan() *jsonschema.Schema {
+	properties := map[string]*jsonschema.Schema{}
+	schemaPlanFields(properties)
+	return object(properties, "issues", "relations", "decisions")
+}
+func schemaApplyIssuePlan() *jsonschema.Schema {
+	properties := map[string]*jsonschema.Schema{"idempotency_key": boundedStringSchema(128)}
+	schemaPlanFields(properties)
+	return object(properties, "issues", "relations", "decisions", "idempotency_key")
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
@@ -129,7 +176,9 @@ func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOu
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }
-func schemaGraphOutput() *jsonschema.Schema { return typedSchema[graphOutput]() }
+func schemaGraphOutput() *jsonschema.Schema          { return typedSchema[graphOutput]() }
+func schemaPlanValidationOutput() *jsonschema.Schema { return typedSchema[planValidationOutput]() }
+func schemaApplyIssuePlanOutput() *jsonschema.Schema { return typedSchema[applyIssuePlanOutput]() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})
