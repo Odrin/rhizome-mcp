@@ -182,6 +182,19 @@ func schemaRenewAttempt() *jsonschema.Schema {
 	}, "attempt_id", "lease_token")
 }
 
+func schemaSaveAttemptNote() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"attempt_id":      boundedStringSchema(26),
+		"lease_token":     boundedStringSchema(512),
+		"kind":            enumSchema("progress", "finding", "warning", "checkpoint"),
+		"content":         boundedStringSchema(50_000),
+		"next_steps":      boundedStringsSchema(20, 1_000),
+		"important":       booleanSchema(),
+		"artifacts":       &jsonschema.Schema{Type: "array", MaxItems: intPointer(20)},
+		"idempotency_key": nullableBoundedStringSchema(128),
+	}, "attempt_id", "lease_token", "kind", "content")
+}
+
 func schemaProjectOutput() *jsonschema.Schema   { return typedSchema[projectOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema     { return typedSchema[issueDTO]() }
@@ -190,11 +203,12 @@ func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOu
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }
-func schemaGraphOutput() *jsonschema.Schema          { return typedSchema[graphOutput]() }
-func schemaPlanValidationOutput() *jsonschema.Schema { return typedSchema[planValidationOutput]() }
-func schemaApplyIssuePlanOutput() *jsonschema.Schema { return typedSchema[applyIssuePlanOutput]() }
-func schemaClaimIssueOutput() *jsonschema.Schema     { return typedSchema[claimIssueOutput]() }
-func schemaRenewAttemptOutput() *jsonschema.Schema   { return typedSchema[renewAttemptOutput]() }
+func schemaGraphOutput() *jsonschema.Schema           { return typedSchema[graphOutput]() }
+func schemaPlanValidationOutput() *jsonschema.Schema  { return typedSchema[planValidationOutput]() }
+func schemaApplyIssuePlanOutput() *jsonschema.Schema  { return typedSchema[applyIssuePlanOutput]() }
+func schemaClaimIssueOutput() *jsonschema.Schema      { return typedSchema[claimIssueOutput]() }
+func schemaRenewAttemptOutput() *jsonschema.Schema    { return typedSchema[renewAttemptOutput]() }
+func schemaSaveAttemptNoteOutput() *jsonschema.Schema { return typedSchema[saveAttemptNoteOutput]() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

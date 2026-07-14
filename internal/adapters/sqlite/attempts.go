@@ -122,6 +122,7 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 	timestamp := now.Format(time.RFC3339Nano)
 	expires := now.Add(command.LeaseDuration).UTC()
 	var result ports.RenewAttemptResult
+	var leaseExpired bool
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		var status, leaseExpiresAt string
 		var tokenHash []byte
@@ -144,7 +145,8 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 			if err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
 				return err
 			}
-			return domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+			leaseExpired = true
+			return nil
 		}
 		if subtle.ConstantTimeCompare(tokenHash, command.TokenHash) != 1 {
 			return domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
@@ -167,6 +169,94 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 	})
 	if err != nil {
 		return ports.RenewAttemptResult{}, err
+	}
+	if leaseExpired {
+		return ports.RenewAttemptResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+	}
+	return result, nil
+}
+
+func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, command ports.SaveAttemptNoteCommand) (ports.SaveAttemptNoteResult, error) {
+	if _, err := ids.ParseStrict(command.NoteID); err != nil {
+		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
+	}
+	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 || !command.Kind.Valid() {
+		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
+	}
+	now := command.OccurredAt.UTC()
+	timestamp := now.Format(time.RFC3339Nano)
+	var result ports.SaveAttemptNoteResult
+	var leaseExpired bool
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		var issueID, status, leaseExpiresAt string
+		var tokenHash []byte
+		err := tx.QueryRowContext(ctx, `SELECT issue_id, status, lease_token_hash, lease_expires_at
+			FROM work_attempts WHERE id = ?`, command.AttemptID).Scan(&issueID, &status, &tokenHash, &leaseExpiresAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
+		}
+		if err != nil {
+			return err
+		}
+		if status != string(domain.AttemptStatusActive) {
+			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
+		}
+		leaseExpiry, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
+		if err != nil {
+			return err
+		}
+		if !leaseExpiry.After(now) {
+			if err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
+				return err
+			}
+			leaseExpired = true
+			return nil
+		}
+		if subtle.ConstantTimeCompare(tokenHash, command.TokenHash) != 1 {
+			return domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
+		}
+		var nextStepsJSON *string
+		if command.NextSteps != nil {
+			encoded, err := json.Marshal(command.NextSteps)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt note next steps", false)
+			}
+			value := string(encoded)
+			nextStepsJSON = &value
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(
+			id, attempt_id, kind, content, next_steps_json, important, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, command.NoteID, command.AttemptID, command.Kind,
+			command.Content, nextStepsJSON, command.Important, timestamp); err != nil {
+			return err
+		}
+		eventType := "attempt_note_saved"
+		if command.Kind == domain.AttemptNoteKindCheckpoint {
+			eventType = "checkpoint_saved"
+		}
+		payload, err := json.Marshal(struct {
+			NoteID string                 `json:"note_id"`
+			Kind   domain.AttemptNoteKind `json:"kind"`
+		}{NoteID: command.NoteID, Kind: command.Kind})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt note event", false)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
+			issue_id, event_type, session_id, attempt_id, payload, created_at
+		) VALUES (?, ?, NULL, ?, ?, ?)`, issueID, eventType, command.AttemptID, string(payload), timestamp); err != nil {
+			return err
+		}
+		result.Note = domain.AttemptNote{
+			ID: command.NoteID, AttemptID: command.AttemptID, Kind: command.Kind, Content: command.Content,
+			NextSteps: append([]string(nil), command.NextSteps...), Important: command.Important, CreatedAt: now,
+		}
+		return nil
+	})
+	if err != nil {
+		return ports.SaveAttemptNoteResult{}, err
+	}
+	if leaseExpired {
+		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
 	}
 	return result, nil
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -120,6 +121,169 @@ func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
 	}
 	if expiredEvents != 1 {
 		t.Fatalf("expired events = %d, want 1", expiredEvents)
+	}
+}
+
+func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.T) {
+	ctx := context.Background()
+	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "notes.db")
+	db, err := sqlite.Open(ctx, path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close(ctx) }()
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueService, err := application.NewIssueService(issues, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "note me", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewAttemptService(repository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := service.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", LeaseToken: claim.LeaseToken, Kind: domain.AttemptNoteKindProgress, Content: "missing",
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotFound}) {
+		t.Fatalf("missing attempt error = %v", err)
+	}
+
+	kinds := []domain.AttemptNoteKind{
+		domain.AttemptNoteKindProgress,
+		domain.AttemptNoteKindFinding,
+		domain.AttemptNoteKindWarning,
+		domain.AttemptNoteKindCheckpoint,
+	}
+	var checkpoint domain.AttemptNote
+	for _, kind := range kinds {
+		content := "note " + string(kind)
+		if kind == domain.AttemptNoteKindCheckpoint {
+			content = "durable state"
+		}
+		note, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+			AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: kind, Content: content,
+			NextSteps: []string{"next " + string(kind)}, Important: kind == domain.AttemptNoteKindCheckpoint,
+		})
+		if err != nil || note.ID == "" || note.CreatedAt != source.Now() || note.Kind != kind {
+			t.Fatalf("save %q = %#v, %v", kind, note, err)
+		}
+		if kind == domain.AttemptNoteKindCheckpoint {
+			checkpoint = note
+		}
+	}
+	if _, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: "wrong", Kind: domain.AttemptNoteKindProgress, Content: "not saved",
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidLeaseToken}) {
+		t.Fatalf("invalid token error = %v", err)
+	}
+
+	if err := db.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sqlite.Open(ctx, path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatal(err)
+	}
+	repository, err = sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err = application.NewAttemptService(repository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noteCount, ordinaryEvents, checkpointEvents int
+	var content, nextSteps, payload string
+	var important int
+	var createdAtText string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes`).Scan(&noteCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT content, next_steps_json, important, created_at
+				FROM attempt_notes WHERE id = ?`, checkpoint.ID).Scan(&content, &nextSteps, &important, &createdAtText); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE event_type = 'attempt_note_saved'`).Scan(&ordinaryEvents); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE event_type = 'checkpoint_saved'`).Scan(&checkpointEvents); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT payload FROM issue_events WHERE event_type = 'checkpoint_saved'`).Scan(&payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, createdAtText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteCount != 4 || content != "durable state" || nextSteps != `["next checkpoint"]` || important != 1 ||
+		!createdAt.Equal(source.Now()) || ordinaryEvents != 3 || checkpointEvents != 1 ||
+		strings.Contains(payload, "durable state") || strings.Contains(payload, "next checkpoint") ||
+		strings.Contains(payload, claim.LeaseToken) {
+		t.Fatalf("persisted notes/events = notes %d content %q next %q important %d time %s ordinary %d checkpoint %d payload %q",
+			noteCount, content, nextSteps, important, createdAt, ordinaryEvents, checkpointEvents, payload)
+	}
+
+	source.Advance(time.Duration(domain.DefaultLeaseSeconds) * time.Second)
+	if _, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: domain.AttemptNoteKindCheckpoint, Content: "expired",
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
+		t.Fatalf("boundary save error = %v", err)
+	}
+	if _, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: domain.AttemptNoteKindProgress, Content: "inactive",
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("post-expiry save error = %v", err)
+	}
+	var expiredEvents int
+	var status string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes`).Scan(&noteCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE event_type = 'attempt_expired'`).Scan(&expiredEvents); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&status)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if noteCount != 4 || expiredEvents != 1 || status != string(domain.AttemptStatusExpired) {
+		t.Fatalf("boundary state = notes %d expiry events %d status %q", noteCount, expiredEvents, status)
 	}
 }
 

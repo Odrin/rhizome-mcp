@@ -53,6 +53,7 @@ Exit gate: graph bounds, relation races, cycle rejection, deterministic validati
 ## Phase 4: sessions, claims, leases, and recovery
 
 - **Claim/renewal subunit completed on 2026-07-14.** Implemented hashed opaque lease tokens, atomic claim and renewal, clock-driven lazy expiry and takeover, plus `claim_issue` and `renew_attempt`. Per-connection agent-session persistence, cleanup scheduling, notes, and completion remain for later Phase 4 subunits.
+- **Attempt-note subunit completed on 2026-07-14.** Implemented lease-authorized append-only `save_attempt_note` for progress, finding, warning, and checkpoint notes, with `attempt_note_saved` ordinary-note events, `checkpoint_saved` checkpoint events, and lazy expiry at the lease boundary. Notes support at most 20 next steps of 1,000 characters each; artifact attachments and attempt completion remain for later subunits.
 - Implement temporary sessions and work attempts using injected time and hashed opaque tokens.
 - Implement atomic claim, renewal, lazy expiry, periodic cleanup, checkpoints, completion consistency, verification, and artifacts.
 - Deliver `claim_issue`, `renew_attempt`, `save_attempt_note`, and `finish_attempt`.

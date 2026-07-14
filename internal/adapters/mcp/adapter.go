@@ -96,6 +96,7 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
 	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
+	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, _ *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -123,6 +124,23 @@ func (adapter *adapter) renewAttempt(ctx context.Context, _ *sdkmcp.CallToolRequ
 		return adapter.failure(err)
 	}
 	return success(renewAttemptOutput{LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime}, "attempt lease renewed")
+}
+
+func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
+	if len(input.Artifacts) != 0 {
+		return adapter.failure(unsupportedField("artifacts"))
+	}
+	if input.IdempotencyKey != nil {
+		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	note, err := adapter.attempts.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: domain.AttemptNoteKind(input.Kind),
+		Content: input.Content, NextSteps: input.NextSteps, Important: input.Important,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(note), Artifacts: []struct{}{}}, "attempt note saved")
 }
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, _ *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {

@@ -77,3 +77,27 @@ func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.Re
 		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
 	})
 }
+
+func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (domain.AttemptNote, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return domain.AttemptNote{}, err
+	}
+	id, err := service.ids.New()
+	if err != nil {
+		return domain.AttemptNote{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+	}
+	if _, err := ids.ParseStrict(id); err != nil {
+		return domain.AttemptNote{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+	}
+	hash := sha256.Sum256([]byte(normalized.LeaseToken))
+	result, err := service.repository.SaveAttemptNote(ctx, ports.SaveAttemptNoteCommand{
+		NoteID: id, AttemptID: normalized.AttemptID, TokenHash: hash[:], Kind: normalized.Kind,
+		Content: normalized.Content, NextSteps: normalized.NextSteps, Important: normalized.Important,
+		OccurredAt: service.clock.Now().UTC(),
+	})
+	if err != nil {
+		return domain.AttemptNote{}, err
+	}
+	return result.Note, nil
+}

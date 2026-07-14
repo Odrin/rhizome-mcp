@@ -39,7 +39,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "get_issue", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -50,6 +50,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
 
 	project := call(t, client, "get_project", map[string]any{})
 	if project.IsError {
@@ -362,6 +363,39 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		t.Fatalf("claim metadata = status %q active ID present %t kind %q token present %t",
 			output.Issue.EffectiveStatus, output.Issue.ActiveAttemptID != nil, output.Attempt.Kind, output.LeaseToken != "")
 	}
+	saved := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "checkpoint",
+		"content": "durable checkpoint", "next_steps": []string{"resume"}, "important": true, "artifacts": []any{},
+	})
+	var noteOutput struct {
+		AttemptNote struct {
+			ID        string    `json:"id"`
+			AttemptID string    `json:"attempt_id"`
+			Kind      string    `json:"kind"`
+			Content   string    `json:"content"`
+			NextSteps []string  `json:"next_steps"`
+			Important bool      `json:"important"`
+			CreatedAt time.Time `json:"created_at"`
+		} `json:"attempt_note"`
+		Artifacts []any `json:"artifacts"`
+	}
+	decodeStructured(t, saved, &noteOutput)
+	if saved.IsError || noteOutput.AttemptNote.ID == "" || noteOutput.AttemptNote.AttemptID != output.Attempt.ID ||
+		noteOutput.AttemptNote.Kind != "checkpoint" || noteOutput.AttemptNote.Content != "durable checkpoint" ||
+		!reflect.DeepEqual(noteOutput.AttemptNote.NextSteps, []string{"resume"}) || !noteOutput.AttemptNote.Important ||
+		noteOutput.AttemptNote.CreatedAt.IsZero() || len(noteOutput.Artifacts) != 0 {
+		t.Fatalf("save note output = %#v", noteOutput)
+	}
+	unsupportedArtifacts := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
+		"content": "note", "artifacts": []any{map[string]any{"uri": "file"}},
+	})
+	assertDomainError(t, unsupportedArtifacts, "INVALID_ARGUMENT", false)
+	unsupportedIdempotency := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
+		"content": "note", "idempotency_key": "unsupported",
+	})
+	assertDomainError(t, unsupportedIdempotency, "INVALID_ARGUMENT", false)
 	listed := call(t, client, "list_issues", map[string]any{"effective_statuses": []string{"in_progress"}})
 	var listedOutput struct {
 		Items []struct {

@@ -15,6 +15,10 @@ const (
 	MaxLeaseSeconds = 3600
 	// MaxLeaseTokenRunes bounds an opaque token supplied to renewal.
 	MaxLeaseTokenRunes = 512
+	// MaxAttemptNoteNextSteps bounds the compact recovery steps stored with a note.
+	MaxAttemptNoteNextSteps = 20
+	// MaxAttemptNoteNextStepRunes bounds each compact recovery step.
+	MaxAttemptNoteNextStepRunes = 1_000
 )
 
 type AttemptKind string
@@ -63,6 +67,35 @@ type WorkAttempt struct {
 	FinishedAt            *time.Time
 }
 
+type AttemptNoteKind string
+
+const (
+	AttemptNoteKindProgress   AttemptNoteKind = "progress"
+	AttemptNoteKindFinding    AttemptNoteKind = "finding"
+	AttemptNoteKindWarning    AttemptNoteKind = "warning"
+	AttemptNoteKindCheckpoint AttemptNoteKind = "checkpoint"
+)
+
+func (value AttemptNoteKind) Valid() bool {
+	switch value {
+	case AttemptNoteKindProgress, AttemptNoteKindFinding, AttemptNoteKindWarning, AttemptNoteKindCheckpoint:
+		return true
+	default:
+		return false
+	}
+}
+
+// AttemptNote is the durable, append-only recovery note associated with one attempt.
+type AttemptNote struct {
+	ID        string
+	AttemptID string
+	Kind      AttemptNoteKind
+	Content   string
+	NextSteps []string
+	Important bool
+	CreatedAt time.Time
+}
+
 type ClaimIssueInput struct {
 	IssueID      string
 	LeaseSeconds *int
@@ -100,6 +133,54 @@ func (input RenewAttemptInput) Validate() (RenewAttemptInput, error) {
 		return RenewAttemptInput{}, err
 	}
 	return RenewAttemptInput{AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: lease}, nil
+}
+
+type SaveAttemptNoteInput struct {
+	AttemptID  string
+	LeaseToken string
+	Kind       AttemptNoteKind
+	Content    string
+	NextSteps  []string
+	Important  bool
+}
+
+func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
+	attemptID, err := ulid.ParseStrict(input.AttemptID)
+	if err != nil || len(input.AttemptID) != 26 || attemptID.String() != input.AttemptID {
+		return SaveAttemptNoteInput{}, validationError("attempt_id", "INVALID_ULID", "must be a canonical ULID")
+	}
+	if strings.TrimSpace(input.LeaseToken) == "" {
+		return SaveAttemptNoteInput{}, validationError("lease_token", "REQUIRED", "is required")
+	}
+	if err := ValidateText("lease_token", input.LeaseToken, MaxLeaseTokenRunes); err != nil {
+		return SaveAttemptNoteInput{}, err
+	}
+	if !input.Kind.Valid() {
+		return SaveAttemptNoteInput{}, validationError("kind", "INVALID_ENUM", "must be progress, finding, warning, or checkpoint")
+	}
+	if strings.TrimSpace(input.Content) == "" {
+		return SaveAttemptNoteInput{}, validationError("content", "REQUIRED", "is required")
+	}
+	if err := ValidateText("content", input.Content, MaxAttemptNoteRunes); err != nil {
+		return SaveAttemptNoteInput{}, err
+	}
+	nextSteps, err := CopyBounded("next_steps", input.NextSteps, MaxAttemptNoteNextSteps)
+	if err != nil {
+		return SaveAttemptNoteInput{}, err
+	}
+	for _, nextStep := range nextSteps {
+		field := "next_steps"
+		if strings.TrimSpace(nextStep) == "" {
+			return SaveAttemptNoteInput{}, validationError(field, "REQUIRED", "items must be nonblank")
+		}
+		if err := ValidateText(field, nextStep, MaxAttemptNoteNextStepRunes); err != nil {
+			return SaveAttemptNoteInput{}, err
+		}
+	}
+	return SaveAttemptNoteInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: input.Kind, Content: input.Content,
+		NextSteps: nextSteps, Important: input.Important,
+	}, nil
 }
 
 func validateLeaseSeconds(value *int) (*int, error) {

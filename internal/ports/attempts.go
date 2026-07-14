@@ -32,8 +32,24 @@ type RenewAttemptResult struct {
 	ServerTime     time.Time
 }
 
+type SaveAttemptNoteCommand struct {
+	NoteID     string
+	AttemptID  string
+	TokenHash  []byte
+	Kind       domain.AttemptNoteKind
+	Content    string
+	NextSteps  []string
+	Important  bool
+	OccurredAt time.Time
+}
+
+type SaveAttemptNoteResult struct {
+	Note domain.AttemptNote
+}
+
 // AttemptRepository executes all attempt lifecycle mutations atomically.
 type AttemptRepository interface {
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
+	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
 }

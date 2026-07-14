@@ -82,6 +82,17 @@ type renewAttemptInput struct {
 	LeaseSeconds *int   `json:"lease_seconds,omitempty"`
 }
 
+type saveAttemptNoteInput struct {
+	AttemptID      string            `json:"attempt_id"`
+	LeaseToken     string            `json:"lease_token"`
+	Kind           string            `json:"kind"`
+	Content        string            `json:"content"`
+	NextSteps      []string          `json:"next_steps,omitempty"`
+	Important      bool              `json:"important,omitempty"`
+	Artifacts      []json.RawMessage `json:"artifacts,omitempty"`
+	IdempotencyKey *string           `json:"idempotency_key,omitempty"`
+}
+
 type manageIssueRelationInput struct {
 	Action         string  `json:"action"`
 	SourceIssueID  string  `json:"source_issue_id"`
@@ -393,6 +404,21 @@ type renewAttemptOutput struct {
 	ServerTime     time.Time `json:"server_time"`
 }
 
+type attemptNoteDTO struct {
+	ID        string    `json:"id"`
+	AttemptID string    `json:"attempt_id"`
+	Kind      string    `json:"kind"`
+	Content   string    `json:"content"`
+	NextSteps []string  `json:"next_steps"`
+	Important bool      `json:"important"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type saveAttemptNoteOutput struct {
+	AttemptNote attemptNoteDTO `json:"attempt_note"`
+	Artifacts   []struct{}     `json:"artifacts"`
+}
+
 type issueListOutput struct {
 	Items      []issueListItemDTO `json:"items"`
 	NextCursor *string            `json:"next_cursor"`
@@ -552,6 +578,13 @@ func attemptDTOFromDomain(attempt domain.WorkAttempt) attemptDTO {
 	return attemptDTO{ID: attempt.ID, IssueID: attempt.IssueID, Kind: string(attempt.Kind), Status: string(attempt.Status),
 		IssueVersionAtStart: attempt.IssueVersionAtStart, ContextEventIDAtStart: attempt.ContextEventIDAtStart,
 		LeaseExpiresAt: attempt.LeaseExpiresAt, StartedAt: attempt.StartedAt, LastHeartbeatAt: attempt.LastHeartbeatAt}
+}
+
+func attemptNoteDTOFromDomain(note domain.AttemptNote) attemptNoteDTO {
+	return attemptNoteDTO{
+		ID: note.ID, AttemptID: note.AttemptID, Kind: string(note.Kind), Content: note.Content,
+		NextSteps: append([]string(nil), note.NextSteps...), Important: note.Important, CreatedAt: note.CreatedAt,
+	}
 }
 
 func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
