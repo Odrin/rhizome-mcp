@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -174,6 +175,7 @@ type FinishAttemptInput struct {
 	ReasonDetails          *string
 	AcknowledgedChanges    *AttemptAcknowledgement
 	Artifacts              []ArtifactInput
+	IdempotencyKey         *string
 }
 
 func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
@@ -274,15 +276,80 @@ func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
 	normalized.FailureReasonCode = copyFinishFailure(input.FailureReasonCode)
 	normalized.InterruptionReasonCode = copyFinishInterruption(input.InterruptionReasonCode)
 	normalized.ReasonDetails = copyFinishString(input.ReasonDetails)
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return FinishAttemptInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return FinishAttemptInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		normalized.IdempotencyKey = &key
+	}
 	if input.AcknowledgedChanges != nil {
 		ack := *input.AcknowledgedChanges
 		normalized.AcknowledgedChanges = &ack
 	}
+
 	normalized.SessionID, err = copyOptionalSessionID(input.SessionID)
 	if err != nil {
 		return FinishAttemptInput{}, err
 	}
 	return normalized, nil
+}
+
+// CanonicalFinishAttemptRequest returns deterministic JSON for a normalized
+// finish request. Transient session identity and generated persistence values
+// are intentionally excluded.
+func CanonicalFinishAttemptRequest(input FinishAttemptInput) ([]byte, error) {
+	type canonicalArtifact struct {
+		Type     ArtifactType    `json:"type"`
+		URI      string          `json:"uri"`
+		Title    *string         `json:"title"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	type canonicalAcknowledgement struct {
+		IssueVersion  int64 `json:"issue_version"`
+		LatestEventID int64 `json:"latest_event_id"`
+	}
+	request := struct {
+		AttemptID              string                    `json:"attempt_id"`
+		LeaseToken             string                    `json:"lease_token"`
+		Outcome                AttemptOutcome            `json:"outcome"`
+		ResultSummary          string                    `json:"result_summary"`
+		NextSteps              []string                  `json:"next_steps"`
+		Verification           []string                  `json:"verification"`
+		TargetIssueStatus      *Status                   `json:"target_issue_status"`
+		BlockedReason          *string                   `json:"blocked_reason"`
+		ReviewOutcome          *ReviewOutcome            `json:"review_outcome"`
+		FailureReasonCode      *FailureReasonCode        `json:"failure_reason_code"`
+		InterruptionReasonCode *InterruptionReasonCode   `json:"interruption_reason_code"`
+		ReasonDetails          *string                   `json:"reason_details"`
+		AcknowledgedChanges    *canonicalAcknowledgement `json:"acknowledged_changes"`
+		Artifacts              []canonicalArtifact       `json:"artifacts"`
+	}{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Outcome: input.Outcome,
+		ResultSummary: input.ResultSummary, NextSteps: input.NextSteps, Verification: input.Verification,
+		TargetIssueStatus: input.TargetIssueStatus, BlockedReason: input.BlockedReason,
+		ReviewOutcome: input.ReviewOutcome, FailureReasonCode: input.FailureReasonCode,
+		InterruptionReasonCode: input.InterruptionReasonCode, ReasonDetails: input.ReasonDetails,
+	}
+	if input.AcknowledgedChanges != nil {
+		request.AcknowledgedChanges = &canonicalAcknowledgement{
+			IssueVersion:  input.AcknowledgedChanges.IssueVersion,
+			LatestEventID: input.AcknowledgedChanges.LatestEventID,
+		}
+	}
+	if input.Artifacts != nil {
+		request.Artifacts = make([]canonicalArtifact, len(input.Artifacts))
+		for index, artifact := range input.Artifacts {
+			request.Artifacts[index] = canonicalArtifact{
+				Type: artifact.Type, URI: artifact.URI, Title: copyFinishString(artifact.Title),
+				Metadata: append(json.RawMessage(nil), artifact.Metadata...),
+			}
+		}
+	}
+	return json.Marshal(request)
 }
 
 // ValidateFinishAttemptForKind applies the completion shape rules that require persisted attempt kind.

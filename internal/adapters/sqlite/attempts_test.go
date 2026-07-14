@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,379 @@ import (
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
 )
+
+func TestFinishAttemptIdempotentReplayAndConflict(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-idempotency")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "finish retry", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-retry"
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	input.IdempotencyKey = &key
+	input.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "result.txt"}}
+	first, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("replay = %#v, %v; first = %#v", second, err, first)
+	}
+	changed := input
+	changed.ResultSummary = "changed"
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var events, artifacts, records int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifacts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records WHERE operation = 'finish_attempt' AND idempotency_key = ?`, key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || artifacts != 1 || records != 1 {
+		t.Fatalf("durable retry state = events %d artifacts %d records %d", events, artifacts, records)
+	}
+}
+
+func TestFinishAttemptIdempotentReplaySurvivesReopen(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-reopen")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "finish reopen", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-reopen-key"
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	input.IdempotencyKey = &key
+	input.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "reopen.txt"}}
+	first, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reopenAttemptTestFixture(t, fixture)
+	second, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("reopen replay = %#v, %v; first = %#v", second, err, first)
+	}
+
+	var events, artifacts, records int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifacts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records
+			WHERE operation = 'finish_attempt' AND idempotency_key = ?`, key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || artifacts != 1 || records != 1 {
+		t.Fatalf("reopen durable state = events %d artifacts %d records %d", events, artifacts, records)
+	}
+}
+
+func TestFinishAttemptWithoutKeyRemainsNonIdempotent(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-no-key")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "finish without key", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("duplicate no-key finish = %v", err)
+	}
+
+	var events, artifacts, records int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifacts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records
+			WHERE operation = 'finish_attempt'`).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || artifacts != 0 || records != 0 {
+		t.Fatalf("no-key durable state = events %d artifacts %d records %d", events, artifacts, records)
+	}
+}
+
+func TestFinishAttemptConcurrentSameKeyReplay(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-concurrent-replay")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "finish concurrent replay", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-concurrent-key"
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	input.IdempotencyKey = &key
+	input.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "concurrent.txt"}}
+
+	start := make(chan struct{})
+	results := make(chan struct {
+		result ports.FinishAttemptResult
+		err    error
+	}, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			result, err := fixture.attempts.FinishAttempt(context.Background(), input)
+			results <- struct {
+				result ports.FinishAttemptResult
+				err    error
+			}{result: result, err: err}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var first ports.FinishAttemptResult
+	for index := 0; index < 2; index++ {
+		outcome := <-results
+		if outcome.err != nil {
+			t.Fatalf("concurrent finish %d = %v", index, outcome.err)
+		}
+		if index == 0 {
+			first = outcome.result
+		} else if !reflect.DeepEqual(first, outcome.result) {
+			t.Fatalf("concurrent replay = %#v; first = %#v", outcome.result, first)
+		}
+	}
+
+	var events, records, artifacts int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records
+			WHERE operation = 'finish_attempt' AND idempotency_key = ?`, key).Scan(&records); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifacts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || records != 1 || artifacts != 1 {
+		t.Fatalf("concurrent durable state = events %d records %d artifacts %d", events, records, artifacts)
+	}
+}
+
+func TestFinishAttemptIdempotentReplayAcrossSessionReconnect(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-session-reconnect")
+	defer fixture.close()
+
+	sessionA := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+	sessionB := "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		timestamp := fixture.clock.Now().Format(time.RFC3339Nano)
+		for _, id := range []string{sessionA, sessionB} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(
+				id, client_name, started_at, last_seen_at) VALUES (?, 'test', ?, ?)`,
+				id, timestamp, timestamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	issue := createAttemptIssue(t, fixture, "finish session reconnect", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{
+		IssueID: issue.ID, SessionID: &sessionA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-session-key"
+	firstInput := finishInput(claim, domain.AttemptOutcomeCompleted)
+	firstInput.SessionID = &sessionA
+	firstInput.TargetIssueStatus = statusPointer(domain.StatusDone)
+	firstInput.IdempotencyKey = &key
+	firstInput.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "session.txt"}}
+	first, err := fixture.attempts.FinishAttempt(fixture.ctx, firstInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryInput := firstInput
+	retryInput.SessionID = &sessionB
+	second, err := fixture.attempts.FinishAttempt(fixture.ctx, retryInput)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("session reconnect replay = %#v, %v; first = %#v", second, err, first)
+	}
+
+	var events int
+	var eventSession sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&eventSession)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || !eventSession.Valid || eventSession.String != sessionA {
+		t.Fatalf("session reconnect event = count %d session %#v", events, eventSession)
+	}
+}
+
+func TestFinishAttemptCorruptStoredResponses(t *testing.T) {
+	tests := []struct {
+		name        string
+		response    string
+		ignoreCheck bool
+	}{
+		{name: "invalid-json", response: "not-json", ignoreCheck: true},
+		{name: "valid-invalid-shape", response: "{}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAttemptTestFixture(t, "finish-corrupt-"+test.name)
+			defer fixture.close()
+
+			issue := createAttemptIssue(t, fixture, "finish corrupt "+test.name, domain.StatusReady)
+			claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := "finish-corrupt-" + test.name
+			input := finishInput(claim, domain.AttemptOutcomeCompleted)
+			input.TargetIssueStatus = statusPointer(domain.StatusDone)
+			input.IdempotencyKey = &key
+			if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+				if test.ignoreCheck {
+					if _, err := tx.ExecContext(ctx, `PRAGMA ignore_check_constraints = ON`); err != nil {
+						return err
+					}
+					defer tx.ExecContext(ctx, `PRAGMA ignore_check_constraints = OFF`)
+				}
+				_, err := tx.ExecContext(ctx, `UPDATE idempotency_records SET response_json = ?
+					WHERE operation = 'finish_attempt' AND idempotency_key = ?`, test.response, key)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, err = fixture.attempts.FinishAttempt(fixture.ctx, input)
+			if !errors.Is(err, &domain.Error{Code: domain.CodeStorageCorrupt}) {
+				t.Fatalf("corrupt response error = %v", err)
+			}
+		})
+	}
+}
+
+func TestFinishAttemptIdempotencyInsertFailureRollsBack(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-idempotency-rollback")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "finish idempotency rollback", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-idempotency-rollback-key"
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	input.IdempotencyKey = &key
+	input.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "rollback.txt"}}
+	const triggerName = "test_fail_finish_idempotency_insert"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER `+triggerName+`
+			BEFORE INSERT ON idempotency_records
+			WHEN NEW.operation = 'finish_attempt'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced finish idempotency insert failure');
+			END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `DROP TRIGGER `+triggerName)
+			return err
+		}); err != nil {
+			t.Errorf("drop test trigger: %v", err)
+		}
+	}()
+
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err == nil {
+		t.Fatal("finish succeeded despite idempotency insert failure")
+	}
+
+	var attemptStatus, issueStatus string
+	var issueVersion int64
+	var events, artifacts, records int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`,
+			claim.Attempt.ID).Scan(&attemptStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, version FROM issues WHERE id = ?`,
+			issue.ID).Scan(&issueStatus, &issueVersion); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`,
+			claim.Attempt.ID).Scan(&artifacts); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records
+			WHERE operation = 'finish_attempt' AND idempotency_key = ?`, key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != string(domain.AttemptStatusActive) || issueStatus != string(domain.StatusReady) ||
+		issueVersion != issue.Issue.Version || events != 0 || artifacts != 0 || records != 0 {
+		t.Fatalf("idempotency rollback state = attempt %q issue %q version %d events %d artifacts %d records %d",
+			attemptStatus, issueStatus, issueVersion, events, artifacts, records)
+	}
+}
 
 func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
 	ctx := context.Background()
@@ -679,6 +1053,7 @@ func TestAttemptSimultaneousClaimsHaveOneWinner(t *testing.T) {
 type attemptTestFixture struct {
 	ctx       context.Context
 	clock     *clock.FakeClock
+	path      string
 	db        *sqlite.DB
 	issues    *application.IssueService
 	attempts  *application.AttemptService
@@ -689,7 +1064,8 @@ func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
 	t.Helper()
 	ctx := context.Background()
 	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
-	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), name+".db"), sqlite.Options{})
+	path := filepath.Join(t.TempDir(), name+".db")
+	db, err := sqlite.Open(ctx, path, sqlite.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,11 +1116,65 @@ func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
 		_ = db.Close(ctx)
 		t.Fatal(err)
 	}
-	return &attemptTestFixture{ctx: ctx, clock: source, db: db, issues: issues, attempts: attempts, relations: relations}
+	return &attemptTestFixture{ctx: ctx, clock: source, path: path, db: db, issues: issues, attempts: attempts, relations: relations}
 }
 
 func (fixture *attemptTestFixture) close() {
 	_ = fixture.db.Close(fixture.ctx)
+}
+
+func reopenAttemptTestFixture(t *testing.T, fixture *attemptTestFixture) {
+	t.Helper()
+	if err := fixture.db.Close(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(fixture.ctx, fixture.path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrations.Migrate(fixture.ctx, db, fixture.clock); err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(fixture.clock, rand.Reader)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	issueRepository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	attemptRepository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	relationRepository, err := sqlite.NewRelationRepository(db)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	issues, err := application.NewIssueService(issueRepository, fixture.clock, generator)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	attempts, err := application.NewAttemptService(attemptRepository, fixture.clock, generator)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	relations, err := application.NewRelationService(relationRepository, fixture.clock, generator)
+	if err != nil {
+		_ = db.Close(fixture.ctx)
+		t.Fatal(err)
+	}
+	fixture.db = db
+	fixture.issues = issues
+	fixture.attempts = attempts
+	fixture.relations = relations
 }
 
 func createAttemptIssue(t *testing.T, fixture *attemptTestFixture, title string, status domain.Status) application.CreateIssueResult {

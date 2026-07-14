@@ -307,9 +307,6 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
 	for index, artifact := range input.Artifacts {
 		artifacts[index] = domain.ArtifactInput{
@@ -327,7 +324,7 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 		TargetIssueStatus: statusPointer(input.TargetIssueStatus), BlockedReason: input.BlockedReason,
 		ReviewOutcome: reviewPointer(input.ReviewOutcome), FailureReasonCode: failurePointer(input.FailureReasonCode),
 		InterruptionReasonCode: interruptionPointer(input.InterruptionReasonCode), ReasonDetails: input.ReasonDetails,
-		AcknowledgedChanges: acknowledgement, Artifacts: artifacts,
+		AcknowledgedChanges: acknowledgement, Artifacts: artifacts, IdempotencyKey: copyString(input.IdempotencyKey),
 	})
 	if err != nil {
 		return adapter.failure(err)

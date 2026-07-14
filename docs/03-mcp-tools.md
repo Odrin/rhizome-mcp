@@ -726,6 +726,16 @@ acknowledged_changes
 idempotency_key
 ```
 
+`idempotency_key` is optional for `finish_attempt`. When supplied, the
+normalized request (including the lease-token proof and caller artifact fields,
+but excluding the transient MCP session and generated artifact values) is
+hashed and stored with the final response in the same SQLite transaction.
+Retrying the same key with the same normalized request replays that exact
+response, including after reconnect or database reopen, without creating
+another event or artifact set. Reusing the key with a different normalized
+request returns `IDEMPOTENCY_CONFLICT`; a request without a key retains the
+ordinary non-idempotent finish behavior.
+
 Work outcomes:
 
 ```text

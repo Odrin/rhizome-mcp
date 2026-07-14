@@ -53,12 +53,14 @@ type SaveAttemptNoteResult struct {
 }
 
 type FinishAttemptCommand struct {
-	AttemptID  string
-	SessionID  *string
-	TokenHash  []byte
-	Input      domain.FinishAttemptInput
-	Artifacts  []domain.Artifact
-	OccurredAt time.Time
+	AttemptID      string
+	SessionID      *string
+	TokenHash      []byte
+	Input          domain.FinishAttemptInput
+	Artifacts      []domain.Artifact
+	IdempotencyKey string
+	RequestHash    []byte
+	OccurredAt     time.Time
 }
 
 type FinishAttemptResult struct {
@@ -82,6 +84,7 @@ type AttemptRepository interface {
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
+	LookupFinishedAttempt(context.Context, string, []byte) (FinishAttemptResult, bool, error)
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
 	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
 }

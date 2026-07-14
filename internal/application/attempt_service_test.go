@@ -310,6 +310,12 @@ type recordingAttemptRepository struct {
 	renewCalled   bool
 	finishCalled  bool
 	expireCalled  bool
+	lookupCalled  bool
+	lookupKey     string
+	lookupHash    []byte
+	lookupResult  ports.FinishAttemptResult
+	lookupFound   bool
+	lookupError   error
 }
 
 func (repository *recordingAttemptRepository) ClaimIssue(_ context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
@@ -343,6 +349,13 @@ func (repository *recordingAttemptRepository) FinishAttempt(_ context.Context, c
 	return repository.finishResult, nil
 }
 
+func (repository *recordingAttemptRepository) LookupFinishedAttempt(_ context.Context, key string, hash []byte) (ports.FinishAttemptResult, bool, error) {
+	repository.lookupCalled = true
+	repository.lookupKey = key
+	repository.lookupHash = append([]byte(nil), hash...)
+	return repository.lookupResult, repository.lookupFound, repository.lookupError
+}
+
 func failureReasonPointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }
 
 type fixedAttemptIDGenerator string
@@ -358,4 +371,54 @@ func (generator *sequenceAttemptIDGenerator) New() (string, error) {
 	id := generator.ids[generator.next]
 	generator.next++
 	return id, nil
+}
+
+func TestAttemptServiceFinishLooksUpReplayBeforeAllocatingIDs(t *testing.T) {
+	repository := &recordingAttemptRepository{
+		lookupFound:  true,
+		lookupResult: ports.FinishAttemptResult{LatestEventID: 19},
+	}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Now()), &sequenceAttemptIDGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "  finish-retry "
+	input := domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeFailed, ResultSummary: "failed",
+		FailureReasonCode: failureReasonPointer(domain.FailureReasonOther), IdempotencyKey: &key,
+	}
+	result, err := service.FinishAttempt(context.Background(), input)
+	if err != nil || result.LatestEventID != 19 || !repository.lookupCalled || repository.finishCalled {
+		t.Fatalf("result = %#v, err = %v, repository = %#v", result, err, repository)
+	}
+	normalized, err := input.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := domain.CanonicalFinishAttemptRequest(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(canonical)
+	if repository.lookupKey != "finish-retry" || !reflect.DeepEqual(repository.lookupHash, expected[:]) {
+		t.Fatalf("lookup = %q/%x, want %q/%x", repository.lookupKey, repository.lookupHash, "finish-retry", expected)
+	}
+}
+
+func TestAttemptServiceFinishForwardsIdempotencyAndPropagatesLookupError(t *testing.T) {
+	repository := &recordingAttemptRepository{lookupError: errors.New("lookup failed")}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Now()), fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FAX"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "finish-key"
+	_, err = service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeFailed, ResultSummary: "failed",
+		FailureReasonCode: failureReasonPointer(domain.FailureReasonOther), IdempotencyKey: &key,
+	})
+	if err == nil || err.Error() != "lookup failed" || repository.finishCalled {
+		t.Fatalf("lookup error = %v, finish called = %t", err, repository.finishCalled)
+	}
 }

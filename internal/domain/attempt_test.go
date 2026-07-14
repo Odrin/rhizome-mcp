@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -189,3 +190,51 @@ func TestAttemptInputsNormalizeOptionalSessionIDs(t *testing.T) {
 
 func optionalStringPointer(value string) *string                                      { return &value }
 func optionalFailurePointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }
+
+func TestFinishAttemptIdempotencyKeyValidationAndCanonicalRequest(t *testing.T) {
+	key := "  retry-key  "
+	input := domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		SessionID: optionalStringPointer("01BX5ZZKBKACTAV9WEVGEMMVRZ"),
+		Outcome:   domain.AttemptOutcomeFailed, ResultSummary: "failed",
+		FailureReasonCode: optionalFailurePointer(domain.FailureReasonOther),
+		IdempotencyKey:    &key,
+	}
+	normalized, err := input.Validate()
+	if err != nil || normalized.IdempotencyKey == nil || *normalized.IdempotencyKey != "retry-key" {
+		t.Fatalf("normalized key = %#v, %v", normalized.IdempotencyKey, err)
+	}
+	key = "changed"
+	if *normalized.IdempotencyKey != "retry-key" {
+		t.Fatal("idempotency key was not defensively copied")
+	}
+	first, err := domain.CanonicalFinishAttemptRequest(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSession := "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	same := normalized
+	same.SessionID = &otherSession
+	second, err := domain.CanonicalFinishAttemptRequest(same)
+	if err != nil || !bytes.Equal(first, second) {
+		t.Fatalf("session changed canonical request: %s / %s", first, second)
+	}
+	different := normalized
+	different.ResultSummary = "different"
+	third, err := domain.CanonicalFinishAttemptRequest(different)
+	if err != nil || bytes.Equal(first, third) {
+		t.Fatal("request change did not change canonical bytes")
+	}
+	for _, value := range []string{" ", strings.Repeat("x", domain.MaxIdempotencyKeyRunes+1)} {
+		value := value
+		_, err := (domain.FinishAttemptInput{
+			AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeFailed,
+			ResultSummary: "failed", FailureReasonCode: optionalFailurePointer(domain.FailureReasonOther),
+			IdempotencyKey: &value,
+		}).Validate()
+		if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) &&
+			!errors.Is(err, &domain.Error{Code: domain.CodeLimitExceeded}) {
+			t.Fatalf("key %q error = %v", value, err)
+		}
+	}
+}

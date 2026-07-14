@@ -132,6 +132,24 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 	if err != nil {
 		return ports.FinishAttemptResult{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalFinishAttemptRequest(normalized)
+		if err != nil {
+			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode finish request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupFinishedAttempt(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ports.FinishAttemptResult{}, err
+		}
+		if found {
+			return result, nil
+		}
+	}
 	now := service.clock.Now().UTC()
 	artifacts := make([]domain.Artifact, len(normalized.Artifacts))
 	for index, inputArtifact := range normalized.Artifacts {
@@ -156,6 +174,7 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	return service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
-		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Input: normalized, Artifacts: artifacts, OccurredAt: now,
+		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Input: normalized,
+		Artifacts: artifacts, IdempotencyKey: idempotencyKey, RequestHash: requestHash, OccurredAt: now,
 	})
 }

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"rhizome-mcp/internal/domain"
@@ -17,6 +19,8 @@ import (
 
 // AttemptRepository is the SQLite implementation of ports.AttemptRepository.
 type AttemptRepository struct{ db *DB }
+
+const finishAttemptOperation = "finish_attempt"
 
 func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
 	if database == nil {
@@ -374,11 +378,197 @@ func validateAttemptArtifacts(values []domain.Artifact, occurredAt time.Time) ([
 	}
 	return result, nil
 }
+
+// LookupFinishedAttempt serves a replay before application-side artifact IDs
+// and timestamps are allocated.
+func (repository *AttemptRepository) LookupFinishedAttempt(ctx context.Context, key string, hash []byte) (ports.FinishAttemptResult, bool, error) {
+	if err := validateFinishIdempotency(key, hash); err != nil {
+		return ports.FinishAttemptResult{}, false, err
+	}
+	var result ports.FinishAttemptResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var lookupErr error
+		result, found, lookupErr = lookupFinishedAttempt(ctx, query, key, hash)
+		return lookupErr
+	})
+	return result, found, err
+}
+
+func validateFinishIdempotency(key string, hash []byte) error {
+	if err := domain.ValidateText("idempotency_key", key, domain.MaxIdempotencyKeyRunes); err != nil {
+		return err
+	}
+	if strings.TrimSpace(key) == "" || len(hash) != 32 {
+		return domain.NewError(domain.CodeInvalidArgument, "finish idempotency command is invalid", false,
+			domain.Detail{Field: "idempotency_key", Code: "REQUIRED"})
+	}
+	return nil
+}
+
+func lookupFinishedAttempt(ctx context.Context, query Queryer, key string, hash []byte) (ports.FinishAttemptResult, bool, error) {
+	var savedHash []byte
+	var savedResponse string
+	err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+		WHERE operation = ? AND idempotency_key = ?`, finishAttemptOperation, key).Scan(&savedHash, &savedResponse)
+	if err == sql.ErrNoRows {
+		return ports.FinishAttemptResult{}, false, nil
+	}
+	if err != nil {
+		return ports.FinishAttemptResult{}, false, err
+	}
+	if !bytes.Equal(savedHash, hash) {
+		return ports.FinishAttemptResult{}, false, domain.NewError(domain.CodeIdempotencyConflict,
+			"idempotency key was used with a different request", false,
+			domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+	}
+	var result ports.FinishAttemptResult
+	if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+		return ports.FinishAttemptResult{}, false, domain.WrapError(err, domain.CodeStorageCorrupt,
+			"stored idempotency response is invalid", false)
+	}
+	for index := range result.Artifacts {
+		if bytes.Equal(result.Artifacts[index].Metadata, []byte("null")) {
+			result.Artifacts[index].Metadata = nil
+		}
+	}
+	if err := validateStoredFinishResult(result); err != nil {
+		return ports.FinishAttemptResult{}, false, err
+	}
+	return cloneFinishResult(result), true, nil
+}
+
+func validateStoredFinishResult(result ports.FinishAttemptResult) error {
+	if _, err := ids.ParseStrict(result.Attempt.ID); err != nil || result.Attempt.IssueID == "" {
+		return corruptFinishResult()
+	}
+	if _, err := ids.ParseStrict(result.Attempt.IssueID); err != nil {
+		return corruptFinishResult()
+	}
+	if _, err := ids.ParseStrict(result.Issue.ID); err != nil || result.Attempt.IssueID != result.Issue.ID ||
+		!result.Attempt.Kind.Valid() || !result.Attempt.Status.Valid() || result.LatestEventID < 0 ||
+		result.Attempt.FinishedAt == nil || result.Attempt.LeaseExpiresAt.IsZero() ||
+		result.Attempt.StartedAt.IsZero() || result.Attempt.LastHeartbeatAt.IsZero() ||
+		result.Issue.CreatedAt.IsZero() || result.Issue.UpdatedAt.IsZero() {
+		return corruptFinishResult()
+	}
+	if !result.Issue.Type.Valid() || !result.Issue.Status.Valid() || !result.Issue.Priority.Valid() {
+		return corruptFinishResult()
+	}
+	for _, timestamp := range []time.Time{result.Attempt.LeaseExpiresAt, result.Attempt.StartedAt,
+		result.Attempt.LastHeartbeatAt, *result.Attempt.FinishedAt, result.Issue.CreatedAt, result.Issue.UpdatedAt} {
+		if timestamp.IsZero() || timestamp.Location() != time.UTC {
+			return corruptFinishResult()
+		}
+	}
+	for _, timestamp := range []*time.Time{result.Issue.ClosedAt, result.Issue.ArchivedAt} {
+		if timestamp != nil && (timestamp.IsZero() || timestamp.Location() != time.UTC) {
+			return corruptFinishResult()
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if _, err := ids.ParseStrict(artifact.ID); err != nil || artifact.IssueID != result.Issue.ID ||
+			artifact.AttemptID == nil || *artifact.AttemptID != result.Attempt.ID || artifact.CreatedAt.IsZero() ||
+			artifact.CreatedAt.Location() != time.UTC {
+			return corruptFinishResult()
+		}
+		normalized, err := domain.ValidateArtifactInputs("artifacts", []domain.ArtifactInput{{
+			Type: artifact.Type, URI: artifact.URI, Title: artifact.Title, Metadata: artifact.Metadata,
+		}})
+		if err != nil || len(normalized) != 1 ||
+			!bytes.Equal(normalized[0].Metadata, artifact.Metadata) {
+			return corruptFinishResult()
+		}
+	}
+	return nil
+}
+
+func corruptFinishResult() error {
+	return domain.NewError(domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+}
+
+func cloneFinishResult(result ports.FinishAttemptResult) ports.FinishAttemptResult {
+	cloned := result
+	cloned.Warnings = cloneAttemptStrings(result.Warnings)
+	cloned.Artifacts = domain.CloneArtifacts(result.Artifacts)
+	cloned.Attempt.SessionID = cloneAttemptString(result.Attempt.SessionID)
+	cloned.Attempt.AgentLabel = cloneAttemptString(result.Attempt.AgentLabel)
+	cloned.Attempt.FinishedAt = cloneAttemptTime(result.Attempt.FinishedAt)
+	cloned.Attempt.ResultSummary = cloneAttemptString(result.Attempt.ResultSummary)
+	cloned.Attempt.NextSteps = cloneAttemptStrings(result.Attempt.NextSteps)
+	cloned.Attempt.Verification = cloneAttemptStrings(result.Attempt.Verification)
+	cloned.Attempt.FailureReasonCode = cloneAttemptFailure(result.Attempt.FailureReasonCode)
+	cloned.Attempt.InterruptionReasonCode = cloneAttemptInterruption(result.Attempt.InterruptionReasonCode)
+	cloned.Attempt.ReasonDetails = cloneAttemptString(result.Attempt.ReasonDetails)
+	cloned.Issue.Description = cloneAttemptString(result.Issue.Description)
+	cloned.Issue.AcceptanceCriteria = cloneAttemptString(result.Issue.AcceptanceCriteria)
+	cloned.Issue.ParentID = cloneAttemptString(result.Issue.ParentID)
+	cloned.Issue.BlockedReason = cloneAttemptString(result.Issue.BlockedReason)
+	cloned.Issue.CreatedBySessionID = cloneAttemptString(result.Issue.CreatedBySessionID)
+	cloned.Issue.ClosedAt = cloneAttemptTime(result.Issue.ClosedAt)
+	cloned.Issue.ArchivedAt = cloneAttemptTime(result.Issue.ArchivedAt)
+	cloned.Issue.ArchivedBySessionID = cloneAttemptString(result.Issue.ArchivedBySessionID)
+	if result.Issue.Labels != nil {
+		cloned.Issue.Labels = make([]domain.Label, len(result.Issue.Labels))
+		copy(cloned.Issue.Labels, result.Issue.Labels)
+	}
+	for index := range cloned.Issue.Labels {
+		cloned.Issue.Labels[index].Description = cloneAttemptString(result.Issue.Labels[index].Description)
+	}
+	return cloned
+}
+
+func cloneAttemptStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
+}
+
+func cloneAttemptString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneAttemptTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneAttemptFailure(value *domain.FailureReasonCode) *domain.FailureReasonCode {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneAttemptInterruption(value *domain.InterruptionReasonCode) *domain.InterruptionReasonCode {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command ports.FinishAttemptCommand) (ports.FinishAttemptResult, error) {
 	if !validAttemptSessionID(command.SessionID) {
 		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt completion command is invalid", false)
 	}
 	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 {
+		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt completion command is invalid", false)
+	}
+	if command.IdempotencyKey != "" {
+		if err := validateFinishIdempotency(command.IdempotencyKey, command.RequestHash); err != nil {
+			return ports.FinishAttemptResult{}, err
+		}
+	} else if len(command.RequestHash) != 0 {
 		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt completion command is invalid", false)
 	}
 	input, err := command.Input.Validate()
@@ -394,6 +584,16 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 	var result ports.FinishAttemptResult
 	var leaseExpired bool
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			saved, found, err := lookupFinishedAttempt(ctx, tx, command.IdempotencyKey, command.RequestHash)
+			if err != nil {
+				return err
+			}
+			if found {
+				result = saved
+				return nil
+			}
+		}
 		var issueID, kindText, status, expiry string
 		var tokenHash []byte
 		var version, contextEventID int64
@@ -633,6 +833,18 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			attempt.InterruptionReasonCode = &v
 		}
 		result = ports.FinishAttemptResult{Attempt: attempt, Issue: issue, Warnings: warnings, LatestEventID: latestEventID, Artifacts: result.Artifacts}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode finish response", false)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, finishAttemptOperation, command.RequestHash,
+				string(response), timestamp); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

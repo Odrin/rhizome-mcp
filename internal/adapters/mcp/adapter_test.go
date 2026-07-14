@@ -705,19 +705,32 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"type": "file", "uri": "../outside"}},
 	})
 	assertDomainError(t, invalidFinishArtifacts, "INVALID_ARGUMENT", false)
-	unsupportedFinishIdempotency := call(t, client, "finish_attempt", map[string]any{
-		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
-		"result_summary": "done", "failure_reason_code": "other", "idempotency_key": "unsupported",
-	})
-	assertDomainError(t, unsupportedFinishIdempotency, "INVALID_ARGUMENT", false)
 	finished := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
 		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
+		"idempotency_key": "finish-retry",
 		"artifacts": []any{
 			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
 			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
 		},
 	})
+	replayed := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
+		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
+		"idempotency_key": "finish-retry",
+		"artifacts": []any{
+			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
+			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
+		},
+	})
+	if replayed.IsError || !reflect.DeepEqual(finished.StructuredContent, replayed.StructuredContent) {
+		t.Fatalf("finish replay = %#v, first = %#v", replayed, finished)
+	}
+	conflict := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
+		"result_summary": "changed", "target_issue_status": "done", "idempotency_key": "finish-retry",
+	})
+	assertDomainError(t, conflict, "IDEMPOTENCY_CONFLICT", false)
 	var finishOutput struct {
 		Attempt struct {
 			Status        string   `json:"status"`
