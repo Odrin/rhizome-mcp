@@ -40,6 +40,8 @@ Exit gate: a temporary repository can be initialized, migrated, reopened, and ve
 
 Exit gate: the issue lifecycle works through an MCP client and survives restart, including invalid transitions, invalid parents, archive behavior, and version conflicts.
 
+**Progress on 2026-07-14:** issue creation, base lookup, and optimistic patch application/port/SQLite slices are complete and verified. Creation validates fields and parent rules, atomically allocates non-reused `ISSUE-N` values, stores version-one issue rows, and appends `issue_created` events. Parent references accept either canonical ULIDs or `ISSUE-N` and persist canonical parent IDs. Base lookup accepts both forms, returns archived issues, and maps complete stored projections without side effects. Patches have typed absent/null semantics, enforce status/parent rules, append compact update events atomically, preserve immutable display IDs, and reject stale updates with retryable `VERSION_CONFLICT`. MCP exposure, labels, lists, archive behavior, and the Phase 2 exit gate remain outstanding.
+
 ## Phase 3: relations, graphs, and planning
 
 - Implement canonical relations, transactional blocker-cycle detection, and blocker-derived claimability.

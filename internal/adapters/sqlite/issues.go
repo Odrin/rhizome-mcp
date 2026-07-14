@@ -1,0 +1,515 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/ports"
+)
+
+// IssueRepository is the SQLite implementation of ports.IssueRepository.
+type IssueRepository struct {
+	db *DB
+}
+
+// NewIssueRepository returns an issue repository backed by database.
+func NewIssueRepository(database *DB) (*IssueRepository, error) {
+	if database == nil {
+		return nil, domain.NewError(domain.CodeStorageConfiguration, "issue database is required", false)
+	}
+	return &IssueRepository{db: database}, nil
+}
+
+// CreateIssue atomically allocates a project-local sequence number, inserts the
+// issue projection, and appends its creation event.
+func (repository *IssueRepository) CreateIssue(ctx context.Context, command ports.CreateIssueCommand) (domain.Issue, error) {
+	input, err := command.Input.Validate()
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	if _, err := ids.ParseStrict(command.ID); err != nil {
+		return domain.Issue{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate issue identifier", false)
+	}
+
+	now := command.CreatedAt.UTC()
+	timestamp := now.Format(time.RFC3339Nano)
+	var issue domain.Issue
+	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		var sequenceNo int64
+		err := tx.QueryRowContext(ctx, `
+			UPDATE projects
+			SET next_issue_number = next_issue_number + 1, updated_at = ?
+			RETURNING next_issue_number - 1
+		`, timestamp).Scan(&sequenceNo)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return domain.NewError(domain.CodeProjectNotInitialized, "project database is not initialized", false)
+			}
+			return err
+		}
+		resolvedParentID, err := validateParent(ctx, tx, input.ParentID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(
+			id, sequence_no, type, title, description, acceptance_criteria,
+			status, priority, parent_id, blocked_reason, version,
+			created_by_session_id, created_at, updated_at, closed_at,
+			archived_at, archived_by_session_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, NULL, NULL)`,
+			command.ID, sequenceNo, input.Type, input.Title, nullableString(input.Description),
+			nullableString(input.AcceptanceCriteria), input.Status, input.Priority,
+			nullableString(resolvedParentID), nullableString(input.BlockedReason), timestamp, timestamp,
+		); err != nil {
+			return err
+		}
+
+		payload, err := json.Marshal(issueCreatedPayload{
+			SequenceNo: sequenceNo,
+			Type:       input.Type,
+			Status:     input.Status,
+			Priority:   input.Priority,
+			ParentID:   resolvedParentID,
+		})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue creation event", false)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_created', NULL, NULL, ?, ?)
+		`, command.ID, string(payload), timestamp); err != nil {
+			return err
+		}
+
+		issue = domain.Issue{
+			ID:                 command.ID,
+			DisplayID:          fmt.Sprintf("ISSUE-%d", sequenceNo),
+			SequenceNo:         sequenceNo,
+			Type:               input.Type,
+			Title:              input.Title,
+			Description:        input.Description,
+			AcceptanceCriteria: input.AcceptanceCriteria,
+			Status:             input.Status,
+			Priority:           input.Priority,
+			ParentID:           resolvedParentID,
+			BlockedReason:      input.BlockedReason,
+			Version:            1,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	return issue, nil
+}
+
+// GetIssue reads one issue projection by internal ID or project-local sequence
+// number. It performs no writes and does not hide archived issues.
+func (repository *IssueRepository) GetIssue(ctx context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
+	var issue domain.Issue
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var row *sql.Row
+		switch identifier.Kind {
+		case domain.IssueIdentifierInternalID:
+			row = query.QueryRowContext(ctx, `
+				SELECT id, sequence_no, type, title, description, acceptance_criteria,
+					status, priority, parent_id, blocked_reason, version,
+					created_by_session_id, created_at, updated_at, closed_at,
+					archived_at, archived_by_session_id
+				FROM issues
+				WHERE id = ?`, identifier.Value)
+		case domain.IssueIdentifierDisplayID:
+			row = query.QueryRowContext(ctx, `
+				SELECT id, sequence_no, type, title, description, acceptance_criteria,
+					status, priority, parent_id, blocked_reason, version,
+					created_by_session_id, created_at, updated_at, closed_at,
+					archived_at, archived_by_session_id
+				FROM issues
+				WHERE sequence_no = ?`, identifier.SequenceNo)
+		default:
+			return domain.NewError(
+				domain.CodeInvalidArgument,
+				"issue identifier is invalid",
+				false,
+				domain.Detail{Field: "issue_id", Code: "INVALID_IDENTIFIER"},
+			)
+		}
+
+		parsed, err := scanIssueProjection(row)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+			}
+			return err
+		}
+		issue = parsed
+		return nil
+	})
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	return issue, nil
+}
+
+// UpdateIssue atomically validates the current projection, conditionally
+// persists an optimistic patch, and appends its one corresponding event.
+func (repository *IssueRepository) UpdateIssue(ctx context.Context, command ports.UpdateIssueCommand) (ports.UpdateIssueResult, error) {
+	var result ports.UpdateIssueResult
+	now := command.UpdatedAt.UTC()
+	timestamp := now.Format(time.RFC3339Nano)
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		current, err := loadIssueForMutation(ctx, tx, command.Identifier)
+		if err != nil {
+			return err
+		}
+		if current.ArchivedAt != nil {
+			return domain.NewError(domain.CodeIssueArchived, "issue is archived", false)
+		}
+		if current.Version != command.ExpectedVersion {
+			return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
+		}
+		next, changedFields, err := domain.ApplyIssuePatch(current, command.Changes)
+		if err != nil {
+			return err
+		}
+		if command.Changes.ParentID.Set && next.ParentID != nil {
+			resolved, err := validateParent(ctx, tx, next.ParentID)
+			if err != nil {
+				return err
+			}
+			if *resolved == current.ID {
+				return invalidParentError()
+			}
+			next.ParentID = resolved
+		}
+		if next.Type == domain.TypeEpic && next.ParentID != nil {
+			return invalidParentError()
+		}
+		next.UpdatedAt = now
+		next.Version = current.Version + 1
+		if command.Changes.Status.Set {
+			switch {
+			case next.Status.Terminal() && !current.Status.Terminal():
+				next.ClosedAt = &now
+			case !next.Status.Terminal() && current.Status.Terminal():
+				next.ClosedAt = nil
+			}
+		}
+
+		res, err := tx.ExecContext(ctx, `UPDATE issues SET
+			type = ?, title = ?, description = ?, acceptance_criteria = ?,
+			status = ?, priority = ?, parent_id = ?, blocked_reason = ?,
+			version = ?, updated_at = ?, closed_at = ?
+			WHERE id = ? AND version = ? AND archived_at IS NULL`,
+			next.Type, next.Title, nullableString(next.Description), nullableString(next.AcceptanceCriteria),
+			next.Status, next.Priority, nullableString(next.ParentID), nullableString(next.BlockedReason),
+			next.Version, timestamp, nullableTime(next.ClosedAt), current.ID, command.ExpectedVersion,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return classifyConditionalUpdateFailure(ctx, tx, current.ID)
+		}
+		payload, err := json.Marshal(newIssueUpdatedPayload(next, changedFields))
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue update event", false)
+		}
+		eventType := "issue_updated"
+		if command.Changes.Status.Set {
+			eventType = "status_changed"
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, ?, NULL, NULL, ?, ?)`, current.ID, eventType, string(payload), timestamp); err != nil {
+			return err
+		}
+		result = ports.UpdateIssueResult{Issue: next, ChangedFields: append([]string(nil), changedFields...)}
+		return nil
+	})
+	if err != nil {
+		return ports.UpdateIssueResult{}, err
+	}
+	return result, nil
+}
+
+func loadIssueForMutation(ctx context.Context, tx Executor, identifier domain.IssueIdentifier) (domain.Issue, error) {
+	var row *sql.Row
+	switch identifier.Kind {
+	case domain.IssueIdentifierInternalID:
+		row = tx.QueryRowContext(ctx, issueProjectionSelect+" WHERE id = ?", identifier.Value)
+	case domain.IssueIdentifierDisplayID:
+		row = tx.QueryRowContext(ctx, issueProjectionSelect+" WHERE sequence_no = ?", identifier.SequenceNo)
+	default:
+		return domain.Issue{}, domain.NewError(domain.CodeInvalidArgument, "issue identifier is invalid", false,
+			domain.Detail{Field: "issue_id", Code: "INVALID_IDENTIFIER"})
+	}
+	issue, err := scanIssueProjection(row)
+	if err == sql.ErrNoRows {
+		return domain.Issue{}, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+	}
+	return issue, err
+}
+
+func classifyConditionalUpdateFailure(ctx context.Context, tx Executor, id string) error {
+	var archivedAt sql.NullString
+	var version int64
+	err := tx.QueryRowContext(ctx, "SELECT archived_at, version FROM issues WHERE id = ?", id).Scan(&archivedAt, &version)
+	if err == sql.ErrNoRows {
+		return domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+	}
+	if err != nil {
+		return err
+	}
+	if archivedAt.Valid {
+		return domain.NewError(domain.CodeIssueArchived, "issue is archived", false)
+	}
+	return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
+}
+
+const issueProjectionSelect = `SELECT id, sequence_no, type, title, description, acceptance_criteria,
+	status, priority, parent_id, blocked_reason, version,
+	created_by_session_id, created_at, updated_at, closed_at,
+	archived_at, archived_by_session_id FROM issues`
+
+func scanIssueProjection(row *sql.Row) (domain.Issue, error) {
+	var (
+		id, issueType, title, status, priority, createdAt, updatedAt  string
+		description, acceptanceCriteria, parentID, blockedReason      sql.NullString
+		createdBySessionID, closedAt, archivedAt, archivedBySessionID sql.NullString
+		sequenceNo, version                                           int64
+	)
+	if err := row.Scan(
+		&id, &sequenceNo, &issueType, &title, &description, &acceptanceCriteria,
+		&status, &priority, &parentID, &blockedReason, &version,
+		&createdBySessionID, &createdAt, &updatedAt, &closedAt,
+		&archivedAt, &archivedBySessionID,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Issue{}, err
+		}
+		return domain.Issue{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+	}
+	parsedType, err := domain.ParseType(issueType)
+	if err != nil {
+		return domain.Issue{}, corruptIssueProjection(err)
+	}
+	parsedStatus, err := domain.ParseStatus(status)
+	if err != nil {
+		return domain.Issue{}, corruptIssueProjection(err)
+	}
+	parsedPriority, err := domain.ParsePriority(priority)
+	if err != nil {
+		return domain.Issue{}, corruptIssueProjection(err)
+	}
+	created, err := parseIssueTimestamp("created_at", createdAt)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	updated, err := parseIssueTimestamp("updated_at", updatedAt)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	closed, err := parseNullableIssueTimestamp("closed_at", closedAt)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	archived, err := parseNullableIssueTimestamp("archived_at", archivedAt)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	return domain.Issue{
+		ID:                  id,
+		DisplayID:           fmt.Sprintf("ISSUE-%d", sequenceNo),
+		SequenceNo:          sequenceNo,
+		Type:                parsedType,
+		Title:               title,
+		Description:         nullableStringPointer(description),
+		AcceptanceCriteria:  nullableStringPointer(acceptanceCriteria),
+		Status:              parsedStatus,
+		Priority:            parsedPriority,
+		ParentID:            nullableStringPointer(parentID),
+		BlockedReason:       nullableStringPointer(blockedReason),
+		Version:             version,
+		CreatedBySessionID:  nullableStringPointer(createdBySessionID),
+		CreatedAt:           created,
+		UpdatedAt:           updated,
+		ClosedAt:            closed,
+		ArchivedAt:          archived,
+		ArchivedBySessionID: nullableStringPointer(archivedBySessionID),
+	}, nil
+}
+
+type issueUpdatedPayload struct {
+	ChangedFields         []string         `json:"changed_fields"`
+	Title                 *string          `json:"title,omitempty"`
+	Type                  *domain.Type     `json:"type,omitempty"`
+	Priority              *domain.Priority `json:"priority,omitempty"`
+	Status                *domain.Status   `json:"status,omitempty"`
+	ParentID              *string          `json:"parent_id,omitempty"`
+	DescriptionSet        *bool            `json:"description_set,omitempty"`
+	AcceptanceCriteriaSet *bool            `json:"acceptance_criteria_set,omitempty"`
+	BlockedReasonSet      *bool            `json:"blocked_reason_set,omitempty"`
+}
+
+func newIssueUpdatedPayload(next domain.Issue, changedFields []string) issueUpdatedPayload {
+	payload := issueUpdatedPayload{ChangedFields: append([]string(nil), changedFields...)}
+	for _, field := range changedFields {
+		switch field {
+		case "title":
+			value := next.Title
+			payload.Title = &value
+		case "type":
+			value := next.Type
+			payload.Type = &value
+		case "priority":
+			value := next.Priority
+			payload.Priority = &value
+		case "status":
+			value := next.Status
+			payload.Status = &value
+		case "parent_id":
+			payload.ParentID = copyOptionalString(next.ParentID)
+		case "description":
+			value := next.Description != nil
+			payload.DescriptionSet = &value
+		case "acceptance_criteria":
+			value := next.AcceptanceCriteria != nil
+			payload.AcceptanceCriteriaSet = &value
+		case "blocked_reason":
+			value := next.BlockedReason != nil
+			payload.BlockedReasonSet = &value
+		}
+	}
+	return payload
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func copyOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func nullableStringPointer(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	result := value.String
+	return &result
+}
+
+func parseIssueTimestamp(field, value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false,
+			domain.Detail{Field: field, Code: "INVALID_TIMESTAMP"})
+	}
+	if _, offset := parsed.Zone(); offset != 0 {
+		return time.Time{}, domain.NewError(domain.CodeStorageCorrupt, "stored issue projection is invalid", false,
+			domain.Detail{Field: field, Code: "INVALID_TIMESTAMP"})
+	}
+	return parsed.UTC(), nil
+}
+
+func parseNullableIssueTimestamp(field string, value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	parsed, err := parseIssueTimestamp(field, value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func corruptIssueProjection(cause error) error {
+	return domain.WrapError(cause, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+}
+
+type issueCreatedPayload struct {
+	SequenceNo int64           `json:"sequence_no"`
+	Type       domain.Type     `json:"type"`
+	Status     domain.Status   `json:"status"`
+	Priority   domain.Priority `json:"priority"`
+	ParentID   *string         `json:"parent_id,omitempty"`
+}
+
+func validateParent(ctx context.Context, tx Executor, parentID *string) (*string, error) {
+	if parentID == nil {
+		return nil, nil
+	}
+
+	identifier, err := domain.ParseIssueIdentifier(*parentID)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		resolvedID string
+		issueType  domain.Type
+		archivedAt sql.NullString
+	)
+	var row *sql.Row
+	switch identifier.Kind {
+	case domain.IssueIdentifierInternalID:
+		row = tx.QueryRowContext(ctx, "SELECT id, type, archived_at FROM issues WHERE id = ?", identifier.Value)
+	case domain.IssueIdentifierDisplayID:
+		row = tx.QueryRowContext(ctx, "SELECT id, type, archived_at FROM issues WHERE sequence_no = ?", identifier.SequenceNo)
+	default:
+		return nil, domain.NewError(
+			domain.CodeInvalidArgument,
+			"parent identifier is invalid",
+			false,
+			domain.Detail{Field: "parent_id", Code: "INVALID_IDENTIFIER"},
+		)
+	}
+	err = row.Scan(&resolvedID, &issueType, &archivedAt)
+	if err == sql.ErrNoRows {
+		return nil, invalidParentError()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if issueType != domain.TypeEpic || archivedAt.Valid {
+		return nil, invalidParentError()
+	}
+	return &resolvedID, nil
+}
+
+func invalidParentError() error {
+	return domain.NewError(
+		domain.CodeInvalidEpicParent,
+		"parent_id must reference a non-archived epic",
+		false,
+		domain.Detail{Field: "parent_id", Code: domain.CodeInvalidEpicParent},
+	)
+}
+
+func nullableString(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+var _ ports.IssueRepository = (*IssueRepository)(nil)

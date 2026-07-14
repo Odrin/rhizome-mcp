@@ -7,10 +7,24 @@ import (
 const (
 	// CodeInvalidArgument identifies invalid caller input.
 	CodeInvalidArgument = "INVALID_ARGUMENT"
+	// CodeValidationError identifies malformed request input.
+	CodeValidationError = "VALIDATION_ERROR"
 	// CodeInvalidTransition identifies a forbidden issue status transition.
-	CodeInvalidTransition = "INVALID_TRANSITION"
+	CodeInvalidTransition = "INVALID_STATUS_TRANSITION"
+	// CodeInvalidEpicParent identifies a parent rule violation for an issue.
+	CodeInvalidEpicParent = "INVALID_EPIC_PARENT"
+	// CodeIssueNotFound identifies an issue reference that is not present.
+	CodeIssueNotFound = "ISSUE_NOT_FOUND"
+	// CodeIssueArchived identifies an issue that cannot be mutated.
+	CodeIssueArchived = "ISSUE_ARCHIVED"
+	// CodeVersionConflict identifies a failed optimistic version precondition.
+	CodeVersionConflict = "VERSION_CONFLICT"
 	// CodeLimitExceeded identifies input beyond a documented bound.
 	CodeLimitExceeded = "LIMIT_EXCEEDED"
+	// CodeIDGeneration identifies failure to generate a canonical internal ID.
+	CodeIDGeneration = "ID_GENERATION_FAILED"
+	// CodeProjectNotInitialized identifies a database without its required project row.
+	CodeProjectNotInitialized = "PROJECT_NOT_INITIALIZED"
 	// CodeStorageBusy identifies exhausted SQLite lock-contention retries.
 	CodeStorageBusy = "STORAGE_BUSY"
 	// CodeStorageUnavailable identifies inaccessible or failed storage.

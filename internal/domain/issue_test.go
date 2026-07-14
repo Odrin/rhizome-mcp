@@ -58,7 +58,7 @@ func TestApplyStatusTransitionBlockedReason(t *testing.T) {
 		{name: "enter blocked blank", from: domain.StatusReady, to: domain.StatusBlocked, reason: "  ", wantCode: domain.CodeInvalidArgument},
 		{name: "leave blocked clears reason", from: domain.StatusBlocked, to: domain.StatusReady, reason: "old reason", wantReason: ""},
 		{name: "non-blocked target clears supplied reason", from: domain.StatusReady, to: domain.StatusDone, reason: "stale", wantReason: ""},
-		{name: "invalid transition", from: domain.StatusOpen, to: domain.StatusDone, wantCode: domain.CodeInvalidTransition},
+		{name: "invalid transition", from: domain.StatusOpen, to: domain.StatusDone, wantCode: "INVALID_STATUS_TRANSITION"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

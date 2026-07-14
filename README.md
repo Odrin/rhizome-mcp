@@ -64,4 +64,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-This repository currently contains the product and technical specification. The next step is to create an implementation plan and begin development.
+Phase 1 foundation is complete. Phase 2 implementation is in progress, beginning with the internal issue-creation service and SQLite persistence slice. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
