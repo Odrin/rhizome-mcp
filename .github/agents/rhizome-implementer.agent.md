@@ -4,6 +4,7 @@ description: Implement one bounded rhizome-mcp task from an orchestrator brief w
 argument-hint: Provide a self-contained brief with scope, invariants, acceptance criteria, and required tests.
 tools: [vscode, execute, read, edit]
 agents: []
+model: GPT-5.6 Luna (copilot)
 user-invocable: false
 disable-model-invocation: false
 ---
