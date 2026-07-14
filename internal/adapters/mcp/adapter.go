@@ -153,11 +153,15 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolR
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
-	if len(input.Artifacts) != 0 {
-		return adapter.failure(unsupportedField("artifacts"))
-	}
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
+	}
+	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
+	for index, artifact := range input.Artifacts {
+		artifacts[index] = domain.ArtifactInput{
+			Type: domain.ArtifactType(artifact.Type), URI: artifact.URI,
+			Title: copyString(artifact.Title), Metadata: append([]byte(nil), artifact.Metadata...),
+		}
 	}
 	var acknowledgement *domain.AttemptAcknowledgement
 	if input.AcknowledgedChanges != nil {
@@ -169,13 +173,17 @@ func (adapter *adapter) finishAttempt(ctx context.Context, _ *sdkmcp.CallToolReq
 		TargetIssueStatus: statusPointer(input.TargetIssueStatus), BlockedReason: input.BlockedReason,
 		ReviewOutcome: reviewPointer(input.ReviewOutcome), FailureReasonCode: failurePointer(input.FailureReasonCode),
 		InterruptionReasonCode: interruptionPointer(input.InterruptionReasonCode), ReasonDetails: input.ReasonDetails,
-		AcknowledgedChanges: acknowledgement,
+		AcknowledgedChanges: acknowledgement, Artifacts: artifacts,
 	})
 	if err != nil {
 		return adapter.failure(err)
 	}
+	outputArtifacts := make([]artifactDTO, len(result.Artifacts))
+	for index, artifact := range result.Artifacts {
+		outputArtifacts[index] = artifactDTOFromDomain(artifact)
+	}
 	return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
-		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID}, "attempt finished")
+		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts}, "attempt finished")
 }
 
 func statusPointer(value *string) *domain.Status {

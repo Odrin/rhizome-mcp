@@ -127,9 +127,30 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 	if err != nil {
 		return ports.FinishAttemptResult{}, err
 	}
-	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	now := service.clock.Now().UTC()
+	artifacts := make([]domain.Artifact, len(normalized.Artifacts))
+	for index, inputArtifact := range normalized.Artifacts {
+		artifactID, err := service.ids.New()
+		if err != nil {
+			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "ID_GENERATION_FAILED"})
+		}
+		if _, err := ids.ParseStrict(artifactID); err != nil {
+			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "INVALID_ULID"})
+		}
+		var title *string
+		if inputArtifact.Title != nil {
+			value := *inputArtifact.Title
+			title = &value
+		}
+		artifacts[index] = domain.Artifact{
+			ID: artifactID, Type: inputArtifact.Type, URI: inputArtifact.URI, Title: title,
+			Metadata: append([]byte(nil), inputArtifact.Metadata...), CreatedAt: now,
+		}
+	}
+	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	return service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
-		AttemptID: normalized.AttemptID, TokenHash: hash[:], Input: normalized, OccurredAt: now,
+		AttemptID: normalized.AttemptID, TokenHash: hash[:], Input: normalized, Artifacts: artifacts, OccurredAt: now,
 	})
 }

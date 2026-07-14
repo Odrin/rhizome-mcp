@@ -172,6 +172,7 @@ type FinishAttemptInput struct {
 	InterruptionReasonCode *InterruptionReasonCode
 	ReasonDetails          *string
 	AcknowledgedChanges    *AttemptAcknowledgement
+	Artifacts              []ArtifactInput
 }
 
 func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
@@ -218,6 +219,10 @@ func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
 			return FinishAttemptInput{}, err
 		}
 	}
+	artifacts, err := ValidateArtifactInputs("artifacts", input.Artifacts)
+	if err != nil {
+		return FinishAttemptInput{}, err
+	}
 	if input.TargetIssueStatus != nil && (*input.TargetIssueStatus == StatusOpen || *input.TargetIssueStatus == StatusCancelled || !input.TargetIssueStatus.Valid()) {
 		return FinishAttemptInput{}, validationError("target_issue_status", "INVALID_ENUM", "must be done, review, ready, or blocked")
 	}
@@ -261,6 +266,7 @@ func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
 	}
 	normalized := input
 	normalized.NextSteps, normalized.Verification = next, verification
+	normalized.Artifacts = artifacts
 	normalized.TargetIssueStatus = copyFinishStatus(input.TargetIssueStatus)
 	normalized.BlockedReason = copyFinishString(input.BlockedReason)
 	normalized.ReviewOutcome = copyFinishReview(input.ReviewOutcome)

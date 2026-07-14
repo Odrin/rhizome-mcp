@@ -187,7 +187,7 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
 	}
 	now := command.OccurredAt.UTC()
-	artifacts, err := validateSaveAttemptNoteArtifacts(command.Artifacts, now)
+	artifacts, err := validateAttemptArtifacts(command.Artifacts, now)
 	if err != nil {
 		return ports.SaveAttemptNoteResult{}, err
 	}
@@ -291,7 +291,7 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 	return result, nil
 }
 
-func validateSaveAttemptNoteArtifacts(values []domain.Artifact, occurredAt time.Time) ([]domain.Artifact, error) {
+func validateAttemptArtifacts(values []domain.Artifact, occurredAt time.Time) ([]domain.Artifact, error) {
 	if len(values) > domain.MaxArtifactsPerAttemptMutation {
 		return nil, domain.NewError(domain.CodeLimitExceeded, "artifacts exceeds the maximum count of 20", false,
 			domain.Detail{Field: "artifacts", Code: "MAX_ITEMS", Message: "maximum 20"})
@@ -300,7 +300,7 @@ func validateSaveAttemptNoteArtifacts(values []domain.Artifact, occurredAt time.
 	for index, artifact := range values {
 		if _, err := ids.ParseStrict(artifact.ID); err != nil || artifact.IssueID != "" || artifact.AttemptID != nil ||
 			!artifact.CreatedAt.Equal(occurredAt) || artifact.CreatedAt.Location() != time.UTC {
-			return nil, domain.NewError(domain.CodeInvalidArgument, "attempt note artifact command is invalid", false,
+			return nil, domain.NewError(domain.CodeInvalidArgument, "attempt artifact command is invalid", false,
 				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "]", Code: "INVALID_VALUE"})
 		}
 		inputs[index] = domain.ArtifactInput{
@@ -329,6 +329,10 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		return ports.FinishAttemptResult{}, err
 	}
 	now := command.OccurredAt.UTC()
+	artifacts, err := validateAttemptArtifacts(command.Artifacts, now)
+	if err != nil {
+		return ports.FinishAttemptResult{}, err
+	}
 	timestamp := now.Format(time.RFC3339Nano)
 	var result ports.FinishAttemptResult
 	var leaseExpired bool
@@ -482,6 +486,29 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		if affected != 1 {
 			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
 		}
+		result.Artifacts = make([]domain.Artifact, len(artifacts))
+		for index, artifact := range artifacts {
+			var title any
+			if artifact.Title != nil {
+				title = *artifact.Title
+			}
+			var metadata any
+			if artifact.Metadata != nil {
+				metadata = string(artifact.Metadata)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(
+				id, issue_id, attempt_id, type, uri, title, metadata, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, artifact.ID, issue.ID, command.AttemptID,
+				artifact.Type, artifact.URI, title, metadata, timestamp); err != nil {
+				return err
+			}
+			attemptID := command.AttemptID
+			result.Artifacts[index] = domain.Artifact{
+				ID: artifact.ID, IssueID: issue.ID, AttemptID: &attemptID, Type: artifact.Type,
+				URI: artifact.URI, Title: domain.CloneArtifact(artifact).Title,
+				Metadata: append([]byte(nil), artifact.Metadata...), CreatedAt: now,
+			}
+		}
 		eventTarget := domain.Status("")
 		if input.Outcome == domain.AttemptOutcomeCompleted {
 			eventTarget = target
@@ -548,7 +575,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			v := *input.InterruptionReasonCode
 			attempt.InterruptionReasonCode = &v
 		}
-		result = ports.FinishAttemptResult{Attempt: attempt, Issue: issue, Warnings: warnings, LatestEventID: latestEventID}
+		result = ports.FinishAttemptResult{Attempt: attempt, Issue: issue, Warnings: warnings, LatestEventID: latestEventID, Artifacts: result.Artifacts}
 		return nil
 	})
 	if err != nil {

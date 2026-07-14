@@ -142,6 +142,72 @@ func TestAttemptServiceFinishRejectsInvalidInputBeforeRepository(t *testing.T) {
 	}
 }
 
+func TestAttemptServiceFinishGeneratesAndPropagatesArtifacts(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.FixedZone("test", 2*60*60))
+	repository := &recordingAttemptRepository{}
+	generator := sequenceAttemptIDGenerator{ids: []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FAY",
+		"01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+	}}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(now), &generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "result"
+	metadata := json.RawMessage(`{ "kind": "result" }`)
+	target := domain.StatusDone
+	_, err = service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary", TargetIssueStatus: &target,
+		Artifacts: []domain.ArtifactInput{
+			{Type: domain.ArtifactTypeFile, URI: "build/result.txt", Title: &title, Metadata: metadata},
+			{Type: domain.ArtifactTypeURL, URI: "https://example.invalid/build/42"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedHash := sha256.Sum256([]byte("token"))
+	if !reflect.DeepEqual(repository.finishCommand.TokenHash, expectedHash[:]) ||
+		len(repository.finishCommand.Artifacts) != 2 ||
+		repository.finishCommand.Artifacts[0].ID != generator.ids[0] ||
+		repository.finishCommand.Artifacts[1].ID != generator.ids[1] ||
+		repository.finishCommand.Artifacts[0].IssueID != "" || repository.finishCommand.Artifacts[0].AttemptID != nil ||
+		string(repository.finishCommand.Artifacts[0].Metadata) != `{"kind":"result"}` ||
+		!repository.finishCommand.Artifacts[0].CreatedAt.Equal(now.UTC()) ||
+		!repository.finishCommand.OccurredAt.Equal(now.UTC()) || repository.finishCommand.OccurredAt.Location() != time.UTC {
+		t.Fatalf("finish command = %#v", repository.finishCommand)
+	}
+	title = "changed"
+	metadata[2] = 'x'
+	if *repository.finishCommand.Artifacts[0].Title != "result" ||
+		string(repository.finishCommand.Artifacts[0].Metadata) != `{"kind":"result"}` {
+		t.Fatal("finish artifact propagation was not defensive")
+	}
+}
+
+func TestAttemptServiceFinishRejectsInvalidGeneratedArtifactIDBeforeRepository(t *testing.T) {
+	repository := &recordingAttemptRepository{}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Now()), &sequenceAttemptIDGenerator{ids: []string{"bad"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.FinishAttempt(context.Background(), domain.FinishAttemptInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Outcome: domain.AttemptOutcomeFailed, ResultSummary: "summary",
+		FailureReasonCode: failureReasonPointer(domain.FailureReasonOther),
+		Artifacts:         []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "result"}},
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeIDGeneration}) || repository.finishCalled {
+		t.Fatalf("error = %v, repository called = %t", err, repository.finishCalled)
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || len(domainErr.Details) != 1 ||
+		domainErr.Details[0].Field != "artifacts[0].id" {
+		t.Fatalf("generated ID details = %#v", err)
+	}
+}
+
 type recordingAttemptRepository struct {
 	command       ports.SaveAttemptNoteCommand
 	finishCommand ports.FinishAttemptCommand

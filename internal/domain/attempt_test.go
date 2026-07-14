@@ -76,10 +76,15 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 	target := domain.StatusReview
 	next := []string{"resume"}
 	verification := []string{"tests passed"}
+	title := "result"
+	metadata := json.RawMessage(`{"kind":"result"}`)
 	input := domain.FinishAttemptInput{
 		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
 		Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
 		NextSteps: next, Verification: verification, TargetIssueStatus: &target,
+		Artifacts: []domain.ArtifactInput{{
+			Type: domain.ArtifactTypeFile, URI: "build/result.txt", Title: &title, Metadata: metadata,
+		}},
 	}
 	normalized, err := input.Validate()
 	if err != nil {
@@ -88,6 +93,12 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 	next[0], verification[0] = "changed", "changed"
 	if normalized.NextSteps[0] != "resume" || normalized.Verification[0] != "tests passed" {
 		t.Fatal("finish slices were not copied")
+	}
+	title = "changed"
+	metadata[2] = 'x'
+	if len(normalized.Artifacts) != 1 || *normalized.Artifacts[0].Title != "result" ||
+		string(normalized.Artifacts[0].Metadata) != `{"kind":"result"}` {
+		t.Fatalf("finish artifacts were not defensively copied: %#v", normalized.Artifacts)
 	}
 	if err := domain.ValidateFinishAttemptForKind(normalized, domain.AttemptKindWork); err != nil {
 		t.Fatal(err)
@@ -101,6 +112,10 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeInterrupted, ResultSummary: "summary"},
 		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary", NextSteps: []string{" "}},
 		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary", Verification: []string{" "}},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
+			Artifacts: []domain.ArtifactInput{{Type: domain.ArtifactTypeFile, URI: "../outside"}}},
+		{AttemptID: input.AttemptID, LeaseToken: "token", Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
+			Artifacts: make([]domain.ArtifactInput, domain.MaxArtifactsPerAttemptMutation+1)},
 	} {
 		if _, err := bad.Validate(); err == nil {
 			t.Fatalf("invalid finish input accepted: %#v", bad)

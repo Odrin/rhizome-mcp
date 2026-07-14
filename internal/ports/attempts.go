@@ -53,6 +53,7 @@ type FinishAttemptCommand struct {
 	AttemptID  string
 	TokenHash  []byte
 	Input      domain.FinishAttemptInput
+	Artifacts  []domain.Artifact
 	OccurredAt time.Time
 }
 
@@ -61,6 +62,7 @@ type FinishAttemptResult struct {
 	Issue         domain.Issue
 	Warnings      []string
 	LatestEventID int64
+	Artifacts     []domain.Artifact
 }
 
 // AttemptRepository executes all attempt lifecycle mutations atomically.

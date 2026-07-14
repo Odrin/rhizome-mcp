@@ -452,11 +452,11 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	}
 	invalid := call(t, client, "renew_attempt", map[string]any{"attempt_id": output.Attempt.ID, "lease_token": "bad"})
 	assertDomainError(t, invalid, "INVALID_LEASE_TOKEN", false)
-	unsupportedFinishArtifacts := call(t, client, "finish_attempt", map[string]any{
+	invalidFinishArtifacts := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
-		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"type": "file", "uri": "file.txt"}},
+		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"type": "file", "uri": "../outside"}},
 	})
-	assertDomainError(t, unsupportedFinishArtifacts, "INVALID_ARGUMENT", false)
+	assertDomainError(t, invalidFinishArtifacts, "INVALID_ARGUMENT", false)
 	unsupportedFinishIdempotency := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
 		"result_summary": "done", "failure_reason_code": "other", "idempotency_key": "unsupported",
@@ -465,6 +465,10 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	finished := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
 		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
+		"artifacts": []any{
+			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
+			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
+		},
 	})
 	var finishOutput struct {
 		Attempt struct {
@@ -477,13 +481,51 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		} `json:"issue"`
 		LatestEventID int64    `json:"latest_event_id"`
 		Warnings      []string `json:"warnings"`
+		Artifacts     []struct {
+			ID        string         `json:"id"`
+			IssueID   string         `json:"issue_id"`
+			AttemptID *string        `json:"attempt_id"`
+			Type      string         `json:"type"`
+			URI       string         `json:"uri"`
+			Title     *string        `json:"title"`
+			Metadata  map[string]any `json:"metadata"`
+			CreatedAt time.Time      `json:"created_at"`
+		} `json:"artifacts"`
 	}
 	decodeStructured(t, finished, &finishOutput)
 	if finished.IsError || finishOutput.Attempt.Status != "completed" || finishOutput.Issue.Status != "done" ||
 		finishOutput.Attempt.ResultSummary == nil || *finishOutput.Attempt.ResultSummary != "implemented" ||
 		!reflect.DeepEqual(finishOutput.Attempt.Verification, []string{"tests"}) || finishOutput.LatestEventID <= 0 ||
-		finishOutput.Warnings == nil {
+		finishOutput.Warnings == nil || len(finishOutput.Artifacts) != 2 ||
+		finishOutput.Artifacts[0].ID == "" || finishOutput.Artifacts[0].IssueID != issue.ID ||
+		finishOutput.Artifacts[0].AttemptID == nil || *finishOutput.Artifacts[0].AttemptID != output.Attempt.ID ||
+		finishOutput.Artifacts[0].Title == nil || *finishOutput.Artifacts[0].Title != "service" ||
+		finishOutput.Artifacts[0].Metadata["language"] != "go" {
 		t.Fatalf("finish output = %#v", finishOutput)
+	}
+	emptyCreated := call(t, client, "create_issue", map[string]any{"type": "task", "title": "empty final artifacts", "status": "ready"})
+	var emptyIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, emptyCreated, &emptyIssue)
+	emptyClaim := call(t, client, "claim_issue", map[string]any{"issue_id": emptyIssue.ID})
+	var emptyClaimOutput struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, emptyClaim, &emptyClaimOutput)
+	emptyFinished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": emptyClaimOutput.Attempt.ID, "lease_token": emptyClaimOutput.LeaseToken,
+		"outcome": "failed", "result_summary": "no artifacts", "failure_reason_code": "other",
+	})
+	var emptyFinishOutput struct {
+		Artifacts []json.RawMessage `json:"artifacts"`
+	}
+	decodeStructured(t, emptyFinished, &emptyFinishOutput)
+	if emptyFinished.IsError || emptyFinishOutput.Artifacts == nil || len(emptyFinishOutput.Artifacts) != 0 {
+		t.Fatalf("empty finish artifacts = %#v", emptyFinishOutput)
 	}
 }
 

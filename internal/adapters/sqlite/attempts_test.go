@@ -596,6 +596,10 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 		Outcome: domain.AttemptOutcomeCompleted, TargetIssueStatus: statusPointer(domain.StatusDone),
 		ResultSummary: "implemented", NextSteps: []string{"follow up"},
 		Verification: []string{"go test ./..."},
+		Artifacts: []domain.ArtifactInput{
+			{Type: domain.ArtifactTypeFile, URI: "build/result.txt", Title: stringPointer("result"), Metadata: json.RawMessage(`{"kind":"result"}`)},
+			{Type: domain.ArtifactTypeURL, URI: "https://example.invalid/build/42"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -604,7 +608,12 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 		finished.Attempt.FinishedAt == nil || !finished.Attempt.FinishedAt.Equal(fixture.clock.Now()) ||
 		finished.Attempt.ResultSummary == nil || *finished.Attempt.ResultSummary != "implemented" ||
 		!equalStrings(finished.Attempt.NextSteps, []string{"follow up"}) ||
-		!equalStrings(finished.Attempt.Verification, []string{"go test ./..."}) {
+		!equalStrings(finished.Attempt.Verification, []string{"go test ./..."}) || len(finished.Artifacts) != 2 ||
+		finished.Artifacts[0].IssueID != issue.ID || finished.Artifacts[0].AttemptID == nil ||
+		*finished.Artifacts[0].AttemptID != claim.Attempt.ID ||
+		finished.Artifacts[0].Title == nil || *finished.Artifacts[0].Title != "result" ||
+		string(finished.Artifacts[0].Metadata) != `{"kind":"result"}` ||
+		!finished.Artifacts[0].CreatedAt.Equal(fixture.clock.Now()) {
 		t.Fatalf("finished attempt = %#v", finished.Attempt)
 	}
 	if finished.Issue.Status != domain.StatusDone || finished.Issue.Version != claim.Issue.Version+1 ||
@@ -614,6 +623,7 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 	var status, resultSummary, nextJSON, verificationJSON string
 	var finishedAt, failureCode, interruptionCode sql.NullString
 	var eventPayload string
+	var artifactCount int
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
 		if err := query.QueryRowContext(ctx, `SELECT status, finished_at, result_summary, next_steps_json,
 			verification_json, failure_reason_code, interruption_reason_code
@@ -621,12 +631,15 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 			&nextJSON, &verificationJSON, &failureCode, &interruptionCode); err != nil {
 			return err
 		}
-		return query.QueryRowContext(ctx, `SELECT payload FROM issue_events
-			WHERE attempt_id = ? AND event_type = 'attempt_completed' ORDER BY id`, claim.Attempt.ID).Scan(&eventPayload)
+		if err := query.QueryRowContext(ctx, `SELECT payload FROM issue_events
+			WHERE attempt_id = ? AND event_type = 'attempt_completed' ORDER BY id`, claim.Attempt.ID).Scan(&eventPayload); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if status != string(domain.AttemptStatusCompleted) || !finishedAt.Valid || !finishedAtTimeIs(finishedAt.String, fixture.clock.Now()) ||
+	if status != string(domain.AttemptStatusCompleted) || artifactCount != 2 || !finishedAt.Valid || !finishedAtTimeIs(finishedAt.String, fixture.clock.Now()) ||
 		resultSummary != "implemented" || nextJSON != `["follow up"]` ||
 		verificationJSON != `["go test ./..."]` || failureCode.Valid || interruptionCode.Valid {
 		t.Fatalf("stored completion = status %q finished %q summary %q next %q verification %q failure %#v interruption %#v",
@@ -639,7 +652,10 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 	if payload["attempt_id"] != claim.Attempt.ID || payload["outcome"] != string(domain.AttemptOutcomeCompleted) ||
 		payload["target_status"] != string(domain.StatusDone) ||
 		strings.Contains(eventPayload, claim.LeaseToken) || strings.Contains(eventPayload, "implemented") ||
-		strings.Contains(eventPayload, "follow up") || strings.Contains(eventPayload, "go test ./...") {
+		strings.Contains(eventPayload, "follow up") || strings.Contains(eventPayload, "go test ./...") ||
+		strings.Contains(eventPayload, "build/result.txt") || strings.Contains(eventPayload, `"title":"result"`) ||
+		strings.Contains(eventPayload, `"kind":"result"`) ||
+		strings.Contains(eventPayload, "https://example.invalid/build/42") {
 		t.Fatalf("unsafe completion event = %q", eventPayload)
 	}
 	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 1 {
@@ -651,6 +667,66 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 func finishedAtTimeIs(value string, want time.Time) bool {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	return err == nil && parsed.Equal(want)
+}
+
+func TestFinishAttemptDuplicateArtifactRollsBackCompletion(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-rollback")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "rollback completion", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingID := "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO artifacts(
+			id, issue_id, attempt_id, type, uri, title, metadata, created_at
+		) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`, existingID, issue.ID, claim.Attempt.ID,
+			domain.ArtifactTypeOther, "existing", fixture.clock.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte(claim.LeaseToken))
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	_, err = repository.FinishAttempt(fixture.ctx, ports.FinishAttemptCommand{
+		AttemptID: claim.Attempt.ID, TokenHash: hash[:], Input: input,
+		Artifacts: []domain.Artifact{{
+			ID: existingID, Type: domain.ArtifactTypeOther, URI: "duplicate", CreatedAt: fixture.clock.Now(),
+		}},
+		OccurredAt: fixture.clock.Now(),
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeStorageConstraint}) {
+		t.Fatalf("duplicate final artifact error = %v", err)
+	}
+	var attemptStatus, issueStatus string
+	var issueVersion int64
+	var artifactCount, completionEvents int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&attemptStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, version FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus, &issueVersion); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&completionEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != string(domain.AttemptStatusActive) || issueStatus != string(domain.StatusReady) ||
+		issueVersion != issue.Issue.Version || artifactCount != 1 || completionEvents != 0 {
+		t.Fatalf("completion rollback state = attempt %q issue %q version %d artifacts %d events %d",
+			attemptStatus, issueStatus, issueVersion, artifactCount, completionEvents)
+	}
 }
 
 func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
@@ -679,6 +755,7 @@ func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
 			input.FailureReasonCode = test.failure
 			input.InterruptionReasonCode = test.interruption
 			input.ReasonDetails = pointer("private diagnostic")
+			input.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "result/" + test.name}}
 			finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
 			if err != nil {
 				t.Fatal(err)
@@ -691,6 +768,7 @@ func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
 				t.Fatalf("finish state changed issue: before=%#v after=%#v", before, finished.Issue)
 			}
 			var status, payload string
+			var artifactCount int
 			var storedFailure, storedInterruption, storedDetails sql.NullString
 			if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
 				if err := query.QueryRowContext(ctx, `SELECT status, failure_reason_code,
@@ -698,12 +776,15 @@ func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
 					claim.Attempt.ID).Scan(&status, &storedFailure, &storedInterruption, &storedDetails); err != nil {
 					return err
 				}
-				return query.QueryRowContext(ctx, `SELECT payload FROM issue_events
-					WHERE attempt_id = ? AND event_type = ? ORDER BY id`, claim.Attempt.ID, test.eventType).Scan(&payload)
+				if err := query.QueryRowContext(ctx, `SELECT payload FROM issue_events
+					WHERE attempt_id = ? AND event_type = ? ORDER BY id`, claim.Attempt.ID, test.eventType).Scan(&payload); err != nil {
+					return err
+				}
+				return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if status != string(test.outcome) || !storedDetails.Valid || storedDetails.String != "private diagnostic" ||
+			if status != string(test.outcome) || artifactCount != 1 || !storedDetails.Valid || storedDetails.String != "private diagnostic" ||
 				(test.failure == nil && storedFailure.Valid) || (test.failure != nil && (!storedFailure.Valid || storedFailure.String != string(*test.failure))) ||
 				(test.interruption == nil && storedInterruption.Valid) || (test.interruption != nil && (!storedInterruption.Valid || storedInterruption.String != string(*test.interruption))) ||
 				strings.Contains(payload, "summary") || strings.Contains(payload, "private diagnostic") ||
@@ -773,12 +854,23 @@ func TestFinishAttemptReviewMappingAndShapeRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, finishInput(workClaim, domain.AttemptOutcomeCompleted)); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+	workInput := finishInput(workClaim, domain.AttemptOutcomeCompleted)
+	workInput.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "invalid-shape"}}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, workInput); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("missing work target error = %v", err)
 	}
 	requireAttemptActive(t, fixture, workClaim)
 	if countAttemptEvents(t, fixture, workClaim.Attempt.ID, "attempt_completed") != 0 {
 		t.Fatal("invalid work shape appended completion event")
+	}
+	var artifactCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, workClaim.Attempt.ID).Scan(&artifactCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if artifactCount != 0 {
+		t.Fatalf("invalid completion attached %d artifacts", artifactCount)
 	}
 
 	review := createAttemptIssue(t, fixture, "review shape", domain.StatusReview)
@@ -789,6 +881,7 @@ func TestFinishAttemptReviewMappingAndShapeRejection(t *testing.T) {
 	reviewInput := finishInput(reviewClaim, domain.AttemptOutcomeCompleted)
 	reviewInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
 	reviewInput.TargetIssueStatus = statusPointer(domain.StatusDone)
+	reviewInput.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "invalid-review-shape"}}
 	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, reviewInput); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("invalid review shape error = %v", err)
 	}
@@ -810,12 +903,22 @@ func TestFinishAttemptAuthorizationAndExpiryPreserveCompletionData(t *testing.T)
 	wrongToken := finishInput(claim, domain.AttemptOutcomeCompleted)
 	wrongToken.LeaseToken = "wrong-token"
 	wrongToken.TargetIssueStatus = statusPointer(domain.StatusDone)
+	wrongToken.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "wrong-token"}}
 	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, wrongToken); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidLeaseToken}) {
 		t.Fatalf("wrong token error = %v", err)
 	}
 	requireAttemptActive(t, fixture, claim)
 	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {
 		t.Fatal("wrong token appended completion event")
+	}
+	var artifactCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if artifactCount != 0 {
+		t.Fatalf("wrong token attached %d artifacts", artifactCount)
 	}
 	missing := finishInput(claim, domain.AttemptOutcomeCompleted)
 	missing.AttemptID = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
@@ -826,6 +929,7 @@ func TestFinishAttemptAuthorizationAndExpiryPreserveCompletionData(t *testing.T)
 	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds) * time.Second)
 	valid := finishInput(claim, domain.AttemptOutcomeCompleted)
 	valid.TargetIssueStatus = statusPointer(domain.StatusDone)
+	valid.Artifacts = []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "expired"}}
 	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, valid); !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
 		t.Fatalf("boundary finish error = %v", err)
 	}
@@ -843,6 +947,14 @@ func TestFinishAttemptAuthorizationAndExpiryPreserveCompletionData(t *testing.T)
 	}
 	if status != string(domain.AttemptStatusExpired) {
 		t.Fatalf("expired attempt status = %q", status)
+	}
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if artifactCount != 0 {
+		t.Fatalf("expired attempt attached %d artifacts", artifactCount)
 	}
 	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, valid); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
 		t.Fatalf("second finish after expiry = %v", err)
@@ -871,10 +983,22 @@ func TestFinishAttemptChangeAcknowledgementsAndWarnings(t *testing.T) {
 		}
 		input := finishInput(claim, domain.AttemptOutcomeCompleted)
 		input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		input.Artifacts = []domain.ArtifactInput{{
+			Type: domain.ArtifactTypeFile, URI: "rejected-description-artifact",
+		}}
 		finished, err := fixture.attempts.FinishAttempt(fixture.ctx, input)
 		requireAcknowledgementError(t, err, "description")
 		if finished.Attempt.ID != "" {
 			t.Fatal("rejected completion returned an attempt")
+		}
+		var artifactCount int
+		if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+			return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if artifactCount != 0 {
+			t.Fatalf("rejected completion persisted %d artifacts", artifactCount)
 		}
 		requireAttemptActive(t, fixture, claim)
 		if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 0 {

@@ -761,6 +761,7 @@ attempt
 issue
 warnings
 latest_event_id
+artifacts
 ```
 
 Completion checks:

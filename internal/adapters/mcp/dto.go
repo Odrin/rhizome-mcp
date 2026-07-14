@@ -426,10 +426,11 @@ type attemptDTO struct {
 }
 
 type finishAttemptOutput struct {
-	Attempt       attemptDTO `json:"attempt"`
-	Issue         issueDTO   `json:"issue"`
-	Warnings      []string   `json:"warnings"`
-	LatestEventID int64      `json:"latest_event_id"`
+	Attempt       attemptDTO    `json:"attempt"`
+	Issue         issueDTO      `json:"issue"`
+	Warnings      []string      `json:"warnings"`
+	LatestEventID int64         `json:"latest_event_id"`
+	Artifacts     []artifactDTO `json:"artifacts"`
 }
 
 type emptyWorkContextDTO struct{}
