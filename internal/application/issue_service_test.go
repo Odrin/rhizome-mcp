@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,11 +17,13 @@ type recordingIssueRepository struct {
 	command        ports.CreateIssueCommand
 	updateCommand  ports.UpdateIssueCommand
 	archiveCommand ports.ArchiveIssueCommand
+	listCommand    ports.ListIssuesCommand
 	issue          domain.Issue
 	identifier     domain.IssueIdentifier
 	createCalled   bool
 	updateCalled   bool
 	archiveCalled  bool
+	listCalled     bool
 	getCalled      bool
 }
 
@@ -56,6 +59,12 @@ func (repository *recordingIssueRepository) ListLabels(_ context.Context, _ port
 	return domain.LabelList{}, nil
 }
 
+func (repository *recordingIssueRepository) ListIssues(_ context.Context, command ports.ListIssuesCommand) (domain.IssueList, error) {
+	repository.listCalled = true
+	repository.listCommand = command
+	return domain.IssueList{}, nil
+}
+
 type fixedIDGenerator struct {
 	id  string
 	err error
@@ -83,6 +92,24 @@ func TestIssueServiceCreateIssueValidatesGeneratesAndDelegates(t *testing.T) {
 	}
 	if result.ID != repository.command.ID || result.DisplayID != "ISSUE-7" || result.SequenceNo != 7 {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestIssueServiceListIssuesValidatesCopiesAndDelegates(t *testing.T) {
+	repository := &recordingIssueRepository{}
+	service, err := application.NewIssueService(repository, clock.NewFakeClock(time.Unix(0, 0)),
+		fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := []string{" Zebra ", "ALPHA", "alpha"}
+	if _, err := service.ListIssues(context.Background(), domain.ListIssuesInput{Labels: labels}); err != nil {
+		t.Fatal(err)
+	}
+	labels[0] = "changed"
+	if !repository.listCalled || repository.listCommand.Input.Limit != 20 ||
+		!reflect.DeepEqual(repository.listCommand.Input.Labels, []string{"ALPHA", "Zebra"}) {
+		t.Fatalf("list command = %#v", repository.listCommand)
 	}
 }
 

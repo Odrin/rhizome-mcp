@@ -391,17 +391,38 @@ func scanIssueProjection(row *sql.Row) (domain.Issue, error) {
 		createdBySessionID, closedAt, archivedAt, archivedBySessionID sql.NullString
 		sequenceNo, version                                           int64
 	)
-	if err := row.Scan(
-		&id, &sequenceNo, &issueType, &title, &description, &acceptanceCriteria,
-		&status, &priority, &parentID, &blockedReason, &version,
-		&createdBySessionID, &createdAt, &updatedAt, &closedAt,
-		&archivedAt, &archivedBySessionID,
+	if err := scanIssueProjectionColumns(row, &id, &sequenceNo, &issueType, &title, &description,
+		&acceptanceCriteria, &parentID, &blockedReason, &version,
+		&createdBySessionID, &closedAt, &archivedAt, &archivedBySessionID,
+		&status, &priority, &createdAt, &updatedAt,
 	); err != nil {
-		if err == sql.ErrNoRows {
-			return domain.Issue{}, err
+		if err != sql.ErrNoRows {
+			return domain.Issue{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
 		}
-		return domain.Issue{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+		return domain.Issue{}, err
 	}
+	return parseIssueProjectionColumns(id, sequenceNo, issueType, title, description, acceptanceCriteria,
+		parentID, blockedReason, status, priority, version, createdBySessionID, createdAt, updatedAt,
+		closedAt, archivedAt, archivedBySessionID)
+}
+
+func scanIssueProjectionColumns(scanner labelScanner, id *string, sequenceNo *int64, issueType, title *string,
+	description, acceptanceCriteria, parentID, blockedReason *sql.NullString, version *int64,
+	createdBySessionID, closedAt, archivedAt, archivedBySessionID *sql.NullString,
+	status, priority, createdAt, updatedAt *string,
+) error {
+	return scanner.Scan(
+		id, sequenceNo, issueType, title, description, acceptanceCriteria,
+		status, priority, parentID, blockedReason, version,
+		createdBySessionID, createdAt, updatedAt, closedAt, archivedAt, archivedBySessionID,
+	)
+}
+
+func parseIssueProjectionColumns(id string, sequenceNo int64, issueType, title string,
+	description, acceptanceCriteria, parentID, blockedReason sql.NullString,
+	status, priority string, version int64, createdBySessionID sql.NullString, createdAt, updatedAt string,
+	closedAt, archivedAt, archivedBySessionID sql.NullString,
+) (domain.Issue, error) {
 	parsedType, err := domain.ParseType(issueType)
 	if err != nil {
 		return domain.Issue{}, corruptIssueProjection(err)

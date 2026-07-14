@@ -53,6 +53,11 @@ type ListLabelsCommand struct {
 	Input domain.ListLabelsInput
 }
 
+// ListIssuesCommand contains a validated page request.
+type ListIssuesCommand struct {
+	Input domain.ListIssuesInput
+}
+
 // IssueRepository reads issue projections and persists issue mutations.
 type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
@@ -60,4 +65,5 @@ type IssueRepository interface {
 	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
 	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)
+	ListIssues(context.Context, ListIssuesCommand) (domain.IssueList, error)
 }

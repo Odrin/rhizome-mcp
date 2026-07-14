@@ -133,6 +133,15 @@ func (service *IssueService) ListLabels(ctx context.Context, input domain.ListLa
 	return service.repository.ListLabels(ctx, ports.ListLabelsCommand{Input: normalized})
 }
 
+// ListIssues validates and returns a deterministic cursor-paginated issue page.
+func (service *IssueService) ListIssues(ctx context.Context, input domain.ListIssuesInput) (domain.IssueList, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return domain.IssueList{}, err
+	}
+	return service.repository.ListIssues(ctx, ports.ListIssuesCommand{Input: normalized})
+}
+
 func (service *IssueService) newLabelIDs(labels []string, enabled bool) ([]string, error) {
 	if !enabled {
 		return nil, nil
