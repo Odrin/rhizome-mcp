@@ -64,4 +64,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-Phases 1 and 2 are complete. The stdio MCP server currently exposes project metadata, labels, and the issue lifecycle tools; later-phase relations, attempts, search, and CLI functionality remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
+Phases 1 and 2 are complete, and relation management is now available alongside the issue lifecycle tools. Graph and planning tools, attempts, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.

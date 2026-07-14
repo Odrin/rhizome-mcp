@@ -44,10 +44,10 @@ Exit gate: the issue lifecycle works through an MCP client and survives restart,
 
 ## Phase 3: relations, graphs, and planning
 
-- Implement canonical relations, transactional blocker-cycle detection, and blocker-derived claimability.
-- Build one bounded breadth-first graph engine reused by issue and planning projections.
-- Implement deterministic plan validation, atomic application, and idempotent response replay.
-- Deliver `manage_issue_relation`, `get_issue_graph`, `get_planning_graph`, `validate_issue_plan`, and `apply_issue_plan`.
+- **Relation-management subunit completed on 2026-07-14 (commit `85d97e7`).** Implemented canonical relation operations, in-transaction blocker-cycle rejection, blocker-derived list projections, and the ninth MCP tool, `manage_issue_relation`, with focused tests.
+- **Pending:** build one bounded breadth-first graph engine reused by issue and planning projections.
+- **Pending:** implement deterministic plan validation, atomic application, and idempotent response replay.
+- **Pending:** deliver `get_issue_graph`, `get_planning_graph`, `validate_issue_plan`, and `apply_issue_plan`.
 
 Exit gate: graph bounds, relation races, cycle rejection, deterministic validation, rollback, and concurrent idempotent application pass.
 
