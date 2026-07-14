@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
@@ -191,15 +193,15 @@ func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.
 		if kind == domain.AttemptNoteKindCheckpoint {
 			content = "durable state"
 		}
-		note, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		result, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
 			AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: kind, Content: content,
 			NextSteps: []string{"next " + string(kind)}, Important: kind == domain.AttemptNoteKindCheckpoint,
 		})
-		if err != nil || note.ID == "" || note.CreatedAt != source.Now() || note.Kind != kind {
-			t.Fatalf("save %q = %#v, %v", kind, note, err)
+		if err != nil || result.Note.ID == "" || result.Note.CreatedAt != source.Now() || result.Note.Kind != kind {
+			t.Fatalf("save %q = %#v, %v", kind, result, err)
 		}
 		if kind == domain.AttemptNoteKindCheckpoint {
-			checkpoint = note
+			checkpoint = result.Note
 		}
 	}
 	if _, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
@@ -286,6 +288,111 @@ func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.
 	}
 	if noteCount != 4 || expiredEvents != 1 || status != string(domain.AttemptStatusExpired) {
 		t.Fatalf("boundary state = notes %d expiry events %d status %q", noteCount, expiredEvents, status)
+	}
+}
+
+func TestSaveAttemptNotePersistsArtifactsAtomicallyAndSafely(t *testing.T) {
+	ctx := context.Background()
+	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "artifacts.db"), sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAS", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueService, err := application.NewIssueService(issues, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "artifact note", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewAttemptService(repository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := service.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: domain.AttemptNoteKindCheckpoint,
+		Content: "private note body", Artifacts: []domain.ArtifactInput{
+			{Type: domain.ArtifactTypeFile, URI: "internal/application/attempt_service.go", Title: stringPointer("service"), Metadata: json.RawMessage(`{"language":"go"}`)},
+			{Type: domain.ArtifactTypeURL, URI: "https://example.invalid/build/42"},
+		},
+	})
+	if err != nil || len(result.Artifacts) != 2 {
+		t.Fatalf("save result = %#v, %v", result, err)
+	}
+	for index, artifact := range result.Artifacts {
+		if artifact.ID == "" || artifact.IssueID != issue.ID || artifact.AttemptID == nil ||
+			*artifact.AttemptID != claim.Attempt.ID || !artifact.CreatedAt.Equal(source.Now()) {
+			t.Fatalf("artifact %d = %#v", index, artifact)
+		}
+	}
+	var noteCount, artifactCount int
+	var payload string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes`).Scan(&noteCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT payload FROM issue_events WHERE event_type = 'checkpoint_saved' ORDER BY id DESC LIMIT 1`).Scan(&payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if noteCount != 1 || artifactCount != 2 || strings.Contains(payload, "internal/application/attempt_service.go") ||
+		strings.Contains(payload, "service") || strings.Contains(payload, "language") ||
+		strings.Contains(payload, "private note body") || strings.Contains(payload, claim.LeaseToken) {
+		t.Fatalf("atomic or unsafe state = notes %d artifacts %d payload %q", noteCount, artifactCount, payload)
+	}
+
+	hash := sha256.Sum256([]byte(claim.LeaseToken))
+	duplicate := ports.SaveAttemptNoteCommand{
+		NoteID: "01ARZ3NDEKTSV4RRFFQ69G5FAW", AttemptID: claim.Attempt.ID, TokenHash: hash[:],
+		Kind: domain.AttemptNoteKindProgress, Content: "rollback", OccurredAt: source.Now(),
+		Artifacts: []domain.Artifact{{
+			ID: result.Artifacts[0].ID, Type: domain.ArtifactTypeOther, URI: "duplicate", CreatedAt: source.Now(),
+		}},
+	}
+	if _, err := repository.SaveAttemptNote(ctx, duplicate); !errors.Is(err, &domain.Error{Code: domain.CodeStorageConstraint}) {
+		t.Fatalf("duplicate artifact error = %v", err)
+	}
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes`).Scan(&noteCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if noteCount != 1 || artifactCount != 2 {
+		t.Fatalf("rollback state = notes %d artifacts %d", noteCount, artifactCount)
 	}
 }
 

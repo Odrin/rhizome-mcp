@@ -438,6 +438,7 @@ type SaveAttemptNoteInput struct {
 	Content    string
 	NextSteps  []string
 	Important  bool
+	Artifacts  []ArtifactInput
 }
 
 func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
@@ -473,9 +474,13 @@ func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
 			return SaveAttemptNoteInput{}, err
 		}
 	}
+	artifacts, err := ValidateArtifactInputs("artifacts", input.Artifacts)
+	if err != nil {
+		return SaveAttemptNoteInput{}, err
+	}
 	return SaveAttemptNoteInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: input.Kind, Content: input.Content,
-		NextSteps: nextSteps, Important: input.Important,
+		NextSteps: nextSteps, Important: input.Important, Artifacts: artifacts,
 	}, nil
 }
 

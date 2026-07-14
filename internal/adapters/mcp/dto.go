@@ -82,15 +82,22 @@ type renewAttemptInput struct {
 	LeaseSeconds *int   `json:"lease_seconds,omitempty"`
 }
 
+type artifactInput struct {
+	Type     string          `json:"type"`
+	URI      string          `json:"uri"`
+	Title    *string         `json:"title,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
 type saveAttemptNoteInput struct {
-	AttemptID      string            `json:"attempt_id"`
-	LeaseToken     string            `json:"lease_token"`
-	Kind           string            `json:"kind"`
-	Content        string            `json:"content"`
-	NextSteps      []string          `json:"next_steps,omitempty"`
-	Important      bool              `json:"important,omitempty"`
-	Artifacts      []json.RawMessage `json:"artifacts,omitempty"`
-	IdempotencyKey *string           `json:"idempotency_key,omitempty"`
+	AttemptID      string          `json:"attempt_id"`
+	LeaseToken     string          `json:"lease_token"`
+	Kind           string          `json:"kind"`
+	Content        string          `json:"content"`
+	NextSteps      []string        `json:"next_steps,omitempty"`
+	Important      bool            `json:"important,omitempty"`
+	Artifacts      []artifactInput `json:"artifacts,omitempty"`
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
 }
 
 type acknowledgementInput struct {
@@ -112,7 +119,7 @@ type finishAttemptInput struct {
 	InterruptionReasonCode *string               `json:"interruption_reason_code,omitempty"`
 	ReasonDetails          *string               `json:"reason_details,omitempty"`
 	AcknowledgedChanges    *acknowledgementInput `json:"acknowledged_changes,omitempty"`
-	Artifacts              []json.RawMessage     `json:"artifacts,omitempty"`
+	Artifacts              []artifactInput       `json:"artifacts,omitempty"`
 	IdempotencyKey         *string               `json:"idempotency_key,omitempty"`
 }
 
@@ -451,9 +458,20 @@ type attemptNoteDTO struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type artifactDTO struct {
+	ID        string          `json:"id"`
+	IssueID   string          `json:"issue_id"`
+	AttemptID *string         `json:"attempt_id"`
+	Type      string          `json:"type"`
+	URI       string          `json:"uri"`
+	Title     *string         `json:"title"`
+	Metadata  json.RawMessage `json:"metadata"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
 type saveAttemptNoteOutput struct {
 	AttemptNote attemptNoteDTO `json:"attempt_note"`
-	Artifacts   []struct{}     `json:"artifacts"`
+	Artifacts   []artifactDTO  `json:"artifacts"`
 }
 
 type issueListOutput struct {
@@ -653,6 +671,14 @@ func attemptNoteDTOFromDomain(note domain.AttemptNote) attemptNoteDTO {
 	return attemptNoteDTO{
 		ID: note.ID, AttemptID: note.AttemptID, Kind: string(note.Kind), Content: note.Content,
 		NextSteps: append([]string(nil), note.NextSteps...), Important: note.Important, CreatedAt: note.CreatedAt,
+	}
+}
+
+func artifactDTOFromDomain(artifact domain.Artifact) artifactDTO {
+	return artifactDTO{
+		ID: artifact.ID, IssueID: artifact.IssueID, AttemptID: copyString(artifact.AttemptID),
+		Type: string(artifact.Type), URI: artifact.URI, Title: copyString(artifact.Title),
+		Metadata: append(json.RawMessage(nil), artifact.Metadata...), CreatedAt: artifact.CreatedAt,
 	}
 }
 

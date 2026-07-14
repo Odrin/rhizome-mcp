@@ -182,6 +182,20 @@ func schemaRenewAttempt() *jsonschema.Schema {
 	}, "attempt_id", "lease_token")
 }
 
+func schemaArtifact() *jsonschema.Schema {
+	metadata := &jsonschema.Schema{Type: "object"}
+	return object(map[string]*jsonschema.Schema{
+		"type":     enumSchema("file", "directory", "url", "commit", "branch", "pull_request", "log", "other"),
+		"uri":      boundedStringSchema(4_096),
+		"title":    nullableBoundedStringSchema(300),
+		"metadata": &jsonschema.Schema{OneOf: []*jsonschema.Schema{metadata, &jsonschema.Schema{Type: "null"}}},
+	}, "type", "uri")
+}
+
+func schemaArtifacts() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "array", Items: schemaArtifact(), MaxItems: intPointer(20)}
+}
+
 func schemaSaveAttemptNote() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"attempt_id":      boundedStringSchema(26),
@@ -190,7 +204,7 @@ func schemaSaveAttemptNote() *jsonschema.Schema {
 		"content":         boundedStringSchema(50_000),
 		"next_steps":      boundedStringsSchema(20, 1_000),
 		"important":       booleanSchema(),
-		"artifacts":       &jsonschema.Schema{Type: "array", MaxItems: intPointer(20)},
+		"artifacts":       schemaArtifacts(),
 		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "attempt_id", "lease_token", "kind", "content")
 }
@@ -212,7 +226,7 @@ func schemaFinishAttempt() *jsonschema.Schema {
 		"interruption_reason_code": &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}},
 		"reason_details":           nullableBoundedStringSchema(50_000),
 		"acknowledged_changes":     &jsonschema.Schema{Types: []string{"object", "null"}, OneOf: []*jsonschema.Schema{acknowledgement}},
-		"artifacts":                &jsonschema.Schema{Type: "array", MaxItems: intPointer(20)},
+		"artifacts":                schemaArtifacts(),
 		"idempotency_key":          nullableBoundedStringSchema(128),
 	}, "attempt_id", "lease_token", "outcome", "result_summary")
 }

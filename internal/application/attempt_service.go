@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"strconv"
 	"time"
 
 	"rhizome-mcp/internal/clock"
@@ -78,29 +79,47 @@ func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.Re
 	})
 }
 
-func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (domain.AttemptNote, error) {
+func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (ports.SaveAttemptNoteResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
-		return domain.AttemptNote{}, err
+		return ports.SaveAttemptNoteResult{}, err
 	}
 
 	id, err := service.ids.New()
 	if err != nil {
-		return domain.AttemptNote{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+		return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
 	}
 	if _, err := ids.ParseStrict(id); err != nil {
-		return domain.AttemptNote{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+		return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+	}
+	now := service.clock.Now().UTC()
+	artifacts := make([]domain.Artifact, len(normalized.Artifacts))
+	for index, inputArtifact := range normalized.Artifacts {
+		artifactID, err := service.ids.New()
+		if err != nil {
+			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "ID_GENERATION_FAILED"})
+		}
+		if _, err := ids.ParseStrict(artifactID); err != nil {
+			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "INVALID_ULID"})
+		}
+		artifacts[index] = domain.Artifact{
+			ID: artifactID, Type: inputArtifact.Type, URI: inputArtifact.URI,
+			Title: inputArtifact.Title, Metadata: append([]byte(nil), inputArtifact.Metadata...),
+			CreatedAt: now,
+		}
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	result, err := service.repository.SaveAttemptNote(ctx, ports.SaveAttemptNoteCommand{
 		NoteID: id, AttemptID: normalized.AttemptID, TokenHash: hash[:], Kind: normalized.Kind,
 		Content: normalized.Content, NextSteps: normalized.NextSteps, Important: normalized.Important,
-		OccurredAt: service.clock.Now().UTC(),
+		Artifacts: artifacts, OccurredAt: now,
 	})
 	if err != nil {
-		return domain.AttemptNote{}, err
+		return ports.SaveAttemptNoteResult{}, err
 	}
-	return result.Note, nil
+	return result, nil
 }
 
 func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.FinishAttemptInput) (ports.FinishAttemptResult, error) {

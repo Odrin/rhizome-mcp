@@ -378,7 +378,16 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 			Important bool      `json:"important"`
 			CreatedAt time.Time `json:"created_at"`
 		} `json:"attempt_note"`
-		Artifacts []any `json:"artifacts"`
+		Artifacts []struct {
+			ID        string          `json:"id"`
+			IssueID   string          `json:"issue_id"`
+			AttemptID *string         `json:"attempt_id"`
+			Type      string          `json:"type"`
+			URI       string          `json:"uri"`
+			Title     *string         `json:"title"`
+			Metadata  json.RawMessage `json:"metadata"`
+			CreatedAt time.Time       `json:"created_at"`
+		} `json:"artifacts"`
 	}
 	decodeStructured(t, saved, &noteOutput)
 	if saved.IsError || noteOutput.AttemptNote.ID == "" || noteOutput.AttemptNote.AttemptID != output.Attempt.ID ||
@@ -387,11 +396,39 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		noteOutput.AttemptNote.CreatedAt.IsZero() || len(noteOutput.Artifacts) != 0 {
 		t.Fatalf("save note output = %#v", noteOutput)
 	}
-	unsupportedArtifacts := call(t, client, "save_attempt_note", map[string]any{
+	savedWithArtifacts := call(t, client, "save_attempt_note", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
-		"content": "note", "artifacts": []any{map[string]any{"uri": "file"}},
+		"content": "note", "artifacts": []any{
+			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
+			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
+		},
 	})
-	assertDomainError(t, unsupportedArtifacts, "INVALID_ARGUMENT", false)
+	var artifactOutput struct {
+		Artifacts []struct {
+			ID        string         `json:"id"`
+			IssueID   string         `json:"issue_id"`
+			AttemptID *string        `json:"attempt_id"`
+			Type      string         `json:"type"`
+			URI       string         `json:"uri"`
+			Title     *string        `json:"title"`
+			Metadata  map[string]any `json:"metadata"`
+			CreatedAt time.Time      `json:"created_at"`
+		} `json:"artifacts"`
+	}
+	decodeStructured(t, savedWithArtifacts, &artifactOutput)
+	if savedWithArtifacts.IsError || len(artifactOutput.Artifacts) != 2 ||
+		artifactOutput.Artifacts[0].ID == "" || artifactOutput.Artifacts[0].IssueID != issue.ID ||
+		artifactOutput.Artifacts[0].AttemptID == nil || *artifactOutput.Artifacts[0].AttemptID != output.Attempt.ID ||
+		artifactOutput.Artifacts[0].Type != "file" || artifactOutput.Artifacts[0].URI != "internal/application/attempt_service.go" ||
+		artifactOutput.Artifacts[0].Title == nil || *artifactOutput.Artifacts[0].Title != "service" ||
+		artifactOutput.Artifacts[0].Metadata["language"] != "go" || artifactOutput.Artifacts[0].CreatedAt.IsZero() {
+		t.Fatalf("save note artifacts output = %#v", artifactOutput)
+	}
+	unsafeArtifacts := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
+		"content": "note", "artifacts": []any{map[string]any{"type": "file", "uri": "../outside"}},
+	})
+	assertDomainError(t, unsafeArtifacts, "INVALID_ARGUMENT", false)
 	unsupportedIdempotency := call(t, client, "save_attempt_note", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
 		"content": "note", "idempotency_key": "unsupported",
@@ -417,7 +454,7 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	assertDomainError(t, invalid, "INVALID_LEASE_TOKEN", false)
 	unsupportedFinishArtifacts := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "failed",
-		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"uri": "file"}},
+		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"type": "file", "uri": "file.txt"}},
 	})
 	assertDomainError(t, unsupportedFinishArtifacts, "INVALID_ARGUMENT", false)
 	unsupportedFinishIdempotency := call(t, client, "finish_attempt", map[string]any{

@@ -40,11 +40,13 @@ type SaveAttemptNoteCommand struct {
 	Content    string
 	NextSteps  []string
 	Important  bool
+	Artifacts  []domain.Artifact
 	OccurredAt time.Time
 }
 
 type SaveAttemptNoteResult struct {
-	Note domain.AttemptNote
+	Note      domain.AttemptNote
+	Artifacts []domain.Artifact
 }
 
 type FinishAttemptCommand struct {

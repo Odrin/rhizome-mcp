@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -21,7 +22,7 @@ func TestAttemptServiceSaveNoteGeneratesIDHashesTokenAndUsesClock(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	note, err := service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
+	result, err := service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
 		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "opaque-token", Kind: domain.AttemptNoteKindFinding,
 		Content: "finding", NextSteps: []string{"act"}, Important: true,
 	})
@@ -33,8 +34,8 @@ func TestAttemptServiceSaveNoteGeneratesIDHashesTokenAndUsesClock(t *testing.T) 
 		!reflect.DeepEqual(repository.command.TokenHash, expectedHash[:]) ||
 		repository.command.OccurredAt.Location() != time.UTC ||
 		!repository.command.OccurredAt.Equal(now.UTC()) ||
-		note.ID != repository.command.NoteID {
-		t.Fatalf("command = %#v, note = %#v", repository.command, note)
+		result.Note.ID != repository.command.NoteID {
+		t.Fatalf("command = %#v, result = %#v", repository.command, result)
 	}
 }
 
@@ -44,11 +45,62 @@ func TestAttemptServiceSaveNoteRejectsInvalidInputBeforeRepository(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	_, err = service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
 		AttemptID: "bad", LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: "note",
 	})
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) || repository.called {
+		t.Fatalf("error = %v, repository called = %t", err, repository.called)
+	}
+}
+
+func TestAttemptServiceSaveNoteGeneratesAndPropagatesArtifacts(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.FixedZone("test", 2*60*60))
+	repository := &recordingAttemptRepository{}
+	generator := sequenceAttemptIDGenerator{ids: []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FAX",
+		"01ARZ3NDEKTSV4RRFFQ69G5FAY",
+		"01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+	}}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(now), &generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Kind: domain.AttemptNoteKindCheckpoint, Content: "checkpoint",
+		Artifacts: []domain.ArtifactInput{
+			{Type: domain.ArtifactTypeFile, URI: "internal/application/attempt_service.go", Metadata: json.RawMessage(`{ "language": "go" }`)},
+			{Type: domain.ArtifactTypeURL, URI: "https://example.invalid/build/42"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.command.Artifacts) != 2 || len(result.Artifacts) != 0 ||
+		repository.command.Artifacts[0].ID != generator.ids[1] ||
+		repository.command.Artifacts[1].ID != generator.ids[2] ||
+		repository.command.Artifacts[0].IssueID != "" || repository.command.Artifacts[0].AttemptID != nil ||
+		string(repository.command.Artifacts[0].Metadata) != `{"language":"go"}` ||
+		!repository.command.Artifacts[0].CreatedAt.Equal(now.UTC()) ||
+		repository.command.OccurredAt.Location() != time.UTC || !repository.command.OccurredAt.Equal(now.UTC()) {
+		t.Fatalf("command = %#v, result = %#v", repository.command, result)
+	}
+}
+
+func TestAttemptServiceSaveNoteRejectsInvalidGeneratedArtifactIDBeforeRepository(t *testing.T) {
+	repository := &recordingAttemptRepository{}
+	service, err := NewAttemptService(repository, clock.NewFakeClock(time.Now()), &sequenceAttemptIDGenerator{ids: []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FAX", "bad",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.SaveAttemptNote(context.Background(), domain.SaveAttemptNoteInput{
+		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+		Kind: domain.AttemptNoteKindProgress, Content: "note",
+		Artifacts: []domain.ArtifactInput{{Type: domain.ArtifactTypeOther, URI: "ref"}},
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeIDGeneration}) || repository.called {
 		t.Fatalf("error = %v, repository called = %t", err, repository.called)
 	}
 }
@@ -124,3 +176,14 @@ func failureReasonPointer(value domain.FailureReasonCode) *domain.FailureReasonC
 type fixedAttemptIDGenerator string
 
 func (generator fixedAttemptIDGenerator) New() (string, error) { return string(generator), nil }
+
+type sequenceAttemptIDGenerator struct {
+	ids  []string
+	next int
+}
+
+func (generator *sequenceAttemptIDGenerator) New() (string, error) {
+	id := generator.ids[generator.next]
+	generator.next++
+	return id, nil
+}

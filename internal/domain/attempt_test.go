@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,18 +26,29 @@ func TestAttemptLeaseInputValidation(t *testing.T) {
 }
 
 func TestSaveAttemptNoteInputValidation(t *testing.T) {
+	title := "artifact"
+	metadata := json.RawMessage(`{"kind":"source"}`)
 	valid := domain.SaveAttemptNoteInput{
 		AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token", Kind: domain.AttemptNoteKindCheckpoint,
 		Content: "checkpoint", NextSteps: []string{"resume tests"}, Important: true,
+		Artifacts: []domain.ArtifactInput{{
+			Type: domain.ArtifactTypeFile, URI: "internal/application/attempt_service.go", Title: &title, Metadata: metadata,
+		}},
 	}
 
 	normalized, err := valid.Validate()
-	if err != nil || normalized.NextSteps[0] != "resume tests" || !normalized.Important {
+	if err != nil || normalized.NextSteps[0] != "resume tests" || !normalized.Important ||
+		len(normalized.Artifacts) != 1 || string(normalized.Artifacts[0].Metadata) != `{"kind":"source"}` {
 		t.Fatalf("valid input = %#v, %v", normalized, err)
 	}
 	normalized.NextSteps[0] = "changed"
 	if valid.NextSteps[0] != "resume tests" {
 		t.Fatal("next steps were not defensively copied")
+	}
+	title = "changed"
+	metadata[2] = 'x'
+	if *normalized.Artifacts[0].Title != "artifact" || string(normalized.Artifacts[0].Metadata) != `{"kind":"source"}` {
+		t.Fatal("artifacts were not defensively copied")
 	}
 
 	cases := []domain.SaveAttemptNoteInput{
@@ -49,6 +61,8 @@ func TestSaveAttemptNoteInputValidation(t *testing.T) {
 		{AttemptID: valid.AttemptID, LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: "note", NextSteps: []string{" "}},
 		{AttemptID: valid.AttemptID, LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: "note", NextSteps: make([]string, domain.MaxAttemptNoteNextSteps+1)},
 		{AttemptID: valid.AttemptID, LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: strings.Repeat("x", domain.MaxAttemptNoteRunes+1)},
+		{AttemptID: valid.AttemptID, LeaseToken: "token", Kind: domain.AttemptNoteKindProgress, Content: "note",
+			Artifacts: make([]domain.ArtifactInput, domain.MaxArtifactsPerAttemptMutation+1)},
 	}
 	for _, input := range cases {
 		if _, err := input.Validate(); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) &&

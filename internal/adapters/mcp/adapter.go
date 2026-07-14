@@ -128,21 +128,28 @@ func (adapter *adapter) renewAttempt(ctx context.Context, _ *sdkmcp.CallToolRequ
 }
 
 func (adapter *adapter) saveAttemptNote(ctx context.Context, _ *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
-	if len(input.Artifacts) != 0 {
-		return adapter.failure(unsupportedField("artifacts"))
-	}
-
 	if input.IdempotencyKey != nil {
 		return adapter.failure(unsupportedField("idempotency_key"))
 	}
-	note, err := adapter.attempts.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
+	for index, artifact := range input.Artifacts {
+		artifacts[index] = domain.ArtifactInput{
+			Type: domain.ArtifactType(artifact.Type), URI: artifact.URI,
+			Title: copyString(artifact.Title), Metadata: append([]byte(nil), artifact.Metadata...),
+		}
+	}
+	result, err := adapter.attempts.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: domain.AttemptNoteKind(input.Kind),
-		Content: input.Content, NextSteps: input.NextSteps, Important: input.Important,
+		Content: input.Content, NextSteps: input.NextSteps, Important: input.Important, Artifacts: artifacts,
 	})
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(note), Artifacts: []struct{}{}}, "attempt note saved")
+	outputArtifacts := make([]artifactDTO, len(result.Artifacts))
+	for index, artifact := range result.Artifacts {
+		outputArtifacts[index] = artifactDTOFromDomain(artifact)
+	}
+	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(result.Note), Artifacts: outputArtifacts}, "attempt note saved")
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, _ *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {

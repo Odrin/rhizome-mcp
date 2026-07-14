@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"time"
 
 	"rhizome-mcp/internal/domain"
@@ -186,10 +187,14 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
 	}
 	now := command.OccurredAt.UTC()
+	artifacts, err := validateSaveAttemptNoteArtifacts(command.Artifacts, now)
+	if err != nil {
+		return ports.SaveAttemptNoteResult{}, err
+	}
 	timestamp := now.Format(time.RFC3339Nano)
 	var result ports.SaveAttemptNoteResult
 	var leaseExpired bool
-	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		var issueID, status, leaseExpiresAt string
 		var tokenHash []byte
 		err := tx.QueryRowContext(ctx, `SELECT issue_id, status, lease_token_hash, lease_expires_at
@@ -232,6 +237,29 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 			command.Content, nextStepsJSON, command.Important, timestamp); err != nil {
 			return err
 		}
+		result.Artifacts = make([]domain.Artifact, len(artifacts))
+		for index, artifact := range artifacts {
+			var title any
+			if artifact.Title != nil {
+				title = *artifact.Title
+			}
+			var metadata any
+			if artifact.Metadata != nil {
+				metadata = string(artifact.Metadata)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(
+				id, issue_id, attempt_id, type, uri, title, metadata, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, artifact.ID, issueID, command.AttemptID,
+				artifact.Type, artifact.URI, title, metadata, timestamp); err != nil {
+				return err
+			}
+			attemptID := command.AttemptID
+			result.Artifacts[index] = domain.Artifact{
+				ID: artifact.ID, IssueID: issueID, AttemptID: &attemptID, Type: artifact.Type,
+				URI: artifact.URI, Title: domain.CloneArtifact(artifact).Title,
+				Metadata: append([]byte(nil), artifact.Metadata...), CreatedAt: now,
+			}
+		}
 		eventType := "attempt_note_saved"
 		if command.Kind == domain.AttemptNoteKindCheckpoint {
 			eventType = "checkpoint_saved"
@@ -259,6 +287,36 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 	}
 	if leaseExpired {
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+	}
+	return result, nil
+}
+
+func validateSaveAttemptNoteArtifacts(values []domain.Artifact, occurredAt time.Time) ([]domain.Artifact, error) {
+	if len(values) > domain.MaxArtifactsPerAttemptMutation {
+		return nil, domain.NewError(domain.CodeLimitExceeded, "artifacts exceeds the maximum count of 20", false,
+			domain.Detail{Field: "artifacts", Code: "MAX_ITEMS", Message: "maximum 20"})
+	}
+	inputs := make([]domain.ArtifactInput, len(values))
+	for index, artifact := range values {
+		if _, err := ids.ParseStrict(artifact.ID); err != nil || artifact.IssueID != "" || artifact.AttemptID != nil ||
+			!artifact.CreatedAt.Equal(occurredAt) || artifact.CreatedAt.Location() != time.UTC {
+			return nil, domain.NewError(domain.CodeInvalidArgument, "attempt note artifact command is invalid", false,
+				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "]", Code: "INVALID_VALUE"})
+		}
+		inputs[index] = domain.ArtifactInput{
+			Type: artifact.Type, URI: artifact.URI, Title: artifact.Title, Metadata: artifact.Metadata,
+		}
+	}
+	normalized, err := domain.ValidateArtifactInputs("artifacts", inputs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Artifact, len(values))
+	for index, artifact := range values {
+		result[index] = domain.Artifact{
+			ID: artifact.ID, Type: normalized[index].Type, URI: normalized[index].URI,
+			Title: normalized[index].Title, Metadata: normalized[index].Metadata, CreatedAt: occurredAt,
+		}
 	}
 	return result, nil
 }
