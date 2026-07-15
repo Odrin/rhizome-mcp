@@ -96,9 +96,17 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
 - **Phase 5 activity-MCP exposure completed on 2026-07-14.** Tool #15 is
   exposed through the thin MCP adapter with schema-bounded input and typed
   output mapping. Adapter, full, race, vet, and no-CGO validation passed.
-- The immediate next unit is bounded `get_work_context` assembly. Phase 5
-  remains incomplete and the exit gate remains decisions and checkpoints
-  surviving interruption and default context remaining compact and
+- **Phase 5 compact work-context storage completed on 2026-07-14.** The
+  snapshot-consistent default projection resolves canonical and display issue
+  identifiers and returns issue state, unresolved blockers, active decision
+  summaries, the latest recovery-relevant attempt, the newest checkpoint, and
+  deterministic repeated-failure warnings. Effective status uses
+  application-injected time; stored-data corruption and uncommitted writer
+  state are covered without exposing lease secrets. Optional sections and MCP
+  exposure remain pending.
+- The immediate next unit is bounded optional `get_work_context` sections.
+  Phase 5 remains incomplete and the exit gate remains decisions and
+  checkpoints surviving interruption and default context remaining compact and
   deterministic.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
 - Implement compact default work context with explicitly bounded optional sections.
