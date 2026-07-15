@@ -116,6 +116,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	workContextRepository, err := sqlite.NewWorkContextRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return err
@@ -156,6 +160,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	workContextService, err := application.NewWorkContextService(workContextRepository, source)
+	if err != nil {
+		return err
+	}
 	sessionRepository, err := sqlite.NewAgentSessionRepository(project.Database)
 	if err != nil {
 		return err
@@ -186,19 +194,20 @@ func run(ctx context.Context, cfg *config.Config) error {
 		<-cleanupDone
 	}()
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
-		IssueService:    issueService,
-		ProjectService:  projectService,
-		RelationService: relationService,
-		GraphService:    graphService,
-		PlanningService: planningService,
-		CommentService:  commentService,
-		DecisionService: decisionService,
-		ActivityService: activityService,
-		AttemptService:  attemptService,
-		SessionService:  sessionService,
-		ServerName:      cfg.ServerName,
-		ServerVersion:   cfg.Version,
-		ConfigVersion:   projectconfig.CurrentIdentityVersion,
+		IssueService:       issueService,
+		ProjectService:     projectService,
+		RelationService:    relationService,
+		GraphService:       graphService,
+		PlanningService:    planningService,
+		CommentService:     commentService,
+		DecisionService:    decisionService,
+		ActivityService:    activityService,
+		AttemptService:     attemptService,
+		SessionService:     sessionService,
+		WorkContextService: workContextService,
+		ServerName:         cfg.ServerName,
+		ServerVersion:      cfg.Version,
+		ConfigVersion:      projectconfig.CurrentIdentityVersion,
 	})
 	if err != nil {
 		return err

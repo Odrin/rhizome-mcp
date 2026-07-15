@@ -14,11 +14,10 @@ This is the living roadmap for the first release. It records current capability,
 
 ## Current state
 
-- **Active phase:** Phase 5, knowledge and work context.
-- **Next unit:** add bounded `decision_content` to the SQLite work-context snapshot with deterministic newest-first ordering and per-section truncation.
-- **Following storage units:** `attempt_history`, `artifacts`, then `changes_since_previous_attempt`.
-- **Then:** expose `get_work_context` through MCP and run the Phase 5 exit gate.
-- **Later:** Phase 6 search/change feeds, then Phase 7 CLI, maintenance, and release.
+- **Active phase:** Phase 6, search and changes.
+- **Next unit:** complete transactional FTS5 indexing and rebuild support.
+- **Then:** implement ranked bounded search and event-based incremental changes, and expose `search` and `get_changes`.
+- **Later:** Phase 7 CLI, maintenance, and release.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -48,7 +47,7 @@ Delivered durable connection sessions; atomic claims and renewals; hashed opaque
 
 Exit gate satisfied under the race detector: simultaneous claims, blocker/claim, expiry/renewal, completion/update, invalid token, interruption, and takeover. No issue remains permanently locked.
 
-## Phase 5: knowledge and work context - active
+## Phase 5: knowledge and work context - complete
 
 Delivered:
 
@@ -58,17 +57,13 @@ Delivered:
 - Compact work-context storage for issue state, blockers, active decision summaries, the latest recovery-relevant attempt, checkpoint, and repeated-failure warnings.
 - Include-gated parent epic, project instructions, direct relations, and bounded related-issue summaries.
 - Include-gated, bounded recent comments and attempt notes with deterministic newest-first ordering and per-section truncation.
+- Include-gated, bounded active issue decision content with deterministic newest-first ordering and per-section truncation.
+- Include-gated, bounded attempt history with deterministic newest-first ordering, full persisted attempt metadata, and no lease-token exposure.
+- Include-gated, bounded artifacts with deterministic newest-first ordering and full validated metadata.
+- Include-gated, bounded chronological issue changes since the latest recovery-relevant attempt boundary.
+- Thin MCP `get_work_context` with closed bounded schemas, typed mappings, compact defaults, and no lease-secret exposure.
 
-Remaining, in order:
-
-1. Add bounded decision content.
-2. Add bounded attempt history.
-3. Add bounded artifacts.
-4. Add bounded changes since the previous attempt.
-5. Expose `get_work_context` through the thin MCP adapter with bounded schemas and typed mapping.
-6. Run focused contract coverage and the Phase 5 checkpoint suite.
-
-Exit gate: decisions and checkpoints survive interruption, every optional section obeys its bound, and default context remains compact and deterministic.
+Exit gate satisfied: decisions and checkpoints survive interruption; every optional section is explicitly bounded and reports truncation; and default context is compact and deterministic. The focused contract coverage and repository-wide standard, race, vet, and no-CGO suites pass.
 
 ## Phase 6: search and changes - planned
 

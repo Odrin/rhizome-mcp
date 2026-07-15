@@ -72,6 +72,22 @@ type listIssuesInput struct {
 	View              string   `json:"view,omitempty"`
 }
 
+type getWorkContextInput struct {
+	IssueID string                  `json:"issue_id"`
+	Include []string                `json:"include,omitempty"`
+	Limits  *workContextLimitsInput `json:"limits,omitempty"`
+}
+
+type workContextLimitsInput struct {
+	RelatedIssueSummaries       *int `json:"related_issue_summaries,omitempty"`
+	RecentComments              *int `json:"recent_comments,omitempty"`
+	RecentAttemptNotes          *int `json:"recent_attempt_notes,omitempty"`
+	DecisionContent             *int `json:"decision_content,omitempty"`
+	AttemptHistory              *int `json:"attempt_history,omitempty"`
+	Artifacts                   *int `json:"artifacts,omitempty"`
+	ChangesSincePreviousAttempt *int `json:"changes_since_previous_attempt,omitempty"`
+}
+
 type archiveIssueInput struct {
 	IssueID         string  `json:"issue_id"`
 	ExpectedVersion int64   `json:"expected_version"`
@@ -519,6 +535,55 @@ type finishAttemptOutput struct {
 
 type emptyWorkContextDTO struct{}
 
+type workContextIssueDTO struct {
+	ID                     string  `json:"id"`
+	DisplayID              string  `json:"display_id"`
+	Title                  string  `json:"title"`
+	Description            *string `json:"description"`
+	AcceptanceCriteria     *string `json:"acceptance_criteria"`
+	EffectiveStatus        string  `json:"effective_status"`
+	UnresolvedBlockerCount int64   `json:"unresolved_blocker_count"`
+	IsBlocked              bool    `json:"is_blocked"`
+}
+
+type workContextDecisionSummaryDTO struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Summary   string    `json:"summary"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type workContextAttemptSummaryDTO struct {
+	ID            string     `json:"id"`
+	Kind          string     `json:"kind"`
+	Status        string     `json:"status"`
+	FinishedAt    *time.Time `json:"finished_at"`
+	ResultSummary *string    `json:"result_summary"`
+	NextSteps     []string   `json:"next_steps"`
+}
+
+type workContextOutput struct {
+	Issue                       workContextIssueDTO             `json:"issue"`
+	Blockers                    []workContextIssueDTO           `json:"blockers"`
+	Decisions                   []workContextDecisionSummaryDTO `json:"decisions"`
+	PreviousAttempt             *workContextAttemptSummaryDTO   `json:"previous_attempt"`
+	Checkpoint                  *attemptNoteDTO                 `json:"checkpoint"`
+	Warnings                    []string                        `json:"warnings"`
+	ParentEpic                  *workContextIssueDTO            `json:"parent_epic"`
+	Relations                   []relationDTO                   `json:"relations"`
+	RelatedIssueSummaries       []workContextIssueDTO           `json:"related_issue_summaries"`
+	RecentComments              []commentDTO                    `json:"recent_comments"`
+	RecentAttemptNotes          []attemptNoteDTO                `json:"recent_attempt_notes"`
+	DecisionContent             []recordDecisionDecisionDTO     `json:"decision_content"`
+	AttemptHistory              []attemptDTO                    `json:"attempt_history"`
+	Artifacts                   []artifactDTO                   `json:"artifacts"`
+	ProjectInstructions         *string                         `json:"project_instructions"`
+	ChangesSincePreviousAttempt []issueEventDTO                 `json:"changes_since_previous_attempt"`
+	Truncated                   bool                            `json:"truncated"`
+	TruncatedSections           []string                        `json:"truncated_sections"`
+}
+
 type claimIssueOutput struct {
 	Issue              issueListItemDTO    `json:"issue"`
 	Attempt            attemptDTO          `json:"attempt"`
@@ -811,6 +876,118 @@ func issueEventDTOFromDomain(event domain.IssueEvent) issueEventDTO {
 		Payload:   append(json.RawMessage(nil), event.Payload...),
 		CreatedAt: event.CreatedAt,
 	}
+}
+
+func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
+	result := workContextOutput{
+		Issue:                       workContextIssueDTOFromDomain(value.Issue),
+		Blockers:                    make([]workContextIssueDTO, len(value.Blockers)),
+		Decisions:                   make([]workContextDecisionSummaryDTO, len(value.Decisions)),
+		Warnings:                    make([]string, len(value.Warnings)),
+		ParentEpic:                  workContextIssueDTOFromDomainPointer(value.ParentEpic),
+		Relations:                   make([]relationDTO, len(value.Relations)),
+		RelatedIssueSummaries:       make([]workContextIssueDTO, len(value.RelatedIssueSummaries)),
+		RecentComments:              make([]commentDTO, len(value.RecentComments)),
+		RecentAttemptNotes:          make([]attemptNoteDTO, len(value.RecentAttemptNotes)),
+		DecisionContent:             make([]recordDecisionDecisionDTO, len(value.DecisionContent)),
+		AttemptHistory:              make([]attemptDTO, len(value.AttemptHistory)),
+		Artifacts:                   make([]artifactDTO, len(value.Artifacts)),
+		ChangesSincePreviousAttempt: make([]issueEventDTO, len(value.ChangesSincePreviousAttempt)),
+		Truncated:                   value.Truncated,
+		TruncatedSections:           make([]string, len(value.TruncatedSections)),
+	}
+	for index, blocker := range value.Blockers {
+		result.Blockers[index] = workContextIssueDTOFromDomain(blocker)
+	}
+	for index, decision := range value.Decisions {
+		result.Decisions[index] = workContextDecisionSummaryDTOFromDomain(decision)
+	}
+	for index, warning := range value.Warnings {
+		result.Warnings[index] = warning
+	}
+	for index, relation := range value.Relations {
+		result.Relations[index] = relationDTOFromDomain(relation)
+	}
+	for index, issue := range value.RelatedIssueSummaries {
+		result.RelatedIssueSummaries[index] = workContextIssueDTOFromDomain(issue)
+	}
+	for index, comment := range value.RecentComments {
+		result.RecentComments[index] = commentDTOFromDomain(comment)
+	}
+	for index, note := range value.RecentAttemptNotes {
+		noteDTO := attemptNoteDTOFromDomain(note)
+		result.RecentAttemptNotes[index] = noteDTO
+	}
+	for index, decision := range value.DecisionContent {
+		result.DecisionContent[index] = recordDecisionDTOFromDomain(decision)
+	}
+	for index, attempt := range value.AttemptHistory {
+		result.AttemptHistory[index] = attemptDTOFromDomain(attempt)
+	}
+	for index, artifact := range value.Artifacts {
+		result.Artifacts[index] = artifactDTOFromDomain(artifact)
+	}
+	for index, event := range value.ChangesSincePreviousAttempt {
+		result.ChangesSincePreviousAttempt[index] = issueEventDTOFromDomain(event)
+	}
+	for index, include := range value.TruncatedSections {
+		result.TruncatedSections[index] = string(include)
+	}
+	if value.PreviousAttempt != nil {
+		result.PreviousAttempt = workContextAttemptSummaryDTOFromDomain(value.PreviousAttempt)
+	}
+	if value.Checkpoint != nil {
+		checkpoint := attemptNoteDTOFromDomain(*value.Checkpoint)
+		result.Checkpoint = &checkpoint
+	}
+	result.ProjectInstructions = copyString(value.ProjectInstructions)
+	return result
+}
+
+func workContextIssueDTOFromDomain(value domain.WorkContextIssue) workContextIssueDTO {
+	return workContextIssueDTO{
+		ID:                     value.ID,
+		DisplayID:              value.DisplayID,
+		Title:                  value.Title,
+		Description:            copyString(value.Description),
+		AcceptanceCriteria:     copyString(value.AcceptanceCriteria),
+		EffectiveStatus:        string(value.EffectiveStatus),
+		UnresolvedBlockerCount: value.UnresolvedBlockerCount,
+		IsBlocked:              value.IsBlocked,
+	}
+}
+
+func workContextIssueDTOFromDomainPointer(value *domain.WorkContextIssue) *workContextIssueDTO {
+	if value == nil {
+		return nil
+	}
+	issue := workContextIssueDTOFromDomain(*value)
+	return &issue
+}
+
+func workContextDecisionSummaryDTOFromDomain(value domain.WorkContextDecisionSummary) workContextDecisionSummaryDTO {
+	return workContextDecisionSummaryDTO{
+		ID:        value.ID,
+		Title:     value.Title,
+		Summary:   value.Summary,
+		Status:    string(value.Status),
+		CreatedAt: value.CreatedAt,
+	}
+}
+
+func workContextAttemptSummaryDTOFromDomain(value *domain.WorkContextAttemptSummary) *workContextAttemptSummaryDTO {
+	if value == nil {
+		return nil
+	}
+	result := workContextAttemptSummaryDTO{
+		ID:            value.ID,
+		Kind:          string(value.Kind),
+		Status:        string(value.Status),
+		FinishedAt:    copyTime(value.FinishedAt),
+		ResultSummary: copyString(value.ResultSummary),
+		NextSteps:     append([]string(nil), value.NextSteps...),
+	}
+	return &result
 }
 
 func activityItemDTOFromDomain(item domain.ActivityItem) activityItemDTO {

@@ -42,6 +42,12 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			return err
 		}
 
+		previousAttempt, previousAttemptBoundary, previousAttemptExists, err := loadWorkContextPreviousAttempt(ctx, query, resolvedIssueID)
+		if err != nil {
+			return err
+		}
+		result.PreviousAttempt = previousAttempt
+
 		targetIssue, err := loadIssueForMutation(ctx, query, domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: resolvedIssueID})
 		if err != nil {
 			return err
@@ -120,6 +126,46 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 					result.Truncated = true
 					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
 				}
+			case domain.WorkContextIncludeDecisionContent:
+				decisions, truncated, err := loadWorkContextDecisionContent(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.DecisionContent = decisions
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeAttemptHistory:
+				attempts, truncated, err := loadWorkContextAttemptHistory(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.AttemptHistory = attempts
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeArtifacts:
+				artifacts, truncated, err := loadWorkContextArtifacts(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.Artifacts = artifacts
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeChangesSincePreviousAttempt:
+				changes, truncated, err := loadWorkContextChangesSincePreviousAttempt(ctx, query, resolvedIssueID, previousAttemptBoundary, previousAttemptExists, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.ChangesSincePreviousAttempt = changes
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
 			}
 		}
 
@@ -129,11 +175,6 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 		}
 
 		result.Decisions, err = loadWorkContextDecisions(ctx, query, resolvedIssueID)
-		if err != nil {
-			return err
-		}
-
-		result.PreviousAttempt, err = loadWorkContextPreviousAttempt(ctx, query, resolvedIssueID)
 		if err != nil {
 			return err
 		}
@@ -172,6 +213,37 @@ func appendWorkContextSection(values []domain.WorkContextInclude, wanted domain.
 		values = []domain.WorkContextInclude{}
 	}
 	return append(values, wanted)
+}
+
+func loadWorkContextChangesSincePreviousAttempt(ctx context.Context, query Queryer, issueID string, boundary int64, hasPreviousAttempt bool, limit int) ([]domain.IssueEvent, bool, error) {
+	if !hasPreviousAttempt {
+		return []domain.IssueEvent{}, false, nil
+	}
+	rows, err := query.QueryContext(ctx, `SELECT id, issue_id, event_type, session_id, attempt_id, payload, created_at
+	FROM issue_events
+	WHERE issue_id = ? AND id > ?
+	ORDER BY id ASC
+	LIMIT ?`, issueID, boundary, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.IssueEvent, 0, limit+1)
+	for rows.Next() {
+		event, err := scanActivityEvent(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
 }
 
 func loadWorkContextRelations(ctx context.Context, query Queryer, issueID string) ([]domain.IssueRelation, error) {
@@ -326,6 +398,90 @@ func loadWorkContextRecentAttemptNotes(ctx context.Context, query Queryer, issue
 			return nil, false, err
 		}
 		result = append(result, note)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
+}
+
+func loadWorkContextDecisionContent(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.Decision, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at
+	FROM decisions
+	WHERE issue_id = ? AND status = 'active'
+	ORDER BY created_at DESC, id ASC
+	LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.Decision, 0, limit+1)
+	for rows.Next() {
+		decision, err := scanActivityDecision(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, decision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
+}
+
+func loadWorkContextAttemptHistory(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.WorkAttempt, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT id, issue_id, session_id, agent_label, kind, status, issue_version_at_start, context_event_id_at_start, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json, failure_reason_code, interruption_reason_code, reason_details
+	FROM work_attempts
+	WHERE issue_id = ?
+	ORDER BY started_at DESC, id ASC
+	LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.WorkAttempt, 0, limit+1)
+	for rows.Next() {
+		attempt, err := scanActivityAttempt(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
+}
+
+func loadWorkContextArtifacts(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.Artifact, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT id, issue_id, attempt_id, type, uri, title, metadata, created_at
+	FROM artifacts
+	WHERE issue_id = ?
+	ORDER BY created_at DESC, id ASC
+	LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.Artifact, 0, limit+1)
+	for rows.Next() {
+		artifact, err := scanActivityArtifact(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, artifact)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, false, workContextCorrupt(err)
@@ -496,14 +652,14 @@ func loadWorkContextDecisions(ctx context.Context, query Queryer, issueID string
 	return result, nil
 }
 
-func loadWorkContextPreviousAttempt(ctx context.Context, query Queryer, issueID string) (*domain.WorkContextAttemptSummary, error) {
+func loadWorkContextPreviousAttempt(ctx context.Context, query Queryer, issueID string) (*domain.WorkContextAttemptSummary, int64, bool, error) {
 	row := query.QueryRowContext(ctx, `SELECT id, issue_id, session_id, agent_label, kind, status, issue_version_at_start, context_event_id_at_start, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json, failure_reason_code, interruption_reason_code, reason_details FROM work_attempts WHERE issue_id = ? AND status IN ('completed', 'failed', 'interrupted', 'expired') ORDER BY finished_at DESC, id ASC LIMIT 1`, issueID)
 	attempt, err := scanActivityAttempt(row)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, 0, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	return &domain.WorkContextAttemptSummary{
 		ID:            attempt.ID,
@@ -512,7 +668,7 @@ func loadWorkContextPreviousAttempt(ctx context.Context, query Queryer, issueID 
 		FinishedAt:    attempt.FinishedAt,
 		ResultSummary: attempt.ResultSummary,
 		NextSteps:     attempt.NextSteps,
-	}, nil
+	}, attempt.ContextEventIDAtStart, true, nil
 }
 
 func loadWorkContextCheckpoint(ctx context.Context, query Queryer, issueID string) (*domain.AttemptNote, error) {

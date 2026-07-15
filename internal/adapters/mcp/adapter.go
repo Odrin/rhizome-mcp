@@ -18,19 +18,20 @@ import (
 
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
-	IssueService    *application.IssueService
-	ProjectService  *application.ProjectService
-	RelationService *application.RelationService
-	GraphService    *application.GraphService
-	PlanningService *application.PlanningService
-	CommentService  *application.CommentService
-	DecisionService *application.DecisionService
-	ActivityService *application.ActivityService
-	AttemptService  *application.AttemptService
-	SessionService  *application.AgentSessionService
-	ServerName      string
-	ServerVersion   string
-	ConfigVersion   int
+	IssueService       *application.IssueService
+	ProjectService     *application.ProjectService
+	RelationService    *application.RelationService
+	GraphService       *application.GraphService
+	PlanningService    *application.PlanningService
+	CommentService     *application.CommentService
+	DecisionService    *application.DecisionService
+	ActivityService    *application.ActivityService
+	AttemptService     *application.AttemptService
+	SessionService     *application.AgentSessionService
+	WorkContextService *application.WorkContextService
+	ServerName         string
+	ServerVersion      string
+	ConfigVersion      int
 }
 
 type adapter struct {
@@ -44,6 +45,7 @@ type adapter struct {
 	activities    *application.ActivityService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
+	workContexts  *application.WorkContextService
 	appVersion    string
 	configVersion int
 
@@ -92,6 +94,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.SessionService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "session service is required", false)
 	}
+	if options.WorkContextService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "work context service is required", false)
+	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
 	}
@@ -109,6 +114,7 @@ func NewServer(options Options) (*Server, error) {
 		activities:         options.ActivityService,
 		attempts:           options.AttemptService,
 		sessions:           options.SessionService,
+		workContexts:       options.WorkContextService,
 		appVersion:         options.ServerVersion,
 		configVersion:      options.ConfigVersion,
 		connectionSessions: make(map[*sdkmcp.ServerSession]string),
@@ -265,6 +271,44 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
 	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
 	sdkmcp.AddTool(server, tool("finish_attempt", "Finish an active leased work or review attempt", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
+	sdkmcp.AddTool(server, tool("get_work_context", "Return bounded recovery context for an issue", schemaGetWorkContext(), schemaGetWorkContextOutput()), adapter.getWorkContext)
+}
+
+func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.CallToolRequest, input getWorkContextInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	include := make([]domain.WorkContextInclude, len(input.Include))
+	for index, value := range input.Include {
+		include[index] = domain.WorkContextInclude(value)
+	}
+	limits := make(map[domain.WorkContextInclude]int)
+	if input.Limits != nil {
+		if input.Limits.RelatedIssueSummaries != nil {
+			limits[domain.WorkContextIncludeRelatedIssueSummaries] = *input.Limits.RelatedIssueSummaries
+		}
+		if input.Limits.RecentComments != nil {
+			limits[domain.WorkContextIncludeRecentComments] = *input.Limits.RecentComments
+		}
+		if input.Limits.RecentAttemptNotes != nil {
+			limits[domain.WorkContextIncludeRecentAttemptNotes] = *input.Limits.RecentAttemptNotes
+		}
+		if input.Limits.DecisionContent != nil {
+			limits[domain.WorkContextIncludeDecisionContent] = *input.Limits.DecisionContent
+		}
+		if input.Limits.AttemptHistory != nil {
+			limits[domain.WorkContextIncludeAttemptHistory] = *input.Limits.AttemptHistory
+		}
+		if input.Limits.Artifacts != nil {
+			limits[domain.WorkContextIncludeArtifacts] = *input.Limits.Artifacts
+		}
+		if input.Limits.ChangesSincePreviousAttempt != nil {
+			limits[domain.WorkContextIncludeChangesSincePreviousAttempt] = *input.Limits.ChangesSincePreviousAttempt
+		}
+	}
+	result, err := adapter.workContexts.GetWorkContext(ctx, domain.GetWorkContextInput{IssueID: input.IssueID, Include: include, Limits: limits})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(workContextOutputFromDomain(result), "work context returned")
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {

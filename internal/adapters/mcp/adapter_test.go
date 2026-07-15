@@ -8,6 +8,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -1247,6 +1248,177 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 	_ = ctx
 }
 
+func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "work-context.db")
+	db, source := openDatabase(t, databasePath)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	workContextTool := toolNamed(t, tools.Tools, "get_work_context")
+	assertRequired(t, workContextTool, "issue_id")
+
+	data, err := json.Marshal(workContextTool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			Include struct {
+				Type  string `json:"type"`
+				Items struct {
+					Enum []string `json:"enum"`
+				} `json:"items"`
+				MaxItems    int  `json:"maxItems"`
+				UniqueItems bool `json:"uniqueItems"`
+			} `json:"include"`
+			Limits struct {
+				Type                 string                     `json:"type"`
+				Properties           map[string]json.RawMessage `json:"properties"`
+				AdditionalProperties bool                       `json:"additionalProperties"`
+			} `json:"limits"`
+		} `json:"properties"`
+		Required             []string `json:"required"`
+		AdditionalProperties bool     `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(schema.Required, "issue_id") {
+		t.Fatalf("get_work_context required fields = %v, want issue_id", schema.Required)
+	}
+	if schema.AdditionalProperties != false {
+		t.Fatalf("get_work_context top-level additionalProperties = %v, want false", schema.AdditionalProperties)
+	}
+	if schema.Properties.Include.Type != "array" || schema.Properties.Include.MaxItems != 10 || !schema.Properties.Include.UniqueItems {
+		t.Fatalf("include schema = %+v", schema.Properties.Include)
+	}
+	if len(schema.Properties.Include.Items.Enum) != 10 {
+		t.Fatalf("include enum values = %v", schema.Properties.Include.Items.Enum)
+	}
+	if !contains(schema.Properties.Include.Items.Enum, "related_issue_summaries") || !contains(schema.Properties.Include.Items.Enum, "changes_since_previous_attempt") {
+		t.Fatalf("include enum values = %v", schema.Properties.Include.Items.Enum)
+	}
+	if schema.Properties.Limits.Type != "object" || schema.Properties.Limits.AdditionalProperties != false {
+		t.Fatalf("limits schema = %+v", schema.Properties.Limits)
+	}
+	if len(schema.Properties.Limits.Properties) != 7 {
+		t.Fatalf("limits properties count = %d, want 7", len(schema.Properties.Limits.Properties))
+	}
+	if _, ok := schema.Properties.Limits.Properties["recent_comments"]; !ok {
+		t.Fatal("limits schema missing recent_comments")
+	}
+	if _, ok := schema.Properties.Limits.Properties["parent_epic"]; ok {
+		t.Fatal("limits schema unexpectedly allowed parent_epic")
+	}
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Work context", "status": "ready", "priority": "medium"})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError {
+		t.Fatalf("create_issue = %#v", created)
+	}
+
+	if _, err := client.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: "add_comment", Arguments: map[string]any{"issue_id": issue.DisplayID, "content": "first"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: "add_comment", Arguments: map[string]any{"issue_id": issue.DisplayID, "content": "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: "record_decision", Arguments: map[string]any{"issue_id": issue.DisplayID, "title": "Decision", "summary": "Reason", "content": "Detail"}}); err != nil {
+		t.Fatal(err)
+	}
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.DisplayID})
+	if claimed.IsError {
+		t.Fatalf("claim_issue = %#v", claimed)
+	}
+
+	defaultResult := call(t, client, "get_work_context", map[string]any{"issue_id": issue.DisplayID})
+	var defaultOutput map[string]any
+	decodeStructured(t, defaultResult, &defaultOutput)
+	if defaultResult.IsError {
+		t.Fatalf("default work context = %#v", defaultResult)
+	}
+	issueOutput, ok := defaultOutput["issue"].(map[string]any)
+	if !ok || issueOutput["display_id"] != issue.DisplayID {
+		t.Fatalf("default issue output = %#v", defaultOutput["issue"])
+	}
+	blockers, ok := defaultOutput["blockers"].([]any)
+	if !ok || blockers == nil || len(blockers) != 0 {
+		t.Fatalf("default blockers = %#v", defaultOutput["blockers"])
+	}
+	if defaultOutput["recent_comments"] == nil {
+		t.Fatalf("default recent_comments missing = %#v", defaultOutput)
+	}
+	if recentComments, ok := defaultOutput["recent_comments"].([]any); !ok || recentComments == nil || len(recentComments) != 0 {
+		t.Fatalf("default recent_comments = %#v", defaultOutput["recent_comments"])
+	}
+	if defaultOutput["truncated_sections"] == nil {
+		t.Fatalf("default truncated_sections missing = %#v", defaultOutput)
+	}
+	if truncatedSections, ok := defaultOutput["truncated_sections"].([]any); !ok || truncationSectionList(truncatedSections) != 0 {
+		t.Fatalf("default truncated_sections = %#v", defaultOutput["truncated_sections"])
+	}
+
+	requestedResult := call(t, client, "get_work_context", map[string]any{
+		"issue_id": issue.DisplayID,
+		"include":  []string{"recent_comments", "decision_content", "attempt_history"},
+		"limits":   map[string]any{"recent_comments": 1, "attempt_history": 1},
+	})
+	var requestedOutput map[string]any
+	decodeStructured(t, requestedResult, &requestedOutput)
+	if requestedResult.IsError {
+		t.Fatalf("requested work context = %#v", requestedResult)
+	}
+	recentComments, ok := requestedOutput["recent_comments"].([]any)
+	if !ok || len(recentComments) != 1 {
+		t.Fatalf("requested recent_comments = %#v", requestedOutput["recent_comments"])
+	}
+	decisionContent, ok := requestedOutput["decision_content"].([]any)
+	if !ok || len(decisionContent) != 1 {
+		t.Fatalf("requested decision_content = %#v", requestedOutput["decision_content"])
+	}
+	attemptHistory, ok := requestedOutput["attempt_history"].([]any)
+	if !ok || len(attemptHistory) != 1 {
+		t.Fatalf("requested attempt_history = %#v", requestedOutput["attempt_history"])
+	}
+	if requestedOutput["truncated"] != true {
+		t.Fatalf("requested truncated = %#v", requestedOutput["truncated"])
+	}
+	truncatedSections, ok := requestedOutput["truncated_sections"].([]any)
+	if !ok || truncationSectionList(truncatedSections) != 1 || !containsString(truncatedSections, "recent_comments") {
+		t.Fatalf("requested truncated_sections = %#v", requestedOutput["truncated_sections"])
+	}
+	outputBytes, err := json.Marshal(requestedOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(outputBytes)
+	if strings.Contains(serialized, "lease_token") || strings.Contains(serialized, "token_hash") {
+		t.Fatalf("serialized work context unexpectedly exposed lease secrets: %s", serialized)
+	}
+
+	invalidLimit := call(t, client, "get_work_context", map[string]any{
+		"issue_id": issue.DisplayID,
+		"include":  []string{"relations"},
+		"limits":   map[string]any{"recent_comments": 1},
+	})
+	assertDomainError(t, invalidLimit, "INVALID_ARGUMENT", false)
+
+	options := composeServices(t, db, source)
+	options.WorkContextService = nil
+	if _, err := mcpadapter.NewServer(options); err == nil {
+		t.Fatal("NewServer() accepted nil work context service")
+	}
+}
+
 func openDatabase(t *testing.T, path string) (*sqlite.DB, *clock.FakeClock) {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), path, sqlite.Options{})
@@ -1317,6 +1489,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	workContextRepository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -1357,6 +1533,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	workContexts, err := application.NewWorkContextService(workContextRepository, source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sessionRepository, err := sqlite.NewAgentSessionRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1366,7 +1546,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, AttemptService: attempts, SessionService: sessions,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }
@@ -1499,6 +1679,19 @@ func toolNamed(t *testing.T, tools []*sdkmcp.Tool, name string) *sdkmcp.Tool {
 	}
 	t.Fatalf("missing tool %q", name)
 	return nil
+}
+
+func truncationSectionList(values []any) int {
+	return len(values)
+}
+
+func containsString(values []any, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(values []string, wanted string) bool {

@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"path/filepath"
@@ -1030,6 +1031,378 @@ func TestWorkContextRepositoryLoadsActiveIssueScopedDecisionSummaries(t *testing
 	}
 }
 
+func TestWorkContextRepositoryLoadsArtifactsWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA6"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA7"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusActive, now.Add(10*time.Minute), now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	artifactAID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	artifactBID := "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+	artifactCID := "01ARZ3NDEKTSV4RRFFQ69G5FA3"
+	artifactDID := "01ARZ3NDEKTSV4RRFFQ69G5FA4"
+
+	createdAtA := now.Add(4 * time.Second)
+	createdAtB := now.Add(4 * time.Second)
+	createdAtC := now.Add(2 * time.Second)
+	createdAtD := now.Add(5 * time.Second)
+
+	titleA := "alpha title"
+	titleC := "gamma title"
+	metadataA := json.RawMessage(`{"name":"alpha"}`)
+	metadataC := json.RawMessage(`{"name":"gamma"}`)
+	if err := seedArtifact(t, db, artifactAID, target.ID, &attemptID, domain.ArtifactTypeFile, "notes/alpha.txt", &titleA, metadataA, createdAtA); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedArtifact(t, db, artifactBID, target.ID, nil, domain.ArtifactTypeFile, "notes/beta.txt", nil, nil, createdAtB); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedArtifact(t, db, artifactCID, target.ID, nil, domain.ArtifactTypeFile, "notes/gamma.txt", &titleC, metadataC, createdAtC); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedArtifact(t, db, artifactDID, otherIssueID, nil, domain.ArtifactTypeFile, "notes/other.txt", nil, nil, createdAtD); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.Artifacts) != 0 {
+		t.Fatalf("len(artifacts) = %d, want 0", len(result.Artifacts))
+	}
+	if result.Truncated {
+		t.Fatal("default context should not be truncated")
+	}
+	if len(result.TruncatedSections) != 0 {
+		t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.Artifacts) != 3 {
+		t.Fatalf("len(artifacts) = %d, want 3", len(result.Artifacts))
+	}
+	gotIDs := make([]string, len(result.Artifacts))
+	for index, artifact := range result.Artifacts {
+		gotIDs[index] = artifact.ID
+	}
+	wantIDs := []string{artifactAID, artifactBID, artifactCID}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("artifact ids = %v, want %v", gotIDs, wantIDs)
+	}
+	if result.Artifacts[0].AttemptID == nil || *result.Artifacts[0].AttemptID != attemptID {
+		t.Fatalf("first artifact attempt id = %#v, want %q", result.Artifacts[0].AttemptID, attemptID)
+	}
+	if result.Artifacts[1].AttemptID != nil {
+		t.Fatalf("second artifact attempt id = %#v, want nil", result.Artifacts[1].AttemptID)
+	}
+	if result.Artifacts[0].Title == nil || *result.Artifacts[0].Title != titleA {
+		t.Fatalf("first artifact title = %#v, want %q", result.Artifacts[0].Title, titleA)
+	}
+	if !reflect.DeepEqual(result.Artifacts[0].Metadata, metadataA) {
+		t.Fatalf("first artifact metadata = %s, want %s", result.Artifacts[0].Metadata, metadataA)
+	}
+	if result.Artifacts[1].Title != nil || result.Artifacts[1].Metadata != nil {
+		t.Fatalf("second artifact should omit optional title and metadata: %#v %#v", result.Artifacts[1].Title, result.Artifacts[1].Metadata)
+	}
+	if result.Artifacts[2].Title == nil || *result.Artifacts[2].Title != titleC {
+		t.Fatalf("third artifact title = %#v, want %q", result.Artifacts[2].Title, titleC)
+	}
+	if !reflect.DeepEqual(result.Artifacts[2].Metadata, metadataC) {
+		t.Fatalf("third artifact metadata = %s, want %s", result.Artifacts[2].Metadata, metadataC)
+	}
+	if result.Truncated {
+		t.Fatal("artifacts should not be truncated for this request")
+	}
+	if len(result.TruncatedSections) != 0 {
+		t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+	}
+}
+
+func TestWorkContextRepositoryBoundsArtifacts(t *testing.T) {
+	t.Run("custom limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seedArtifact(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FA1", target.ID, nil, domain.ArtifactTypeFile, "notes/one.txt", nil, nil, now.Add(2*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedArtifact(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FA2", target.ID, nil, domain.ArtifactTypeFile, "notes/two.txt", nil, nil, now.Add(1*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeArtifacts: 1}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.Artifacts) != 1 {
+			t.Fatalf("len(artifacts) = %d, want 1", len(result.Artifacts))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts})
+		}
+	})
+
+	t.Run("default limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generator := newTestULIDGenerator(t, now)
+		nextID := func() string {
+			id, err := generator.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return id
+		}
+		for index := 0; index < domain.DefaultWorkContextArtifactLimit+1; index++ {
+			createdAt := now.Add(time.Duration(index+1) * time.Second)
+			if err := seedArtifact(t, db, nextID(), target.ID, nil, domain.ArtifactTypeFile, fmt.Sprintf("notes/%d.txt", index), nil, nil, createdAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.Artifacts) != domain.DefaultWorkContextArtifactLimit {
+			t.Fatalf("len(artifacts) = %d, want %d", len(result.Artifacts), domain.DefaultWorkContextArtifactLimit)
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeArtifacts})
+		}
+	})
+}
+
+func TestWorkContextRepositoryLoadsAttemptHistoryWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA6"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+
+	generator := newTestULIDGenerator(t, now)
+	nextID := func() string {
+		id, err := generator.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	activeID := nextID()
+	completedID := nextID()
+	failedID := nextID()
+	interruptedID := nextID()
+	expiredID := nextID()
+	cancelledID := nextID()
+	otherAttemptID := nextID()
+
+	activeStartedAt := now.Add(6 * time.Second)
+	completedStartedAt := now.Add(5 * time.Second)
+	failedStartedAt := now.Add(4 * time.Second)
+	interruptedStartedAt := now.Add(3 * time.Second)
+	expiredStartedAt := now.Add(2 * time.Second)
+	cancelledStartedAt := now.Add(2 * time.Second)
+
+	if err := seedAttempt(t, db, activeID, target.ID, domain.AttemptStatusActive, activeStartedAt.Add(10*time.Minute), activeStartedAt, nil, now.Add(1*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, completedID, target.ID, domain.AttemptStatusCompleted, completedStartedAt.Add(10*time.Minute), completedStartedAt, timePtr(completedStartedAt.Add(1*time.Second)), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, failedID, target.ID, domain.AttemptStatusFailed, failedStartedAt.Add(10*time.Minute), failedStartedAt, timePtr(failedStartedAt.Add(1*time.Second)), now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, interruptedID, target.ID, domain.AttemptStatusInterrupted, interruptedStartedAt.Add(10*time.Minute), interruptedStartedAt, timePtr(interruptedStartedAt.Add(1*time.Second)), now.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, expiredID, target.ID, domain.AttemptStatusExpired, expiredStartedAt.Add(10*time.Minute), expiredStartedAt, timePtr(expiredStartedAt.Add(1*time.Second)), now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, cancelledID, target.ID, domain.AttemptStatusCancelled, cancelledStartedAt.Add(10*time.Minute), cancelledStartedAt, timePtr(cancelledStartedAt.Add(1*time.Second)), now.Add(6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedAttempt(t, db, otherAttemptID, otherIssueID, domain.AttemptStatusCompleted, now.Add(20*time.Minute), now.Add(20*time.Second), timePtr(now.Add(20*time.Second)), now.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	agentLabel := "agent"
+	resultSummary := "completed result"
+	reasonDetails := "details"
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE work_attempts SET agent_label = ?, result_summary = ?, next_steps_json = ?, verification_json = ?, reason_details = ? WHERE id = ?`, agentLabel, resultSummary, `["step one"]`, `["verify one"]`, reasonDetails, completedID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.AttemptHistory == nil || len(result.AttemptHistory) != 0 {
+		t.Fatalf("len(attempt history) = %d, want 0", len(result.AttemptHistory))
+	}
+	if result.Truncated {
+		t.Fatal("default context should not be truncated")
+	}
+	if len(result.TruncatedSections) != 0 {
+		t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.AttemptHistory) != 6 {
+		t.Fatalf("len(attempt history) = %d, want 6", len(result.AttemptHistory))
+	}
+	gotStatuses := make([]domain.AttemptStatus, len(result.AttemptHistory))
+	for index, attempt := range result.AttemptHistory {
+		gotStatuses[index] = attempt.Status
+	}
+	wantStatuses := []domain.AttemptStatus{domain.AttemptStatusActive, domain.AttemptStatusCompleted, domain.AttemptStatusFailed, domain.AttemptStatusInterrupted, domain.AttemptStatusExpired, domain.AttemptStatusCancelled}
+	if !reflect.DeepEqual(gotStatuses, wantStatuses) {
+		t.Fatalf("attempt statuses = %v, want %v", gotStatuses, wantStatuses)
+	}
+	if result.AttemptHistory[4].ID >= result.AttemptHistory[5].ID {
+		t.Fatalf("tied attempts should be ordered by id asc: %q >= %q", result.AttemptHistory[4].ID, result.AttemptHistory[5].ID)
+	}
+	completedAttempt := result.AttemptHistory[1]
+	if completedAttempt.ID != completedID {
+		t.Fatalf("completed attempt id = %q, want %q", completedAttempt.ID, completedID)
+	}
+	wantCompleted := domain.WorkAttempt{
+		ID:                    completedID,
+		IssueID:               target.ID,
+		AgentLabel:            &agentLabel,
+		Kind:                  domain.AttemptKindWork,
+		Status:                domain.AttemptStatusCompleted,
+		IssueVersionAtStart:   1,
+		ContextEventIDAtStart: 0,
+		LeaseExpiresAt:        completedStartedAt.Add(10 * time.Minute),
+		StartedAt:             completedStartedAt,
+		LastHeartbeatAt:       now.Add(2 * time.Minute),
+		FinishedAt:            timePtr(completedStartedAt.Add(1 * time.Second)),
+		ResultSummary:         &resultSummary,
+		NextSteps:             []string{"step one"},
+		Verification:          []string{"verify one"},
+		ReasonDetails:         &reasonDetails,
+	}
+	if !reflect.DeepEqual(completedAttempt, wantCompleted) {
+		t.Fatalf("completed attempt = %#v, want %#v", completedAttempt, wantCompleted)
+	}
+	if completedAttempt.FailureReasonCode != nil || completedAttempt.InterruptionReasonCode != nil {
+		t.Fatalf("completed attempt should not include failure or interruption metadata: %#v, %#v", completedAttempt.FailureReasonCode, completedAttempt.InterruptionReasonCode)
+	}
+	if result.Truncated {
+		t.Fatal("attempt history should not be truncated for this request")
+	}
+	if len(result.TruncatedSections) != 0 {
+		t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+	}
+}
+
+func TestWorkContextRepositoryBoundsAttemptHistory(t *testing.T) {
+	t.Run("custom limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generator := newTestULIDGenerator(t, now)
+		nextID := func() string {
+			id, err := generator.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return id
+		}
+		for index := 0; index < 2; index++ {
+			startedAt := now.Add(time.Duration(index+1) * time.Second)
+			if err := seedAttempt(t, db, nextID(), target.ID, domain.AttemptStatusCompleted, startedAt.Add(10*time.Minute), startedAt, timePtr(startedAt.Add(1*time.Second)), now.Add(time.Duration(index+1)*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeAttemptHistory: 1}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.AttemptHistory) != 1 {
+			t.Fatalf("len(attempt history) = %d, want 1", len(result.AttemptHistory))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory})
+		}
+	})
+
+	t.Run("default limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generator := newTestULIDGenerator(t, now)
+		nextID := func() string {
+			id, err := generator.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return id
+		}
+		for index := 0; index < domain.DefaultWorkContextAttemptHistoryLimit+1; index++ {
+			startedAt := now.Add(time.Duration(index+1) * time.Second)
+			if err := seedAttempt(t, db, nextID(), target.ID, domain.AttemptStatusCompleted, startedAt.Add(10*time.Minute), startedAt, timePtr(startedAt.Add(1*time.Second)), now.Add(time.Duration(index+1)*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.AttemptHistory) != domain.DefaultWorkContextAttemptHistoryLimit {
+			t.Fatalf("len(attempt history) = %d, want %d", len(result.AttemptHistory), domain.DefaultWorkContextAttemptHistoryLimit)
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeAttemptHistory})
+		}
+	})
+}
+
 func TestWorkContextRepositorySelectsPreviousAttemptAndCheckpoint(t *testing.T) {
 	db, _, now, target := newWorkContextTestFixture(t)
 	repository, err := sqlite.NewWorkContextRepository(db)
@@ -1123,6 +1496,209 @@ func TestWorkContextRepositoryEmitsRepeatedFailureWarning(t *testing.T) {
 		}
 		if len(result.Warnings) != 0 {
 			t.Fatalf("warnings = %#v, want empty", result.Warnings)
+		}
+	})
+}
+
+func TestWorkContextRepositoryLoadsChangesSincePreviousAttemptWhenRequested(t *testing.T) {
+	t.Run("omits section by default", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 1, target.ID, "issue_updated", nil, nil, `{"changed_fields":["title"]}`, now); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.ChangesSincePreviousAttempt) != 0 {
+			t.Fatalf("len(changes) = %d, want 0", len(result.ChangesSincePreviousAttempt))
+		}
+		if result.Truncated {
+			t.Fatal("truncated should be false")
+		}
+		if len(result.TruncatedSections) != 0 {
+			t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+		}
+	})
+
+	t.Run("returns empty with no recovery-relevant attempt", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finishedAt := now.Add(1 * time.Hour)
+		if err := seedAttemptWithBoundary(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FAA", target.ID, domain.AttemptStatusCancelled, 7, now.Add(1*time.Minute), now, &finishedAt, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 1, target.ID, "issue_updated", nil, nil, `{"changed_fields":["title"]}`, now.Add(1*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeChangesSincePreviousAttempt}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.ChangesSincePreviousAttempt) != 0 {
+			t.Fatalf("len(changes) = %d, want 0", len(result.ChangesSincePreviousAttempt))
+		}
+		if result.Truncated {
+			t.Fatal("truncated should be false")
+		}
+		if len(result.TruncatedSections) != 0 {
+			t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+		}
+	})
+
+	t.Run("uses latest terminal boundary and orders events", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finishedAt := now.Add(2 * time.Hour)
+		if err := seedAttemptWithBoundary(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FAA", target.ID, domain.AttemptStatusCompleted, 2, now.Add(1*time.Minute), now, &finishedAt, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedAttemptWithBoundary(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FAB", target.ID, domain.AttemptStatusFailed, 5, now.Add(2*time.Minute), now.Add(1*time.Minute), &finishedAt, now.Add(1*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+
+		otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FAD"
+		if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other", nil, nil, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'client', ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 1, target.ID, "issue_updated", nil, nil, `{"changed_fields":["title"]}`, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 2, target.ID, "issue_updated", nil, nil, `{"changed_fields":["description"]}`, now.Add(1*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 3, target.ID, "issue_updated", stringPtr("01ARZ3NDEKTSV4RRFFQ69G5FAV"), stringPtr("01ARZ3NDEKTSV4RRFFQ69G5FAA"), `{"changed_fields":["priority"]}`, now.Add(2*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 4, target.ID, "issue_updated", nil, nil, `{"changed_fields":["status"]}`, now.Add(3*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 5, otherIssueID, "issue_updated", nil, nil, `{"changed_fields":["priority"]}`, now.Add(4*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedIssueEvent(t, db, 6, target.ID, "custom_event", nil, nil, `{"payload":"value"}`, now.Add(5*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeChangesSincePreviousAttempt}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.ChangesSincePreviousAttempt) != 3 {
+			t.Fatalf("len(changes) = %d, want 3", len(result.ChangesSincePreviousAttempt))
+		}
+		wantIDs := []int64{3, 4, 6}
+		gotIDs := make([]int64, len(result.ChangesSincePreviousAttempt))
+		for index, event := range result.ChangesSincePreviousAttempt {
+			gotIDs[index] = event.ID
+		}
+		if !reflect.DeepEqual(gotIDs, wantIDs) {
+			t.Fatalf("event ids = %v, want %v", gotIDs, wantIDs)
+		}
+		first := result.ChangesSincePreviousAttempt[0]
+		if first.IssueID == nil || *first.IssueID != target.ID {
+			t.Fatalf("first issue id = %#v, want %q", first.IssueID, target.ID)
+		}
+		if first.EventType != "issue_updated" {
+			t.Fatalf("first event type = %q, want %q", first.EventType, "issue_updated")
+		}
+		if first.SessionID == nil || *first.SessionID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+			t.Fatalf("first session id = %#v, want %q", first.SessionID, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		}
+		if first.AttemptID == nil || *first.AttemptID != "01ARZ3NDEKTSV4RRFFQ69G5FAA" {
+			t.Fatalf("first attempt id = %#v, want %q", first.AttemptID, "01ARZ3NDEKTSV4RRFFQ69G5FAA")
+		}
+		if string(first.Payload) != `{"changed_fields":["priority"]}` {
+			t.Fatalf("first payload = %q, want %q", string(first.Payload), `{"changed_fields":["priority"]}`)
+		}
+		if !first.CreatedAt.Equal(now.Add(2 * time.Second)) {
+			t.Fatalf("first created_at = %v, want %v", first.CreatedAt, now.Add(2*time.Second))
+		}
+		last := result.ChangesSincePreviousAttempt[len(result.ChangesSincePreviousAttempt)-1]
+		if last.SessionID != nil || last.AttemptID != nil {
+			t.Fatalf("last event should have nil session and attempt ids: %#v %#v", last.SessionID, last.AttemptID)
+		}
+	})
+}
+
+func TestWorkContextRepositoryBoundsChangesSincePreviousAttempt(t *testing.T) {
+	t.Run("defaults to 20 and truncates", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finishedAt := now.Add(1 * time.Hour)
+		if err := seedAttemptWithBoundary(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FAA", target.ID, domain.AttemptStatusCompleted, 0, now.Add(1*time.Minute), now, &finishedAt, now); err != nil {
+			t.Fatal(err)
+		}
+		for index := 1; index <= 21; index++ {
+			if err := seedIssueEvent(t, db, int64(index), target.ID, "issue_updated", nil, nil, fmt.Sprintf(`{"id":%d}`, index), now.Add(time.Duration(index)*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeChangesSincePreviousAttempt}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.ChangesSincePreviousAttempt) != 20 {
+			t.Fatalf("len(changes) = %d, want 20", len(result.ChangesSincePreviousAttempt))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !includesWorkContextSection(result.TruncatedSections, domain.WorkContextIncludeChangesSincePreviousAttempt) {
+			t.Fatalf("truncated sections = %v, want include", result.TruncatedSections)
+		}
+	})
+
+	t.Run("uses explicit custom limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finishedAt := now.Add(1 * time.Hour)
+		if err := seedAttemptWithBoundary(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FAA", target.ID, domain.AttemptStatusCompleted, 0, now.Add(1*time.Minute), now, &finishedAt, now); err != nil {
+			t.Fatal(err)
+		}
+		for index := 1; index <= 3; index++ {
+			if err := seedIssueEvent(t, db, int64(index), target.ID, "issue_updated", nil, nil, fmt.Sprintf(`{"id":%d}`, index), now.Add(time.Duration(index)*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeChangesSincePreviousAttempt}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeChangesSincePreviousAttempt: 2}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.ChangesSincePreviousAttempt) != 2 {
+			t.Fatalf("len(changes) = %d, want 2", len(result.ChangesSincePreviousAttempt))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !includesWorkContextSection(result.TruncatedSections, domain.WorkContextIncludeChangesSincePreviousAttempt) {
+			t.Fatalf("truncated sections = %v, want include", result.TruncatedSections)
 		}
 	})
 }
@@ -1317,6 +1893,72 @@ func newTestULIDGenerator(t *testing.T, now time.Time) *ids.Generator {
 	return generator
 }
 
+func seedIssueEvent(t *testing.T, db *sqlite.DB, id int64, issueID string, eventType string, sessionID, attemptID *string, payload string, createdAt time.Time) error {
+	t.Helper()
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		var sessionValue any
+		if sessionID != nil {
+			sessionValue = *sessionID
+		} else {
+			sessionValue = nil
+		}
+		var attemptValue any
+		if attemptID != nil {
+			attemptValue = *attemptID
+		} else {
+			attemptValue = nil
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(id, issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, issueID, eventType, sessionValue, attemptValue, payload, createdAt.Format(time.RFC3339Nano))
+		return err
+	})
+}
+
+func seedAttemptWithBoundary(t *testing.T, db *sqlite.DB, id, issueID string, status domain.AttemptStatus, boundary int64, leaseExpiresAt, startedAt time.Time, finishedAt *time.Time, now time.Time) error {
+	t.Helper()
+	var finishedValue any
+	if finishedAt != nil {
+		finishedValue = finishedAt.Format(time.RFC3339Nano)
+	}
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		failureReasonCode := any(nil)
+		if status == domain.AttemptStatusFailed {
+			failureReasonCode = domain.FailureReasonImplementationError
+		}
+		interruptionReasonCode := any(nil)
+		if status == domain.AttemptStatusInterrupted {
+			interruptionReasonCode = domain.InterruptionReasonHandoff
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`, id, issueID, status, boundary, []byte{1, 2, 3}, leaseExpiresAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), finishedValue, failureReasonCode, interruptionReasonCode)
+		return err
+	})
+}
+
+func seedArtifact(t *testing.T, db *sqlite.DB, id, issueID string, attemptID *string, artifactType domain.ArtifactType, uri string, title *string, metadata json.RawMessage, createdAt time.Time) error {
+	t.Helper()
+	var attemptValue any
+	if attemptID != nil {
+		attemptValue = *attemptID
+	} else {
+		attemptValue = nil
+	}
+	var titleValue any
+	if title != nil {
+		titleValue = *title
+	} else {
+		titleValue = nil
+	}
+	var metadataValue any
+	if metadata != nil {
+		metadataValue = string(metadata)
+	} else {
+		metadataValue = nil
+	}
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, attemptValue, artifactType, uri, titleValue, metadataValue, createdAt.Format(time.RFC3339Nano))
+		return err
+	})
+}
+
 func seedDecision(t *testing.T, db *sqlite.DB, issueID *string, id, title, summary, content string, status domain.DecisionStatus, createdAt time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
@@ -1393,6 +2035,15 @@ func blockerIDsFrom(blockers []domain.WorkContextIssue) []string {
 		result[index] = blocker.ID
 	}
 	return result
+}
+
+func includesWorkContextSection(values []domain.WorkContextInclude, wanted domain.WorkContextInclude) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func timePtr(value time.Time) *time.Time {

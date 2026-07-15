@@ -5,6 +5,8 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"rhizome-mcp/internal/domain"
 )
 
 func tool(name, description string, input, output *jsonschema.Schema) *sdkmcp.Tool {
@@ -95,6 +97,30 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 		"cursor":   nullableBoundedStringSchema(4096),
 		"order":    enumSchema("newest_first"),
 	}, "issue_id")
+}
+
+func schemaGetWorkContext() *jsonschema.Schema {
+	includeValues := make([]string, len(domain.AllWorkContextIncludes))
+	for index, include := range domain.AllWorkContextIncludes {
+		includeValues[index] = string(include)
+	}
+	return object(map[string]*jsonschema.Schema{
+		"issue_id": boundedStringSchema(64),
+		"include":  &jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(10), UniqueItems: true},
+		"limits":   schemaWorkContextLimits(),
+	}, "issue_id")
+}
+
+func schemaWorkContextLimits() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"related_issue_summaries":        boundedIntegerSchema(1, 20),
+		"recent_comments":                boundedIntegerSchema(1, 20),
+		"recent_attempt_notes":           boundedIntegerSchema(1, 20),
+		"decision_content":               boundedIntegerSchema(1, 20),
+		"attempt_history":                boundedIntegerSchema(1, 20),
+		"artifacts":                      boundedIntegerSchema(1, 20),
+		"changes_since_previous_attempt": boundedIntegerSchema(1, 20),
+	})
 }
 
 func schemaListIssues() *jsonschema.Schema {
@@ -268,8 +294,9 @@ func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addC
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()
 }
-func schemaUpdateOutput() *jsonschema.Schema    { return typedSchema[updateIssueOutput]() }
-func schemaIssueListOutput() *jsonschema.Schema { return typedSchema[issueListOutput]() }
+func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
+func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
+func schemaIssueListOutput() *jsonschema.Schema      { return typedSchema[issueListOutput]() }
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }
