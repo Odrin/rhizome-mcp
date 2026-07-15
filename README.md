@@ -82,7 +82,6 @@ usage.
 
 ## Documentation
 
-- [Current implementation roadmap](docs/07-implementation-plan.md)
 - [Implementation context for AI agents](AGENT_BRIEF.md)
 - [Product goals and scope](docs/01-product-scope.md)
 - [Domain model](docs/02-domain-model.md)
@@ -91,9 +90,21 @@ usage.
 - [Implementation requirements](docs/05-implementation-requirements.md)
 - [Deferred features and non-goals](docs/06-deferred-and-open.md)
 - [Specification index and reading guide](SPEC.md)
-- [Accepted implementation baseline](docs/decisions/0001-implementation-baseline.md)
 
-The six modular files are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current roadmap unit.
+The six modular files are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current MCP issue.
+
+## Repository task tracking
+
+The configured `rhizome-mcp` project is the source of truth for this repository's backlog and implementation history. Contributors and agents should:
+
+- inspect MCP issues and the planning graph before selecting work;
+- use work context and active decisions before implementation;
+- create and update work through MCP issues, labels, hierarchy, and relations;
+- record durable architectural or product choices with MCP decision tools;
+- claim executable work and store checkpoints or handoffs in attempts and attempt notes;
+- use MCP search and changes to recover historical context.
+
+Markdown remains appropriate for product and technical specifications, but not for the active task backlog or implementation-status tracking.
 
 ## Repository identity
 
@@ -122,4 +133,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-Active development toward the first release. The [implementation roadmap](docs/07-implementation-plan.md) is the single source for the current phase, next unit, and exit gates.
+The first-version MVP is complete. Active follow-up work and historical milestones are tracked in the configured `rhizome-mcp` project.

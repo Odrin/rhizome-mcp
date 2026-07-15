@@ -4,10 +4,10 @@ You are implementing `rhizome-mcp`, a local-first MCP server for task tracking a
 
 ## Load context selectively
 
-1. Read the current state and next unit in `docs/07-implementation-plan.md`.
-2. Inspect the owning code path and its nearest tests.
-3. Read only the specification sections needed for that unit.
-4. Read an ADR only when the unit touches its decision.
+1. Inspect the configured MCP project's issues and planning graph.
+2. Select a claimable issue and load its work context, relations, and relevant decisions.
+3. Inspect the owning code path and its nearest tests.
+4. Read only the specification sections needed for that issue.
 
 `SPEC.md` is a lightweight index, not a second copy of the specification. Detailed contracts live only in the modular documents below.
 
@@ -19,7 +19,7 @@ Specification map:
 - `docs/04-storage-runtime.md`: SQLite, transactions, migrations, leases, and operations.
 - `docs/05-implementation-requirements.md`: architecture, algorithms, errors, and test coverage.
 - `docs/06-deferred-and-open.md`: deferred features and confirmed defaults.
-- `docs/decisions/`: accepted implementation choices.
+- MCP decisions: accepted implementation and product choices.
 
 ## Non-negotiable requirements
 
@@ -37,4 +37,6 @@ Specification map:
 
 ## Working rule
 
-Implement one coherent vertical slice at a time. Use the smallest focused check during development, then apply the validation tier in the roadmap. Keep roadmap entries current and concise; Git history and tests are the detailed completion record.
+Implement one coherent vertical slice at a time. Claim executable work through MCP, save checkpoints and handoffs as attempt notes, and finish the attempt with a concise result and verification summary. Keep issue status, blockers, relations, and decisions current through MCP. Use focused checks during development and repository-wide validation when shared contracts, schemas, migrations, or cross-layer wiring change.
+
+Do not maintain the active backlog or durable decisions in Markdown. Markdown documentation remains the source for product and technical specification only.

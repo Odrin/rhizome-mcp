@@ -70,9 +70,9 @@ These are plausible future additions, not current requirements.
 - optional permanent agent profiles;
 - capability matching.
 
-## 3. Decisions to make during implementation planning
+## 3. MVP implementation choices
 
-The implementation agent must select and document:
+These choices were resolved during MVP implementation and are preserved in the active MCP decision named `Implementation baseline`:
 
 - exact Go version;
 - exact MCP Go SDK and version;
@@ -94,9 +94,9 @@ The implementation agent must select and document:
 
 These choices must not contradict the domain model.
 
-## 4. Suggested defaults requiring confirmation
+## 4. Confirmed MVP defaults
 
-Reasonable initial defaults:
+The MVP uses:
 
 ```text
 lease duration: 5 minutes
@@ -111,7 +111,7 @@ graph default nodes: 100
 graph maximum nodes: 500
 ```
 
-They may be adjusted during planning if justified.
+Future changes must be recorded as a superseding MCP decision when they affect public contracts or invariants.
 
 ## 5. Known design trade-offs
 
