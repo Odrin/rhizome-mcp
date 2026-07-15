@@ -21,9 +21,13 @@ import (
 //go:embed sql/001_initial_schema.sql
 var initialSchemaSQL string
 
+//go:embed sql/002_search_index_triggers.sql
+var searchIndexTriggersSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
+const searchIndexTriggersChecksum = "817957b68b07b7d393fe21718743dc64dd90aa5a0d7e8da8153ff2b35bf1a695"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -33,6 +37,12 @@ var (
 			name:     "initial_schema",
 			checksum: initialSchemaChecksum,
 			sql:      initialSchemaSQL,
+		},
+		{
+			version:  2,
+			name:     "search_index_triggers",
+			checksum: searchIndexTriggersChecksum,
+			sql:      searchIndexTriggersSQL,
 		},
 	}
 )

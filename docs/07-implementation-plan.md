@@ -15,8 +15,8 @@ This is the living roadmap for the first release. It records current capability,
 ## Current state
 
 - **Active phase:** Phase 6, search and changes.
-- **Next unit:** complete transactional FTS5 indexing and rebuild support.
-- **Then:** implement ranked bounded search and event-based incremental changes, and expose `search` and `get_changes`.
+- **Next unit:** implement ranked bounded search and event-based incremental changes.
+- **Then:** expose `search` and `get_changes`.
 - **Later:** Phase 7 CLI, maintenance, and release.
 
 ## Phase 0: decisions and workflow - complete
@@ -65,9 +65,9 @@ Delivered:
 
 Exit gate satisfied: decisions and checkpoints survive interruption; every optional section is explicitly bounded and reports truncation; and default context is compact and deterministic. The focused contract coverage and repository-wide standard, race, vet, and no-CGO suites pass.
 
-## Phase 6: search and changes - planned
+## Phase 6: search and changes - in progress
 
-- Complete transactional FTS5 indexing and rebuild support.
+- Transactional FTS5 indexing and atomic rebuild support are complete.
 - Implement ranked bounded snippets, deterministic tie-breaking, filters, and event-based incremental changes.
 - Deliver `search` and `get_changes`.
 

@@ -19,12 +19,12 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO schema_migrations(version, name, checksum, applied_at)
-			VALUES (3, 'later_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
+			VALUES (4, 'later_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO schema_migrations(version, name, checksum, applied_at)
-			VALUES (2, 'middle_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
+			VALUES (3, 'middle_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
@@ -63,8 +63,8 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 	if got.NextIssueNumber != 7 || !got.CreatedAt.Equal(now) || !got.UpdatedAt.Equal(now) {
 		t.Fatalf("project values = %#v", got)
 	}
-	if got.SchemaVersion != 3 || got.LatestEventID != 2 {
-		t.Fatalf("derived values = schema %d, event %d; want 3, 2", got.SchemaVersion, got.LatestEventID)
+	if got.SchemaVersion != 4 || got.LatestEventID != 2 {
+		t.Fatalf("derived values = schema %d, event %d; want 4, 2", got.SchemaVersion, got.LatestEventID)
 	}
 }
 

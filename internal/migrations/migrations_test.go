@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: 1, Applied: 1}) {
-		t.Fatalf("Migrate() result = %+v, want version 1 with one applied migration", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 2}) {
+		t.Fatalf("Migrate() result = %+v, want current version with two applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -85,13 +85,14 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 
 	var version int
 	var name, checksum, appliedAt string
-	if err := inspect.QueryRow("SELECT version, name, checksum, applied_at FROM schema_migrations").Scan(&version, &name, &checksum, &appliedAt); err != nil {
+	if err := inspect.QueryRow(`SELECT version, name, checksum, applied_at
+		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "initial_schema" || checksum != initialSchemaChecksum {
+	if version != CurrentVersion() || name != "search_index_triggers" || checksum != searchIndexTriggersChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(initialSchemaSQL))
+	actualChecksum := sha256.Sum256([]byte(searchIndexTriggersSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -113,7 +114,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 1 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 2 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -122,8 +123,72 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := inspect.QueryRow("SELECT count(*), min(applied_at) FROM schema_migrations").Scan(&count, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || appliedAt != migrationTime.UTC().Format(time.RFC3339Nano) {
+	if count != CurrentVersion() || appliedAt != migrationTime.UTC().Format(time.RFC3339Nano) {
 		t.Fatalf("history count/applied_at = %d/%q", count, appliedAt)
+	}
+}
+
+func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
+	t.Parallel()
+	_, db := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:1]); err != nil {
+		t.Fatalf("migrate initial schema: %v", err)
+	}
+
+	issueID := testID(1)
+	commentID := testID(2)
+	decisionID := testID(3)
+	attemptID := testID(4)
+	noteID := testID(5)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		insertIssueSQL := `INSERT INTO issues(
+			id, sequence_no, type, title, description, status, priority, version, created_at, updated_at
+		) VALUES (?, 1, 'task', 'indexed issue', 'issue body', 'ready', 'medium', 1, ?, ?)`
+		if _, err := tx.ExecContext(ctx, insertIssueSQL, issueID, nowText(), nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at)
+			VALUES (?, ?, 'comment body', ?)`, commentID, issueID, nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(
+			id, issue_id, title, summary, content, status, created_at
+		) VALUES (?, ?, 'decision title', 'decision summary', 'decision body', 'active', ?)`,
+			decisionID, issueID, nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, X'01', ?, ?, ?)`,
+			attemptID, issueID, nowText(), nowText(), nowText()); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(
+			id, attempt_id, kind, content, important, created_at
+		) VALUES (?, ?, 'progress', 'note body', 0, ?)`, noteID, attemptID, nowText())
+		return err
+	}); err != nil {
+		t.Fatalf("seed pre-upgrade rows: %v", err)
+	}
+
+	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+	if err != nil {
+		t.Fatalf("upgrade migration: %v", err)
+	}
+	if result != (Result{Version: CurrentVersion(), Applied: 1}) {
+		t.Fatalf("upgrade result = %+v, want one applied migration", result)
+	}
+
+	var count int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM search_index").Scan(&count)
+	}); err != nil {
+		t.Fatalf("read rebuilt search index: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("search index rows = %d, want 4", count)
 	}
 }
 
@@ -200,8 +265,8 @@ func TestConcurrentRunnersHaveOneMigrationOwner(t *testing.T) {
 		}
 		applied += result.Applied
 	}
-	if applied != 1 {
-		t.Fatalf("total applied migrations = %d, want 1", applied)
+	if applied != CurrentVersion() {
+		t.Fatalf("total applied migrations = %d, want %d", applied, CurrentVersion())
 	}
 }
 
@@ -213,8 +278,8 @@ func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	}{
 		{name: "checksum", tamper: "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"},
 		{name: "name", tamper: "UPDATE schema_migrations SET name = 'renamed_schema'"},
-		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (2, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
-		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0"},
+		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (3, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
+		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0 WHERE version = 1"},
 		{name: "malformed checksum", tamper: "UPDATE schema_migrations SET checksum = 'not-sha256'"},
 		{name: "malformed timestamp", tamper: "UPDATE schema_migrations SET applied_at = 'not-a-timestamp'"},
 		{name: "non UTC timestamp", tamper: "UPDATE schema_migrations SET applied_at = '2026-01-01T01:00:00+01:00'"},
