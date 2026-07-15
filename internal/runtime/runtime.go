@@ -58,6 +58,7 @@ type Project struct {
 	closed   bool
 	closeErr error
 	SQLite   sqlite.Options
+	clock    clock.Clock
 }
 
 // OpenProject discovers strict repository identity, resolves external storage,
@@ -126,6 +127,7 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 		SchemaVersion: migrationResult.Version,
 		Database:      db,
 		SQLite:        options.SQLite,
+		clock:         options.Clock,
 	}, nil
 }
 

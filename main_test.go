@@ -67,6 +67,42 @@ func TestInitCreatesUsableDatabase(t *testing.T) {
 	}
 }
 
+func TestDoctorCommandUsesCustomDataRoot(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("reopen project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "doctor", "--format", "json"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("doctor command failed: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "\"healthy\"") || !strings.Contains(output, "\"checks\"") {
+		t.Fatalf("expected doctor JSON output, got %q", output)
+	}
+}
+
 func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()

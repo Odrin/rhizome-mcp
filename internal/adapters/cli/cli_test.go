@@ -200,6 +200,76 @@ func TestRunBackup(t *testing.T) {
 	})
 }
 
+func TestRunDoctor(t *testing.T) {
+	t.Run("json output", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		full := false
+		cli.SetDoctorHandler(func(_ context.Context, receivedFull bool) (DoctorReport, error) {
+			full = receivedFull
+			return DoctorReport{Full: receivedFull, Checks: []DoctorCheck{{Check: "ping", Healthy: true, Message: "ok"}}}, nil
+		})
+		if err := cli.Run(context.Background(), []string{"doctor", "--full", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !full {
+			t.Fatal("expected --full to be passed to the doctor handler")
+		}
+		output := stdout.String()
+		for _, token := range []string{"\"full\"", "\"healthy\"", "\"checks\"", "\"ping\""} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+	})
+
+	t.Run("unhealthy output before error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetDoctorHandler(func(context.Context, bool) (DoctorReport, error) {
+			return DoctorReport{Full: false, Checks: []DoctorCheck{{Check: "ping", Healthy: false, Message: "failed"}}}, errors.New("boom")
+		})
+
+		t.Run("unhealthy report without handler error", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cli := New(Services{}, &stdout, &stderr, nil, nil)
+			cli.SetDoctorHandler(func(context.Context, bool) (DoctorReport, error) {
+				return DoctorReport{Checks: []DoctorCheck{{Check: "ping", Healthy: false, Message: "failed"}}}, nil
+			})
+			err := cli.Run(context.Background(), []string{"doctor", "--format", "json"})
+			if err == nil || err.Error() != "doctor found failed checks" {
+				t.Fatalf("expected doctor found failed checks error, got %v", err)
+			}
+			if !strings.Contains(stdout.String(), "\"healthy\": false") {
+				t.Fatalf("expected unhealthy JSON report, got %q", stdout.String())
+			}
+		})
+		err := cli.Run(context.Background(), []string{"doctor"})
+		if err == nil || err.Error() != "doctor found failed checks" {
+			t.Fatalf("expected doctor found failed checks error, got %v", err)
+		}
+		output := stdout.String()
+		if !strings.Contains(output, "ping") || !strings.Contains(output, "overall_health") {
+			t.Fatalf("expected output to include report, got %q", output)
+		}
+	})
+
+	t.Run("handler error no stdout", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetDoctorHandler(func(context.Context, bool) (DoctorReport, error) {
+			return DoctorReport{Full: true, Checks: []DoctorCheck{{Check: "ping", Healthy: true, Message: "ok"}}}, errors.New("boom")
+		})
+		err := cli.Run(context.Background(), []string{"doctor"})
+		if err == nil || err.Error() != "boom" {
+			t.Fatalf("expected boom error, got %v", err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no successful output, got %q", stdout.String())
+		}
+	})
+}
+
 func TestRunJSONOutput(t *testing.T) {
 	tests := []struct {
 		name      string

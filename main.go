@@ -122,8 +122,15 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return cliadapter.BackupReport{OutputPath: report.OutputPath, SchemaVersion: report.SchemaVersion}, nil
 	}
+	doctorHandler := func(ctx context.Context, full bool) (cliadapter.DoctorReport, error) {
+		if project == nil {
+			return cliadapter.DoctorReport{}, errors.New("project is not open")
+		}
+		report, err := project.Doctor(ctx, full)
+		return doctorReportFromRuntime(report), err
+	}
 
-	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup") {
+	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -152,6 +159,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
 	adapter.SetBackupHandler(backupHandler)
+	adapter.SetDoctorHandler(doctorHandler)
 	return adapter.Run(ctx, args)
 }
 
@@ -440,6 +448,14 @@ func resolveDataRoot(pathInputs projectconfig.PathInputs, dataRootOverride strin
 		return "", err
 	}
 	return dataRoot, nil
+}
+
+func doctorReportFromRuntime(report projectruntime.DoctorReport) cliadapter.DoctorReport {
+	checks := make([]cliadapter.DoctorCheck, len(report.Checks))
+	for index, check := range report.Checks {
+		checks[index] = cliadapter.DoctorCheck{Check: check.Name, Healthy: check.Healthy, Message: check.Message}
+	}
+	return cliadapter.DoctorReport{Full: report.Full, Checks: checks}
 }
 
 func writeJSON(w io.Writer, value any) error {

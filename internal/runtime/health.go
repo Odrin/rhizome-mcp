@@ -63,6 +63,24 @@ func (project *Project) Health(ctx context.Context) (HealthReport, error) {
 			domain.Detail{Field: checkPing, Code: "CHECK_FAILED", Message: "project is closed"})
 	}
 
+	checks, currentVersion, details, err := project.collectHealthChecks(ctx, report.ExpectedSchemaVersion)
+	report.Checks = checks
+	report.CurrentSchemaVersion = currentVersion
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return report, err
+		}
+		return report, domain.WrapError(err, CodeHealthCheck, "project health check failed", false,
+			domain.Detail{Field: checkPing, Code: "CHECK_FAILED", Message: "database query failed"})
+	}
+	if len(details) != 0 {
+		return report, domain.NewError(CodeHealthCheck, "project health check failed", false, details...)
+	}
+	return report, nil
+}
+
+func (project *Project) collectHealthChecks(ctx context.Context, expectedSchemaVersion int) ([]HealthCheck, int, []domain.Detail, error) {
+	var currentSchemaVersion int
 	checks := []struct {
 		name string
 		run  func(context.Context, sqlite.Queryer) (string, error)
@@ -75,11 +93,11 @@ func (project *Project) Health(ctx context.Context) (HealthReport, error) {
 			if err := query.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&current); err != nil {
 				return "", err
 			}
-			report.CurrentSchemaVersion = current
-			if current != report.ExpectedSchemaVersion {
-				return "", fmt.Errorf("schema version is %d; expected %d", current, report.ExpectedSchemaVersion)
+			currentSchemaVersion = current
+			if current != expectedSchemaVersion {
+				return "", fmt.Errorf("schema version is %d; expected %d", current, expectedSchemaVersion)
 			}
-			return fmt.Sprintf("current=%d expected=%d", current, report.ExpectedSchemaVersion), nil
+			return fmt.Sprintf("current=%d expected=%d", current, expectedSchemaVersion), nil
 		}},
 		{checkMigrationHistory, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			version, err := migrations.VerifyHistory(ctx, query)
@@ -94,15 +112,16 @@ func (project *Project) Health(ctx context.Context) (HealthReport, error) {
 		{checkOneActiveAttempt, checkActiveAttemptInvariant},
 	}
 
+	results := make([]HealthCheck, 0, len(checks))
 	details := make([]domain.Detail, 0)
 	err := project.Database.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
 		for _, item := range checks {
 			message, checkErr := item.run(ctx, query)
 			if checkErr == nil {
-				report.Checks = append(report.Checks, HealthCheck{Name: item.name, Healthy: true, Message: message})
+				results = append(results, HealthCheck{Name: item.name, Healthy: true, Message: message})
 				continue
 			}
-			report.Checks = append(report.Checks, HealthCheck{Name: item.name, Healthy: false, Message: "failed"})
+			results = append(results, HealthCheck{Name: item.name, Healthy: false, Message: "failed"})
 			details = append(details, domain.Detail{Field: item.name, Code: "CHECK_FAILED", Message: safeCheckMessage(checkErr)})
 			if errors.Is(checkErr, context.Canceled) || errors.Is(checkErr, context.DeadlineExceeded) {
 				return checkErr
@@ -112,15 +131,11 @@ func (project *Project) Health(ctx context.Context) (HealthReport, error) {
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return report, err
+			return results, currentSchemaVersion, details, err
 		}
-		return report, domain.WrapError(err, CodeHealthCheck, "project health check failed", false,
-			domain.Detail{Field: checkPing, Code: "CHECK_FAILED", Message: "database query failed"})
+		return results, currentSchemaVersion, details, err
 	}
-	if len(details) != 0 {
-		return report, domain.NewError(CodeHealthCheck, "project health check failed", false, details...)
-	}
-	return report, nil
+	return results, currentSchemaVersion, details, nil
 }
 
 func checkPingDatabase(ctx context.Context, query sqlite.Queryer) (string, error) {

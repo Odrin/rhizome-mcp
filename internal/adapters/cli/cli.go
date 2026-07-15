@@ -66,6 +66,42 @@ type BackupReport struct {
 // BackupHandler runs a project backup after the adapter parses the command.
 type BackupHandler func(context.Context, string) (BackupReport, error)
 
+// DoctorReport summarizes a runtime doctor report for CLI output.
+type DoctorReport struct {
+	Full   bool          `json:"full"`
+	Checks []DoctorCheck `json:"checks"`
+}
+
+// DoctorCheck is one doctor verification result.
+type DoctorCheck struct {
+	Check   string `json:"check"`
+	Healthy bool   `json:"healthy"`
+	Message string `json:"message"`
+}
+
+// MarshalJSON writes doctor report JSON with a computed healthy field.
+func (report DoctorReport) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		Full    bool          `json:"full"`
+		Healthy bool          `json:"healthy"`
+		Checks  []DoctorCheck `json:"checks"`
+	}
+	return json.Marshal(alias{Full: report.Full, Healthy: report.Healthy(), Checks: report.Checks})
+}
+
+// Healthy reports whether every named check passed.
+func (report DoctorReport) Healthy() bool {
+	for _, check := range report.Checks {
+		if !check.Healthy {
+			return false
+		}
+	}
+	return true
+}
+
+// DoctorHandler runs a project doctor check after the adapter parses the command.
+type DoctorHandler func(context.Context, bool) (DoctorReport, error)
+
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
 	services      Services
@@ -74,6 +110,7 @@ type CLI struct {
 	initHandler   InitHandler
 	serveHandler  ServeHandler
 	backupHandler BackupHandler
+	doctorHandler DoctorHandler
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -84,6 +121,11 @@ func New(services Services, stdout, stderr io.Writer, initHandler InitHandler, s
 // SetBackupHandler installs a handler for the backup command.
 func (c *CLI) SetBackupHandler(handler BackupHandler) {
 	c.backupHandler = handler
+}
+
+// SetDoctorHandler installs a handler for the doctor command.
+func (c *CLI) SetDoctorHandler(handler DoctorHandler) {
+	c.doctorHandler = handler
 }
 
 // Run parses the supplied arguments and dispatches the matching subcommand.
@@ -99,6 +141,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runServe(ctx, args[1:])
 	case "backup":
 		return c.runBackup(ctx, args[1:])
+	case "doctor":
+		return c.runDoctor(ctx, args[1:])
 	case "project":
 		return c.runProject(ctx, args[1:])
 	case "issue":
@@ -173,6 +217,43 @@ func (c *CLI) runBackup(ctx context.Context, args []string) error {
 		return writeJSON(c.stdoutWriter(), BackupResponse{Output: report.OutputPath, SchemaVersion: report.SchemaVersion, Validated: true})
 	}
 	return c.writeBackupTable(report)
+}
+
+func (c *CLI) runDoctor(ctx context.Context, args []string) error {
+	if c.doctorHandler == nil {
+		return fmt.Errorf("doctor handler is not configured")
+	}
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	full := fs.Bool("full", false, "run the full integrity check")
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return fmt.Errorf("unsupported format %q", *format)
+	}
+	report, err := c.doctorHandler(ctx, *full)
+	if !report.Healthy() {
+		if *format == "json" {
+			if writeErr := writeJSON(c.stdoutWriter(), report); writeErr != nil {
+				return writeErr
+			}
+		} else if writeErr := c.writeDoctorTable(report); writeErr != nil {
+			return writeErr
+		}
+		return errors.New("doctor found failed checks")
+	}
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), report)
+	}
+	return c.writeDoctorTable(report)
 }
 
 func (c *CLI) runProject(ctx context.Context, args []string) error {
@@ -497,6 +578,18 @@ func (c *CLI) writeProjectInfoTable(project domain.Project) error {
 	return err
 }
 
+func (c *CLI) writeDoctorTable(report DoctorReport) error {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("mode\t%t\n", report.Full))
+	builder.WriteString(fmt.Sprintf("overall_health\t%t\n", report.Healthy()))
+	builder.WriteString("check\thealthy\tmessage\n")
+	for _, check := range report.Checks {
+		builder.WriteString(fmt.Sprintf("%s\t%t\t%s\n", check.Check, check.Healthy, check.Message))
+	}
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
+}
+
 func (c *CLI) writeBackupTable(report BackupReport) error {
 	lines := []string{
 		fmt.Sprintf("output\t%s", report.OutputPath),
@@ -632,6 +725,7 @@ func (c *CLI) usage() string {
   rhizome-mcp [--data-root PATH] init
   rhizome-mcp [--data-root PATH] serve
   rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
+  rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]
   rhizome-mcp [--data-root PATH] project info [--format table|json]
   rhizome-mcp [--data-root PATH] issue list [--format table|json] [--limit N] [--cursor CURSOR] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]

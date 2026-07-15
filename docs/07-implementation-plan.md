@@ -15,8 +15,7 @@ This is the living roadmap for the first release. It records current capability,
 ## Current state
 
 - **Active phase:** Phase 7, CLI, maintenance, and release.
-- **Next unit:** add `doctor`.
-- **Then:** finalize release validation, documentation, packaging, and target-platform builds.
+- **Next unit:** finalize release validation, documentation, packaging, and target-platform builds.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -78,7 +77,7 @@ Exit gate satisfied: transaction visibility, rebuild equivalence, malformed curs
 - `init` creates strict identity and external storage, then migrates and seeds the database. All CLI commands accept an optional process-level data-root override.
 - Delivered CLI-only maintenance release for active attempts and transactional FTS rebuild. Forced release atomically records a sessionless interruption and preserves issue and recovery state.
 - Delivered `backup --output PATH` using a controlled full WAL checkpoint, `VACUUM INTO`, atomic no-overwrite publication, and reopen health validation.
-- Add `doctor`.
+- Delivered `doctor [--full]` with runtime health, permission, capacity, WAL, expired-attempt, and optional deep-integrity checks.
 - Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, packaging, and target-platform builds.
 
 Exit gate: exactly 22 tools are stable; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed; the full release suite passes.
