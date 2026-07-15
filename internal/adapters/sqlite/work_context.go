@@ -81,6 +81,25 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			}
 		}
 
+		if includesWorkContextSection(input.Include, domain.WorkContextIncludeRelations) {
+			result.Relations, err = loadWorkContextRelations(ctx, query, resolvedIssueID)
+			if err != nil {
+				return err
+			}
+		}
+
+		if includesWorkContextSection(input.Include, domain.WorkContextIncludeRelatedIssueSummaries) {
+			summaries, truncated, err := loadWorkContextRelatedIssueSummaries(ctx, query, resolvedIssueID, input.Limits[domain.WorkContextIncludeRelatedIssueSummaries], now)
+			if err != nil {
+				return err
+			}
+			result.RelatedIssueSummaries = summaries
+			if truncated {
+				result.Truncated = true
+				result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, domain.WorkContextIncludeRelatedIssueSummaries)
+			}
+		}
+
 		result.Blockers, err = loadWorkContextBlockers(ctx, query, resolvedIssueID, now)
 		if err != nil {
 			return err
@@ -120,6 +139,121 @@ func includesWorkContextSection(values []domain.WorkContextInclude, wanted domai
 		}
 	}
 	return false
+}
+
+func appendWorkContextSection(values []domain.WorkContextInclude, wanted domain.WorkContextInclude) []domain.WorkContextInclude {
+	if includesWorkContextSection(values, wanted) {
+		return values
+	}
+	if values == nil {
+		values = []domain.WorkContextInclude{}
+	}
+	return append(values, wanted)
+}
+
+func loadWorkContextRelations(ctx context.Context, query Queryer, issueID string) ([]domain.IssueRelation, error) {
+	rows, err := query.QueryContext(ctx, `SELECT relation.id, relation.source_issue_id, relation.target_issue_id, relation.type, relation.created_at, source.sequence_no AS source_sequence_no, target.sequence_no AS target_sequence_no
+	FROM issue_relations AS relation
+	LEFT JOIN issues AS source ON source.id = relation.source_issue_id
+	LEFT JOIN issues AS target ON target.id = relation.target_issue_id
+	WHERE relation.source_issue_id = ? OR relation.target_issue_id = ?
+	ORDER BY relation.type ASC, source.sequence_no ASC, relation.source_issue_id ASC, target.sequence_no ASC, relation.target_issue_id ASC, relation.id ASC`, issueID, issueID)
+	if err != nil {
+		return nil, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.IssueRelation, 0)
+	for rows.Next() {
+		var relationID, sourceIssueID, targetIssueID, relationType, createdAt string
+		var sourceSequenceNo, targetSequenceNo sql.NullInt64
+		if err := rows.Scan(&relationID, &sourceIssueID, &targetIssueID, &relationType, &createdAt, &sourceSequenceNo, &targetSequenceNo); err != nil {
+			return nil, workContextCorrupt(err)
+		}
+		if !sourceSequenceNo.Valid || !targetSequenceNo.Valid {
+			return nil, domain.NewError(domain.CodeStorageCorrupt, "stored relation endpoint is invalid", false)
+		}
+		if _, err := ids.ParseStrict(relationID); err != nil {
+			return nil, domain.NewError(domain.CodeStorageCorrupt, "stored relation projection is invalid", false, domain.Detail{Field: "id", Code: "INVALID_ULID"})
+		}
+		if _, err := ids.ParseStrict(sourceIssueID); err != nil {
+			return nil, domain.NewError(domain.CodeStorageCorrupt, "stored relation endpoint is invalid", false, domain.Detail{Field: "source_issue_id", Code: "INVALID_ULID"})
+		}
+		if _, err := ids.ParseStrict(targetIssueID); err != nil {
+			return nil, domain.NewError(domain.CodeStorageCorrupt, "stored relation endpoint is invalid", false, domain.Detail{Field: "target_issue_id", Code: "INVALID_ULID"})
+		}
+		parsedType, err := domain.ParseRelationType(relationType)
+		if err != nil {
+			return nil, domain.WrapError(err, domain.CodeStorageCorrupt, "stored relation projection is invalid", false)
+		}
+		createdAtTime, err := parseIssueTimestamp("created_at", createdAt)
+		if err != nil {
+			return nil, domain.WrapError(err, domain.CodeStorageCorrupt, "stored relation projection is invalid", false)
+		}
+		result = append(result, domain.IssueRelation{ID: relationID, SourceIssueID: sourceIssueID, TargetIssueID: targetIssueID, Type: parsedType, CreatedAt: createdAtTime})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, workContextCorrupt(err)
+	}
+	return result, nil
+}
+
+func loadWorkContextRelatedIssueSummaries(ctx context.Context, query Queryer, issueID string, limit int, now time.Time) ([]domain.WorkContextIssue, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT endpoint_ids.issue_id, related.id
+	FROM (
+		SELECT relation.source_issue_id AS issue_id
+		FROM issue_relations AS relation
+		WHERE relation.source_issue_id = ? OR relation.target_issue_id = ?
+		UNION
+		SELECT relation.target_issue_id AS issue_id
+		FROM issue_relations AS relation
+		WHERE relation.source_issue_id = ? OR relation.target_issue_id = ?
+	) AS endpoint_ids
+	LEFT JOIN issues AS related ON related.id = endpoint_ids.issue_id
+	WHERE endpoint_ids.issue_id != ?
+	ORDER BY related.sequence_no ASC, related.id ASC
+	LIMIT ?`, issueID, issueID, issueID, issueID, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	relatedIssueIDs := make([]string, 0, limit+1)
+	for rows.Next() {
+		var endpointIssueID string
+		var relatedIssueID sql.NullString
+		if err := rows.Scan(&endpointIssueID, &relatedIssueID); err != nil {
+			return nil, false, workContextCorrupt(err)
+		}
+		_ = endpointIssueID
+		if !relatedIssueID.Valid {
+			return nil, false, domain.NewError(domain.CodeStorageCorrupt, "stored relation endpoint is invalid", false)
+		}
+		relatedIssueIDs = append(relatedIssueIDs, relatedIssueID.String)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+
+	truncated := false
+	if len(relatedIssueIDs) > limit {
+		relatedIssueIDs = relatedIssueIDs[:limit]
+		truncated = true
+	}
+
+	result := make([]domain.WorkContextIssue, 0, len(relatedIssueIDs))
+	for _, relatedIssueID := range relatedIssueIDs {
+		issue, err := loadStoredIssueProjection(ctx, query, relatedIssueID)
+		if err != nil {
+			return nil, false, err
+		}
+		issueSummary, err := buildWorkContextIssue(ctx, query, issue, now)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, issueSummary)
+	}
+	return result, truncated, nil
 }
 
 func buildWorkContextIssue(ctx context.Context, query Queryer, issue domain.Issue, now time.Time) (domain.WorkContextIssue, error) {

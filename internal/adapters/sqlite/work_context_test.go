@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
 
@@ -126,6 +128,365 @@ func TestWorkContextRepositoryCompactDefaultProjection(t *testing.T) {
 	}
 	if result.TruncatedSections == nil || len(result.TruncatedSections) != 0 {
 		t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+	}
+}
+
+func TestWorkContextRepositoryLoadsRelationsWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	generator := newTestULIDGenerator(t, now)
+	nextID := func() string {
+		id, err := generator.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	relatedIssueAID := nextID()
+	relatedIssueBID := nextID()
+	relatedIssueCID := nextID()
+	parentEpicID := nextID()
+	for _, issue := range []struct {
+		id         string
+		sequenceNo int64
+		title      string
+	}{
+		{id: relatedIssueAID, sequenceNo: 2, title: "alpha"},
+		{id: relatedIssueBID, sequenceNo: 3, title: "beta"},
+		{id: relatedIssueCID, sequenceNo: 4, title: "gamma"},
+		{id: parentEpicID, sequenceNo: 5, title: "parent epic"},
+	} {
+		if err := seedIssue(t, db, issue.id, issue.sequenceNo, domain.StatusReady, issue.title, nil, nil, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET parent_id = ? WHERE id = ?`, parentEpicID, target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueAID, domain.RelationTypeBlocks, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, relatedIssueBID, target.ID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueCID, domain.RelationTypeDuplicates, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.Relations) != 0 {
+		t.Fatalf("len(relations) = %d, want 0", len(result.Relations))
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelations}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.Relations) != 3 {
+		t.Fatalf("len(relations) = %d, want 3", len(result.Relations))
+	}
+	wantTypes := []domain.RelationType{domain.RelationTypeBlocks, domain.RelationTypeDuplicates, domain.RelationTypeRelatedTo}
+	gotTypes := make([]domain.RelationType, len(result.Relations))
+	for index, relation := range result.Relations {
+		gotTypes[index] = relation.Type
+	}
+	if !reflect.DeepEqual(gotTypes, wantTypes) {
+		t.Fatalf("relation types = %v, want %v", gotTypes, wantTypes)
+	}
+	if result.Relations[0].SourceIssueID != target.ID || result.Relations[0].TargetIssueID != relatedIssueAID {
+		t.Fatalf("first relation endpoints = %q -> %q, want %q -> %q", result.Relations[0].SourceIssueID, result.Relations[0].TargetIssueID, target.ID, relatedIssueAID)
+	}
+	if result.Relations[1].SourceIssueID != target.ID || result.Relations[1].TargetIssueID != relatedIssueCID {
+		t.Fatalf("second relation endpoints = %q -> %q, want %q -> %q", result.Relations[1].SourceIssueID, result.Relations[1].TargetIssueID, target.ID, relatedIssueCID)
+	}
+	wantSourceID, wantTargetID := relatedIssueBID, target.ID
+	if wantSourceID > wantTargetID {
+		wantSourceID, wantTargetID = wantTargetID, wantSourceID
+	}
+	if result.Relations[2].SourceIssueID != wantSourceID || result.Relations[2].TargetIssueID != wantTargetID {
+		t.Fatalf("third relation endpoints = %q -> %q, want %q -> %q", result.Relations[2].SourceIssueID, result.Relations[2].TargetIssueID, wantSourceID, wantTargetID)
+	}
+	if result.Relations[0].CreatedAt.IsZero() || result.Relations[1].CreatedAt.IsZero() || result.Relations[2].CreatedAt.IsZero() {
+		t.Fatal("relations should preserve created_at timestamps")
+	}
+	if result.ParentEpic != nil {
+		t.Fatalf("parent epic = %#v, want nil", result.ParentEpic)
+	}
+}
+
+func TestWorkContextRepositoryReturnsCorruptOnMalformedRelation(t *testing.T) {
+	db, dbPath, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator := newTestULIDGenerator(t, now)
+	relatedIssueID, err := generator.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedIssue(t, db, relatedIssueID, 2, domain.StatusReady, "related", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.ExecContext(context.Background(), `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FB1", "not-a-ulid", target.ID, domain.RelationTypeBlocks, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelations}}, Now: now})
+	assertDomainCode(t, err, domain.CodeStorageCorrupt)
+}
+
+func TestWorkContextRepositoryLoadsRelatedIssueSummariesWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	generator := newTestULIDGenerator(t, now)
+	nextID := func() string {
+		id, err := generator.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	relatedIssueAID := nextID()
+	relatedIssueBID := nextID()
+	relatedIssueCID := nextID()
+	relatedIssueDID := nextID()
+	parentEpicID := nextID()
+	for _, issue := range []struct {
+		id         string
+		sequenceNo int64
+		title      string
+	}{
+		{id: relatedIssueAID, sequenceNo: 3, title: "alpha"},
+		{id: relatedIssueBID, sequenceNo: 2, title: "beta"},
+		{id: relatedIssueCID, sequenceNo: 4, title: "gamma"},
+		{id: relatedIssueDID, sequenceNo: 5, title: "delta"},
+		{id: parentEpicID, sequenceNo: 6, title: "parent epic"},
+	} {
+		if err := seedIssue(t, db, issue.id, issue.sequenceNo, domain.StatusReady, issue.title, nil, nil, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := seedActiveAttempt(t, db, relatedIssueBID, now.Add(2*time.Minute), now.Add(1*time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedArchivedIssue(t, db, relatedIssueDID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET parent_id = ? WHERE id = ?`, parentEpicID, target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, relatedIssueAID, target.ID, domain.RelationTypeBlocks, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueBID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueCID, domain.RelationTypeDuplicates, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueDID, domain.RelationTypeBlocks, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueAID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.RelatedIssueSummaries) != 0 {
+		t.Fatalf("len(related issue summaries) = %d, want 0", len(result.RelatedIssueSummaries))
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.RelatedIssueSummaries) != 4 {
+		t.Fatalf("len(related issue summaries) = %d, want 4", len(result.RelatedIssueSummaries))
+	}
+	wantIDs := []string{relatedIssueBID, relatedIssueAID, relatedIssueCID, relatedIssueDID}
+	gotIDs := make([]string, len(result.RelatedIssueSummaries))
+	for index, summary := range result.RelatedIssueSummaries {
+		gotIDs[index] = summary.ID
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("related summary ids = %v, want %v", gotIDs, wantIDs)
+	}
+	if result.RelatedIssueSummaries[0].EffectiveStatus != domain.EffectiveStatusInProgress {
+		t.Fatalf("effective status = %q, want %q", result.RelatedIssueSummaries[0].EffectiveStatus, domain.EffectiveStatusInProgress)
+	}
+	for _, summary := range result.RelatedIssueSummaries {
+		if summary.ID == target.ID || summary.ID == parentEpicID {
+			t.Fatalf("summary should not include target or parent epic: %#v", summary)
+		}
+	}
+}
+
+func TestWorkContextRepositoryBoundsRelatedIssueSummaries(t *testing.T) {
+	generator := newTestULIDGenerator(t, time.Date(2026, 7, 14, 10, 11, 12, 123_000_000, time.UTC))
+	nextID := func() string {
+		id, err := generator.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	t.Run("custom limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < 2; index++ {
+			issueID := nextID()
+			if err := seedIssue(t, db, issueID, int64(index+2), domain.StatusReady, fmt.Sprintf("issue-%d", index), nil, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := seedRelation(t, db, target.ID, issueID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeRelatedIssueSummaries: 1}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.RelatedIssueSummaries) != 1 {
+			t.Fatalf("len(related issue summaries) = %d, want 1", len(result.RelatedIssueSummaries))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries})
+		}
+	})
+
+	t.Run("default limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < 21; index++ {
+			issueID := nextID()
+			if err := seedIssue(t, db, issueID, int64(index+2), domain.StatusReady, fmt.Sprintf("issue-%d", index), nil, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := seedRelation(t, db, target.ID, issueID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.RelatedIssueSummaries) != 20 {
+			t.Fatalf("len(related issue summaries) = %d, want 20", len(result.RelatedIssueSummaries))
+		}
+		if !result.Truncated {
+			t.Fatal("truncated should be true")
+		}
+		if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}) {
+			t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries})
+		}
+	})
+
+	t.Run("at limit", func(t *testing.T) {
+		db, _, now, target := newWorkContextTestFixture(t)
+		repository, err := sqlite.NewWorkContextRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < 20; index++ {
+			issueID := nextID()
+			if err := seedIssue(t, db, issueID, int64(index+2), domain.StatusReady, fmt.Sprintf("issue-%d", index), nil, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := seedRelation(t, db, target.ID, issueID, domain.RelationTypeRelatedTo, nextID(), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelatedIssueSummaries}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeRelatedIssueSummaries: 20}}, Now: now})
+		if err != nil {
+			t.Fatalf("GetWorkContext() error = %v", err)
+		}
+		if len(result.RelatedIssueSummaries) != 20 {
+			t.Fatalf("len(related issue summaries) = %d, want 20", len(result.RelatedIssueSummaries))
+		}
+		if result.Truncated {
+			t.Fatal("truncated should be false")
+		}
+		if len(result.TruncatedSections) != 0 {
+			t.Fatalf("len(truncated sections) = %d, want 0", len(result.TruncatedSections))
+		}
+	})
+}
+
+func TestWorkContextRepositoryLoadsRelationsAndRelatedSummariesTogether(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	generator := newTestULIDGenerator(t, now)
+	relatedIssueID, err := generator.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedIssue(t, db, relatedIssueID, 2, domain.StatusReady, "related", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	relationID, err := generator.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRelation(t, db, target.ID, relatedIssueID, domain.RelationTypeRelatedTo, relationID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeRelations, domain.WorkContextIncludeRelatedIssueSummaries}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.Relations) != 1 {
+		t.Fatalf("len(relations) = %d, want 1", len(result.Relations))
+	}
+	if len(result.RelatedIssueSummaries) != 1 {
+		t.Fatalf("len(related issue summaries) = %d, want 1", len(result.RelatedIssueSummaries))
+	}
+	if result.ParentEpic != nil {
+		t.Fatalf("parent epic = %#v, want nil", result.ParentEpic)
+	}
+	if result.ProjectInstructions != nil {
+		t.Fatalf("project instructions = %#v, want nil", result.ProjectInstructions)
 	}
 }
 
@@ -728,6 +1089,26 @@ func seedBlocksRelation(t *testing.T, db *sqlite.DB, sourceID, targetID string, 
 		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, sourceID, sourceID, targetID, now.Format(time.RFC3339Nano))
 		return err
 	})
+}
+
+func seedRelation(t *testing.T, db *sqlite.DB, sourceID, targetID string, relationType domain.RelationType, id string, now time.Time) error {
+	t.Helper()
+	if relationType == domain.RelationTypeRelatedTo && sourceID > targetID {
+		sourceID, targetID = targetID, sourceID
+	}
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, id, sourceID, targetID, relationType, now.Format(time.RFC3339Nano))
+		return err
+	})
+}
+
+func newTestULIDGenerator(t *testing.T, now time.Time) *ids.Generator {
+	t.Helper()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return generator
 }
 
 func seedDecision(t *testing.T, db *sqlite.DB, issueID *string, id, title, summary, content string, status domain.DecisionStatus, createdAt time.Time) error {
