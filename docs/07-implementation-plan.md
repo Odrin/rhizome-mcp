@@ -15,8 +15,8 @@ This is the living roadmap for the first release. It records current capability,
 ## Current state
 
 - **Active phase:** Phase 7, CLI, maintenance, and release.
-- **Next unit:** deliver the shared-service CLI commands.
-- **Then:** add maintenance operations and release validation.
+- **Next unit:** add maintenance-only attempt release and FTS rebuild operations.
+- **Then:** finalize doctor, backup, and release validation.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -74,8 +74,10 @@ Exit gate satisfied: transaction visibility, rebuild equivalence, malformed curs
 
 ## Phase 7: CLI, maintenance, and release - planned
 
-- Deliver `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, `graph`, `doctor`, and `backup` over shared application services.
+- Delivered `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, and `graph` over shared application services, with bounded typed flags and deterministic table, JSON, and Mermaid output.
+- `init` creates strict identity and external storage, then migrates and seeds the database. All CLI commands accept an optional process-level data-root override.
 - Add maintenance-only attempt release and FTS rebuild operations.
+- Add `doctor` and `backup`.
 - Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, packaging, and target-platform builds.
 
 Exit gate: exactly 22 tools are stable; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed; the full release suite passes.
