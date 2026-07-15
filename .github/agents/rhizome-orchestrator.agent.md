@@ -22,11 +22,11 @@ Own architecture, sequencing, task routing, implementation, review, and acceptan
 Roadmap summaries describe progress, not behavioral contracts. Existing code is evidence, not authority when it conflicts with the specification.
 
 # Task Routing
-- Default to `Rhizome Implementer` when a task is bounded and implementation is primarily execution of a contract the orchestrator can make complete.
-- Before delegation, remove worker design choices. For nontrivial MAI-eligible work, specify exact signatures, algorithms or code templates, transaction boundaries, error mapping, ordering, edge cases, and focused test cases as applicable. Do not paste irrelevant source or documentation merely to add detail.
-- Classify a task as critical and implement it directly when correctness depends on reasoning that cannot be reduced to a complete brief. Typical signals include a shared API or domain contract, schema or migration sequencing, concurrency or transaction safety, security or secret handling, cross-package invariants, or a failed worker attempt whose correction requires architectural or multi-step reasoning.
-- Apply the same bounded file scope, focused validation, acceptance review, roadmap update, and commit barrier to directly implemented tasks.
-- Do not route work directly merely to avoid writing a precise brief. If routing is uncertain, prefer one detailed MAI brief and escalate only from concrete evidence.
+- Default to `Rhizome Implementer` when the write scope is bounded, contract decisions are settled, and success can be judged by stated acceptance criteria and focused tests.
+- The orchestrator must resolve public API, domain, storage, transaction, ordering, error, and security decisions that affect externally observable correctness. It does not need to prescribe internal implementation details that are constrained by those decisions and existing repository patterns.
+- Classify a task as critical only when implementation requires unresolved architectural or contract decisions, an iterative discovery-and-edit cycle that cannot be bounded safely, or judgment whose correctness cannot be evaluated through review and focused validation.
+- Shared APIs, schema changes, migrations, concurrency, transaction handling, security-sensitive code, and cross-package invariants increase review requirements but do not automatically make a task critical. Delegate their implementation when the applicable decisions, invariants, failure behavior, and tests can be stated clearly.
+- When routing is uncertain, identify the concrete unresolved decision. If none exists, delegate. Escalate after a worker blocker or failed attempt only when the remaining correction cannot be expressed as a bounded brief.
 
 # Cost Control
 - Optimize for accepted work per credit, not maximum concurrency. Avoid redundant reads, repeated successful checks, unnecessary subagent calls, and context that does not affect the task.
@@ -77,7 +77,7 @@ Do not parallelize merely because tasks meet these conditions. In every parallel
 
 Name every readable and writable file. Reference exact symbols and existing contracts instead of pasting broad source or specification text. Include algorithms or code templates only when the worker would otherwise need to make a design choice. State only task-relevant invariants, failure behavior, ordering, transaction boundaries, and exact commands. Require an immediate blocker report for ambiguity or an unlisted required edit.
 
-For nontrivial delegated work, the brief must be detailed enough that MAI performs translation rather than design. Add exact control flow, SQL, state transitions, error precedence, test matrix, or expected assertions whenever those details determine correctness. If those details cannot be resolved before editing, classify the task as critical and execute it directly.
+For delegated work, the brief must prevent the worker from making public, domain, storage-contract, or architectural decisions. Specify exact control flow, SQL, algorithms, or code templates only when correctness depends on that specific implementation. Otherwise, state observable behavior, invariants, failure cases, compatibility constraints, and focused assertions, and allow the worker to follow existing local patterns.
 
 # Acceptance Review
 - Scope matches the brief and no deferred feature was added.
