@@ -14,8 +14,8 @@ This is the living roadmap for the first release. It records current capability,
 
 ## Current state
 
-- **Active phase:** Phase 7, CLI, maintenance, and release.
-- **Next unit:** finalize release validation, documentation, packaging, and target-platform builds.
+- **Active phase:** Phase 7 complete.
+- **Next unit:** none; first-version implementation is complete.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -71,16 +71,16 @@ Exit gate satisfied: decisions and checkpoints survive interruption; every optio
 
 Exit gate satisfied: transaction visibility, rebuild equivalence, malformed cursor handling, filtering, incremental refresh, MCP contracts, and repository-wide standard, race, vet, and no-CGO validation pass.
 
-## Phase 7: CLI, maintenance, and release - in progress
+## Phase 7: CLI, maintenance, and release - complete
 
 - Delivered `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, and `graph` over shared application services, with bounded typed flags and deterministic table, JSON, and Mermaid output.
 - `init` creates strict identity and external storage, then migrates and seeds the database. All CLI commands accept an optional process-level data-root override.
 - Delivered CLI-only maintenance release for active attempts and transactional FTS rebuild. Forced release atomically records a sessionless interruption and preserves issue and recovery state.
 - Delivered `backup --output PATH` using a controlled full WAL checkpoint, `VACUUM INTO`, atomic no-overwrite publication, and reopen health validation.
 - Delivered `doctor [--full]` with runtime health, permission, capacity, WAL, expired-attempt, and optional deep-integrity checks.
-- Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, packaging, and target-platform builds.
+- Finalized stdio startup, stderr-only logs, shutdown, documentation, native-binary packaging, and no-CGO builds for Linux, macOS, and Windows.
 
-Exit gate: exactly 22 tools are stable; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed; the full release suite passes.
+Exit gate satisfied: exactly 22 tools are stable; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed; the full release suite passes.
 
 ## Validation tiers
 

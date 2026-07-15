@@ -13,6 +13,45 @@ The server gives agents a shared, structured view of project work:
 
 The project is designed for sequential and parallel work by different agent products, including GitHub Copilot, Codex, Claude Code, Antigravity and similar MCP-compatible clients.
 
+## Build and use
+
+Build the single native binary without CGO:
+
+```bash
+CGO_ENABLED=0 go build -o rhizome-mcp .
+```
+
+Run commands from the repository to be tracked. `init` writes only
+`.agent-tracker.json` to that repository; the SQLite database is stored in the
+platform application-data directory. Use `--data-root PATH` to select an
+explicit external data root for every command.
+
+```bash
+rhizome-mcp init
+rhizome-mcp doctor --full
+rhizome-mcp backup --output /safe/location/project-backup.db
+rhizome-mcp project info --format json
+```
+
+To connect an MCP client, launch `serve` with the repository as its working
+directory. The transport is stdio; protocol output is written only to stdout
+and logs/errors are written to stderr.
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "/absolute/path/to/rhizome-mcp",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+The CLI also provides `issue list`, `issue show`, `search`, `graph`, and
+maintenance commands. Run the binary without arguments to print complete
+usage.
+
 ## Core constraints
 
 - Language: Go
