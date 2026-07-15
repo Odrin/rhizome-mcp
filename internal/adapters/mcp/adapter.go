@@ -26,6 +26,7 @@ type Options struct {
 	CommentService     *application.CommentService
 	DecisionService    *application.DecisionService
 	ActivityService    *application.ActivityService
+	SearchService      *application.SearchService
 	AttemptService     *application.AttemptService
 	SessionService     *application.AgentSessionService
 	WorkContextService *application.WorkContextService
@@ -43,6 +44,7 @@ type adapter struct {
 	comments      *application.CommentService
 	decisions     *application.DecisionService
 	activities    *application.ActivityService
+	searches      *application.SearchService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
 	workContexts  *application.WorkContextService
@@ -88,6 +90,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.ActivityService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "activity service is required", false)
 	}
+	if options.SearchService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
+	}
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
@@ -112,6 +117,7 @@ func NewServer(options Options) (*Server, error) {
 		comments:           options.CommentService,
 		decisions:          options.DecisionService,
 		activities:         options.ActivityService,
+		searches:           options.SearchService,
 		attempts:           options.AttemptService,
 		sessions:           options.SessionService,
 		workContexts:       options.WorkContextService,
@@ -272,6 +278,36 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
 	sdkmcp.AddTool(server, tool("finish_attempt", "Finish an active leased work or review attempt", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
 	sdkmcp.AddTool(server, tool("get_work_context", "Return bounded recovery context for an issue", schemaGetWorkContext(), schemaGetWorkContextOutput()), adapter.getWorkContext)
+	sdkmcp.AddTool(server, tool("search", "Search indexed issue work and knowledge", schemaSearch(), schemaSearchOutput()), adapter.search)
+	sdkmcp.AddTool(server, tool("get_changes", "Return incremental events after an event ID", schemaGetChanges(), schemaChangesOutput()), adapter.getChanges)
+}
+
+func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequest, input searchInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	entityTypes := make([]domain.SearchEntityType, len(input.EntityTypes))
+	for index, value := range input.EntityTypes {
+		entityTypes[index] = domain.SearchEntityType(value)
+	}
+	result, err := adapter.searches.Search(ctx, domain.SearchInput{
+		Query: input.Query, EntityTypes: entityTypes, IssueID: input.IssueID, EpicID: input.EpicID,
+		Statuses: stringsToStatuses(input.Statuses), Labels: input.Labels, IncludeArchived: input.IncludeArchived,
+		Limit: input.Limit, Cursor: stringValue(input.Cursor), SnippetLength: input.SnippetLength,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(searchOutputFromDomain(result), "search results returned")
+}
+
+func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallToolRequest, input getChangesInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.searches.GetChanges(ctx, domain.GetChangesInput{
+		SinceEventID: input.SinceEventID, IssueID: input.IssueID, EventTypes: input.EventTypes, Limit: input.Limit,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(changesOutputFromDomain(result), "changes returned")
 }
 
 func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.CallToolRequest, input getWorkContextInput) (*sdkmcp.CallToolResult, any, error) {

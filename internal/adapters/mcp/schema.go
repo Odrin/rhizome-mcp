@@ -99,6 +99,30 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 	}, "issue_id")
 }
 
+func schemaSearch() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"query":            boundedStringSchema(domain.MaxSearchQueryRunes),
+		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "attempt_note"), MaxItems: intPointer(4), UniqueItems: true},
+		"issue_id":         nullableBoundedStringSchema(64),
+		"epic_id":          nullableBoundedStringSchema(64),
+		"statuses":         &jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true},
+		"labels":           boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes),
+		"include_archived": booleanSchema(),
+		"limit":            boundedIntegerSchema(0, domain.MaxSearchResults),
+		"cursor":           nullableBoundedStringSchema(4096),
+		"snippet_length":   boundedIntegerSchema(0, domain.MaxSearchSnippetRunes),
+	}, "query")
+}
+
+func schemaGetChanges() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"since_event_id": boundedIntegerSchema(0, 9_223_372_036_854_775_807),
+		"issue_id":       nullableBoundedStringSchema(64),
+		"event_types":    boundedStringsSchema(domain.MaxChangeEventTypes, domain.MaxEventTypeRunes),
+		"limit":          boundedIntegerSchema(0, 200),
+	}, "since_event_id")
+}
+
 func schemaGetWorkContext() *jsonschema.Schema {
 	includeValues := make([]string, len(domain.AllWorkContextIncludes))
 	for index, include := range domain.AllWorkContextIncludes {
@@ -290,6 +314,8 @@ func schemaProjectOutput() *jsonschema.Schema          { return typedSchema[proj
 func schemaLabelListOutput() *jsonschema.Schema        { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema            { return typedSchema[issueDTO]() }
 func schemaGetIssueActivityOutput() *jsonschema.Schema { return typedSchema[issueActivityOutput]() }
+func schemaSearchOutput() *jsonschema.Schema           { return typedSchema[searchOutput]() }
+func schemaChangesOutput() *jsonschema.Schema          { return typedSchema[changesOutput]() }
 func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addCommentOutput]() }
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()

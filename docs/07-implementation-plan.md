@@ -14,10 +14,9 @@ This is the living roadmap for the first release. It records current capability,
 
 ## Current state
 
-- **Active phase:** Phase 6, search and changes.
-- **Next unit:** expose `search` and `get_changes`.
-- **Then:** run the Phase 6 exit gate.
-- **Later:** Phase 7 CLI, maintenance, and release.
+- **Active phase:** Phase 7, CLI, maintenance, and release.
+- **Next unit:** deliver the shared-service CLI commands.
+- **Then:** add maintenance operations and release validation.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -65,13 +64,13 @@ Delivered:
 
 Exit gate satisfied: decisions and checkpoints survive interruption; every optional section is explicitly bounded and reports truncation; and default context is compact and deterministic. The focused contract coverage and repository-wide standard, race, vet, and no-CGO suites pass.
 
-## Phase 6: search and changes - in progress
+## Phase 6: search and changes - complete
 
 - Transactional FTS5 indexing and atomic rebuild support are complete.
 - Ranked bounded snippets, deterministic tie-breaking, filters, and event-based incremental changes are complete.
-- Deliver `search` and `get_changes`.
+- MCP `search` and `get_changes` expose the bounded search and incremental refresh services.
 
-Exit gate: transaction visibility, rebuild equivalence, malformed cursor handling, filtering, and incremental refresh pass.
+Exit gate satisfied: transaction visibility, rebuild equivalence, malformed cursor handling, filtering, incremental refresh, MCP contracts, and repository-wide standard, race, vet, and no-CGO validation pass.
 
 ## Phase 7: CLI, maintenance, and release - planned
 

@@ -112,6 +112,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	searchRepository, err := sqlite.NewSearchRepository(project.Database)
+	if err != nil {
+		return err
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
 	if err != nil {
 		return err
@@ -153,6 +157,10 @@ func run(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	activityService, err := application.NewActivityService(activityRepository)
+	if err != nil {
+		return err
+	}
+	searchService, err := application.NewSearchService(searchRepository)
 	if err != nil {
 		return err
 	}
@@ -202,6 +210,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 		CommentService:     commentService,
 		DecisionService:    decisionService,
 		ActivityService:    activityService,
+		SearchService:      searchService,
 		AttemptService:     attemptService,
 		SessionService:     sessionService,
 		WorkContextService: workContextService,

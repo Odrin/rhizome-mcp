@@ -41,7 +41,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -51,6 +51,8 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "search"), "query")
+	assertRequired(t, toolNamed(t, tools.Tools, "get_changes"), "since_event_id")
 	activityTool := toolNamed(t, tools.Tools, "get_issue_activity")
 	assertRequired(t, activityTool, "issue_id")
 	data, err := json.Marshal(activityTool.InputSchema)
@@ -513,6 +515,80 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	restartedStop()
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("close after restart: %v", err)
+	}
+}
+
+func TestSearchAndGetChangesTools(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "search-tools.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{
+		"type": "task", "title": "renewable lease", "description": "Lease renewal coordination",
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create issue = %#v", created)
+	}
+	comment := call(t, client, "add_comment", map[string]any{
+		"issue_id": issue.DisplayID, "content": "renewable lease search content",
+	})
+	if comment.IsError {
+		t.Fatalf("add comment = %#v", comment)
+	}
+
+	search := call(t, client, "search", map[string]any{
+		"query": "renewable", "entity_types": []string{"issue", "comment"}, "snippet_length": 120,
+	})
+	var searchOutput struct {
+		Results []struct {
+			EntityType string  `json:"entity_type"`
+			EntityID   string  `json:"entity_id"`
+			IssueID    *string `json:"issue_id"`
+			Title      string  `json:"title"`
+			Snippet    string  `json:"snippet"`
+			Score      float64 `json:"score"`
+		} `json:"results"`
+		NextCursor *string `json:"next_cursor"`
+		HasMore    bool    `json:"has_more"`
+	}
+	decodeStructured(t, search, &searchOutput)
+	if search.IsError || len(searchOutput.Results) != 2 || searchOutput.NextCursor != nil || searchOutput.HasMore {
+		t.Fatalf("search output = %#v", searchOutput)
+	}
+	for _, result := range searchOutput.Results {
+		if result.EntityID == "" || result.IssueID == nil || *result.IssueID != issue.ID ||
+			(result.EntityType != "issue" && result.EntityType != "comment") {
+			t.Fatalf("search result = %#v", result)
+		}
+	}
+	invalidSearch := call(t, client, "search", map[string]any{"query": `"`})
+	assertDomainError(t, invalidSearch, "INVALID_ARGUMENT", false)
+
+	changes := call(t, client, "get_changes", map[string]any{
+		"since_event_id": 0, "issue_id": issue.DisplayID, "event_types": []string{"comment_added"}, "limit": 10,
+	})
+	var changesOutput struct {
+		Events []struct {
+			ID        int64  `json:"id"`
+			IssueID   string `json:"issue_id"`
+			EventType string `json:"event_type"`
+		} `json:"events"`
+		LatestEventID int64 `json:"latest_event_id"`
+		HasMore       bool  `json:"has_more"`
+		NextEventID   int64 `json:"next_event_id"`
+	}
+	decodeStructured(t, changes, &changesOutput)
+	if changes.IsError || len(changesOutput.Events) != 1 || changesOutput.Events[0].IssueID != issue.ID ||
+		changesOutput.Events[0].EventType != "comment_added" || changesOutput.HasMore ||
+		changesOutput.NextEventID != changesOutput.LatestEventID {
+		t.Fatalf("changes output = %#v", changesOutput)
 	}
 }
 
@@ -1417,6 +1493,11 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil work context service")
 	}
+	options = composeServices(t, db, source)
+	options.SearchService = nil
+	if _, err := mcpadapter.NewServer(options); err == nil {
+		t.Fatal("NewServer() accepted nil search service")
+	}
 }
 
 func openDatabase(t *testing.T, path string) (*sqlite.DB, *clock.FakeClock) {
@@ -1485,6 +1566,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	searchRepository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1529,6 +1614,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	searches, err := application.NewSearchService(searchRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -1546,7 +1635,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

@@ -57,6 +57,26 @@ type getIssueActivityInput struct {
 	Order   string   `json:"order,omitempty"`
 }
 
+type searchInput struct {
+	Query           string   `json:"query"`
+	EntityTypes     []string `json:"entity_types,omitempty"`
+	IssueID         *string  `json:"issue_id,omitempty"`
+	EpicID          *string  `json:"epic_id,omitempty"`
+	Statuses        []string `json:"statuses,omitempty"`
+	Labels          []string `json:"labels,omitempty"`
+	IncludeArchived bool     `json:"include_archived,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
+	Cursor          *string  `json:"cursor,omitempty"`
+	SnippetLength   int      `json:"snippet_length,omitempty"`
+}
+
+type getChangesInput struct {
+	SinceEventID int64    `json:"since_event_id"`
+	IssueID      *string  `json:"issue_id,omitempty"`
+	EventTypes   []string `json:"event_types,omitempty"`
+	Limit        int      `json:"limit,omitempty"`
+}
+
 type listIssuesInput struct {
 	Types             []string `json:"types,omitempty"`
 	Statuses          []string `json:"statuses,omitempty"`
@@ -471,6 +491,28 @@ type issueActivityOutput struct {
 	HasMore    bool              `json:"has_more"`
 }
 
+type searchResultDTO struct {
+	EntityType string  `json:"entity_type"`
+	EntityID   string  `json:"entity_id"`
+	IssueID    *string `json:"issue_id"`
+	Title      string  `json:"title"`
+	Snippet    string  `json:"snippet"`
+	Score      float64 `json:"score"`
+}
+
+type searchOutput struct {
+	Results    []searchResultDTO `json:"results"`
+	NextCursor *string           `json:"next_cursor"`
+	HasMore    bool              `json:"has_more"`
+}
+
+type changesOutput struct {
+	Events        []issueEventDTO `json:"events"`
+	LatestEventID int64           `json:"latest_event_id"`
+	HasMore       bool            `json:"has_more"`
+	NextEventID   int64           `json:"next_event_id"`
+}
+
 type addCommentOutput struct {
 	Comment commentDTO `json:"comment"`
 }
@@ -875,6 +917,27 @@ func issueEventDTOFromDomain(event domain.IssueEvent) issueEventDTO {
 		AttemptID: copyString(event.AttemptID),
 		Payload:   append(json.RawMessage(nil), event.Payload...),
 		CreatedAt: event.CreatedAt,
+	}
+}
+
+func searchOutputFromDomain(page domain.SearchPage) searchOutput {
+	results := make([]searchResultDTO, len(page.Results))
+	for index, result := range page.Results {
+		results[index] = searchResultDTO{
+			EntityType: string(result.EntityType), EntityID: result.EntityID, IssueID: copyString(result.IssueID),
+			Title: result.Title, Snippet: result.Snippet, Score: result.Score,
+		}
+	}
+	return searchOutput{Results: results, NextCursor: copyString(page.NextCursor), HasMore: page.HasMore}
+}
+
+func changesOutputFromDomain(page domain.ChangesPage) changesOutput {
+	events := make([]issueEventDTO, len(page.Events))
+	for index, event := range page.Events {
+		events[index] = issueEventDTOFromDomain(event)
+	}
+	return changesOutput{
+		Events: events, LatestEventID: page.LatestEventID, HasMore: page.HasMore, NextEventID: page.NextEventID,
 	}
 }
 
