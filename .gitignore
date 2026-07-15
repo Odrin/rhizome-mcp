@@ -27,3 +27,7 @@ go.work.sum
 # IDE/editor noise
 .vscode/
 .idea/
+
+# Local agent/editor config
+.agent-tracker.json
+lsp.json
