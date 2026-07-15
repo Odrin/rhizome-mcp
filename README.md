@@ -21,6 +21,21 @@ Build the single native binary without CGO:
 CGO_ENABLED=0 go build -o rhizome-mcp .
 ```
 
+Run the regular test suite with:
+
+```bash
+go test ./...
+```
+
+The real-process MCP smoke and workflow tests are isolated behind the
+`integration` build tag. They build a temporary server binary, initialize a
+fresh repository and SQLite data root for each test, and communicate with
+`serve` over stdio:
+
+```bash
+go test -tags=integration .
+```
+
 Run commands from the repository to be tracked. `init` writes only
 `.agent-tracker.json` to that repository; the SQLite database is stored in the
 platform application-data directory. Use `--data-root PATH` to select an
