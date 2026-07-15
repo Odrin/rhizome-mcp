@@ -129,6 +129,211 @@ func TestWorkContextRepositoryCompactDefaultProjection(t *testing.T) {
 	}
 }
 
+func TestWorkContextRepositoryLoadsParentEpicWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	parentDescription := "parent description"
+	parentAcceptance := "parent acceptance criteria"
+	if err := seedIssueWithType(t, db, parentID, 2, domain.TypeEpic, domain.StatusReady, "parent epic", &parentDescription, &parentAcceptance, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET parent_id = ? WHERE id = ?`, parentID, target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedActiveAttempt(t, db, parentID, now.Add(1*time.Minute), now.Add(2*time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ParentEpic != nil {
+		t.Fatalf("parent epic = %#v, want nil", result.ParentEpic)
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeParentEpic}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ParentEpic == nil {
+		t.Fatal("parent epic was nil")
+	}
+	if result.ParentEpic.ID != parentID {
+		t.Fatalf("parent epic id = %q, want %q", result.ParentEpic.ID, parentID)
+	}
+	if result.ParentEpic.Description == nil || *result.ParentEpic.Description != parentDescription {
+		t.Fatalf("parent description = %#v, want %q", result.ParentEpic.Description, parentDescription)
+	}
+	if result.ParentEpic.AcceptanceCriteria == nil || *result.ParentEpic.AcceptanceCriteria != parentAcceptance {
+		t.Fatalf("parent acceptance criteria = %#v, want %q", result.ParentEpic.AcceptanceCriteria, parentAcceptance)
+	}
+	if result.ParentEpic.EffectiveStatus != domain.EffectiveStatusInProgress {
+		t.Fatalf("parent effective status = %q, want %q", result.ParentEpic.EffectiveStatus, domain.EffectiveStatusInProgress)
+	}
+
+	*result.ParentEpic.Description = "mutated parent description"
+	*result.ParentEpic.AcceptanceCriteria = "mutated parent acceptance"
+	second, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeParentEpic}}, Now: now})
+	if err != nil {
+		t.Fatalf("second GetWorkContext() error = %v", err)
+	}
+	if second.ParentEpic == nil || second.ParentEpic.Description == nil || *second.ParentEpic.Description != parentDescription {
+		t.Fatalf("mutated parent description should not leak: %#v", second.ParentEpic)
+	}
+	if second.ParentEpic == nil || second.ParentEpic.AcceptanceCriteria == nil || *second.ParentEpic.AcceptanceCriteria != parentAcceptance {
+		t.Fatalf("mutated parent acceptance should not leak: %#v", second.ParentEpic)
+	}
+}
+
+func TestWorkContextRepositoryParentEpicIncludeWithNoParentReturnsNil(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeParentEpic}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ParentEpic != nil {
+		t.Fatalf("parent epic = %#v, want nil", result.ParentEpic)
+	}
+}
+
+func TestWorkContextRepositoryRejectsNonEpicParent(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonEpicParentID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	if err := seedIssueWithType(t, db, nonEpicParentID, 2, domain.TypeTask, domain.StatusReady, "non epic", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET parent_id = ? WHERE id = ?`, nonEpicParentID, target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeParentEpic}}, Now: now})
+	assertDomainCode(t, err, domain.CodeStorageCorrupt)
+}
+
+func TestWorkContextRepositoryLoadsProjectInstructionsWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	instructions := "follow the project instructions"
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE projects SET instructions = ? WHERE id = ?`, instructions, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ProjectInstructions != nil {
+		t.Fatalf("project instructions = %#v, want nil", result.ProjectInstructions)
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeProjectInstructions}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ProjectInstructions == nil || *result.ProjectInstructions != instructions {
+		t.Fatalf("project instructions = %#v, want %q", result.ProjectInstructions, instructions)
+	}
+
+	*result.ProjectInstructions = "mutated instructions"
+	second, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeProjectInstructions}}, Now: now})
+	if err != nil {
+		t.Fatalf("second GetWorkContext() error = %v", err)
+	}
+	if second.ProjectInstructions == nil || *second.ProjectInstructions != instructions {
+		t.Fatalf("mutated project instructions should not leak: %#v", second.ProjectInstructions)
+	}
+}
+
+func TestWorkContextRepositoryProjectInstructionsIncludeWithNullInstructions(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE projects SET instructions = NULL WHERE id = ?`, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeProjectInstructions}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ProjectInstructions != nil {
+		t.Fatalf("project instructions = %#v, want nil", result.ProjectInstructions)
+	}
+}
+
+func TestWorkContextRepositoryLoadsParentEpicAndProjectInstructionsTogether(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	parentDescription := "parent description"
+	parentAcceptance := "parent acceptance criteria"
+	if err := seedIssueWithType(t, db, parentID, 2, domain.TypeEpic, domain.StatusReady, "parent epic", &parentDescription, &parentAcceptance, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET parent_id = ? WHERE id = ?`, parentID, target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE projects SET instructions = ? WHERE id = ?`, "project instructions", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeParentEpic, domain.WorkContextIncludeProjectInstructions}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ParentEpic == nil {
+		t.Fatal("parent epic was nil")
+	}
+	if result.ProjectInstructions == nil || *result.ProjectInstructions != "project instructions" {
+		t.Fatalf("project instructions = %#v, want %q", result.ProjectInstructions, "project instructions")
+	}
+}
+
 func TestWorkContextRepositoryFiltersBlockersAndOrdersThem(t *testing.T) {
 	db, _, now, target := newWorkContextTestFixture(t)
 	repository, err := sqlite.NewWorkContextRepository(db)
@@ -474,6 +679,11 @@ func newWorkContextTestFixture(t *testing.T) (*sqlite.DB, string, time.Time, dom
 
 func seedIssue(t *testing.T, db *sqlite.DB, id string, sequenceNo int64, status domain.Status, title string, description, acceptanceCriteria *string, now time.Time) error {
 	t.Helper()
+	return seedIssueWithType(t, db, id, sequenceNo, domain.TypeTask, status, title, description, acceptanceCriteria, now)
+}
+
+func seedIssueWithType(t *testing.T, db *sqlite.DB, id string, sequenceNo int64, issueType domain.Type, status domain.Status, title string, description, acceptanceCriteria *string, now time.Time) error {
+	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		var descriptionValue any
 		if description != nil {
@@ -491,7 +701,7 @@ func seedIssue(t *testing.T, db *sqlite.DB, id string, sequenceNo int64, status 
 		if status == domain.StatusBlocked {
 			blockedReasonValue = "blocked reason"
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, description, acceptance_criteria, status, priority, blocked_reason, version, created_at, updated_at) VALUES (?, ?, 'task', ?, ?, ?, ?, 'medium', ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET sequence_no = excluded.sequence_no, type = excluded.type, title = excluded.title, description = excluded.description, acceptance_criteria = excluded.acceptance_criteria, status = excluded.status, priority = excluded.priority, blocked_reason = excluded.blocked_reason, version = excluded.version, updated_at = excluded.updated_at`, id, sequenceNo, title, descriptionValue, acceptanceValue, status, blockedReasonValue, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, description, acceptance_criteria, status, priority, blocked_reason, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'medium', ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET sequence_no = excluded.sequence_no, type = excluded.type, title = excluded.title, description = excluded.description, acceptance_criteria = excluded.acceptance_criteria, status = excluded.status, priority = excluded.priority, blocked_reason = excluded.blocked_reason, version = excluded.version, updated_at = excluded.updated_at`, id, sequenceNo, issueType, title, descriptionValue, acceptanceValue, status, blockedReasonValue, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 		if err != nil {
 			return fmt.Errorf("seed issue %s: %w", id, err)
 		}

@@ -51,6 +51,36 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			return err
 		}
 
+		if includesWorkContextSection(input.Include, domain.WorkContextIncludeParentEpic) && targetIssue.ParentID != nil {
+			parsedParentID, err := ids.ParseStrict(*targetIssue.ParentID)
+			if err != nil {
+				return domain.NewError(domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+			}
+			parent, err := loadStoredIssueProjection(ctx, query, parsedParentID.String())
+			if err != nil {
+				return err
+			}
+			if parent.Type != domain.TypeEpic {
+				return domain.NewError(domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+			}
+			parentIssue, err := buildWorkContextIssue(ctx, query, parent, now)
+			if err != nil {
+				return err
+			}
+			result.ParentEpic = &parentIssue
+		}
+
+		if includesWorkContextSection(input.Include, domain.WorkContextIncludeProjectInstructions) {
+			project, err := readProjectRow(ctx, query)
+			if err != nil {
+				return err
+			}
+			if project.Instructions != nil {
+				instructions := *project.Instructions
+				result.ProjectInstructions = &instructions
+			}
+		}
+
 		result.Blockers, err = loadWorkContextBlockers(ctx, query, resolvedIssueID, now)
 		if err != nil {
 			return err
@@ -81,6 +111,15 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 		return domain.WorkContext{}, err
 	}
 	return domain.CloneWorkContext(result), nil
+}
+
+func includesWorkContextSection(values []domain.WorkContextInclude, wanted domain.WorkContextInclude) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func buildWorkContextIssue(ctx context.Context, query Queryer, issue domain.Issue, now time.Time) (domain.WorkContextIssue, error) {
