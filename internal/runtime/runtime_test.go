@@ -202,6 +202,97 @@ func TestOpenProjectDetectsTamperedMigrationAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestProjectBackupCreatesValidatedBackup(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = project.Close(context.Background()) }()
+
+	if err := project.Database.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "INSERT INTO backup_test(value) VALUES (?)", "backup-data")
+		return err
+	}); err != nil {
+		t.Fatalf("write backup data: %v", err)
+	}
+
+	backupPath := filepath.Join(t.TempDir(), "backup", "backup.db")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report, err := project.Backup(context.Background(), backupPath)
+	if err != nil {
+		t.Fatalf("Backup() error = %v", err)
+	}
+	if report.SchemaVersion != migrations.CurrentVersion() {
+		t.Fatalf("schema version = %d, want %d", report.SchemaVersion, migrations.CurrentVersion())
+	}
+	if report.OutputPath != filepath.Clean(backupPath) {
+		t.Fatalf("output path = %q, want %q", report.OutputPath, filepath.Clean(backupPath))
+	}
+
+	backupDB, err := sqlite.Open(context.Background(), report.OutputPath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open validation backup: %v", err)
+	}
+	defer func() { _ = backupDB.Close(context.Background()) }()
+
+	var value string
+	if err := backupDB.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT value FROM backup_test WHERE id = 1").Scan(&value)
+	}); err != nil {
+		t.Fatalf("read backup data: %v", err)
+	}
+	if value != "backup-data" {
+		t.Fatalf("backup value = %q, want backup-data", value)
+	}
+
+	var count int
+	if err := project.Database.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM backup_test").Scan(&count)
+	}); err != nil {
+		t.Fatalf("source read after backup: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("source rows = %d, want 1", count)
+	}
+}
+
+func TestProjectBackupRemovesOutputOnValidationOpenFailure(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = project.Close(context.Background()) }()
+
+	backupPath := filepath.Join(t.TempDir(), "backup", "backup.db")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	project.SQLite = sqlite.Options{RetryPolicy: &sqlite.RetryPolicy{Sleeper: nil}}
+	_, err = project.Backup(context.Background(), backupPath)
+	if err == nil {
+		t.Fatal("Backup() unexpectedly succeeded")
+	}
+	assertDomainCode(t, err, projectruntime.CodeProjectBackup)
+	if _, statErr := os.Stat(backupPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("backup output stat error = %v, want not-exist", statErr)
+	}
+}
+
 func TestPhase1ExitGate(t *testing.T) {
 	repository, dataRoot := initializeProject(t)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{

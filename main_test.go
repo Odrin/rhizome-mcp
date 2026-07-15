@@ -67,6 +67,76 @@ func TestInitCreatesUsableDatabase(t *testing.T) {
 	}
 }
 
+func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open initialized project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	if err := project.Database.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "INSERT INTO backup_test(value) VALUES (?)", "backup-data")
+		return err
+	}); err != nil {
+		t.Fatalf("write backup data: %v", err)
+	}
+
+	backupOutput := filepath.Join(tempDir, "backup.db")
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "backup", "--output", backupOutput}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("backup command failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), backupOutput) {
+		t.Fatalf("expected backup output path in stdout, got %q", stdout.String())
+	}
+
+	backupDB, err := sqlite.Open(ctx, backupOutput, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open backup database: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = backupDB.Close(closeCtx)
+	}()
+
+	var count int
+	var value string
+	if err := backupDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM backup_test").Scan(&count); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT value FROM backup_test WHERE id = 1").Scan(&value)
+	}); err != nil {
+		t.Fatalf("read backup data: %v", err)
+	}
+	if count != 1 || value != "backup-data" {
+		t.Fatalf("backup rows = %d/%q, want 1/backup-data", count, value)
+	}
+}
+
 func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()

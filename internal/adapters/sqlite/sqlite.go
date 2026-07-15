@@ -9,7 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
+
+	"rhizome-mcp/internal/domain"
 
 	_ "modernc.org/sqlite"
 )
@@ -49,8 +52,11 @@ type Options struct {
 // DB is a configured SQLite connection pool. Its parent directory must exist
 // before Open is called; Open creates neither directories nor schema objects.
 type DB struct {
-	pool  *sql.DB
-	retry retryPolicy
+	pool   *sql.DB
+	retry  retryPolicy
+	path   string
+	mu     sync.RWMutex
+	closed bool
 }
 
 // Open opens path, configures every pooled connection, and verifies the
@@ -91,7 +97,7 @@ func Open(ctx context.Context, path string, options Options) (*DB, error) {
 	pool.SetConnMaxLifetime(0)
 	pool.SetConnMaxIdleTime(0)
 
-	db := &DB{pool: pool, retry: retry}
+	db := &DB{pool: pool, retry: retry, path: absPath}
 	if err := db.verify(ctx); err != nil {
 		closeErr := pool.Close()
 		return nil, TranslateError(errors.Join(err, closeErr))
@@ -162,12 +168,120 @@ func (db *DB) verify(ctx context.Context) error {
 	return nil
 }
 
+// Backup creates a new database file with VACUUM INTO after a controlled WAL
+// checkpoint, validating the requested output path before starting.
+func (db *DB) Backup(ctx context.Context, output string) (string, error) {
+	if db == nil {
+		return "", configurationError(errors.New("SQLite database is not open"), "SQLite database is not open")
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed || db.pool == nil {
+		return "", configurationError(errors.New("SQLite database is not open"), "SQLite database is not open")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	absOutput, err := db.validateBackupOutput(ctx, output)
+	if err != nil {
+		return "", err
+	}
+	tempOutput, err := prepareBackupTemp(absOutput)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if tempOutput != "" {
+			_ = os.Remove(tempOutput)
+		}
+	}()
+	conn, err := db.pool.Conn(ctx)
+	if err != nil {
+		return "", TranslateError(err)
+	}
+	defer conn.Close()
+
+	var checkpointBusy, checkpointLog, checkpointCheckpointed int
+	if err := conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)").Scan(&checkpointBusy, &checkpointLog, &checkpointCheckpointed); err != nil {
+		return "", TranslateError(err)
+	}
+	if checkpointBusy != 0 {
+		return "", domain.WrapError(errors.New("wal checkpoint reported busy readers"), domain.CodeStorageBusy, "storage is busy; retry the operation", true)
+	}
+	if _, err := conn.ExecContext(ctx, "VACUUM INTO ?", tempOutput); err != nil {
+		return "", TranslateError(err)
+	}
+	if err := os.Link(tempOutput, absOutput); err != nil {
+		return "", configurationError(err, "backup output path could not be created")
+	}
+	if err := os.Remove(tempOutput); err != nil {
+		return "", configurationError(err, "cannot finalize backup output")
+	}
+	tempOutput = ""
+	return absOutput, nil
+}
+
+func (db *DB) validateBackupOutput(ctx context.Context, output string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if output == "" {
+		return "", configurationError(errors.New("backup output path must not be empty"), "backup output path must not be empty")
+	}
+	absOutput, err := filepath.Abs(output)
+	if err != nil {
+		return "", configurationError(err, "backup output path is invalid")
+	}
+	if db.path != "" && absOutput == db.path {
+		return "", configurationError(errors.New("backup output path must differ from the source database path"), "backup output path must differ from the source database path")
+	}
+	parent := filepath.Dir(absOutput)
+	info, err := os.Stat(parent)
+	if err != nil {
+		return "", configurationError(err, "backup output parent directory must exist")
+	}
+	if !info.IsDir() {
+		return "", configurationError(errors.New("backup output parent is not a directory"), "backup output parent directory must exist")
+	}
+	info, err = os.Lstat(absOutput)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return absOutput, nil
+	case err != nil:
+		return "", configurationError(err, "backup output path is invalid")
+	default:
+		return "", configurationError(errors.New("backup output path already exists"), "backup output path already exists")
+	}
+}
+
+func prepareBackupTemp(output string) (string, error) {
+	temp, err := os.CreateTemp(filepath.Dir(output), ".rhizome-backup-*")
+	if err != nil {
+		return "", configurationError(err, "cannot create backup output")
+	}
+	path := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", configurationError(err, "cannot create backup output")
+	}
+	if err := os.Remove(path); err != nil {
+		return "", configurationError(err, "cannot create backup output")
+	}
+	return path, nil
+}
+
 // Close attempts a passive WAL checkpoint and always closes the pool. Any
 // checkpoint and close failures are joined before safe storage translation.
 func (db *DB) Close(ctx context.Context) error {
-	if db == nil || db.pool == nil {
+	if db == nil {
 		return nil
 	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed || db.pool == nil {
+		return nil
+	}
+	db.closed = true
 	_, checkpointErr := db.pool.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 	closeErr := db.pool.Close()
 	return TranslateError(errors.Join(checkpointErr, closeErr))

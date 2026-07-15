@@ -294,6 +294,127 @@ func TestOpenTranslatesCorruptDatabase(t *testing.T) {
 	}
 }
 
+func TestBackupCreatesIndependentCopyFromWALData(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t, noRetryOptions())
+	ctx := context.Background()
+	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.ExecContext(ctx, "INSERT INTO backup_test(value) VALUES (?)", "backup-data"); err != nil {
+		t.Fatal(err)
+	}
+
+	output := filepath.Join(t.TempDir(), "backup.db")
+	outputPath, err := db.Backup(ctx, output)
+	if err != nil {
+		t.Fatalf("Backup() error = %v", err)
+	}
+	if outputPath != filepath.Clean(output) {
+		t.Fatalf("Backup() output path = %q, want %q", outputPath, filepath.Clean(output))
+	}
+
+	backupDB, err := Open(ctx, outputPath, Options{})
+	if err != nil {
+		t.Fatalf("reopen backup database: %v", err)
+	}
+	defer func() {
+		if err := backupDB.Close(context.Background()); err != nil {
+			t.Fatalf("close backup database: %v", err)
+		}
+	}()
+
+	var value string
+	if err := backupDB.Read(ctx, func(ctx context.Context, query Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT value FROM backup_test WHERE id = 1").Scan(&value)
+	}); err != nil {
+		t.Fatalf("read backup data: %v", err)
+	}
+	if value != "backup-data" {
+		t.Fatalf("backup value = %q, want backup-data", value)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO backup_test(value) VALUES (?)", "source-data")
+		return err
+	}); err != nil {
+		t.Fatalf("source write after backup: %v", err)
+	}
+	var count int
+	if err := db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM backup_test").Scan(&count)
+	}); err != nil {
+		t.Fatalf("read source count after backup: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("source rows = %d, want 2", count)
+	}
+}
+
+func TestBackupRejectsInvalidDestinationsWithoutOverwritingData(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t, noRetryOptions())
+	ctx := context.Background()
+	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.ExecContext(ctx, "INSERT INTO backup_test(value) VALUES (?)", "backup-data"); err != nil {
+		t.Fatal(err)
+	}
+
+	var beforeCount int
+	if err := db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM backup_test").Scan(&beforeCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := db.Backup(ctx, db.path)
+	if err == nil {
+		t.Fatal("Backup() with same path unexpectedly succeeded")
+	}
+	assertDomainCode(t, err, domain.CodeStorageConfiguration)
+	if err := db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var count int
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM backup_test").Scan(&count); err != nil {
+			return err
+		}
+		if count != beforeCount {
+			t.Fatalf("source row count changed to %d, want %d", count, beforeCount)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	existingPath := filepath.Join(t.TempDir(), "existing.db")
+	if err := os.WriteFile(existingPath, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Backup(ctx, existingPath)
+	if err == nil {
+		t.Fatal("Backup() with existing path unexpectedly succeeded")
+	}
+	assertDomainCode(t, err, domain.CodeStorageConfiguration)
+	contents, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "existing" {
+		t.Fatalf("existing output contents = %q, want %q", string(contents), "existing")
+	}
+
+	missingParent := filepath.Join(t.TempDir(), "missing", "backup.db")
+	_, err = db.Backup(ctx, missingParent)
+	if err == nil {
+		t.Fatal("Backup() with missing parent unexpectedly succeeded")
+	}
+	assertDomainCode(t, err, domain.CodeStorageConfiguration)
+	if _, statErr := os.Stat(filepath.Dir(missingParent)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing parent stat error = %v, want not-exist", statErr)
+	}
+}
+
 func TestOpenTranslatesUnavailableDatabase(t *testing.T) {
 	t.Parallel()
 	_, err := Open(context.Background(), t.TempDir(), Options{})

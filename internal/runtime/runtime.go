@@ -28,6 +28,8 @@ const (
 	CodeProjectMismatch = "PROJECT_DATABASE_MISMATCH"
 	// CodeHealthCheck identifies one or more failed Phase 1 health checks.
 	CodeHealthCheck = "PROJECT_HEALTH_FAILED"
+	// CodeProjectBackup identifies a failed online backup validation path.
+	CodeProjectBackup = "PROJECT_BACKUP_FAILED"
 )
 
 // Options supplies all environment-dependent values needed by OpenProject.
@@ -55,6 +57,7 @@ type Project struct {
 	mu       sync.RWMutex
 	closed   bool
 	closeErr error
+	SQLite   sqlite.Options
 }
 
 // OpenProject discovers strict repository identity, resolves external storage,
@@ -122,6 +125,7 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 		DatabasePath:  databasePath,
 		SchemaVersion: migrationResult.Version,
 		Database:      db,
+		SQLite:        options.SQLite,
 	}, nil
 }
 
@@ -227,6 +231,127 @@ func lifecycleError(err error, fallbackCode, message string) error {
 		return err
 	}
 	return domain.WrapError(err, fallbackCode, message, false)
+}
+
+// BackupReport summarizes a validated backup database artifact.
+type BackupReport struct {
+	OutputPath    string
+	SchemaVersion int
+}
+
+// Backup creates an online backup of the opened project database, validates the
+// output database, and returns the validated backup metadata.
+func (project *Project) Backup(ctx context.Context, output string) (BackupReport, error) {
+	if project == nil {
+		return BackupReport{}, domain.NewError(CodeProjectBackup, "project backup failed", false,
+			domain.Detail{Field: "project", Code: CodeProjectBackup, Message: "project is not open"})
+	}
+	project.mu.RLock()
+	defer project.mu.RUnlock()
+	if project.closed || project.Database == nil {
+		return BackupReport{}, domain.NewError(CodeProjectBackup, "project backup failed", false,
+			domain.Detail{Field: "project", Code: CodeProjectBackup, Message: "project is closed"})
+	}
+
+	outputPath, err := project.Database.Backup(ctx, output)
+	if err != nil {
+		return BackupReport{}, wrapProjectBackupError(err)
+	}
+	outputInfo, err := os.Stat(outputPath)
+	if err != nil {
+		return BackupReport{}, wrapProjectBackupError(err)
+	}
+
+	validationDB, err := sqlite.Open(ctx, outputPath, project.SQLite)
+	if err != nil {
+		cleanupErr := cleanupBackupOutput(outputPath, outputInfo)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+		return BackupReport{}, wrapProjectBackupError(err)
+	}
+
+	validationProject := &Project{
+		Root:          project.Root,
+		ProjectID:     project.ProjectID,
+		DatabasePath:  outputPath,
+		SchemaVersion: project.SchemaVersion,
+		Database:      validationDB,
+		SQLite:        project.SQLite,
+	}
+
+	healthReport, err := validationProject.Health(ctx)
+	if err != nil {
+		closeErr := validationProject.closeValidationDB(ctx)
+		cleanupErr := cleanupBackupOutput(outputPath, outputInfo)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+		if closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		return BackupReport{}, wrapProjectBackupError(err)
+	}
+	if !healthReport.Healthy() {
+		closeErr := validationProject.closeValidationDB(ctx)
+		cleanupErr := cleanupBackupOutput(outputPath, outputInfo)
+		if cleanupErr != nil {
+			err = errors.Join(errors.New("backup validation failed"), cleanupErr)
+		} else {
+			err = errors.New("backup validation failed")
+		}
+		if closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		return BackupReport{}, wrapProjectBackupError(err)
+	}
+
+	closeErr := validationProject.closeValidationDB(ctx)
+	if closeErr != nil {
+		cleanupErr := cleanupBackupOutput(outputPath, outputInfo)
+		if cleanupErr != nil {
+			closeErr = errors.Join(closeErr, cleanupErr)
+		}
+		return BackupReport{}, wrapProjectBackupError(closeErr)
+	}
+	return BackupReport{OutputPath: outputPath, SchemaVersion: healthReport.CurrentSchemaVersion}, nil
+}
+
+func (project *Project) closeValidationDB(ctx context.Context) error {
+	if project == nil || project.Database == nil {
+		return nil
+	}
+	return project.Database.Close(ctx)
+}
+
+func wrapProjectBackupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return domain.WrapError(err, CodeProjectBackup, "project backup failed", false)
+}
+
+func cleanupBackupOutput(path string, expected os.FileInfo) error {
+	if path == "" || expected == nil {
+		return nil
+	}
+	actual, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(actual, expected) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Close performs the configured passive checkpoint and closes owned storage.

@@ -129,6 +129,77 @@ func TestRunUsageAndErrors(t *testing.T) {
 	}
 }
 
+func TestRunBackup(t *testing.T) {
+	t.Run("requires output", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		called := false
+		cli.SetBackupHandler(func(context.Context, string) (BackupReport, error) {
+			called = true
+			return BackupReport{}, nil
+		})
+		err := cli.Run(context.Background(), []string{"backup"})
+		if err == nil || err.Error() != "output is required" {
+			t.Fatalf("expected output is required error, got %v", err)
+		}
+		if called {
+			t.Fatal("backup handler should not be called")
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no stdout output, got %q", stdout.String())
+		}
+	})
+
+	t.Run("table output", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetBackupHandler(func(context.Context, string) (BackupReport, error) {
+			return BackupReport{OutputPath: "/tmp/backup.db", SchemaVersion: 3}, nil
+		})
+		if err := cli.Run(context.Background(), []string{"backup", "--output", "/tmp/backup.db"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		for _, token := range []string{"output", "/tmp/backup.db", "schema_version", "3", "validated", "true"} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+	})
+
+	t.Run("json output", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetBackupHandler(func(context.Context, string) (BackupReport, error) {
+			return BackupReport{OutputPath: "/tmp/backup.db", SchemaVersion: 3}, nil
+		})
+		if err := cli.Run(context.Background(), []string{"backup", "--output", "/tmp/backup.db", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		for _, token := range []string{"\"output\"", "\"schema_version\"", "\"validated\"", "true"} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+	})
+
+	t.Run("handler error no stdout", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetBackupHandler(func(context.Context, string) (BackupReport, error) {
+			return BackupReport{}, errors.New("boom")
+		})
+		err := cli.Run(context.Background(), []string{"backup", "--output", "/tmp/backup.db"})
+		if err == nil || err.Error() != "boom" {
+			t.Fatalf("expected boom error, got %v", err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no successful output, got %q", stdout.String())
+		}
+	})
+}
+
 func TestRunJSONOutput(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -293,6 +364,20 @@ func TestRunMapsServiceInputs(t *testing.T) {
 			}
 			tt.assertFunc(t, issueService, searchService, graphService)
 		})
+	}
+}
+
+func TestRunBackupUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, nil)
+	cli.SetBackupHandler(func(context.Context, string) (BackupReport, error) {
+		return BackupReport{}, nil
+	})
+	if err := cli.Run(context.Background(), []string{"backup", "unexpected"}); err == nil {
+		t.Fatal("expected usage error")
+	}
+	if !strings.Contains(stderr.String(), "backup --output PATH") {
+		t.Fatalf("expected usage text in stderr, got %q", stderr.String())
 	}
 }
 

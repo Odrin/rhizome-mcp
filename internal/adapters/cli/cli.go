@@ -57,18 +57,33 @@ type InitHandler func(context.Context, string) error
 // ServeHandler runs CLI serve logic after the adapter parses the command.
 type ServeHandler func(context.Context) error
 
+// BackupReport summarizes a validated backup database artifact for CLI output.
+type BackupReport struct {
+	OutputPath    string
+	SchemaVersion int
+}
+
+// BackupHandler runs a project backup after the adapter parses the command.
+type BackupHandler func(context.Context, string) (BackupReport, error)
+
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
-	services     Services
-	stdout       io.Writer
-	stderr       io.Writer
-	initHandler  InitHandler
-	serveHandler ServeHandler
+	services      Services
+	stdout        io.Writer
+	stderr        io.Writer
+	initHandler   InitHandler
+	serveHandler  ServeHandler
+	backupHandler BackupHandler
 }
 
 // New constructs a CLI adapter around application services and output writers.
 func New(services Services, stdout, stderr io.Writer, initHandler InitHandler, serveHandler ServeHandler) *CLI {
 	return &CLI{services: services, stdout: stdout, stderr: stderr, initHandler: initHandler, serveHandler: serveHandler}
+}
+
+// SetBackupHandler installs a handler for the backup command.
+func (c *CLI) SetBackupHandler(handler BackupHandler) {
+	c.backupHandler = handler
 }
 
 // Run parses the supplied arguments and dispatches the matching subcommand.
@@ -82,6 +97,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runInit(ctx, args[1:])
 	case "serve":
 		return c.runServe(ctx, args[1:])
+	case "backup":
+		return c.runBackup(ctx, args[1:])
 	case "project":
 		return c.runProject(ctx, args[1:])
 	case "issue":
@@ -126,6 +143,36 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	return c.serveHandler(ctx)
+}
+
+func (c *CLI) runBackup(ctx context.Context, args []string) error {
+	if c.backupHandler == nil {
+		return fmt.Errorf("backup handler is not configured")
+	}
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	output := fs.String("output", "", "backup output path")
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *output == "" {
+		return fmt.Errorf("output is required")
+	}
+	if *format != "table" && *format != "json" {
+		return fmt.Errorf("unsupported format %q", *format)
+	}
+	report, err := c.backupHandler(ctx, *output)
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), BackupResponse{Output: report.OutputPath, SchemaVersion: report.SchemaVersion, Validated: true})
+	}
+	return c.writeBackupTable(report)
 }
 
 func (c *CLI) runProject(ctx context.Context, args []string) error {
@@ -450,6 +497,16 @@ func (c *CLI) writeProjectInfoTable(project domain.Project) error {
 	return err
 }
 
+func (c *CLI) writeBackupTable(report BackupReport) error {
+	lines := []string{
+		fmt.Sprintf("output\t%s", report.OutputPath),
+		fmt.Sprintf("schema_version\t%d", report.SchemaVersion),
+		"validated\ttrue",
+	}
+	_, err := fmt.Fprintln(c.stdoutWriter(), strings.Join(lines, "\n"))
+	return err
+}
+
 func (c *CLI) writeIssueListTable(page domain.IssueList) error {
 	var builder strings.Builder
 	builder.WriteString("display_id\ttype\tstatus\tpriority\ttitle\n")
@@ -574,6 +631,7 @@ func (c *CLI) usage() string {
 	return `Usage:
   rhizome-mcp [--data-root PATH] init
   rhizome-mcp [--data-root PATH] serve
+  rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
   rhizome-mcp [--data-root PATH] project info [--format table|json]
   rhizome-mcp [--data-root PATH] issue list [--format table|json] [--limit N] [--cursor CURSOR] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
@@ -587,6 +645,12 @@ func (c *CLI) usage() string {
 func (c *CLI) usageError() error {
 	fmt.Fprint(c.stderrWriter(), c.usage())
 	return fmt.Errorf("usage error")
+}
+
+type BackupResponse struct {
+	Output        string `json:"output"`
+	SchemaVersion int    `json:"schema_version"`
+	Validated     bool   `json:"validated"`
 }
 
 type MaintenanceReleaseAttemptResponse struct {

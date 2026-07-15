@@ -112,8 +112,18 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return serveRunner(ctx, cfg, stderr, bundle)
 	}
+	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
+		if project == nil {
+			return cliadapter.BackupReport{}, errors.New("project is not open")
+		}
+		report, err := project.Backup(ctx, output)
+		if err != nil {
+			return cliadapter.BackupReport{}, err
+		}
+		return cliadapter.BackupReport{OutputPath: report.OutputPath, SchemaVersion: report.SchemaVersion}, nil
+	}
 
-	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance") {
+	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -141,6 +151,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	}
 
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
+	adapter.SetBackupHandler(backupHandler)
 	return adapter.Run(ctx, args)
 }
 
