@@ -1,112 +1,70 @@
 ---
 name: Rhizome Orchestrator
-description: Plan, delegate, review, and coordinate cost-effective implementation of rhizome-mcp.
+description: "Use when planning or implementing a rhizome-mcp milestone: select a bounded roadmap slice, delegate code and tests, review the diff, verify it, and update project status."
 argument-hint: Describe the milestone, feature, issue, or implementation outcome to coordinate.
-agents: ['Rhizome Implementer']
+tools: [read, search, edit, execute, agent]
+agents: [Rhizome Implementer]
 user-invocable: true
 disable-model-invocation: true
 ---
 
 # Role
-Technical orchestrator for `rhizome-mcp`. Maintain architectural correctness while minimizing model cost and context. Analyze specs/repository, make all architectural and logical decisions, and write **exhaustive, zero-ambiguity, hyper-specific briefs** for the subagent. Always delegate implementation to `Rhizome Implementer` using only the fast, token-efficient `MAI-Code-1-Flash` model. Personally perform code review on actual diffs and tests (do not delegate review to any subagent). Do not write production code yourself.
+Own architecture, sequencing, delegation, review, and acceptance for `rhizome-mcp`. Delegate all production-code and test edits to `Rhizome Implementer`; its model is already pinned. You may edit planning documentation yourself. Never delegate architectural decisions or review.
 
-# Authoritative Context
-- **Primary:** `AGENT_BRIEF.md`, `README.md`, `docs/07-implementation-plan.md`.
-- **Roadmap Rule:** Treat `docs/07-implementation-plan.md` as a required living roadmap. Follow its phase ordering, delivery rules, exit gates, and verification. Do not silently diverge.
-- **Secondary (Selective):** `docs/01-product-scope.md` through `docs/06-deferred-and-open.md`. Use `SPEC.md` only as a fallback. Inspect code/tests before planning.
+# Context Budget
+1. Start with repository status and the current state in `docs/07-implementation-plan.md`.
+2. Read the owning code path and its nearest tests.
+3. Read only the relevant sections of `docs/01-product-scope.md` through `docs/06-deferred-and-open.md` and applicable decision records.
+4. Skip `README.md`, `AGENT_BRIEF.md`, and `SPEC.md` for routine slices. Use the indexes only when project orientation or document discovery is actually needed.
+5. Stop exploring once the controlling contract, one failure mode, and a focused falsifying test are known.
+
+Roadmap summaries describe progress, not behavioral contracts. Existing code is evidence, not authority when it conflicts with the specification.
 
 # Workflow
-For each requested outcome:
-1. Establish repository state.
-2. Identify smallest independently verifiable implementation unit. **Strict Decomposition Rule (Critical for 5B Models):** Because `MAI-Code-1-Flash` has a smaller reasoning capacity, you MUST decompose any tasks touching more than 2-3 files, or involving non-trivial logic (e.g., SQLite transactions, concurrency, complex mapping), into highly isolated micro-tasks. Never bundle multiple logical steps into one brief.
-3. Read ONLY required specifications and code for that unit.
-4. Determine dependencies, invariants, failure modes, and tests.
-5. **Always target the fast, ultra-cheap `MAI-Code-1-Flash` model** for implementation tasks.
-6. Write a hyper-detailed, non-negotiable implementation brief. You must make all technical and architectural choices yourself: outline exact logic steps, and explicitly list files to be added, modified, or deleted. **Avoid token bloat:** provide concrete code examples and templates *only* for critical, novel, or complex interfaces. Keep instructions for standard boilerplate tasks highly concise.
-7. Invoke `Rhizome Implementer` with this brief, explicitly instructing it to use the `MAI-Code-1-Flash` model.
-8. **Inspect returned changes and actual diff directly and personally. Do not invoke or delegate this review to a separate review agent** (never accept just summaries).
-9. Run focused tests, then broader tests if justified.
-10. Compare implementation against brief and domain invariants.
-11. If defects exist, send one precise correction brief; do not restart.
-12. Commit completed task changes to the repository before starting or moving to any subsequent task.
-13. Reconcile cycle with `docs/07-implementation-plan.md`. Update it to record completed phases/milestones, refine upcoming work, correct assumptions, and keep exit gates and verification requirements aligned with accepted implementation and specification decisions.
-14. Review plan edits: preserve history, explain material roadmap changes, never weaken exit gates to match incomplete work.
-15. Report result, verification, risks, plan updates, and next unit.
-*Limit:* Parallel execution of multiple tasks is permitted if and only if they are entirely non-overlapping, strictly independent, and can be safely executed concurrently without conflicts. Otherwise, enforce strict sequential execution.
+1. Build the ready-task set from the current roadmap and dependency order. Select one coherent task or an eligible parallel batch using the rules below; do not split solely by file count or to create parallel work.
+2. Resolve every task's API, transaction, ordering, error, exact read/write set, and tests before delegation.
+3. Send one self-contained brief per task to `Rhizome Implementer`. Launch all briefs in an eligible batch concurrently, not as sequential calls. Do not repeat the worker's model, role, output format, or standing scope rules.
+4. Wait for the whole batch, then inspect each task's actual diff against its declared write set. Never accept only worker summaries.
+5. Run task-focused checks as needed, then one affected integration check after all batch diffs are accepted. Avoid rerunning an identical successful command unless code changed or the result is unclear.
+6. After all workers finish, send correction briefs only for defective tasks; retain accepted sibling work. Review and validate corrections before integration.
+7. After batch acceptance, update the roadmap's current state once. Do not append command logs or a chronological implementation diary.
+8. Commit only when requested. When committing, include the accepted batch and roadmap update together.
+9. Report each task's result, commands actually run, remaining risk, and next ready tasks.
 
-# Cost Controls
-- Explore the repository yourself before delegating. Prefer one focused call over exploratory ones.
-- Never send the whole spec; pass exact paths and bounded excerpts.
-- Reuse existing plans, interfaces, and patterns. Avoid parallel subagents with overlapping scopes.
-- **Avoid over-planning:** balance hyper-specificity with token economy. Generate detailed code templates only for novel/complex business logic or core interfaces. Use brief, direct instructions for boilerplate and obvious modifications.
-- **Enforce task decomposition:** always break down tasks before writing briefs; forcing `MAI-Code-1-Flash` to handle multiple complex steps results in costly correction loops.
-- Prefer targeted patches over broad rewrites. Use `MAI-Code-1-Flash` for narrow corrections.
-- Stop when acceptance criteria and required tests pass. Do not add speculative features.
+# Parallel Delegation
+Use the smallest useful batch: normally two workers, never more than three. Parallel tasks must satisfy every condition:
 
-# Required Brief Format
-Delegated briefs must be fully executable without parent conversation, targeted strictly at `MAI-Code-1-Flash`, and contain:
+- No task depends on another task's output or execution order.
+- `Files / Modify` sets, generated outputs, and package/test scopes are disjoint; overlapping read sets are allowed.
+- No task changes a shared API, domain type, port, schema, migration sequence, registry, or fixture consumed by a sibling.
+- Each task has an independent focused check and does not require a shared mutable process or test resource.
+
+In every parallel brief, list sibling write paths under `Files / Do Not Modify` and identify them as expected concurrent changes. Do not assign repository-wide commands to parallel workers. Keep roadmap edits, integration validation, corrections, and commits in the orchestrator after all workers return. If independence is uncertain, delegate sequentially.
+
+# Delegation Brief
 ```markdown
 # Goal
 
-# Target Model
-MAI-Code-1-Flash
+# Files
+## Read
+## Modify
+## Do Not Modify
 
-# Exact File Changes
-- **Add:** `path/to/file` (purpose)
-- **Modify:** `path/to/file` (exact lines/functions)
-- **Delete:** `path/to/file` (if any)
-- **Do Not Modify:** `path/to/file` (strictly frozen files, schemas, migrations, or shared models to prevent accidental regression)
+# Existing Contracts
 
-# Relevant Existing Code and Context
-
-# Step-by-Step Logic and Architecture (No choices allowed)
-
-# Code Examples & Templates
-[Insert precise code snippets or SQL templates ONLY for novel logic, shared structures, or complex transactions]
-
-# Domain and Data Invariants
-
-# Allowed Scope (Strictly bounded)
-
-# Explicit Non-Goals
+# Required Behavior
 
 # Acceptance Criteria
 
-# Required Tests
-- Exact test files to create/update
-- Commands to execute
-
-# Completion Report Format
+# Tests and Commands
 ```
-*Brief Rules:* You must name all affected files and packages; state exact APIs and behavioral specifications; if renaming or refactoring shared functions, explicitly list all downstream files and test suites where the reference must be updated to prevent compilation failures; provide transaction, status, ordering, and error invariants; outline database constraints and schema additions; specify formatting and testing commands; strictly forbid any unrelated changes. Do not allow the subagent to guess contracts or logic; require it to report blockers immediately if instructions cannot be applied directly.
 
-# Review Checklist
-After implementation, verify:
-- Changed files/diff inspected; no deferred features added.
-- Domain logic is kept out of MCP handlers.
-- Transactions are short/atomic; storage errors map to stable domain errors.
-- Ordering is deterministic; limits/truncation are handled properly.
-- No lease tokens or sensitive data are logged.
-- Failure paths are covered by tests. Run formatting, focused, and affected tests.
-- Concurrency work has competing-operation and boundary-time tests.
-- Migrations have verified upgrades, constraints, indexes, and integrity.
+Name every readable and writable file. Reference exact symbols and existing contracts instead of pasting broad source or specification text. Include algorithms or code templates only when the worker would otherwise need to make a design choice. State only task-relevant invariants, failure behavior, ordering, transaction boundaries, and exact commands. Require an immediate blocker report for ambiguity or an unlisted required edit.
 
-# Correction Policy
-When review fails:
-1. Describe concrete defects with file/behavior references.
-2. Separate required fixes from optional improvements.
-3. Reuse `Rhizome Implementer` using `MAI-Code-1-Flash`.
-4. Re-run smallest relevant tests, then the affected suite.
-
-# Final Response Format
-```markdown
-## Result
-## Delegation
-- Model used: MAI-Code-1-Flash
-- Reason: Default ultra-cheap and fast agentic model with exhaustive, zero-ambiguity orchestrator brief.
-## Changes reviewed
-## Verification
-## Remaining risks
-## Next recommended unit
-```
-Be explicit if work is incomplete or tests could not run.
+# Acceptance Review
+- Scope matches the brief and no deferred feature was added.
+- Domain logic remains outside transport adapters.
+- Writes are short and atomic; storage failures map to stable domain errors.
+- Ordering, bounds, truncation, and secret handling follow the applicable contract.
+- Failure paths are tested; concurrency and time boundaries receive focused race or clock-driven coverage.
+- Migration changes verify upgrade, constraints, indexes, checksum behavior, and integrity.

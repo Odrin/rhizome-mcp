@@ -28,14 +28,18 @@ The project is designed for sequential and parallel work by different agent prod
 
 ## Documentation
 
-- [Complete specification](SPEC.md)
-- [Implementation brief for an AI agent](AGENT_BRIEF.md)
+- [Current implementation roadmap](docs/07-implementation-plan.md)
+- [Implementation context for AI agents](AGENT_BRIEF.md)
 - [Product goals and scope](docs/01-product-scope.md)
 - [Domain model](docs/02-domain-model.md)
 - [MCP tools](docs/03-mcp-tools.md)
 - [Storage and runtime](docs/04-storage-runtime.md)
 - [Implementation requirements](docs/05-implementation-requirements.md)
 - [Deferred features and non-goals](docs/06-deferred-and-open.md)
+- [Specification index and reading guide](SPEC.md)
+- [Accepted implementation baseline](docs/decisions/0001-implementation-baseline.md)
+
+The six modular files are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current roadmap unit.
 
 ## Repository identity
 
@@ -64,4 +68,4 @@ An issue must never remain permanently stuck in `in_progress`.
 
 ## Status
 
-Phases 1 and 2 are complete. Phase 3 includes relation management, bounded issue and planning graph reads, deterministic issue-plan validation, and atomic idempotent issue-plan application. Phase 4 currently provides atomic issue claiming, renewable hashed-token leases, lazy expiry/takeover, append-only leased attempt notes/checkpoints, and completion of work or review attempts. Completion atomically updates the attempt and issue, detects acknowledgable issue changes and new blockers, and stores bounded result/verification data without logging lease tokens. Attempt notes support up to 20 next steps of 1,000 characters each; artifact attachments, sessions, search, CLI functionality, and later phases remain out of scope. See the [implementation plan](docs/07-implementation-plan.md) for the current roadmap and exit gates.
+Active development toward the first release. The [implementation roadmap](docs/07-implementation-plan.md) is the single source for the current phase, next unit, and exit gates.

@@ -1,77 +1,40 @@
-# Implementation brief for an AI coding agent
+# Implementation context for AI coding agents
 
 You are implementing `rhizome-mcp`, a local-first MCP server for task tracking and coordination of autonomous AI coding agents.
 
-Read these files before planning:
+## Load context selectively
 
-1. `README.md`
-2. `docs/01-product-scope.md`
-3. `docs/02-domain-model.md`
-4. `docs/03-mcp-tools.md`
-5. `docs/04-storage-runtime.md`
-6. `docs/05-implementation-requirements.md`
-7. `docs/06-deferred-and-open.md`
+1. Read the current state and next unit in `docs/07-implementation-plan.md`.
+2. Inspect the owning code path and its nearest tests.
+3. Read only the specification sections needed for that unit.
+4. Read an ADR only when the unit touches its decision.
 
-`SPEC.md` contains the same material in one consolidated document.
+`SPEC.md` is a lightweight index, not a second copy of the specification. Detailed contracts live only in the modular documents below.
 
-## Your first task
+Specification map:
 
-Before writing production code:
-
-1. Inspect the complete specification.
-2. Identify internal dependencies between subsystems.
-3. Produce a phased implementation plan.
-4. Define the initial Go module structure.
-5. Define the first SQLite migrations.
-6. Select concrete versions of the MCP SDK and SQLite driver.
-7. Identify any specification conflicts or underspecified behavior.
-8. Propose tests for concurrency, leases, idempotency and graph traversal.
-9. Do not add deferred features unless required by the specification.
+- `docs/01-product-scope.md`: goals, users, deployment, and non-goals.
+- `docs/02-domain-model.md`: entities, states, invariants, and lifecycle rules.
+- `docs/03-mcp-tools.md`: public tool inputs, outputs, limits, and behavior.
+- `docs/04-storage-runtime.md`: SQLite, transactions, migrations, leases, and operations.
+- `docs/05-implementation-requirements.md`: architecture, algorithms, errors, and test coverage.
+- `docs/06-deferred-and-open.md`: deferred features and confirmed defaults.
+- `docs/decisions/`: accepted implementation choices.
 
 ## Non-negotiable requirements
 
-- Go and SQLite.
-- Native local startup without Docker.
-- One SQLite database per project, stored outside the repository.
+- Go, SQLite, native startup, and no Docker requirement.
+- One external SQLite database per project; the repository stores only `.agent-tracker.json`.
 - `.agent-tracker.json` contains only `version` and `project_id`.
 - Primary MCP transport is `stdio`.
-- Business logic must be independent from MCP and CLI adapters.
-- `in_progress` is computed from an active work attempt.
-- One issue can have at most one active attempt.
-- Attempts use renewable leases and opaque lease tokens.
-- A lost client must not leave an issue permanently locked.
-- Batch plan application must be atomic.
-- Mutations must support idempotency where specified.
-- Issue updates use optimistic concurrency.
-- Responses must be bounded and token-efficient.
-- Full-text search uses SQLite FTS5.
-- No GUI, authentication, custom workflows or binary attachments in the first version.
+- Business logic stays in application/domain layers, outside MCP and CLI adapters.
+- `in_progress` is derived from one active renewable lease; lost clients cannot lock issues permanently.
+- Writes that combine state, events, projections, or idempotency records are short and atomic.
+- Issue mutations use optimistic concurrency and specified mutations support replay-safe idempotency.
+- Time is injected, ordering is deterministic, and all large responses are explicitly bounded.
+- FTS5 is a rebuildable projection; history is preserved and raw storage errors or lease secrets are not exposed.
+- Deferred features remain out of scope.
 
-## Recommended implementation order
+## Working rule
 
-Use this only as a dependency guide; produce your own detailed plan.
-
-1. Project bootstrap, configuration resolution and database lifecycle.
-2. Schema migrations, SQLite connection configuration and health checks.
-3. Domain types, validation and error model.
-4. Issue CRUD, labels, events and optimistic concurrency.
-5. Relations, cycle detection and graph queries.
-6. Agent sessions, attempts, leases, checkpoints and recovery.
-7. Comments, decisions and artifacts.
-8. Idempotency.
-9. Batch plan validation and application.
-10. FTS5 search and change feed.
-11. MCP adapter and tool schemas.
-12. CLI, backup, restore, export helpers and diagnostics.
-13. Integration and concurrency tests.
-
-## Expected engineering style
-
-- Prefer explicit domain services over logic in handlers.
-- Keep write transactions short.
-- Make all ordering deterministic.
-- Use injected time through a `Clock` interface.
-- Treat FTS as a rebuildable projection.
-- Return structured domain errors instead of SQLite errors.
-- Preserve history; avoid physical deletion.
-- Do not silently truncate responses.
+Implement one coherent vertical slice at a time. Use the smallest focused check during development, then apply the validation tier in the roadmap. Keep roadmap entries current and concise; Git history and tests are the detailed completion record.

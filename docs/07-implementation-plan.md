@@ -1,126 +1,76 @@
 # Implementation plan
 
-This roadmap delivers the complete first version as small, independently verified vertical slices. The primary orchestrator owns architecture, schema sequencing, shared contracts, integration, and acceptance. The Go MCP specialist implements one bounded batch at a time on the shared branch.
+This is the living roadmap for the first release. It records current capability, remaining order, and exit gates. Git history and tests are the detailed completion record; do not turn this file into a chronological command log.
 
 ## Delivery rules
 
-- Serialize production edits to minimize merge and contract rework.
-- Parallelize only independent read-only research or review.
-- Keep each batch to one service or one to three tightly related tools.
-- Add focused tests with every production change.
-- Run focused tests, all tests, and `go vet` before checkpointing.
-- Do not introduce deferred features.
+- Define work as coherent, independently testable vertical slices.
+- Run two ready implementation units concurrently when they have disjoint write and package/test scopes, no contract or ordering dependency, and independent focused checks; use at most three workers.
+- Keep shared APIs, domain types, ports, schemas, migrations, registries, roadmap edits, integration validation, and commits serialized.
+- Split a slice when it contains multiple novel contracts or transactions, not solely because it spans several layers.
+- Add focused tests with every production change and apply the validation tiers below.
+- Keep domain logic out of adapters, transactions short, ordering deterministic, and responses explicitly bounded.
+- Do not add deferred features.
 
-## Phase 0: decisions and workflow
+## Current state
 
-- Record implementation decisions in `docs/decisions/0001-implementation-baseline.md`.
-- Configure the workspace orchestrator and bounded implementation specialist.
-- Treat the existing in-memory task implementation as a disposable prototype, not a compatibility contract.
+- **Active phase:** Phase 5, knowledge and work context.
+- **Next unit:** add bounded `recent_comments` and `recent_attempt_notes` to the SQLite work-context snapshot with deterministic newest-first ordering and per-section truncation.
+- **Following storage units:** `decision_content`, `attempt_history`, `artifacts`, then `changes_since_previous_attempt`.
+- **Then:** expose `get_work_context` through MCP and run the Phase 5 exit gate.
+- **Later:** Phase 6 search/change feeds, then Phase 7 CLI, maintenance, and release.
 
-## Phase 1: foundation
+## Phase 0: decisions and workflow - complete
 
-- Introduce the required adapter, application, domain, ports, and SQLite package boundaries.
-- Add injected time, ULID generation, domain errors, validation, pagination, and deterministic normalization.
-- Implement strict project identity discovery and initialization.
-- Implement SQLite connection configuration, WAL verification, transaction retry, embedded migrations, health checks, and the complete initial schema.
+The implementation baseline is recorded in `docs/decisions/0001-implementation-baseline.md`, and the workspace uses an orchestrator plus a bounded low-cost implementer.
 
-Exit gate: a temporary repository can be initialized, migrated, reopened, and verified with WAL, FTS5, foreign keys, migration checksums, active-attempt uniqueness, and a no-CGO build.
+## Phase 1: foundation - complete
 
-**Phase 1 completed on 2026-07-13.** Verified exit gate:
+Delivered package boundaries, injected time and IDs, validation and pagination, strict project identity, configured SQLite, embedded checksummed migrations, health checks, FTS5 availability, and the initial strict schema.
 
-- temporary repository initialization, nested discovery, external database migration, project seeding, clean close, and stable reopen;
-- WAL, FTS5, per-connection foreign keys, migration version/checksum history, quick and foreign-key checks, and one-active-attempt uniqueness;
-- race-enabled full tests, vetting, and `CGO_ENABLED=0 go test ./...`.
+Exit gate satisfied: initialization, migration, reopen, WAL, foreign keys, checksums, active-attempt uniqueness, integrity checks, and no-CGO operation.
 
-## Phase 2: projects and issues
+## Phase 2: projects and issues - complete
 
-- Implement project, issue, label, and event domain/repository/application layers.
-- Add immutable `ISSUE-N` allocation, parent rules, stored and effective status, archives, optimistic versions, and deterministic pagination.
-- Deliver `get_project`, `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, and `archive_issue`.
+Delivered project, issue, label, and event layers plus `get_project`, `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, and `archive_issue`. This includes immutable issue numbers, parent rules, effective status, archive behavior, optimistic versions, and deterministic pagination.
 
-Exit gate: the issue lifecycle works through an MCP client and survives restart, including invalid transitions, invalid parents, archive behavior, and version conflicts.
+Exit gate satisfied: the issue lifecycle works through MCP and survives restart, including invalid transitions and parents, archives, and version conflicts.
 
-**Phase 2 completed on 2026-07-14.** The stdio MCP adapter exposes only `get_project`, `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, and `archive_issue`, backed by the committed project and issue services. It uses typed schemas, preserves update absent/null semantics, and returns domain failures as stable structured tool errors. Project metadata includes Phase 2 capabilities and conditionally visible instructions without creating sessions. The MCP lifecycle tests verify creation, lookup, patching, labels, list ordering and archived visibility, invalid status/parent/transition handling, version conflicts, archiving, and SQLite restart persistence. Creation validates fields and parent rules, atomically allocates non-reused `ISSUE-N` values, stores version-one issue rows, and appends `issue_created` events. Parent references accept either canonical ULIDs or `ISSUE-N` and persist canonical parent IDs. Base lookup accepts both forms, returns archived issues, and maps complete stored projections without side effects. Patches have typed absent/null semantics, enforce status/parent rules, append compact update events atomically, preserve immutable display IDs, and reject stale updates with retryable `VERSION_CONFLICT`. Archive preserves historical and related data, rejects active attempts, and appends its event atomically. Labels use ASCII-NOCASE canonicalization consistent with SQLite, support create-or-resolve and replacement semantics, appear on issue projections, list deterministically with cursors, and are read with the issue base row from one SQLite snapshot. Issue lists support bounded keyset pagination, deterministic priority/claimability/sequence ordering, archived visibility, typed filters, and any-label matching. Their current computed fields derive from stored issue state and will be extended for relation and attempt state in later phases.
+## Phase 3: relations, graphs, and planning - complete
 
-## Phase 3: relations, graphs, and planning
+Delivered canonical relation management, in-transaction blocker-cycle rejection, shared bounded breadth-first graph traversal, planning projections, deterministic plan validation, and atomic idempotent plan application. Tools: `manage_issue_relation`, `get_issue_graph`, `get_planning_graph`, `validate_issue_plan`, and `apply_issue_plan`.
 
-- **Relation-management subunit completed on 2026-07-14 (commit `85d97e7`).** Implemented canonical relation operations, in-transaction blocker-cycle rejection, blocker-derived list projections, and the ninth MCP tool, `manage_issue_relation`, with focused tests.
-- **Graph subunit completed on 2026-07-14 (commit `7dfad29`).** Implemented one shared bounded breadth-first graph engine and the MCP tools `get_issue_graph` and `get_planning_graph`, with focused tests.
-- **Batch-planning subunit completed on 2026-07-14.** Implemented deterministic dry-run validation, local issue refs, existing-plus-batch blocker-cycle checks, atomic issue/label/relation/decision/event writes, and replay-safe idempotent `apply_issue_plan`. Delivered `validate_issue_plan` and `apply_issue_plan` with domain, application, SQLite, and MCP coverage.
+Exit gate satisfied: graph bounds, relation races, cycle rejection, deterministic validation, rollback, and concurrent idempotent application.
 
-Exit gate: graph bounds, relation races, cycle rejection, deterministic validation, rollback, and concurrent idempotent application pass.
+## Phase 4: sessions, claims, leases, and recovery - complete
 
-## Phase 4: sessions, claims, leases, and recovery
+Delivered durable connection sessions; atomic claims and renewals; hashed opaque tokens; lazy and background expiry; takeover; notes, checkpoints, and artifacts; completion consistency; review outcomes; session attribution; and idempotent finish replay. Tools: `claim_issue`, `renew_attempt`, `save_attempt_note`, and `finish_attempt`.
 
-- **Claim/renewal subunit completed on 2026-07-14.** Implemented hashed opaque lease tokens, atomic claim and renewal, clock-driven lazy expiry and takeover, plus `claim_issue` and `renew_attempt`. Per-connection agent-session persistence, cleanup scheduling, notes, and completion remain for later Phase 4 subunits.
-- **Attempt-note subunit completed on 2026-07-14.** Implemented lease-authorized append-only `save_attempt_note` for progress, finding, warning, and checkpoint notes, with `attempt_note_saved` ordinary-note events, `checkpoint_saved` checkpoint events, and lazy expiry at the lease boundary. Notes support at most 20 next steps of 1,000 characters each; artifact attachments and attempt completion remain for later subunits.
-- **Attempt-completion subunit completed on 2026-07-14.** Implemented `finish_attempt` for work and review outcomes. Completion validates hashed-token leases, lazily expires at the lease boundary, atomically persists bounded result/verification data and safe attempt events, updates issue workflow state when appropriate, rejects new blockers, and requires an exact acknowledgement for changed description, acceptance criteria, stored status, or manual blocking. Title, priority, label, parent, and type changes return deterministic warnings. Artifact attachment and idempotent finish retries remain for later subunits.
-- **Phase 4 checkpoint/note artifact attachment completed on 2026-07-14.** `save_attempt_note` now atomically attaches validated artifact references to the leased attempt; final-result attachments, sessions, cleanup scheduling, and idempotent finish retries remain pending.
-- **Phase 4 final-result artifact attachment completed on 2026-07-14.** `finish_attempt` now atomically attaches and returns validated final-result artifact references for completed, failed, and interrupted attempts; sessions, background cleanup scheduling, and idempotent finish retries remain pending.
-- **Phase 4 background expiry cleanup completed on 2026-07-14.** Lifecycle-safe periodic cleanup expires lease-expired active attempts; sessions and idempotent finish retries remain pending.
-- **Phase 4 agent-session connection lifecycle completed on 2026-07-14.** Each initialized MCP connection now creates one durable session from client metadata, touches it before tool actions, and ends it once after connection shutdown. Attempt/event attribution to sessions and idempotent finish retries remain pending.
-- **Phase 4 attempt session attribution completed on 2026-07-14.** Claims and request-authored attempt events are attributed to the current durable session; system expiry events remain un-attributed, and idempotent finish retries remain pending.
-- **Phase 4 finish idempotency subunit completed on 2026-07-14.** Optional `finish_attempt` idempotency keys now hash the normalized request (excluding transient session identity and generated artifact values), replay the exact persisted response across reconnect and database reopen, return stable conflicts for changed requests, and atomically store the response with completion effects. Verification: `go test -count=1 ./internal/domain ./internal/application ./internal/adapters/sqlite ./internal/adapters/mcp`, `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`, and `CGO_ENABLED=0 go test -count=1 ./...`.
-- **Phase 4 completed on 2026-07-14.** All Phase 4 vertical slices are complete: sessions, claims, leases, renewal, lazy and background expiry, takeover, notes and artifacts, completion and issue consistency, token authorization, interruption, session attribution, and idempotent finish retries. The exit gate remains simultaneous claim, blocker/claim, expiry/renewal, completion/update, token, interruption, and takeover-under-race coverage under the race detector; the verification above was run without weakening those requirements.
-- Implement temporary sessions and work attempts using injected time and hashed opaque tokens.
-- Implement atomic claim, renewal, lazy expiry, periodic cleanup, checkpoints, completion consistency, verification, and artifacts.
-- Deliver `claim_issue`, `renew_attempt`, `save_attempt_note`, and `finish_attempt`.
+Exit gate satisfied under the race detector: simultaneous claims, blocker/claim, expiry/renewal, completion/update, invalid token, interruption, and takeover. No issue remains permanently locked.
 
-Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update, token, interruption, and takeover tests pass under the race detector. No issue can remain permanently locked.
+## Phase 5: knowledge and work context - active
 
-## Phase 5: knowledge and work context
+Delivered:
 
-- **Phase 5 comment subunit implemented on 2026-07-14.** Append-only
-  `add_comment` now validates issue references and comment bodies, preserves
-  durable MCP-session attribution when available, and atomically persists a
-  comment with its compact `comment_added` event. Verification:
-  `go test -count=1 ./internal/domain ./internal/application ./internal/adapters/sqlite ./internal/adapters/mcp .`,
-  `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
-  and `CGO_ENABLED=0 go test -count=1 ./...`. Remaining Phase 5 work is
-  decisions and supersession, unified activity, and bounded work context;
-  Phase 5 is not complete.
-- **Phase 5 decisions subunit implemented on 2026-07-14.** Standalone
-  `record_decision` now persists immutable project- and issue-level decisions,
-  atomically supersedes one active same-scope predecessor, and writes a compact
-  session-attributed `decision_recorded` event. Only null idempotency keys are
-  accepted. Verification: focused, full, race-enabled, vet, no-CGO, and
-  diff-check tests passed. Remaining Phase 5 work is unified activity and
-  bounded work context; Phase 5 is not complete.
-- **Phase 5 activity-storage subunit completed on 2026-07-14.** The SQLite
-  activity repository/storage slice is complete: it reads all six issue-owned
-  categories in one snapshot-consistent `UNION ALL` page with deterministic
-  newest-first keyset pagination and strict corruption validation, resolves
-  canonical and display issue identifiers, preserves full issue event history,
-  excludes global/null-scope decisions/events, and does not expose lease
-  secrets. Focused, full, race, vet, and no-CGO validation passed.
-- **Phase 5 activity-MCP exposure completed on 2026-07-14.** Tool #15 is
-  exposed through the thin MCP adapter with schema-bounded input and typed
-  output mapping. Adapter, full, race, vet, and no-CGO validation passed.
-- **Phase 5 compact work-context storage completed on 2026-07-14.** The
-  snapshot-consistent default projection resolves canonical and display issue
-  identifiers and returns issue state, unresolved blockers, active decision
-  summaries, the latest recovery-relevant attempt, the newest checkpoint, and
-  deterministic repeated-failure warnings. Effective status uses
-  application-injected time; stored-data corruption and uncommitted writer
-  state are covered without exposing lease secrets. Optional sections and MCP
-  exposure remain pending.
-- **Phase 5 work-context scalar and related sections completed on
-  2026-07-15.** Requested parent-epic and project-instructions projections are
-  strict and include-gated. Direct relations are deterministic, and related
-  issue summaries use requested bounds with explicit truncation metadata.
-  Comments, notes, decision content, history, artifacts, changes, and MCP
-  exposure remain pending.
-- The immediate next unit is the remaining bounded `get_work_context` list
-  sections. Phase 5 remains incomplete and the exit gate remains decisions and
-  checkpoints surviving interruption and default context remaining compact and
-  deterministic.
-- Implement append-only comments, decisions and supersession, artifacts, and unified activity.
-- Implement compact default work context with explicitly bounded optional sections.
-- Deliver `add_comment`, `record_decision`, `get_issue_activity`, and `get_work_context`.
+- Append-only `add_comment` with compact event and session attribution.
+- Project- and issue-level `record_decision` with atomic same-scope supersession.
+- Unified, snapshot-consistent `get_issue_activity` across six categories with bounded deterministic pagination and no lease-secret exposure.
+- Compact work-context storage for issue state, blockers, active decision summaries, the latest recovery-relevant attempt, checkpoint, and repeated-failure warnings.
+- Include-gated parent epic, project instructions, direct relations, and bounded related-issue summaries.
 
-Exit gate: decisions and checkpoints survive interruption and default context remains compact and deterministic.
+Remaining, in order:
 
-## Phase 6: search and changes
+1. Add bounded recent comments and attempt notes.
+2. Add bounded decision content.
+3. Add bounded attempt history.
+4. Add bounded artifacts.
+5. Add bounded changes since the previous attempt.
+6. Expose `get_work_context` through the thin MCP adapter with bounded schemas and typed mapping.
+7. Run focused contract coverage and the Phase 5 checkpoint suite.
+
+Exit gate: decisions and checkpoints survive interruption, every optional section obeys its bound, and default context remains compact and deterministic.
+
+## Phase 6: search and changes - planned
 
 - Complete transactional FTS5 indexing and rebuild support.
 - Implement ranked bounded snippets, deterministic tie-breaking, filters, and event-based incremental changes.
@@ -128,14 +78,40 @@ Exit gate: decisions and checkpoints survive interruption and default context re
 
 Exit gate: transaction visibility, rebuild equivalence, malformed cursor handling, filtering, and incremental refresh pass.
 
-## Phase 7: CLI, maintenance, and release
+## Phase 7: CLI, maintenance, and release - planned
 
-- Deliver `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, `graph`, `doctor`, and `backup` over the same application services.
+- Deliver `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, `graph`, `doctor`, and `backup` over shared application services.
 - Add maintenance-only attempt release and FTS rebuild operations.
-- Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, and packaging.
+- Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, packaging, and target-platform builds.
 
-Exit gate: exactly 22 tools are stable; all tests, race tests, vetting, no-CGO and target-platform builds pass; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed.
+Exit gate: exactly 22 tools are stable; fresh initialization, stdio MCP use, doctor, backup, and a two-agent lease-expiry handoff succeed; the full release suite passes.
 
-## Required verification
+## Validation tiers
 
-Each milestone must cover the applicable unit, SQLite integration, clock-driven, concurrency, MCP contract, and CLI tests listed in `docs/05-implementation-requirements.md`. Lists and graphs must report truncation, all queries must order explicitly, and error responses must expose stable domain errors rather than SQLite details.
+### Worker check
+
+For each delegated patch, run formatting plus the smallest test that can falsify the requested behavior. The worker runs only commands named in its brief.
+
+### Slice acceptance
+
+After review, run affected package and integration tests. Run `go test -count=1 ./...` when a slice changes a shared contract, schema, migration, or cross-layer wiring. Add a focused race test for concurrency-sensitive work and clock-driven boundary tests for time behavior. Do not rerun an identical successful command without a reason.
+
+### Phase checkpoint
+
+Run the expensive repository-wide gate once when closing a phase or preparing a release:
+
+```text
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+CGO_ENABLED=0 go test -count=1 ./...
+```
+
+Also run any phase-specific migration, MCP contract, CLI, backup, or target-platform checks required by `docs/05-implementation-requirements.md`.
+
+## Roadmap maintenance
+
+- Update Current state and the affected phase after accepted behavior changes.
+- Replace stale status instead of appending a dated narrative or repeated command list.
+- Preserve phase ordering and exit gates; never weaken a gate to match incomplete work.
+- Record durable architectural choices in an ADR, not in milestone prose.
