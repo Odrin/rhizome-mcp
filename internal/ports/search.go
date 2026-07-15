@@ -18,3 +18,7 @@ type SearchRepository interface {
 	Search(context.Context, SearchCommand) (domain.SearchPage, error)
 	GetChanges(context.Context, GetChangesCommand) (domain.ChangesPage, error)
 }
+
+type SearchIndexRepository interface {
+	Rebuild(context.Context) error
+}

@@ -15,8 +15,8 @@ This is the living roadmap for the first release. It records current capability,
 ## Current state
 
 - **Active phase:** Phase 7, CLI, maintenance, and release.
-- **Next unit:** add maintenance-only attempt release and FTS rebuild operations.
-- **Then:** finalize doctor, backup, and release validation.
+- **Next unit:** add `doctor` and backup.
+- **Then:** finalize release validation, documentation, packaging, and target-platform builds.
 
 ## Phase 0: decisions and workflow - complete
 
@@ -76,7 +76,7 @@ Exit gate satisfied: transaction visibility, rebuild equivalence, malformed curs
 
 - Delivered `init`, `serve`, `project info`, `issue list`, `issue show`, `search`, and `graph` over shared application services, with bounded typed flags and deterministic table, JSON, and Mermaid output.
 - `init` creates strict identity and external storage, then migrates and seeds the database. All CLI commands accept an optional process-level data-root override.
-- Add maintenance-only attempt release and FTS rebuild operations.
+- Delivered CLI-only maintenance release for active attempts and transactional FTS rebuild. Forced release atomically records a sessionless interruption and preserves issue and recovery state.
 - Add `doctor` and `backup`.
 - Finalize stdio startup, stderr-only logs, shutdown, backup validation, documentation, packaging, and target-platform builds.
 

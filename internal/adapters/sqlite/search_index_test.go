@@ -10,7 +10,10 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
+
+var _ ports.SearchIndexRepository = (*sqlite.SearchIndexRepository)(nil)
 
 func TestSearchIndexTracksSourceMutationsTransactionallyAndRebuilds(t *testing.T) {
 	service, db, now := openIssueService(t)

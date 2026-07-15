@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 // ProjectService exposes current project metadata reads for CLI commands.
@@ -35,12 +36,19 @@ type GraphService interface {
 	GetIssueGraph(context.Context, domain.GetIssueGraphInput) (domain.GraphResult, error)
 }
 
+// MaintenanceService exposes maintenance-only operations for CLI commands.
+type MaintenanceService interface {
+	ForceReleaseAttempt(context.Context, string) (ports.ForceReleaseAttemptResult, error)
+	RebuildSearchIndex(context.Context) error
+}
+
 // Services packages the application-layer services used by the CLI adapter.
 type Services struct {
-	ProjectService ProjectService
-	IssueService   IssueService
-	SearchService  SearchService
-	GraphService   GraphService
+	ProjectService     ProjectService
+	IssueService       IssueService
+	SearchService      SearchService
+	GraphService       GraphService
+	MaintenanceService MaintenanceService
 }
 
 // InitHandler runs CLI init logic after the adapter parses the command.
@@ -82,6 +90,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runSearch(ctx, args[1:])
 	case "graph":
 		return c.runGraph(ctx, args[1:])
+	case "maintenance":
+		return c.runMaintenance(ctx, args[1:])
 	default:
 		return c.usageError()
 	}
@@ -348,6 +358,86 @@ func (c *CLI) runGraph(ctx context.Context, args []string) error {
 	return c.writeGraphTable(result)
 }
 
+func (c *CLI) runMaintenance(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return c.usageError()
+	}
+	if c.services.MaintenanceService == nil {
+		return fmt.Errorf("maintenance service is not configured")
+	}
+
+	switch args[0] {
+	case "release-attempt":
+		return c.runMaintenanceReleaseAttempt(ctx, args[1:])
+	case "rebuild-search-index":
+		return c.runMaintenanceRebuildSearchIndex(ctx, args[1:])
+	default:
+		return c.usageError()
+	}
+}
+
+func (c *CLI) runMaintenanceReleaseAttempt(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("maintenance release-attempt", flag.ContinueOnError)
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 1 {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return fmt.Errorf("unsupported format %q", *format)
+	}
+	result, err := c.services.MaintenanceService.ForceReleaseAttempt(ctx, positionals[0])
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), maintenanceReleaseAttemptResponseFromDomain(result))
+	}
+	return c.writeMaintenanceReleaseAttemptTable(result)
+}
+
+func (c *CLI) runMaintenanceRebuildSearchIndex(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("maintenance rebuild-search-index", flag.ContinueOnError)
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return fmt.Errorf("unsupported format %q", *format)
+	}
+	if err := c.services.MaintenanceService.RebuildSearchIndex(ctx); err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), MaintenanceRebuildResponse{Rebuilt: true})
+	}
+	_, err = fmt.Fprintln(c.stdoutWriter(), "search index rebuilt")
+	return err
+}
+
+func (c *CLI) writeMaintenanceReleaseAttemptTable(result ports.ForceReleaseAttemptResult) error {
+	var builder strings.Builder
+	builder.WriteString("attempt_id\tstatus\tinterruption_reason\tfinished_at\tlatest_event_id\n")
+	interruptionReason := ""
+	if result.Attempt.InterruptionReasonCode != nil {
+		interruptionReason = string(*result.Attempt.InterruptionReasonCode)
+	}
+	finishedAt := ""
+	if result.Attempt.FinishedAt != nil {
+		finishedAt = result.Attempt.FinishedAt.Format(time.RFC3339Nano)
+	}
+	builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%d\n", result.Attempt.ID, result.Attempt.Status, interruptionReason, finishedAt, result.LatestEventID))
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
+}
+
 func (c *CLI) writeProjectInfoTable(project domain.Project) error {
 	lines := []string{
 		fmt.Sprintf("id\t%s", project.ID),
@@ -489,12 +579,27 @@ func (c *CLI) usage() string {
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
   rhizome-mcp [--data-root PATH] search QUERY [--format table|json] [--limit N] [--cursor CURSOR] [--entity-type TYPE ...] [--issue ISSUE-ID] [--epic EPIC-ID] [--status STATUS ...] [--label LABEL ...] [--include-archived] [--snippet-length N]
   rhizome-mcp [--data-root PATH] graph ISSUE-ID [--format table|json|mermaid] [--depth N] [--max-nodes N] [--direction outgoing|incoming|both] [--relation-type TYPE ...] [--include-hierarchy] [--include-terminal]
+  rhizome-mcp [--data-root PATH] maintenance release-attempt ATTEMPT-ID [--format table|json]
+  rhizome-mcp [--data-root PATH] maintenance rebuild-search-index [--format table|json]
 `
 }
 
 func (c *CLI) usageError() error {
 	fmt.Fprint(c.stderrWriter(), c.usage())
 	return fmt.Errorf("usage error")
+}
+
+type MaintenanceReleaseAttemptResponse struct {
+	Attempt       domain.WorkAttempt `json:"attempt"`
+	LatestEventID int64              `json:"latest_event_id"`
+}
+
+func maintenanceReleaseAttemptResponseFromDomain(result ports.ForceReleaseAttemptResult) MaintenanceReleaseAttemptResponse {
+	return MaintenanceReleaseAttemptResponse{Attempt: result.Attempt, LatestEventID: result.LatestEventID}
+}
+
+type MaintenanceRebuildResponse struct {
+	Rebuilt bool `json:"rebuilt"`
 }
 
 // InitResponse is the JSON payload emitted by the init command.

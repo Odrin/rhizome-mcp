@@ -349,6 +349,10 @@ func (repository *recordingAttemptRepository) FinishAttempt(_ context.Context, c
 	return repository.finishResult, nil
 }
 
+func (repository *recordingAttemptRepository) ForceReleaseAttempt(context.Context, ports.ForceReleaseAttemptCommand) (ports.ForceReleaseAttemptResult, error) {
+	return ports.ForceReleaseAttemptResult{}, nil
+}
+
 func (repository *recordingAttemptRepository) LookupFinishedAttempt(_ context.Context, key string, hash []byte) (ports.FinishAttemptResult, bool, error) {
 	repository.lookupCalled = true
 	repository.lookupKey = key

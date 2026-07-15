@@ -48,6 +48,7 @@ type composedServices struct {
 	activityService    *application.ActivityService
 	searchService      *application.SearchService
 	attemptService     *application.AttemptService
+	maintenanceService *application.MaintenanceService
 	workContextService *application.WorkContextService
 	sessionService     *application.AgentSessionService
 }
@@ -112,7 +113,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return serveRunner(ctx, cfg, stderr, bundle)
 	}
 
-	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph") {
+	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -131,10 +132,11 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	var services cliadapter.Services
 	if bundle != nil {
 		services = cliadapter.Services{
-			ProjectService: bundle.projectService,
-			IssueService:   bundle.issueService,
-			SearchService:  bundle.searchService,
-			GraphService:   bundle.graphService,
+			ProjectService:     bundle.projectService,
+			IssueService:       bundle.issueService,
+			SearchService:      bundle.searchService,
+			GraphService:       bundle.graphService,
+			MaintenanceService: bundle.maintenanceService,
 		}
 	}
 
@@ -309,6 +311,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	searchIndexRepository, err := sqlite.NewSearchIndexRepository(project.Database)
+	if err != nil {
+		return nil, nil, err
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
 	if err != nil {
 		return nil, nil, err
@@ -361,6 +367,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	maintenanceService, err := application.NewMaintenanceService(attemptRepository, searchIndexRepository, source)
+	if err != nil {
+		return nil, nil, err
+	}
 	workContextService, err := application.NewWorkContextService(workContextRepository, source)
 	if err != nil {
 		return nil, nil, err
@@ -386,6 +396,7 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		activityService:    activityService,
 		searchService:      searchService,
 		attemptService:     attemptService,
+		maintenanceService: maintenanceService,
 		workContextService: workContextService,
 		sessionService:     sessionService,
 	}

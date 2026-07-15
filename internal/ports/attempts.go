@@ -71,6 +71,16 @@ type FinishAttemptResult struct {
 	Artifacts     []domain.Artifact
 }
 
+type ForceReleaseAttemptCommand struct {
+	AttemptID  string
+	OccurredAt time.Time
+}
+
+type ForceReleaseAttemptResult struct {
+	Attempt       domain.WorkAttempt
+	LatestEventID int64
+}
+
 type ExpireAttemptsCommand struct {
 	OccurredAt time.Time
 }
@@ -86,5 +96,6 @@ type AttemptRepository interface {
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
 	LookupFinishedAttempt(context.Context, string, []byte) (FinishAttemptResult, bool, error)
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
+	ForceReleaseAttempt(context.Context, ForceReleaseAttemptCommand) (ForceReleaseAttemptResult, error)
 	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
 }

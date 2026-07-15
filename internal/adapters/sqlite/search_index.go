@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 // SearchIndexRepository maintains the derived FTS5 search projection.
@@ -46,3 +47,5 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 		return nil
 	})
 }
+
+var _ ports.SearchIndexRepository = (*SearchIndexRepository)(nil)

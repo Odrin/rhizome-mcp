@@ -859,6 +859,68 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 	return result, nil
 }
 
+func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, command ports.ForceReleaseAttemptCommand) (ports.ForceReleaseAttemptResult, error) {
+	if _, err := ids.ParseStrict(command.AttemptID); err != nil || command.OccurredAt.IsZero() {
+		return ports.ForceReleaseAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt release command is invalid", false)
+	}
+	now := command.OccurredAt.UTC()
+	timestamp := now.Format(time.RFC3339Nano)
+	var result ports.ForceReleaseAttemptResult
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		var issueID, status string
+		err := tx.QueryRowContext(ctx, `SELECT issue_id, status FROM work_attempts WHERE id = ?`, command.AttemptID).Scan(&issueID, &status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
+		}
+		if err != nil {
+			return err
+		}
+		if status != string(domain.AttemptStatusActive) {
+			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE work_attempts
+			SET status = 'interrupted', finished_at = ?, interruption_reason_code = 'user_request'
+			WHERE id = ? AND status = 'active'`, timestamp, command.AttemptID)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
+		}
+		payload, err := json.Marshal(struct {
+			AttemptID              string                        `json:"attempt_id"`
+			Outcome                domain.AttemptOutcome         `json:"outcome"`
+			InterruptionReasonCode domain.InterruptionReasonCode `json:"interruption_reason_code"`
+		}{AttemptID: command.AttemptID, Outcome: domain.AttemptOutcomeInterrupted, InterruptionReasonCode: domain.InterruptionReasonUserRequest})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt interruption event", false)
+		}
+		var latestEventID int64
+		if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'attempt_interrupted', NULL, ?, ?, ?) RETURNING id`, issueID, command.AttemptID, string(payload), timestamp).Scan(&latestEventID); err != nil {
+			return err
+		}
+		attempt, err := scanActivityAttempt(tx.QueryRowContext(ctx, `SELECT id, issue_id, session_id, agent_label, kind, status,
+				issue_version_at_start, context_event_id_at_start, lease_expires_at,
+				started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json,
+				failure_reason_code, interruption_reason_code, reason_details
+				FROM work_attempts WHERE id = ?`, command.AttemptID))
+		if err != nil {
+			return err
+		}
+		result = ports.ForceReleaseAttemptResult{Attempt: attempt, LatestEventID: latestEventID}
+		return nil
+	})
+	if err != nil {
+		return ports.ForceReleaseAttemptResult{}, err
+	}
+	return result, nil
+}
+
 func completionIssueChanges(ctx context.Context, tx Queryer, issueID string, startID int64) ([]string, []string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT event_type, payload FROM issue_events WHERE issue_id = ? AND id > ? ORDER BY id ASC`, issueID, startID)
 	if err != nil {

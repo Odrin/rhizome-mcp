@@ -6,8 +6,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 type stubProjectService struct {
@@ -68,6 +70,26 @@ func (s *stubGraphService) GetIssueGraph(ctx context.Context, input domain.GetIs
 	s.calls++
 	s.input = input
 	return s.graph, s.err
+}
+
+type stubMaintenanceService struct {
+	releaseResult ports.ForceReleaseAttemptResult
+	releaseErr    error
+	rebuildErr    error
+	calledRelease bool
+	calledRebuild bool
+	releaseID     string
+}
+
+func (s *stubMaintenanceService) ForceReleaseAttempt(ctx context.Context, attemptID string) (ports.ForceReleaseAttemptResult, error) {
+	s.calledRelease = true
+	s.releaseID = attemptID
+	return s.releaseResult, s.releaseErr
+}
+
+func (s *stubMaintenanceService) RebuildSearchIndex(ctx context.Context) error {
+	s.calledRebuild = true
+	return s.rebuildErr
 }
 
 func TestRunUsageAndErrors(t *testing.T) {
@@ -271,6 +293,90 @@ func TestRunMapsServiceInputs(t *testing.T) {
 			}
 			tt.assertFunc(t, issueService, searchService, graphService)
 		})
+	}
+}
+
+func TestRunMaintenanceCommands(t *testing.T) {
+	t.Run("release attempt table", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		finishedAt := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+		interruptionReason := domain.InterruptionReasonUserRequest
+		maintenanceService := &stubMaintenanceService{releaseResult: ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.AttemptStatusInterrupted, InterruptionReasonCode: &interruptionReason, FinishedAt: &finishedAt}, LatestEventID: 7}}
+		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "01ARZ3NDEKTSV4RRFFQ69G5FAV"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		for _, token := range []string{"attempt_id", "status", "interruption_reason", "finished_at", "latest_event_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "interrupted", "user_request", "2026-07-14T12:00:00Z", "7"} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+		if !strings.HasSuffix(output, "\n") {
+			t.Fatalf("expected output to end with newline, got %q", output)
+		}
+	})
+
+	t.Run("release attempt json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		maintenanceService := &stubMaintenanceService{releaseResult: ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, LatestEventID: 7}}
+		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		for _, token := range []string{"\"attempt\"", "\"latest_event_id\"", "7"} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+		if !strings.HasSuffix(output, "\n") {
+			t.Fatalf("expected output to end with newline, got %q", output)
+		}
+	})
+
+	t.Run("rebuild table", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		maintenanceService := &stubMaintenanceService{}
+		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"maintenance", "rebuild-search-index"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if stdout.String() != "search index rebuilt\n" {
+			t.Fatalf("unexpected output %q", stdout.String())
+		}
+	})
+
+	t.Run("rebuild json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		maintenanceService := &stubMaintenanceService{}
+		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"maintenance", "rebuild-search-index", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		for _, token := range []string{"\"rebuilt\"", "true"} {
+			if !strings.Contains(output, token) {
+				t.Fatalf("expected output to contain %q, got %q", token, output)
+			}
+		}
+		if !strings.HasSuffix(output, "\n") {
+			t.Fatalf("expected output to end with newline, got %q", output)
+		}
+	})
+}
+
+func TestRunMaintenancePropagatesErrorsWithoutSuccessOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	maintenanceService := &stubMaintenanceService{releaseErr: errors.New("boom")}
+	cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
+
+	err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected boom error, got %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected no successful output, got %q", stdout.String())
 	}
 }
 

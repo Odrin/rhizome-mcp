@@ -1455,6 +1455,180 @@ func TestFinishAttemptFailedAndInterruptedPreserveIssueState(t *testing.T) {
 	}
 }
 
+func TestForceReleaseAttemptInterruptsAttemptAndPreservesRecoveryData(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "force-release")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "force release", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at)
+			VALUES (?, ?, 'progress', 'keep me', 0, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAY", claim.Attempt.ID, fixture.clock.Now().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at)
+			VALUES (?, ?, ?, ?, 'artifact.txt', NULL, NULL, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAZ", issue.ID, claim.Attempt.ID, domain.ArtifactTypeOther, fixture.clock.Now().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE work_attempts
+			SET result_summary = ?, next_steps_json = ?, verification_json = ?, reason_details = ?
+			WHERE id = ?`, "keep result", `["next step"]`, `["checked"]`, "preserve details", claim.Attempt.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup release fixture: %v", err)
+	}
+
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: claim.Attempt.ID, OccurredAt: fixture.clock.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Attempt.Status != domain.AttemptStatusInterrupted || release.Attempt.InterruptionReasonCode == nil || *release.Attempt.InterruptionReasonCode != domain.InterruptionReasonUserRequest || release.Attempt.FinishedAt == nil {
+		t.Fatalf("release attempt = %#v", release.Attempt)
+	}
+	if release.LatestEventID == 0 {
+		t.Fatal("expected latest event id")
+	}
+	if release.Attempt.ResultSummary == nil || *release.Attempt.ResultSummary != "keep result" ||
+		release.Attempt.ReasonDetails == nil || *release.Attempt.ReasonDetails != "preserve details" ||
+		!reflect.DeepEqual(release.Attempt.NextSteps, []string{"next step"}) ||
+		!reflect.DeepEqual(release.Attempt.Verification, []string{"checked"}) {
+		t.Fatalf("release recovery projection = %#v", release.Attempt)
+	}
+
+	var issueStatus string
+	var issueVersion int64
+	var noteCount, artifactCount int
+	var leaseExpiresAt string
+	var resultSummary, failureReason, reasonDetails sql.NullString
+	var eventCount int
+	var eventSession sql.NullString
+	var eventPayload string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status, version FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus, &issueVersion); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM attempt_notes WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&noteCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE attempt_id = ?`, claim.Attempt.ID).Scan(&artifactCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT lease_expires_at, result_summary, failure_reason_code, reason_details FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&leaseExpiresAt, &resultSummary, &failureReason, &reasonDetails); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*), session_id, payload FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_interrupted'`, claim.Attempt.ID).Scan(&eventCount, &eventSession, &eventPayload); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issueStatus != string(domain.StatusReady) || issueVersion != issue.Issue.Version {
+		t.Fatalf("issue state changed: status %q version %d", issueStatus, issueVersion)
+	}
+	if noteCount != 1 || artifactCount != 1 || !resultSummary.Valid || resultSummary.String != "keep result" || failureReason.Valid || !reasonDetails.Valid || reasonDetails.String != "preserve details" {
+		t.Fatalf("recovery data changed: notes %d artifacts %d result %#v failure %#v reason %#v", noteCount, artifactCount, resultSummary, failureReason, reasonDetails)
+	}
+	if eventCount != 1 || eventSession.Valid || !strings.Contains(eventPayload, `"outcome":"interrupted"`) || !strings.Contains(eventPayload, `"interruption_reason_code":"user_request"`) {
+		t.Fatalf("event count %d session %#v payload %q", eventCount, eventSession, eventPayload)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_interrupted") != 1 {
+		t.Fatalf("unexpected interruption event count")
+	}
+	if leaseExpiresAt == "" {
+		t.Fatal("expected lease expiry to be preserved")
+	}
+}
+
+func TestForceReleaseAttemptMissingAndInactiveReturnStableErrors(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "force-release-errors")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "force release errors", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", OccurredAt: fixture.clock.Now()}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotFound}) {
+		t.Fatalf("missing attempt error = %v", err)
+	}
+	if _, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: claim.Attempt.ID}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("zero release timestamp error = %v", err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: claim.Attempt.ID, OccurredAt: fixture.clock.Now()}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("inactive attempt error = %v", err)
+	}
+}
+
+func TestForceReleaseAttemptConcurrentCallsCreateSingleEvent(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "force-release-concurrent")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "force release concurrent", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan struct {
+		result ports.ForceReleaseAttemptResult
+		err    error
+	}, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			result, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: claim.Attempt.ID, OccurredAt: fixture.clock.Now()})
+			results <- struct {
+				result ports.ForceReleaseAttemptResult
+				err    error
+			}{result: result, err: err}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var successCount, inactiveCount int
+	for outcome := range results {
+		if outcome.err == nil {
+			successCount++
+		} else if errors.Is(outcome.err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+			inactiveCount++
+		} else {
+			t.Fatalf("unexpected concurrent release error = %v", outcome.err)
+		}
+	}
+	if successCount != 1 || inactiveCount != 1 {
+		t.Fatalf("concurrent outcomes = success %d inactive %d", successCount, inactiveCount)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_interrupted") != 1 {
+		t.Fatalf("concurrent interruption event count = %d", countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_interrupted"))
+	}
+}
+
 func testReasonCode(failure *domain.FailureReasonCode, interruption *domain.InterruptionReasonCode) string {
 	if failure != nil {
 		return string(*failure)

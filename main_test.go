@@ -3,15 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
@@ -92,5 +97,109 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected serve handler to be invoked")
+	}
+}
+
+func TestMaintenanceCommandsUseCustomDataRoot(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open initialized project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	generator, err := ids.NewGenerator(clock.RealClock{}, rand.Reader)
+	if err != nil {
+		t.Fatalf("create generator: %v", err)
+	}
+	issueRepository, err := sqlite.NewIssueRepository(project.Database)
+	if err != nil {
+		t.Fatalf("create issue repository: %v", err)
+	}
+	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
+	if err != nil {
+		t.Fatalf("create attempt repository: %v", err)
+	}
+	issueService, err := application.NewIssueService(issueRepository, clock.RealClock{}, generator)
+	if err != nil {
+		t.Fatalf("create issue service: %v", err)
+	}
+	attemptService, err := application.NewAttemptService(attemptRepository, clock.RealClock{}, generator)
+	if err != nil {
+		t.Fatalf("create attempt service: %v", err)
+	}
+	created, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "maintenance issue", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	claim, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: created.Issue.DisplayID})
+	if err != nil {
+		t.Fatalf("claim issue: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "maintenance", "release-attempt", claim.Attempt.ID}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("maintenance release command failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "attempt_id") {
+		t.Fatalf("expected release output, got %q", stdout.String())
+	}
+
+	reopenedProject, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("reopen project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = reopenedProject.Close(closeCtx)
+	}()
+	reopenedAttemptRepository, err := sqlite.NewAttemptRepository(reopenedProject.Database)
+	if err != nil {
+		t.Fatalf("create reopened attempt repository: %v", err)
+	}
+	reopenedAttemptService, err := application.NewAttemptService(reopenedAttemptRepository, clock.RealClock{}, generator)
+	if err != nil {
+		t.Fatalf("create reopened attempt service: %v", err)
+	}
+	if _, err := reopenedAttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: created.Issue.DisplayID}); err != nil {
+		t.Fatalf("expected issue to become claimable again: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "maintenance", "rebuild-search-index"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("maintenance rebuild command failed: %v", err)
+	}
+	if stdout.String() != "search index rebuilt\n" {
+		t.Fatalf("expected rebuild output, got %q", stdout.String())
+	}
+
+	var searchCount int
+	if err := reopenedProject.Database.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM search_index`).Scan(&searchCount)
+	}); err != nil {
+		t.Fatalf("read search index count: %v", err)
+	}
+	if searchCount == 0 {
+		t.Fatal("expected search index to contain rebuilt rows")
 	}
 }
