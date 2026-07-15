@@ -15,8 +15,8 @@ This is the living roadmap for the first release. It records current capability,
 ## Current state
 
 - **Active phase:** Phase 5, knowledge and work context.
-- **Next unit:** add bounded `recent_comments` and `recent_attempt_notes` to the SQLite work-context snapshot with deterministic newest-first ordering and per-section truncation.
-- **Following storage units:** `decision_content`, `attempt_history`, `artifacts`, then `changes_since_previous_attempt`.
+- **Next unit:** add bounded `decision_content` to the SQLite work-context snapshot with deterministic newest-first ordering and per-section truncation.
+- **Following storage units:** `attempt_history`, `artifacts`, then `changes_since_previous_attempt`.
 - **Then:** expose `get_work_context` through MCP and run the Phase 5 exit gate.
 - **Later:** Phase 6 search/change feeds, then Phase 7 CLI, maintenance, and release.
 
@@ -57,16 +57,16 @@ Delivered:
 - Unified, snapshot-consistent `get_issue_activity` across six categories with bounded deterministic pagination and no lease-secret exposure.
 - Compact work-context storage for issue state, blockers, active decision summaries, the latest recovery-relevant attempt, checkpoint, and repeated-failure warnings.
 - Include-gated parent epic, project instructions, direct relations, and bounded related-issue summaries.
+- Include-gated, bounded recent comments and attempt notes with deterministic newest-first ordering and per-section truncation.
 
 Remaining, in order:
 
-1. Add bounded recent comments and attempt notes.
-2. Add bounded decision content.
-3. Add bounded attempt history.
-4. Add bounded artifacts.
-5. Add bounded changes since the previous attempt.
-6. Expose `get_work_context` through the thin MCP adapter with bounded schemas and typed mapping.
-7. Run focused contract coverage and the Phase 5 checkpoint suite.
+1. Add bounded decision content.
+2. Add bounded attempt history.
+3. Add bounded artifacts.
+4. Add bounded changes since the previous attempt.
+5. Expose `get_work_context` through the thin MCP adapter with bounded schemas and typed mapping.
+6. Run focused contract coverage and the Phase 5 checkpoint suite.
 
 Exit gate: decisions and checkpoints survive interruption, every optional section obeys its bound, and default context remains compact and deterministic.
 

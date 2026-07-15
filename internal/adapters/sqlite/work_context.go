@@ -88,15 +88,38 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			}
 		}
 
-		if includesWorkContextSection(input.Include, domain.WorkContextIncludeRelatedIssueSummaries) {
-			summaries, truncated, err := loadWorkContextRelatedIssueSummaries(ctx, query, resolvedIssueID, input.Limits[domain.WorkContextIncludeRelatedIssueSummaries], now)
-			if err != nil {
-				return err
-			}
-			result.RelatedIssueSummaries = summaries
-			if truncated {
-				result.Truncated = true
-				result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, domain.WorkContextIncludeRelatedIssueSummaries)
+		for _, include := range input.Include {
+			switch include {
+			case domain.WorkContextIncludeRelatedIssueSummaries:
+				summaries, truncated, err := loadWorkContextRelatedIssueSummaries(ctx, query, resolvedIssueID, input.Limits[include], now)
+				if err != nil {
+					return err
+				}
+				result.RelatedIssueSummaries = summaries
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeRecentComments:
+				comments, truncated, err := loadWorkContextRecentComments(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.RecentComments = comments
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeRecentAttemptNotes:
+				notes, truncated, err := loadWorkContextRecentAttemptNotes(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.RecentAttemptNotes = notes
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
 			}
 		}
 
@@ -254,6 +277,63 @@ func loadWorkContextRelatedIssueSummaries(ctx context.Context, query Queryer, is
 		result = append(result, issueSummary)
 	}
 	return result, truncated, nil
+}
+
+func loadWorkContextRecentComments(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.Comment, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT id, issue_id, content, created_by_session_id, author_label, created_at, edited_at
+	FROM comments
+	WHERE issue_id = ?
+	ORDER BY created_at DESC, id ASC
+	LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.Comment, 0, limit+1)
+	for rows.Next() {
+		comment, err := scanActivityComment(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, comment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
+}
+
+func loadWorkContextRecentAttemptNotes(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.AttemptNote, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT attempt_notes.id, attempt_notes.attempt_id, attempt_notes.kind, attempt_notes.content, attempt_notes.next_steps_json, attempt_notes.important, attempt_notes.created_at
+	FROM attempt_notes
+	JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id
+	WHERE work_attempts.issue_id = ?
+	ORDER BY attempt_notes.created_at DESC, attempt_notes.id ASC
+	LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.AttemptNote, 0, limit+1)
+	for rows.Next() {
+		note, err := scanActivityAttemptNote(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, note)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
 }
 
 func buildWorkContextIssue(ctx context.Context, query Queryer, issue domain.Issue, now time.Time) (domain.WorkContextIssue, error) {

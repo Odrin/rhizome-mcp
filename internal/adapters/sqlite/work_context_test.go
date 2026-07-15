@@ -449,6 +449,212 @@ func TestWorkContextRepositoryBoundsRelatedIssueSummaries(t *testing.T) {
 	})
 }
 
+func TestWorkContextRepositoryLoadsRecentCommentsAndAttemptNotesWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+
+	commentIDs := []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FB1",
+		"01ARZ3NDEKTSV4RRFFQ69G5FB2",
+		"01ARZ3NDEKTSV4RRFFQ69G5FB3",
+	}
+	if err := seedComment(t, db, commentIDs[2], target.ID, "older comment", now.Add(1*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedComment(t, db, commentIDs[1], target.ID, "second tied comment", now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedComment(t, db, commentIDs[0], target.ID, "first tied comment", now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedComment(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB4", otherIssueID, "other issue comment", now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := []domain.AttemptStatus{
+		domain.AttemptStatusActive,
+		domain.AttemptStatusCompleted,
+		domain.AttemptStatusFailed,
+		domain.AttemptStatusInterrupted,
+		domain.AttemptStatusExpired,
+		domain.AttemptStatusCancelled,
+	}
+	attemptIDs := []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FC1",
+		"01ARZ3NDEKTSV4RRFFQ69G5FC2",
+		"01ARZ3NDEKTSV4RRFFQ69G5FC3",
+		"01ARZ3NDEKTSV4RRFFQ69G5FC4",
+		"01ARZ3NDEKTSV4RRFFQ69G5FC5",
+		"01ARZ3NDEKTSV4RRFFQ69G5FC6",
+	}
+	noteIDs := []string{
+		"01ARZ3NDEKTSV4RRFFQ69G5FD1",
+		"01ARZ3NDEKTSV4RRFFQ69G5FD2",
+		"01ARZ3NDEKTSV4RRFFQ69G5FD3",
+		"01ARZ3NDEKTSV4RRFFQ69G5FD4",
+		"01ARZ3NDEKTSV4RRFFQ69G5FD5",
+		"01ARZ3NDEKTSV4RRFFQ69G5FD6",
+	}
+	for index, status := range statuses {
+		var finishedAt *time.Time
+		if status != domain.AttemptStatusActive {
+			finishedAt = timePtr(now.Add(time.Duration(index+1) * time.Minute))
+		}
+		if err := seedAttempt(t, db, attemptIDs[index], target.ID, status, now.Add(time.Hour), now, finishedAt, now); err != nil {
+			t.Fatal(err)
+		}
+		createdAt := now.Add(time.Duration(6-index) * time.Minute)
+		if index == 1 {
+			createdAt = now.Add(6 * time.Minute)
+		}
+		if err := seedNote(t, db, noteIDs[index], attemptIDs[index], domain.AttemptNoteKindProgress, fmt.Sprintf("note-%d", index), createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherAttemptID := "01ARZ3NDEKTSV4RRFFQ69G5FC7"
+	if err := seedAttempt(t, db, otherAttemptID, otherIssueID, domain.AttemptStatusCompleted, now.Add(time.Hour), now, timePtr(now.Add(time.Minute)), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedNote(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FD7", otherAttemptID, domain.AttemptNoteKindWarning, "other issue note", now.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.RecentComments) != 0 || len(result.RecentAttemptNotes) != 0 {
+		t.Fatalf("default recent sections = %d comments, %d notes; want empty", len(result.RecentComments), len(result.RecentAttemptNotes))
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{
+		IssueID: target.ID,
+		Include: []domain.WorkContextInclude{domain.WorkContextIncludeRecentComments, domain.WorkContextIncludeRecentAttemptNotes},
+	}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	gotCommentIDs := make([]string, len(result.RecentComments))
+	for index, comment := range result.RecentComments {
+		gotCommentIDs[index] = comment.ID
+	}
+	if !reflect.DeepEqual(gotCommentIDs, commentIDs) {
+		t.Fatalf("recent comment ids = %v, want %v", gotCommentIDs, commentIDs)
+	}
+	if result.RecentComments[0].Content != "first tied comment" {
+		t.Fatalf("first comment content = %q, want %q", result.RecentComments[0].Content, "first tied comment")
+	}
+	gotNoteIDs := make([]string, len(result.RecentAttemptNotes))
+	for index, note := range result.RecentAttemptNotes {
+		gotNoteIDs[index] = note.ID
+	}
+	if !reflect.DeepEqual(gotNoteIDs, noteIDs) {
+		t.Fatalf("recent attempt note ids = %v, want %v", gotNoteIDs, noteIDs)
+	}
+	for index, note := range result.RecentAttemptNotes {
+		if note.AttemptID != attemptIDs[index] {
+			t.Fatalf("note %d attempt id = %q, want %q", index, note.AttemptID, attemptIDs[index])
+		}
+	}
+}
+
+func TestWorkContextRepositoryBoundsRecentCommentsAndAttemptNotes(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusCompleted, now.Add(time.Hour), now, timePtr(now.Add(time.Minute)), now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		suffix := index + 1
+		if err := seedComment(t, db, fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G5FB%d", suffix), target.ID, fmt.Sprintf("comment-%d", index), now.Add(time.Duration(index)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedNote(t, db, fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G5FC%d", suffix), attemptID, domain.AttemptNoteKindFinding, fmt.Sprintf("note-%d", index), now.Add(time.Duration(index)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{
+		IssueID: target.ID,
+		Include: []domain.WorkContextInclude{
+			domain.WorkContextIncludeRecentAttemptNotes,
+			domain.WorkContextIncludeRecentComments,
+		},
+		Limits: map[domain.WorkContextInclude]int{
+			domain.WorkContextIncludeRecentAttemptNotes: 1,
+			domain.WorkContextIncludeRecentComments:     2,
+		},
+	}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.RecentAttemptNotes) != 1 || result.RecentAttemptNotes[0].Content != "note-2" {
+		t.Fatalf("recent attempt notes = %#v, want newest note only", result.RecentAttemptNotes)
+	}
+	if len(result.RecentComments) != 2 || result.RecentComments[0].Content != "comment-2" || result.RecentComments[1].Content != "comment-1" {
+		t.Fatalf("recent comments = %#v, want two newest comments", result.RecentComments)
+	}
+	if !result.Truncated {
+		t.Fatal("truncated should be true")
+	}
+	wantSections := []domain.WorkContextInclude{
+		domain.WorkContextIncludeRecentAttemptNotes,
+		domain.WorkContextIncludeRecentComments,
+	}
+	if !reflect.DeepEqual(result.TruncatedSections, wantSections) {
+		t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, wantSections)
+	}
+}
+
+func TestWorkContextRepositoryReturnsCorruptOnMalformedRecentComment(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedComment(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB1", target.ID, "   ", now); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{
+		IssueID: target.ID,
+		Include: []domain.WorkContextInclude{domain.WorkContextIncludeRecentComments},
+	}, Now: now})
+	assertDomainCode(t, err, domain.CodeStorageCorrupt)
+}
+
+func TestWorkContextRepositoryReturnsCorruptOnMalformedRecentAttemptNote(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusCompleted, now.Add(time.Hour), now, timePtr(now.Add(time.Minute)), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedNote(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB1", attemptID, domain.AttemptNoteKindProgress, "   ", now); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{
+		IssueID: target.ID,
+		Include: []domain.WorkContextInclude{domain.WorkContextIncludeRecentAttemptNotes},
+	}, Now: now})
+	assertDomainCode(t, err, domain.CodeStorageCorrupt)
+}
+
 func TestWorkContextRepositoryLoadsRelationsAndRelatedSummariesTogether(t *testing.T) {
 	db, _, now, target := newWorkContextTestFixture(t)
 	repository, err := sqlite.NewWorkContextRepository(db)
@@ -1119,6 +1325,14 @@ func seedDecision(t *testing.T, db *sqlite.DB, issueID *string, id, title, summa
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, *issueID, title, summary, content, status, createdAt.Format(time.RFC3339Nano))
+		return err
+	})
+}
+
+func seedComment(t *testing.T, db *sqlite.DB, id, issueID, content string, createdAt time.Time) error {
+	t.Helper()
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, id, issueID, content, createdAt.Format(time.RFC3339Nano))
 		return err
 	})
 }
