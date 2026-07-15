@@ -104,8 +104,14 @@ Exit gate: simultaneous claim, blocker/claim, expiry/renewal, completion/update,
   application-injected time; stored-data corruption and uncommitted writer
   state are covered without exposing lease secrets. Optional sections and MCP
   exposure remain pending.
-- The immediate next unit is bounded optional `get_work_context` sections.
-  Phase 5 remains incomplete and the exit gate remains decisions and
+- **Phase 5 work-context scalar and related sections completed on
+  2026-07-15.** Requested parent-epic and project-instructions projections are
+  strict and include-gated. Direct relations are deterministic, and related
+  issue summaries use requested bounds with explicit truncation metadata.
+  Comments, notes, decision content, history, artifacts, changes, and MCP
+  exposure remain pending.
+- The immediate next unit is the remaining bounded `get_work_context` list
+  sections. Phase 5 remains incomplete and the exit gate remains decisions and
   checkpoints surviving interruption and default context remaining compact and
   deterministic.
 - Implement append-only comments, decisions and supersession, artifacts, and unified activity.
