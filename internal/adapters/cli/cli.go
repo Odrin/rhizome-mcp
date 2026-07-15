@@ -15,6 +15,12 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+const (
+	ansiGreen = "\x1b[32m"
+	ansiRed   = "\x1b[31m"
+	ansiReset = "\x1b[0m"
+)
+
 // ProjectService exposes current project metadata reads for CLI commands.
 type ProjectService interface {
 	GetProject(context.Context) (domain.Project, error)
@@ -580,14 +586,32 @@ func (c *CLI) writeProjectInfoTable(project domain.Project) error {
 
 func (c *CLI) writeDoctorTable(report DoctorReport) error {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("mode\t%t\n", report.Full))
-	builder.WriteString(fmt.Sprintf("overall_health\t%t\n", report.Healthy()))
-	builder.WriteString("check\thealthy\tmessage\n")
+	checkWidth := len("overall_health")
 	for _, check := range report.Checks {
-		builder.WriteString(fmt.Sprintf("%s\t%t\t%s\n", check.Check, check.Healthy, check.Message))
+		if len(check.Check) > checkWidth {
+			checkWidth = len(check.Check)
+		}
+	}
+	statusWidth := len("healthy")
+	builder.WriteString(fmt.Sprintf("%-*s  %-*s\n", checkWidth, "mode", statusWidth, strconv.FormatBool(report.Full)))
+	builder.WriteString(fmt.Sprintf("%-*s  %s\n", checkWidth, "overall_health", colorizeDoctorStatus(padStatus(report.Healthy()), report.Healthy())))
+	builder.WriteString(fmt.Sprintf("%-*s  %-*s  %s\n", checkWidth, "check", statusWidth, "healthy", "message"))
+	for _, check := range report.Checks {
+		builder.WriteString(fmt.Sprintf("%-*s  %s  %s\n", checkWidth, check.Check, colorizeDoctorStatus(padStatus(check.Healthy), check.Healthy), check.Message))
 	}
 	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
 	return err
+}
+
+func padStatus(healthy bool) string {
+	return fmt.Sprintf("%-*s", len("healthy"), strconv.FormatBool(healthy))
+}
+
+func colorizeDoctorStatus(value string, healthy bool) string {
+	if healthy {
+		return ansiGreen + value + ansiReset
+	}
+	return ansiRed + value + ansiReset
 }
 
 func (c *CLI) writeBackupTable(report BackupReport) error {
