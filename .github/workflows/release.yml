@@ -132,5 +132,5 @@ jobs:
             echo " - ${file}"
           done
 
-          gh release upload "$TAG" "${files[@]}" --clobber
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
 
