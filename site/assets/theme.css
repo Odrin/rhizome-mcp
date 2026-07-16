@@ -4,8 +4,8 @@
   --surface: #ffffff;
   --text: #10243f;
   --muted: #4e647d;
-  --accent: #0f4c81;
-  --accent-strong: #0c355e;
+  --accent: #0ab444;
+  --accent-strong: #529c32;
   --border: #dce6f1;
 }
 
@@ -64,6 +64,10 @@ body {
   padding: 1rem;
   border-radius: 0.75rem;
   overflow-x: auto;
+}
+
+.markdown-section pre > code {
+  color: var(--accent);
 }
 
 .markdown-section pre code {
