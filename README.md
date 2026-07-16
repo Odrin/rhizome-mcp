@@ -122,6 +122,12 @@ PATH.
 
 The six modular files are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current MCP issue.
 
+Connected MCP clients receive compact initialize guidance. `get_project` links
+the full `rhizome://guides/agent-workflow`,
+`rhizome://guides/issue-lifecycle`, and
+`rhizome://guides/multi-agent-handoff` resources. Repository agents can also
+load the `rhizome-task-workflow` skill in `.github/skills/`.
+
 ## Repository task tracking
 
 The configured `rhizome-mcp` project is the source of truth for this repository's backlog and implementation history. Contributors and agents should:

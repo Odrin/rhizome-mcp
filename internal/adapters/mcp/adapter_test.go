@@ -25,6 +25,75 @@ import (
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
+func TestServerPublishesWorkflowGuidance(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	initialize := client.InitializeResult()
+	if initialize == nil || !strings.Contains(initialize.Instructions, "get_work_context") ||
+		!strings.Contains(initialize.Instructions, "finish_attempt") ||
+		!strings.Contains(initialize.Instructions, "rhizome://guides/agent-workflow") {
+		t.Fatalf("initialize instructions = %#v", initialize)
+	}
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	for _, item := range tools.Tools {
+		if description := strings.TrimSpace(item.Description); description == "" || len(description) > 160 {
+			t.Errorf("%s description = %q", item.Name, item.Description)
+		}
+	}
+
+	resources, err := client.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListResources() error = %v", err)
+	}
+	wantURIs := []string{
+		"rhizome://guides/agent-workflow",
+		"rhizome://guides/issue-lifecycle",
+		"rhizome://guides/multi-agent-handoff",
+	}
+	gotURIs := make([]string, len(resources.Resources))
+	for index, resource := range resources.Resources {
+		gotURIs[index] = resource.URI
+		if resource.MIMEType != "text/markdown" || resource.Description == "" || resource.Size == 0 {
+			t.Errorf("resource = %#v", resource)
+		}
+		read, err := client.ReadResource(ctx, &sdkmcp.ReadResourceParams{URI: resource.URI})
+		if err != nil {
+			t.Fatalf("ReadResource(%q) error = %v", resource.URI, err)
+		}
+		if len(read.Contents) != 1 || !strings.HasPrefix(read.Contents[0].Text, "# ") ||
+			len(read.Contents[0].Text) < 500 {
+			t.Errorf("resource contents for %q = %#v", resource.URI, read.Contents)
+		}
+	}
+	if !reflect.DeepEqual(gotURIs, wantURIs) {
+		t.Fatalf("resource URIs = %v, want %v", gotURIs, wantURIs)
+	}
+
+	project := call(t, client, "get_project", map[string]any{})
+	var output struct {
+		Guides []struct {
+			URI string `json:"uri"`
+		} `json:"guides"`
+		NextActions []string `json:"next_actions"`
+	}
+	decodeStructured(t, project, &output)
+	if len(output.Guides) != len(wantURIs) || len(output.NextActions) != 1 {
+		t.Fatalf("get_project guidance = %#v", output)
+	}
+	for index, link := range output.Guides {
+		if link.URI != wantURIs[index] {
+			t.Fatalf("guide %d URI = %q, want %q", index, link.URI, wantURIs[index])
+		}
+	}
+}
+
 func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "project.db")

@@ -10,7 +10,15 @@ Tools return:
 
 - `structuredContent` as the authoritative result;
 - an optional short text summary;
+- short `next_actions` on workflow-sensitive results;
 - no full duplication of large JSON results in text.
+
+The initialize response contains compact baseline workflow instructions. Full
+guidance is available through these static Markdown resources:
+
+- `rhizome://guides/agent-workflow`;
+- `rhizome://guides/issue-lifecycle`;
+- `rhizome://guides/multi-agent-handoff`.
 
 All IDs accepted as `issue_id` may be either:
 
@@ -49,7 +57,7 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 22 tools:
+The first version exposes 23 tools:
 
 1. `get_project`
 2. `list_labels`
@@ -65,14 +73,15 @@ The first version exposes 22 tools:
 12. `apply_issue_plan`
 13. `add_comment`
 14. `record_decision`
-15. `get_issue_activity`
-16. `claim_issue`
-17. `renew_attempt`
-18. `save_attempt_note`
-19. `finish_attempt`
-20. `get_work_context`
-21. `search`
-22. `get_changes`
+15. `list_decisions`
+16. `get_issue_activity`
+17. `claim_issue`
+18. `renew_attempt`
+19. `save_attempt_note`
+20. `finish_attempt`
+21. `get_work_context`
+22. `search`
+23. `get_changes`
 
 ---
 
@@ -106,9 +115,12 @@ supported_statuses
 supported_relation_types
 supported_priorities
 latest_event_id
+guides
+next_actions
 ```
 
-The project instructions are returned only when requested.
+The project instructions are returned only when requested. `guides` links the
+three workflow resources advertised by the server.
 
 ### 4.2. `list_labels`
 
@@ -578,7 +590,12 @@ The standalone operation writes one compact, session-attributed
 `decision_recorded` event. Only a null `idempotency_key` is accepted; replay
 semantics are not provided.
 
-### 8.3. `get_issue_activity`
+### 8.3. `list_decisions`
+
+Lists project-level decisions when `issue_id` is omitted, or decisions scoped
+to one issue when it is supplied. Results use deterministic cursor pagination.
+
+### 8.4. `get_issue_activity`
 
 Input:
 

@@ -59,7 +59,7 @@ These are plausible future additions, not current requirements.
 
 - `open_question` entity;
 - logical project import/export format;
-- project instruction resources;
+- dynamically generated project instruction resources;
 - richer review workflow;
 - HTTP transport bound to localhost;
 - IDE extension;

@@ -396,17 +396,25 @@ type errorOutput struct {
 }
 
 type projectOutput struct {
-	Project                projectDTO `json:"project"`
-	Session                any        `json:"session"`
-	AppVersion             string     `json:"app_version"`
-	SchemaVersion          int        `json:"schema_version"`
-	ConfigVersion          int        `json:"config_version"`
-	Limits                 limitsDTO  `json:"limits"`
-	SupportedIssueTypes    []string   `json:"supported_issue_types"`
-	SupportedStatuses      []string   `json:"supported_statuses"`
-	SupportedRelationTypes []string   `json:"supported_relation_types"`
-	SupportedPriorities    []string   `json:"supported_priorities"`
-	LatestEventID          int64      `json:"latest_event_id"`
+	Project                projectDTO     `json:"project"`
+	Session                any            `json:"session"`
+	AppVersion             string         `json:"app_version"`
+	SchemaVersion          int            `json:"schema_version"`
+	ConfigVersion          int            `json:"config_version"`
+	Limits                 limitsDTO      `json:"limits"`
+	SupportedIssueTypes    []string       `json:"supported_issue_types"`
+	SupportedStatuses      []string       `json:"supported_statuses"`
+	SupportedRelationTypes []string       `json:"supported_relation_types"`
+	SupportedPriorities    []string       `json:"supported_priorities"`
+	LatestEventID          int64          `json:"latest_event_id"`
+	Guides                 []guideLinkDTO `json:"guides"`
+	NextActions            []string       `json:"next_actions"`
+}
+
+type guideLinkDTO struct {
+	URI         string `json:"uri"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
 }
 
 type projectDTO struct {
@@ -585,6 +593,7 @@ type finishAttemptOutput struct {
 	Warnings      []string      `json:"warnings"`
 	LatestEventID int64         `json:"latest_event_id"`
 	Artifacts     []artifactDTO `json:"artifacts"`
+	NextActions   []string      `json:"next_actions"`
 }
 
 type emptyWorkContextDTO struct{}
@@ -636,6 +645,7 @@ type workContextOutput struct {
 	ChangesSincePreviousAttempt []issueEventDTO                 `json:"changes_since_previous_attempt"`
 	Truncated                   bool                            `json:"truncated"`
 	TruncatedSections           []string                        `json:"truncated_sections"`
+	NextActions                 []string                        `json:"next_actions"`
 }
 
 type claimIssueOutput struct {
@@ -645,11 +655,13 @@ type claimIssueOutput struct {
 	LeaseExpiresAt     time.Time           `json:"lease_expires_at"`
 	MinimalWorkContext emptyWorkContextDTO `json:"minimal_work_context"`
 	Warnings           []string            `json:"warnings"`
+	NextActions        []string            `json:"next_actions"`
 }
 
 type renewAttemptOutput struct {
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
 	ServerTime     time.Time `json:"server_time"`
+	NextActions    []string  `json:"next_actions"`
 }
 
 type attemptNoteDTO struct {
@@ -676,12 +688,14 @@ type artifactDTO struct {
 type saveAttemptNoteOutput struct {
 	AttemptNote attemptNoteDTO `json:"attempt_note"`
 	Artifacts   []artifactDTO  `json:"artifacts"`
+	NextActions []string       `json:"next_actions"`
 }
 
 type issueListOutput struct {
-	Items      []issueListItemDTO `json:"items"`
-	NextCursor *string            `json:"next_cursor"`
-	HasMore    bool               `json:"has_more"`
+	Items       []issueListItemDTO `json:"items"`
+	NextCursor  *string            `json:"next_cursor"`
+	HasMore     bool               `json:"has_more"`
+	NextActions []string           `json:"next_actions"`
 }
 
 type relationDTO struct {
@@ -721,6 +735,7 @@ type graphOutput struct {
 	Warnings         []string           `json:"warnings,omitempty"`
 	Truncated        bool               `json:"truncated"`
 	TruncationReason *string            `json:"truncation_reason,omitempty"`
+	NextActions      []string           `json:"next_actions"`
 }
 
 type planSummaryDTO struct {
@@ -740,6 +755,7 @@ type planValidationOutput struct {
 	Warnings       []string          `json:"warnings"`
 	Summary        planSummaryDTO    `json:"summary"`
 	NormalizedPlan normalizedPlanDTO `json:"normalized_plan"`
+	NextActions    []string          `json:"next_actions"`
 }
 type createdPlanIssueDTO struct {
 	Ref   string   `json:"ref,omitempty"`
@@ -759,6 +775,7 @@ type applyIssuePlanOutput struct {
 	CreatedRelations []relationDTO         `json:"created_relations"`
 	CreatedDecisions []decisionDTO         `json:"created_decisions"`
 	LatestEventID    int64                 `json:"latest_event_id"`
+	NextActions      []string              `json:"next_actions"`
 }
 
 func planValidationOutputFromDomain(value domain.PlanValidation) planValidationOutput {

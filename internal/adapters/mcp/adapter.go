@@ -63,8 +63,7 @@ type Server struct {
 	adapter *adapter
 }
 
-// NewServer composes a tools-only MCP server. It has no process-global
-// dependencies and deliberately exposes no resources or prototype task tools.
+// NewServer composes the MCP server without process-global dependencies.
 func NewServer(options Options) (*Server, error) {
 	if options.IssueService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "issue service is required", false)
@@ -131,10 +130,12 @@ func NewServer(options Options) (*Server, error) {
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
 		&sdkmcp.ServerOptions{
 			Capabilities:       &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}},
+			Instructions:       initializeInstructions,
 			InitializedHandler: adapter.startSession,
 		},
 	)
 	adapter.register(server)
+	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
 }
 
@@ -258,29 +259,29 @@ func isContextCancellation(err error) bool {
 }
 
 func (adapter *adapter) register(server *sdkmcp.Server) {
-	sdkmcp.AddTool(server, tool("get_project", "Return current project metadata and server capabilities", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
-	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels in deterministic order", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
-	sdkmcp.AddTool(server, tool("create_issue", "Create an issue", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
-	sdkmcp.AddTool(server, tool("update_issue", "Apply an optimistic issue patch", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
-	sdkmcp.AddTool(server, tool("get_issue", "Get an issue by internal or display ID", schemaGetIssue(), schemaIssueOutput()), adapter.getIssue)
-	sdkmcp.AddTool(server, tool("list_issues", "List issues in deterministic order", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
-	sdkmcp.AddTool(server, tool("archive_issue", "Archive an issue with an optimistic version precondition", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
-	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one relation between two issues", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
-	sdkmcp.AddTool(server, tool("get_issue_graph", "Return a bounded compact issue graph", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
-	sdkmcp.AddTool(server, tool("get_planning_graph", "Return a bounded planning graph", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
-	sdkmcp.AddTool(server, tool("validate_issue_plan", "Validate a bounded issue plan without changes", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
-	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
-	sdkmcp.AddTool(server, tool("add_comment", "Append a comment to an issue", schemaAddComment(), schemaAddCommentOutput()), adapter.addComment)
-	sdkmcp.AddTool(server, tool("record_decision", "Record an append-only project or issue decision", schemaRecordDecision(), schemaRecordDecisionOutput()), adapter.recordDecision)
-	sdkmcp.AddTool(server, tool("list_decisions", "List project-level or issue-level decisions in deterministic order", schemaListDecisions(), schemaDecisionListOutput()), adapter.listDecisions)
-	sdkmcp.AddTool(server, tool("get_issue_activity", "Return deterministic unified issue activity", schemaGetIssueActivity(), schemaGetIssueActivityOutput()), adapter.getIssueActivity)
-	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
-	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
-	sdkmcp.AddTool(server, tool("save_attempt_note", "Save an append-only note for an active leased attempt", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
-	sdkmcp.AddTool(server, tool("finish_attempt", "Finish an active leased work or review attempt", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
-	sdkmcp.AddTool(server, tool("get_work_context", "Return bounded recovery context for an issue", schemaGetWorkContext(), schemaGetWorkContextOutput()), adapter.getWorkContext)
-	sdkmcp.AddTool(server, tool("search", "Search indexed issue work and knowledge", schemaSearch(), schemaSearchOutput()), adapter.search)
-	sdkmcp.AddTool(server, tool("get_changes", "Return incremental events after an event ID", schemaGetChanges(), schemaChangesOutput()), adapter.getChanges)
+	sdkmcp.AddTool(server, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
+	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
+	sdkmcp.AddTool(server, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
+	sdkmcp.AddTool(server, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
+	sdkmcp.AddTool(server, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput()), adapter.getIssue)
+	sdkmcp.AddTool(server, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
+	sdkmcp.AddTool(server, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
+	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
+	sdkmcp.AddTool(server, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
+	sdkmcp.AddTool(server, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
+	sdkmcp.AddTool(server, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
+	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically create issues, relations, and decisions from a valid plan.", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
+	sdkmcp.AddTool(server, tool("add_comment", "Append collaboration context to an issue without rewriting history.", schemaAddComment(), schemaAddCommentOutput()), adapter.addComment)
+	sdkmcp.AddTool(server, tool("record_decision", "Append a durable project or issue decision, optionally superseding one.", schemaRecordDecision(), schemaRecordDecisionOutput()), adapter.recordDecision)
+	sdkmcp.AddTool(server, tool("list_decisions", "List project-wide or issue-scoped decisions with cursor pagination.", schemaListDecisions(), schemaDecisionListOutput()), adapter.listDecisions)
+	sdkmcp.AddTool(server, tool("get_issue_activity", "Get a unified newest-first timeline of issue work and artifacts.", schemaGetIssueActivity(), schemaGetIssueActivityOutput()), adapter.getIssueActivity)
+	sdkmcp.AddTool(server, tool("claim_issue", "Claim claimable ready or review work and receive a renewable lease token.", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
+	sdkmcp.AddTool(server, tool("renew_attempt", "Extend an active work or review lease before it expires.", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
+	sdkmcp.AddTool(server, tool("save_attempt_note", "Append a restartable checkpoint, finding, warning, or progress note.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput()), adapter.saveAttemptNote)
+	sdkmcp.AddTool(server, tool("finish_attempt", "End a leased attempt with outcome, verification, artifacts, and status.", schemaFinishAttempt(), schemaFinishAttemptOutput()), adapter.finishAttempt)
+	sdkmcp.AddTool(server, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput()), adapter.getWorkContext)
+	sdkmcp.AddTool(server, tool("search", "Full-text search issues, comments, decisions, and attempt notes.", schemaSearch(), schemaSearchOutput()), adapter.search)
+	sdkmcp.AddTool(server, tool("get_changes", "Get ordered issue events after an event ID for incremental synchronization.", schemaGetChanges(), schemaChangesOutput()), adapter.getChanges)
 }
 
 func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequest, input searchInput) (*sdkmcp.CallToolResult, any, error) {
@@ -345,7 +346,9 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(workContextOutputFromDomain(result), "work context returned")
+	output := workContextOutputFromDomain(result)
+	output.NextActions = []string{"Call claim_issue when the issue is claimable."}
+	return success(output, "work context returned")
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -364,6 +367,7 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 			UnresolvedBlockerCount: 0, IsBlocked: false, IsClaimable: false, ActiveAttemptID: &result.Attempt.ID},
 		Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
 		MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
+		NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
 	}, "issue claimed")
 }
 
@@ -376,7 +380,10 @@ func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallTo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(renewAttemptOutput{LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime}, "attempt lease renewed")
+	return success(renewAttemptOutput{
+		LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime,
+		NextActions: []string{"Continue work; checkpoint or finish before expiry."},
+	}, "attempt lease renewed")
 }
 
 func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
@@ -403,7 +410,10 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 	for index, artifact := range result.Artifacts {
 		outputArtifacts[index] = artifactDTOFromDomain(artifact)
 	}
-	return success(saveAttemptNoteOutput{AttemptNote: attemptNoteDTOFromDomain(result.Note), Artifacts: outputArtifacts}, "attempt note saved")
+	return success(saveAttemptNoteOutput{
+		AttemptNote: attemptNoteDTOFromDomain(result.Note), Artifacts: outputArtifacts,
+		NextActions: []string{"Continue work or call finish_attempt."},
+	}, "attempt note saved")
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
@@ -436,7 +446,8 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 		outputArtifacts[index] = artifactDTOFromDomain(artifact)
 	}
 	return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
-		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts}, "attempt finished")
+		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts,
+		NextActions: []string{"Select new work from get_planning_graph."}}, "attempt finished")
 }
 
 func statusPointer(value *string) *domain.Status {
@@ -474,7 +485,13 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.C
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(planValidationOutputFromDomain(validation), "issue plan validated")
+	output := planValidationOutputFromDomain(validation)
+	if output.Valid {
+		output.NextActions = []string{"Apply normalized_plan with apply_issue_plan."}
+	} else {
+		output.NextActions = []string{"Correct errors and validate again."}
+	}
+	return success(output, "issue plan validated")
 }
 
 func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
@@ -483,7 +500,9 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(applyIssuePlanOutputFromPort(result), "issue plan applied")
+	output := applyIssuePlanOutputFromPort(result)
+	output.NextActions = []string{"Use get_planning_graph to select executable work."}
+	return success(output, "issue plan applied")
 }
 
 func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
@@ -553,7 +572,9 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallT
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(graphOutputFromDomain(graph), "issue graph returned")
+	output := graphOutputFromDomain(graph)
+	output.NextActions = []string{"Inspect a node with get_work_context."}
+	return success(output, "issue graph returned")
 }
 
 func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
@@ -565,7 +586,9 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(graphOutputFromDomain(graph), "planning graph returned")
+	output := graphOutputFromDomain(graph)
+	output.NextActions = []string{"Inspect an entry point with get_work_context."}
+	return success(output, "planning graph returned")
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
@@ -586,6 +609,8 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		SupportedRelationTypes: []string{"blocks", "related_to", "duplicates"},
 		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
 		LatestEventID:          project.LatestEventID,
+		Guides:                 guideLinks(),
+		NextActions:            []string{"Read rhizome://guides/agent-workflow; then find claimable work."},
 	}
 	return success(output, "project metadata returned")
 }
@@ -737,7 +762,13 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 			ActiveAttemptID:        item.ActiveAttemptID,
 		}
 	}
-	return success(issueListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "issues listed")
+	nextActions := []string{"Inspect a claimable issue with get_work_context."}
+	if result.HasMore {
+		nextActions = append(nextActions, "Continue with next_cursor.")
+	}
+	return success(issueListOutput{
+		Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore, NextActions: nextActions,
+	}, "issues listed")
 }
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
