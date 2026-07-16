@@ -1,0 +1,105 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f8fc;
+  --surface: #ffffff;
+  --text: #10243f;
+  --muted: #4e647d;
+  --accent: #0f4c81;
+  --accent-strong: #0c355e;
+  --border: #dce6f1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.app-nav {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-section {
+  max-width: 900px;
+  padding: 1.5rem 1.25rem 3rem;
+}
+
+.markdown-section h1,
+.markdown-section h2,
+.markdown-section h3 {
+  color: var(--accent-strong);
+  line-height: 1.25;
+}
+
+.markdown-section img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  box-shadow: 0 12px 30px rgba(15, 76, 129, 0.12);
+}
+
+.markdown-section img[alt="rhizome-mcp logo"] {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+}
+
+.markdown-section code {
+  font-size: 0.95em;
+  background: rgba(15, 76, 129, 0.08);
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.25rem;
+}
+
+.markdown-section pre {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  overflow-x: auto;
+}
+
+.markdown-section pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar ul li a {
+  color: var(--muted);
+}
+
+.sidebar ul li.active > a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+blockquote {
+  border-left: 4px solid var(--accent);
+  padding-left: 1rem;
+  color: var(--muted);
+  background: rgba(15, 76, 129, 0.06);
+  border-radius: 0.25rem;
+}
+
+@media (max-width: 768px) {
+  .markdown-section {
+    padding: 1rem 1rem 2rem;
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
