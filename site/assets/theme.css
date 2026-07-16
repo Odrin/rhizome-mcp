@@ -66,11 +66,8 @@ body {
   overflow-x: auto;
 }
 
-.markdown-section pre > code {
-  color: var(--accent);
-}
-
 .markdown-section pre code {
+  color: var(--accent);
   background: transparent;
   padding: 0;
 }
