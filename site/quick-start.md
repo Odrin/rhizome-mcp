@@ -4,28 +4,26 @@ Use the steps below to install, initialize, and connect clients to `rhizome-mcp`
 
 ## Install from the repository scripts
 
-The repository maintains one installer source for each platform:
+Choose the installer for your platform:
 
 - [install.sh](https://github.com/Odrin/rhizome-mcp/blob/main/scripts/install.sh)
 - [install.ps1](https://github.com/Odrin/rhizome-mcp/blob/main/scripts/install.ps1)
 
-The site links to those repository files instead of copying them into the static site because there is one maintained source, the raw URLs are fetched by the terminal rather than by Docsify, and the scripts verify release checksums before they install anything. If you want a safer inspect-then-run flow, download and inspect the script first:
+The installers detect your operating system and CPU architecture, download the matching release, verify its SHA-256 checksum, and install `rhizome-mcp` to `~/.local/bin` by default. They also tell you if the installation directory needs to be added to your `PATH`.
+
+On Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.sh -o /tmp/install.sh
-sed -n '1,220p' /tmp/install.sh
-sh /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.ps1 -OutFile $env:TEMP\install.ps1
-Get-Content $env:TEMP\install.ps1
-powershell -ExecutionPolicy Bypass -File $env:TEMP\install.ps1
+Invoke-RestMethod https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.ps1 | Invoke-Expression
 ```
 
-The scripts do not need mirroring into the static site. They are the maintained installation source, and the terminal fetches are the right place to inspect and run them.
+Set `RHIZOME_VERSION` to install a specific release or `RHIZOME_INSTALL_DIR` to choose a different installation directory before running the installer.
 
 ## Manual installation from release assets or source
 
