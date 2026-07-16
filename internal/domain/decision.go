@@ -48,6 +48,38 @@ type RecordDecisionResult struct {
 	SupersededDecisionID *string
 }
 
+type ListDecisionsInput struct {
+	IssueID *string
+	Limit   int
+	Cursor  string
+}
+
+func (input ListDecisionsInput) Validate() (ListDecisionsInput, error) {
+	if input.Limit < 0 || input.Limit > 100 {
+		return ListDecisionsInput{}, validationError("limit", "OUT_OF_RANGE", "must be 0 (default) or between 1 and 100")
+	}
+	issueID, err := normalizeOptionalSearchIssueID("issue_id", input.IssueID)
+	if err != nil {
+		return ListDecisionsInput{}, err
+	}
+	if input.Cursor != "" {
+		if err := ValidateText("cursor", input.Cursor, 4096); err != nil {
+			return ListDecisionsInput{}, err
+		}
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	return ListDecisionsInput{IssueID: issueID, Limit: limit, Cursor: input.Cursor}, nil
+}
+
+type DecisionList struct {
+	Items      []Decision
+	NextCursor *string
+	HasMore    bool
+}
+
 func (input RecordDecisionInput) Validate() (RecordDecisionInput, error) {
 	var issueID *string
 	if input.IssueID != nil {
@@ -105,4 +137,16 @@ func CloneDecision(decision Decision) Decision {
 	decision.SupersedesID = copyOptionalString(decision.SupersedesID)
 	decision.CreatedBySessionID = copyOptionalString(decision.CreatedBySessionID)
 	return decision
+}
+
+func CloneDecisionList(list DecisionList) DecisionList {
+	list.Items = append([]Decision(nil), list.Items...)
+	for index := range list.Items {
+		list.Items[index] = CloneDecision(list.Items[index])
+	}
+	list.NextCursor = copyOptionalString(list.NextCursor)
+	if list.Items == nil {
+		list.Items = []Decision{}
+	}
+	return list
 }

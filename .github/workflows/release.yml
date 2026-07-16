@@ -1,0 +1,82 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published, prereleased]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    name: Build and upload assets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Derive versions with SVU
+        run: |
+          go install github.com/caarlos0/svu/v3@latest
+          SVU_NEXT="$(svu next)"
+          echo "svu_next=${SVU_NEXT}" >> "$GITHUB_OUTPUT"
+        id: svu
+
+      - name: Build archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          BIN_BASE="rhizome-mcp"
+          BIN_NAME="$BIN_BASE"
+          if [ "$GOOS" = "windows" ]; then
+            BIN_NAME="${BIN_BASE}.exe"
+          fi
+          ASSET_BASE="${BIN_BASE}_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "-s -w" -o "dist/${BIN_NAME}" .
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            (cd dist && zip -q "${ASSET_BASE}.zip" "${BIN_NAME}")
+            FILE="dist/${ASSET_BASE}.zip"
+          else
+            (cd dist && tar -czf "${ASSET_BASE}.tar.gz" "${BIN_NAME}")
+            FILE="dist/${ASSET_BASE}.tar.gz"
+          fi
+          shasum -a 256 "$FILE" | awk '{print $1}' > "${FILE}.sha256"
+          echo "asset_file=${FILE}" >> "$GITHUB_OUTPUT"
+        id: build
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" "${{ steps.build.outputs.asset_file }}" "${{ steps.build.outputs.asset_file }}.sha256" --clobber
+

@@ -23,6 +23,10 @@ func (repository *recordingDecisionRepository) RecordDecision(_ context.Context,
 	return domain.RecordDecisionResult{Decision: domain.Decision{ID: command.ID, Status: command.Input.Status}}, nil
 }
 
+func (repository *recordingDecisionRepository) ListDecisions(_ context.Context, _ ports.ListDecisionsCommand) (domain.DecisionList, error) {
+	return domain.DecisionList{}, nil
+}
+
 func TestDecisionServiceValidatesAndBuildsCommand(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 9, 10, 0, time.FixedZone("test", 2*60*60))
 	repository := &recordingDecisionRepository{}

@@ -155,8 +155,7 @@ Input:
   "parent_issue_id": null,
   "blocked_reason": null,
   "labels": [],
-  "create_missing_labels": true,
-  "idempotency_key": null
+  "create_missing_labels": true
 }
 ```
 
@@ -220,9 +219,7 @@ Input:
 ```json
 {
   "issue_id": "ISSUE-42",
-  "view": "standard",
-  "include": [],
-  "limits": {}
+  "view": "standard"
 }
 ```
 
@@ -234,34 +231,16 @@ standard
 full
 ```
 
-Supported includes:
-
-```text
-labels
-relations
-parent_epic
-child_issues
-active_attempt
-decision_summaries
-recent_comments
-recent_attempt_notes
-attempt_history
-artifacts
-```
-
 Default:
 
 ```text
 view = standard
-include = []
 ```
 
 Output:
 
 ```text
-issue
-included sections
-truncated sections
+issue projection
 ```
 
 ### 5.4. `list_issues`

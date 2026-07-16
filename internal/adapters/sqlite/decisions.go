@@ -9,12 +9,20 @@ import (
 
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/pagination"
 	"rhizome-mcp/internal/ports"
 )
 
 type DecisionRepository struct {
 	db *DB
 }
+
+type decisionCursor struct {
+	CreatedAt string `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+var decisionCursorCodec = pagination.NewCodec[decisionCursor](0)
 
 func NewDecisionRepository(database *DB) (*DecisionRepository, error) {
 	if database == nil {
@@ -134,6 +142,74 @@ func (repository *DecisionRepository) RecordDecision(ctx context.Context, comman
 	return result, nil
 }
 
+func (repository *DecisionRepository) ListDecisions(ctx context.Context, command ports.ListDecisionsCommand) (domain.DecisionList, error) {
+	input, err := command.Input.Validate()
+	if err != nil {
+		return domain.DecisionList{}, err
+	}
+	var after *decisionCursor
+	if input.Cursor != "" {
+		decoded, err := decisionCursorCodec.Decode(input.Cursor)
+		if err != nil || strings.TrimSpace(decoded.CreatedAt) == "" {
+			return domain.DecisionList{}, domain.NewError(domain.CodeInvalidArgument, "decision cursor is invalid", false,
+				domain.Detail{Field: "cursor", Code: "MALFORMED_CURSOR"})
+		}
+		after = &decoded
+	}
+	var result domain.DecisionList
+	err = repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
+		where := "issue_id IS NULL"
+		args := make([]any, 0, 5)
+		if input.IssueID != nil {
+			issueID, err := resolveSearchIssueID(ctx, query, *input.IssueID)
+			if err != nil {
+				return err
+			}
+			where = "issue_id = ?"
+			args = append(args, issueID)
+		}
+		statement := `SELECT id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at
+			FROM decisions WHERE ` + where
+		if after != nil {
+			statement += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+			args = append(args, after.CreatedAt, after.CreatedAt, after.ID)
+		}
+		statement += " ORDER BY created_at DESC, id DESC LIMIT ?"
+		args = append(args, input.Limit+1)
+		rows, err := query.QueryContext(ctx, statement, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		result.Items = make([]domain.Decision, 0, input.Limit)
+		for rows.Next() {
+			item, err := scanDecisionFromScanner(rows)
+			if err != nil {
+				return err
+			}
+			result.Items = append(result.Items, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(result.Items) > input.Limit {
+			result.HasMore = true
+			result.Items = result.Items[:input.Limit]
+			last := result.Items[len(result.Items)-1]
+			cursor, err := decisionCursorCodec.Encode(decisionCursor{CreatedAt: last.CreatedAt.Format(time.RFC3339Nano), ID: last.ID})
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode decision cursor", false)
+			}
+			result.NextCursor = &cursor
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.DecisionList{}, err
+	}
+	return domain.CloneDecisionList(result), nil
+}
+
 func sameDecisionScope(left, right *string) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -147,11 +223,11 @@ func decisionSupersessionError(code, message string) error {
 }
 
 func loadDecision(ctx context.Context, query Queryer, id string) (domain.Decision, error) {
-	return scanDecision(query.QueryRowContext(ctx, `SELECT id, issue_id, title, summary, content,
+	return scanDecisionFromScanner(query.QueryRowContext(ctx, `SELECT id, issue_id, title, summary, content,
 		status, supersedes_id, created_by_session_id, created_at FROM decisions WHERE id = ?`, id))
 }
 
-func scanDecision(row *sql.Row) (domain.Decision, error) {
+func scanDecisionFromScanner(row scanner) (domain.Decision, error) {
 	var (
 		id, title, summary, content, status, createdAt string
 		issueID, supersedesID, sessionID               sql.NullString

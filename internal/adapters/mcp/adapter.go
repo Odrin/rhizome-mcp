@@ -272,6 +272,7 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("apply_issue_plan", "Atomically apply a validated issue plan", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput()), adapter.applyIssuePlan)
 	sdkmcp.AddTool(server, tool("add_comment", "Append a comment to an issue", schemaAddComment(), schemaAddCommentOutput()), adapter.addComment)
 	sdkmcp.AddTool(server, tool("record_decision", "Record an append-only project or issue decision", schemaRecordDecision(), schemaRecordDecisionOutput()), adapter.recordDecision)
+	sdkmcp.AddTool(server, tool("list_decisions", "List project-level or issue-level decisions in deterministic order", schemaListDecisions(), schemaDecisionListOutput()), adapter.listDecisions)
 	sdkmcp.AddTool(server, tool("get_issue_activity", "Return deterministic unified issue activity", schemaGetIssueActivity(), schemaGetIssueActivityOutput()), adapter.getIssueActivity)
 	sdkmcp.AddTool(server, tool("claim_issue", "Atomically claim a ready or review issue with a renewable lease", schemaClaimIssue(), schemaClaimIssueOutput()), adapter.claimIssue)
 	sdkmcp.AddTool(server, tool("renew_attempt", "Renew an active attempt lease", schemaRenewAttempt(), schemaRenewAttemptOutput()), adapter.renewAttempt)
@@ -516,6 +517,17 @@ func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.Call
 		Decision:             recordDecisionDTOFromDomain(result.Decision),
 		SupersededDecisionID: copyString(result.SupersededDecisionID),
 	}, "decision recorded")
+}
+
+func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallToolRequest, input listDecisionsInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.decisions.ListDecisions(ctx, domain.ListDecisionsInput{
+		IssueID: input.IssueID, Limit: input.Limit, Cursor: stringValue(input.Cursor),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(decisionListOutputFromDomain(result), "decisions listed")
 }
 
 func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueActivityInput) (*sdkmcp.CallToolResult, any, error) {

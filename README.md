@@ -67,6 +67,35 @@ The CLI also provides `issue list`, `issue show`, `search`, `graph`, and
 maintenance commands. Run the binary without arguments to print complete
 usage.
 
+## Release automation and installers
+
+GitHub Releases are built by `.github/workflows/release.yml` on both published
+and prereleased release events. The workflow:
+
+- builds CGO-disabled binaries for linux/amd64, linux/arm64, darwin/amd64,
+  darwin/arm64, and windows/amd64;
+- creates predictable asset names: `rhizome-mcp_<version>_<os>_<arch>.<ext>`;
+- publishes each archive and `<archive>.sha256` checksum to the release;
+- installs `svu` and derives the next semantic version (`svu next`) as part of
+  the release pipeline context.
+
+Required repository setting: workflow runs need permission to write release
+assets (`contents: write`, granted in workflow permissions).
+
+Installers published from release assets:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.ps1 | iex
+```
+
+Installers verify archive checksums and install to a user-local directory by
+default (`~/.local/bin`), then report whether that directory is already on
+PATH.
+
 ## Core constraints
 
 - Language: Go

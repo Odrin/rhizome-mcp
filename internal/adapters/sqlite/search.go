@@ -326,7 +326,9 @@ func scanChangeEvent(scanner scanner) (domain.IssueEvent, error) {
 
 func isFTSQueryError(err error) bool {
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "fts5") || strings.Contains(message, "unterminated string")
+	return strings.Contains(message, "fts5") ||
+		strings.Contains(message, "unterminated string") ||
+		strings.Contains(message, "unknown special query")
 }
 
 func searchCursorError(err error) error {

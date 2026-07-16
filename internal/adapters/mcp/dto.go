@@ -130,6 +130,12 @@ type recordDecisionInput struct {
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
 }
 
+type listDecisionsInput struct {
+	IssueID *string `json:"issue_id,omitempty"`
+	Limit   int     `json:"limit,omitempty"`
+	Cursor  *string `json:"cursor,omitempty"`
+}
+
 type claimIssueInput struct {
 	IssueID        string  `json:"issue_id"`
 	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
@@ -534,6 +540,12 @@ type recordDecisionOutput struct {
 	SupersededDecisionID *string                   `json:"superseded_decision_id"`
 }
 
+type decisionListOutput struct {
+	Items      []recordDecisionDecisionDTO `json:"items"`
+	NextCursor *string                     `json:"next_cursor"`
+	HasMore    bool                        `json:"has_more"`
+}
+
 type updateIssueOutput struct {
 	Issue         issueDTO `json:"issue"`
 	ChangedFields []string `json:"changed_fields"`
@@ -828,6 +840,14 @@ func recordDecisionDTOFromDomain(decision domain.Decision) recordDecisionDecisio
 		Content: decision.Content, Status: string(decision.Status), SupersedesID: copyString(decision.SupersedesID),
 		CreatedBySessionID: copyString(decision.CreatedBySessionID), CreatedAt: decision.CreatedAt,
 	}
+}
+
+func decisionListOutputFromDomain(list domain.DecisionList) decisionListOutput {
+	items := make([]recordDecisionDecisionDTO, len(list.Items))
+	for index, item := range list.Items {
+		items[index] = recordDecisionDTOFromDomain(item)
+	}
+	return decisionListOutput{Items: items, NextCursor: copyString(list.NextCursor), HasMore: list.HasMore}
 }
 
 func relationDTOFromDomain(relation domain.IssueRelation) relationDTO {

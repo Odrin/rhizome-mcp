@@ -96,6 +96,58 @@ func TestDecisionRepositoryPersistsScopesEventAndSupersession(t *testing.T) {
 	}
 }
 
+func TestDecisionRepositoryListsProjectAndIssueScopedDecisions(t *testing.T) {
+	issues, db, now := openIssueService(t)
+	repository, err := sqlite.NewDecisionRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := issues.CreateIssue(context.Background(), domain.CreateIssueInput{Type: domain.TypeTask, Title: "Decision list issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := repository.RecordDecision(ctx, ports.RecordDecisionCommand{
+		ID: decisionTestID, Input: domain.RecordDecisionInput{Title: "Project old", Summary: "old"}, OccurredAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RecordDecision(ctx, ports.RecordDecisionCommand{
+		ID: decisionReplacementID, Input: domain.RecordDecisionInput{Title: "Project new", Summary: "new"}, OccurredAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RecordDecision(ctx, ports.RecordDecisionCommand{
+		ID: decisionConcurrentID, Input: domain.RecordDecisionInput{IssueID: stringPtr(issue.DisplayID), Title: "Issue scoped", Summary: "issue"}, OccurredAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstPage, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{Limit: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Items) != 1 || !firstPage.HasMore || firstPage.NextCursor == nil || firstPage.Items[0].ID != decisionReplacementID || firstPage.Items[0].IssueID != nil {
+		t.Fatalf("project first page = %#v", firstPage)
+	}
+	secondPage, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{Limit: 10, Cursor: *firstPage.NextCursor}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage.Items) != 1 || secondPage.HasMore || secondPage.NextCursor != nil || secondPage.Items[0].ID != decisionTestID || secondPage.Items[0].IssueID != nil {
+		t.Fatalf("project second page = %#v", secondPage)
+	}
+
+	issueID := issue.DisplayID
+	issueList, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{IssueID: &issueID, Limit: 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issueList.Items) != 1 || issueList.Items[0].ID != decisionConcurrentID || issueList.Items[0].IssueID == nil || *issueList.Items[0].IssueID != issue.ID {
+		t.Fatalf("issue list = %#v", issueList)
+	}
+}
+
 func TestDecisionRepositoryRejectsPredecessorErrorsAtomically(t *testing.T) {
 	issues, db, now := openIssueService(t)
 	repository, err := sqlite.NewDecisionRepository(db)

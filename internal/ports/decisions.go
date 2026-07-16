@@ -13,6 +13,11 @@ type RecordDecisionCommand struct {
 	OccurredAt time.Time
 }
 
+type ListDecisionsCommand struct {
+	Input domain.ListDecisionsInput
+}
+
 type DecisionRepository interface {
 	RecordDecision(context.Context, RecordDecisionCommand) (domain.RecordDecisionResult, error)
+	ListDecisions(context.Context, ListDecisionsCommand) (domain.DecisionList, error)
 }

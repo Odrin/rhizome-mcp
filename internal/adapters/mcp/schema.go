@@ -21,6 +21,20 @@ func object(properties map[string]*jsonschema.Schema, required ...string) *jsons
 }
 
 func stringSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "string"} }
+func issueIdentifierSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Pattern:     "^(?:[0-9A-HJKMNP-TV-Z]{26}|ISSUE-[1-9][0-9]*)$",
+		Description: "Canonical issue identifier (ULID or ISSUE-N).",
+	}
+}
+func nullableIssueIdentifierSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Types:       []string{"string", "null"},
+		Pattern:     "^(?:[0-9A-HJKMNP-TV-Z]{26}|ISSUE-[1-9][0-9]*)$",
+		Description: "Canonical issue identifier (ULID or ISSUE-N).",
+	}
+}
 func nullableStringSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Types: []string{"string", "null"}}
 }
@@ -55,8 +69,10 @@ func schemaGetProject() *jsonschema.Schema {
 }
 
 func schemaListLabels() *jsonschema.Schema {
+	limit := boundedIntegerSchema(0, 100)
+	limit.Description = "0 uses the default limit of 50; maximum is 100."
 	return object(map[string]*jsonschema.Schema{
-		"query": nullableStringSchema(), "limit": integerSchema(), "cursor": nullableStringSchema(),
+		"query": nullableStringSchema(), "limit": limit, "cursor": nullableStringSchema(),
 	})
 }
 
@@ -64,8 +80,8 @@ func schemaCreateIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"type": stringSchema(), "title": stringSchema(), "description": nullableStringSchema(),
 		"acceptance_criteria": nullableStringSchema(), "status": stringSchema(), "priority": stringSchema(),
-		"parent_issue_id": nullableStringSchema(), "blocked_reason": nullableStringSchema(),
-		"labels": stringsSchema(), "create_missing_labels": booleanSchema(), "idempotency_key": nullableStringSchema(),
+		"parent_issue_id": nullableIssueIdentifierSchema(), "blocked_reason": nullableStringSchema(),
+		"labels": stringsSchema(), "create_missing_labels": booleanSchema(),
 	}, "type", "title")
 }
 
@@ -77,21 +93,20 @@ func schemaUpdateIssue() *jsonschema.Schema {
 		"labels": stringsSchema(),
 	})
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": stringSchema(), "expected_version": integerSchema(), "changes": changes,
+		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "changes": changes,
 		"create_missing_labels": booleanSchema(), "idempotency_key": nullableStringSchema(),
 	}, "issue_id", "expected_version", "changes")
 }
 
 func schemaGetIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": stringSchema(), "view": stringSchema(), "include": stringsSchema(),
-		"limits": &jsonschema.Schema{Type: "object"},
+		"issue_id": issueIdentifierSchema(), "view": stringSchema(),
 	}, "issue_id")
 }
 
 func schemaGetIssueActivity() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": boundedStringSchema(64),
+		"issue_id": issueIdentifierSchema(),
 		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(6), UniqueItems: true},
 		"limit":    boundedIntegerSchema(0, 100),
 		"cursor":   nullableBoundedStringSchema(4096),
@@ -103,8 +118,8 @@ func schemaSearch() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"query":            boundedStringSchema(domain.MaxSearchQueryRunes),
 		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "attempt_note"), MaxItems: intPointer(4), UniqueItems: true},
-		"issue_id":         nullableBoundedStringSchema(64),
-		"epic_id":          nullableBoundedStringSchema(64),
+		"issue_id":         nullableIssueIdentifierSchema(),
+		"epic_id":          nullableIssueIdentifierSchema(),
 		"statuses":         &jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true},
 		"labels":           boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes),
 		"include_archived": booleanSchema(),
@@ -117,7 +132,7 @@ func schemaSearch() *jsonschema.Schema {
 func schemaGetChanges() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"since_event_id": boundedIntegerSchema(0, 9_223_372_036_854_775_807),
-		"issue_id":       nullableBoundedStringSchema(64),
+		"issue_id":       nullableIssueIdentifierSchema(),
 		"event_types":    boundedStringsSchema(domain.MaxChangeEventTypes, domain.MaxEventTypeRunes),
 		"limit":          boundedIntegerSchema(0, 200),
 	}, "since_event_id")
@@ -129,43 +144,59 @@ func schemaGetWorkContext() *jsonschema.Schema {
 		includeValues[index] = string(include)
 	}
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": boundedStringSchema(64),
+		"issue_id": issueIdentifierSchema(),
 		"include":  &jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(10), UniqueItems: true},
 		"limits":   schemaWorkContextLimits(),
 	}, "issue_id")
 }
 
 func schemaWorkContextLimits() *jsonschema.Schema {
+	relatedIssueSummaries := boundedIntegerSchema(1, 20)
+	relatedIssueSummaries.Description = "Applies when include contains related_issue_summaries."
+	recentComments := boundedIntegerSchema(1, 20)
+	recentComments.Description = "Applies when include contains recent_comments."
+	recentAttemptNotes := boundedIntegerSchema(1, 20)
+	recentAttemptNotes.Description = "Applies when include contains recent_attempt_notes."
+	decisionContent := boundedIntegerSchema(1, 20)
+	decisionContent.Description = "Applies when include contains decision_content."
+	attemptHistory := boundedIntegerSchema(1, 20)
+	attemptHistory.Description = "Applies when include contains attempt_history."
+	artifacts := boundedIntegerSchema(1, 20)
+	artifacts.Description = "Applies when include contains artifacts."
+	changesSincePreviousAttempt := boundedIntegerSchema(1, 20)
+	changesSincePreviousAttempt.Description = "Applies when include contains changes_since_previous_attempt."
 	return object(map[string]*jsonschema.Schema{
-		"related_issue_summaries":        boundedIntegerSchema(1, 20),
-		"recent_comments":                boundedIntegerSchema(1, 20),
-		"recent_attempt_notes":           boundedIntegerSchema(1, 20),
-		"decision_content":               boundedIntegerSchema(1, 20),
-		"attempt_history":                boundedIntegerSchema(1, 20),
-		"artifacts":                      boundedIntegerSchema(1, 20),
-		"changes_since_previous_attempt": boundedIntegerSchema(1, 20),
+		"related_issue_summaries":        relatedIssueSummaries,
+		"recent_comments":                recentComments,
+		"recent_attempt_notes":           recentAttemptNotes,
+		"decision_content":               decisionContent,
+		"attempt_history":                attemptHistory,
+		"artifacts":                      artifacts,
+		"changes_since_previous_attempt": changesSincePreviousAttempt,
 	})
 }
 
 func schemaListIssues() *jsonschema.Schema {
+	limit := boundedIntegerSchema(0, 100)
+	limit.Description = "0 uses the default limit of 20; maximum is 100."
 	return object(map[string]*jsonschema.Schema{
 		"types": stringsSchema(), "statuses": stringsSchema(), "effective_statuses": stringsSchema(),
-		"priorities": stringsSchema(), "labels": stringsSchema(), "parent_issue_id": nullableStringSchema(),
+		"priorities": stringsSchema(), "labels": stringsSchema(), "parent_issue_id": nullableIssueIdentifierSchema(),
 		"is_blocked":       &jsonschema.Schema{Types: []string{"boolean", "null"}},
 		"is_claimable":     &jsonschema.Schema{Types: []string{"boolean", "null"}},
-		"include_archived": booleanSchema(), "limit": integerSchema(), "cursor": nullableStringSchema(), "view": stringSchema(),
+		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": stringSchema(),
 	})
 }
 
 func schemaArchiveIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": stringSchema(), "expected_version": integerSchema(), "idempotency_key": nullableStringSchema(),
+		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableStringSchema(),
 	}, "issue_id", "expected_version")
 }
 
 func schemaAddComment() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": boundedStringSchema(64), "content": boundedStringSchema(50_000),
+		"issue_id": issueIdentifierSchema(), "content": boundedStringSchema(50_000),
 		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "issue_id", "content")
 }
@@ -182,11 +213,21 @@ func schemaRecordDecision() *jsonschema.Schema {
 	}, "title", "summary", "content")
 }
 
+func schemaListDecisions() *jsonschema.Schema {
+	limit := boundedIntegerSchema(0, 100)
+	limit.Description = "0 uses the default limit of 20; maximum is 100."
+	return object(map[string]*jsonschema.Schema{
+		"issue_id": issueIdentifierSchema(),
+		"limit":    limit,
+		"cursor":   nullableBoundedStringSchema(4096),
+	})
+}
+
 func schemaManageIssueRelation() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"action":          enumSchema("add", "remove"),
-		"source_issue_id": stringSchema(),
-		"target_issue_id": stringSchema(),
+		"source_issue_id": issueIdentifierSchema(),
+		"target_issue_id": issueIdentifierSchema(),
 		"relation_type":   enumSchema("blocks", "related_to", "duplicates"),
 		"idempotency_key": nullableStringSchema(),
 	}, "action", "source_issue_id", "target_issue_id", "relation_type")
@@ -194,7 +235,7 @@ func schemaManageIssueRelation() *jsonschema.Schema {
 
 func schemaGetIssueGraph() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"root_issue_id": stringSchema(), "depth": boundedIntegerSchema(0, 5),
+		"root_issue_id": issueIdentifierSchema(), "depth": boundedIntegerSchema(0, 5),
 		"direction":         enumSchema("outgoing", "incoming", "both"),
 		"relation_types":    &jsonschema.Schema{Type: "array", Items: enumSchema("blocks", "related_to", "duplicates"), UniqueItems: true},
 		"include_hierarchy": booleanSchema(), "include_terminal": booleanSchema(),
@@ -204,7 +245,7 @@ func schemaGetIssueGraph() *jsonschema.Schema {
 
 func schemaGetPlanningGraph() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"root_issue_id": nullableStringSchema(), "depth": boundedIntegerSchema(0, 5), "max_nodes": boundedIntegerSchema(1, 500),
+		"root_issue_id": nullableIssueIdentifierSchema(), "depth": boundedIntegerSchema(0, 5), "max_nodes": boundedIntegerSchema(1, 500),
 		"include_review": booleanSchema(), "include_related": booleanSchema(),
 	})
 }
@@ -249,7 +290,7 @@ func schemaApplyIssuePlan() *jsonschema.Schema {
 
 func schemaClaimIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": boundedStringSchema(64), "lease_seconds": boundedIntegerSchema(60, 3600),
+		"issue_id": issueIdentifierSchema(), "lease_seconds": boundedIntegerSchema(60, 3600),
 		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "issue_id")
 }
@@ -320,6 +361,7 @@ func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addC
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()
 }
+func schemaDecisionListOutput() *jsonschema.Schema { return typedSchema[decisionListOutput]() }
 func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
 func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
 func schemaIssueListOutput() *jsonschema.Schema      { return typedSchema[issueListOutput]() }

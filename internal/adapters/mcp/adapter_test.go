@@ -41,17 +41,25 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "create_issue"), "type", "title")
+	assertPropertyAbsent(t, toolNamed(t, tools.Tools, "create_issue"), "idempotency_key")
 	assertRequired(t, toolNamed(t, tools.Tools, "add_comment"), "issue_id", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "record_decision"), "title", "summary", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
 	assertUpdateLabelsSchema(t, toolNamed(t, tools.Tools, "update_issue"))
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
+	assertPropertyAbsent(t, toolNamed(t, tools.Tools, "get_issue"), "include")
+	assertPropertyAbsent(t, toolNamed(t, tools.Tools, "get_issue"), "limits")
+	assertIssueIdentifierProperty(t, toolNamed(t, tools.Tools, "get_issue"), "issue_id")
+	assertIssueIdentifierProperty(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id")
+	assertIssueIdentifierProperty(t, toolNamed(t, tools.Tools, "claim_issue"), "issue_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "search"), "query")
+	assertIssueIdentifierProperty(t, toolNamed(t, tools.Tools, "search"), "issue_id")
+	assertIssueIdentifierProperty(t, toolNamed(t, tools.Tools, "search"), "epic_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_changes"), "since_event_id")
 	activityTool := toolNamed(t, tools.Tools, "get_issue_activity")
 	assertRequired(t, activityTool, "issue_id")
@@ -71,6 +79,8 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
+	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
+	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_labels"), "limit", 0, 100)
 	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "finish_attempt"), "attempt_id", "lease_token", "outcome", "result_summary")
 
@@ -331,6 +341,33 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	if projectDecision.IsError {
 		t.Fatalf("project decision = %#v", projectDecision)
 	}
+	projectDecisions := call(t, client, "list_decisions", map[string]any{"limit": 5})
+	var projectDecisionPage struct {
+		Items []struct {
+			ID      string  `json:"id"`
+			IssueID *string `json:"issue_id"`
+			Title   string  `json:"title"`
+		} `json:"items"`
+		HasMore bool `json:"has_more"`
+	}
+	decodeStructured(t, projectDecisions, &projectDecisionPage)
+	if projectDecisions.IsError || len(projectDecisionPage.Items) == 0 || projectDecisionPage.HasMore {
+		t.Fatalf("project decision page = %#v", projectDecisionPage)
+	}
+	if projectDecisionPage.Items[0].IssueID != nil {
+		t.Fatalf("project decision should be project-level: %#v", projectDecisionPage.Items[0])
+	}
+	issueDecisions := call(t, client, "list_decisions", map[string]any{"issue_id": issue.DisplayID, "limit": 5})
+	var issueDecisionPage struct {
+		Items []struct {
+			ID      string  `json:"id"`
+			IssueID *string `json:"issue_id"`
+		} `json:"items"`
+	}
+	decodeStructured(t, issueDecisions, &issueDecisionPage)
+	if issueDecisions.IsError || len(issueDecisionPage.Items) == 0 || issueDecisionPage.Items[0].IssueID == nil || *issueDecisionPage.Items[0].IssueID != issue.ID {
+		t.Fatalf("issue decision page = %#v", issueDecisionPage)
+	}
 	unsupportedDecision := call(t, client, "record_decision", map[string]any{
 		"title": "Unsupported retry", "summary": "No replay", "content": "", "idempotency_key": "decision-key",
 	})
@@ -471,15 +508,21 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("labels null should be rejected by the advertised schema: %#v", labelsNull)
 	}
 	unsupported := call(t, client, "get_issue", map[string]any{"issue_id": issue.DisplayID, "include": []string{"labels"}})
-	assertDomainError(t, unsupported, "INVALID_ARGUMENT", false)
+	if !unsupported.IsError {
+		t.Fatalf("get_issue include should be rejected by schema: %#v", unsupported)
+	}
 	unsupportedLimits := call(t, client, "get_issue", map[string]any{"issue_id": issue.DisplayID, "limits": map[string]any{"comments": 1}})
-	assertDomainError(t, unsupportedLimits, "INVALID_ARGUMENT", false)
+	if !unsupportedLimits.IsError {
+		t.Fatalf("get_issue limits should be rejected by schema: %#v", unsupportedLimits)
+	}
 	unsupportedListView := call(t, client, "list_issues", map[string]any{"view": "standard"})
 	assertDomainError(t, unsupportedListView, "INVALID_ARGUMENT", false)
 	unsupportedIdempotency := call(t, client, "create_issue", map[string]any{
 		"type": "task", "title": "unsupported idempotency", "idempotency_key": "key",
 	})
-	assertDomainError(t, unsupportedIdempotency, "INVALID_ARGUMENT", false)
+	if !unsupportedIdempotency.IsError {
+		t.Fatalf("create_issue idempotency_key should be rejected by schema: %#v", unsupportedIdempotency)
+	}
 
 	archived := call(t, client, "archive_issue", map[string]any{"issue_id": issue.DisplayID, "expected_version": 2})
 	var archivedIssue struct {
@@ -1388,6 +1431,15 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	if _, ok := schema.Properties.Limits.Properties["recent_comments"]; !ok {
 		t.Fatal("limits schema missing recent_comments")
 	}
+	var recentCommentsLimit struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(schema.Properties.Limits.Properties["recent_comments"], &recentCommentsLimit); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recentCommentsLimit.Description, "include contains recent_comments") {
+		t.Fatalf("recent_comments limit description = %q", recentCommentsLimit.Description)
+	}
 	if _, ok := schema.Properties.Limits.Properties["parent_epic"]; ok {
 		t.Fatal("limits schema unexpectedly allowed parent_epic")
 	}
@@ -1756,6 +1808,81 @@ func assertUpdateLabelsSchema(t *testing.T, tool *sdkmcp.Tool) {
 	}
 	if contains(schema.Properties.Changes.Properties.Labels.Types, "null") {
 		t.Fatal("update_issue changes.labels schema must not permit null")
+	}
+}
+
+func assertIntegerPropertyBounds(t *testing.T, tool *sdkmcp.Tool, field string, minimum, maximum float64) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	propertyRaw, ok := schema.Properties[field]
+	if !ok {
+		t.Fatalf("%s missing %s property", tool.Name, field)
+	}
+	var property struct {
+		Type    string   `json:"type"`
+		Minimum *float64 `json:"minimum"`
+		Maximum *float64 `json:"maximum"`
+	}
+	if err := json.Unmarshal(propertyRaw, &property); err != nil {
+		t.Fatal(err)
+	}
+	if property.Type != "integer" || property.Minimum == nil || property.Maximum == nil ||
+		*property.Minimum != minimum || *property.Maximum != maximum {
+		t.Fatalf("%s %s schema = %#v", tool.Name, field, property)
+	}
+}
+
+func assertIssueIdentifierProperty(t *testing.T, tool *sdkmcp.Tool, field string) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	propertyRaw, ok := schema.Properties[field]
+	if !ok {
+		t.Fatalf("%s missing %s property", tool.Name, field)
+	}
+	var property struct {
+		Pattern     string `json:"pattern"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(propertyRaw, &property); err != nil {
+		t.Fatal(err)
+	}
+	if property.Pattern == "" || !strings.Contains(property.Description, "ULID") || !strings.Contains(property.Description, "ISSUE-N") {
+		t.Fatalf("%s %s schema = %#v", tool.Name, field, property)
+	}
+}
+
+func assertPropertyAbsent(t *testing.T, tool *sdkmcp.Tool, field string) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := schema.Properties[field]; ok {
+		t.Fatalf("%s unexpectedly exposes %s", tool.Name, field)
 	}
 }
 

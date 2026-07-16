@@ -109,6 +109,12 @@ func TestSearchRanksPaginatesAndFiltersIndexedEntities(t *testing.T) {
 	if _, err := repository.Search(ctx, portsSearch(domain.SearchInput{Query: `"`})); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("malformed FTS query error = %v", err)
 	}
+	if _, err := repository.Search(ctx, portsSearch(domain.SearchInput{
+		Query:       "*",
+		EntityTypes: []domain.SearchEntityType{domain.SearchEntityTypeDecision},
+	})); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("wildcard decision query error = %v", err)
+	}
 	_ = second
 }
 

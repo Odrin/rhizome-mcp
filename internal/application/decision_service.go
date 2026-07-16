@@ -44,3 +44,15 @@ func (service *DecisionService) RecordDecision(ctx context.Context, input domain
 		ID: id, Input: normalized, OccurredAt: service.clock.Now().UTC(),
 	})
 }
+
+func (service *DecisionService) ListDecisions(ctx context.Context, input domain.ListDecisionsInput) (domain.DecisionList, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return domain.DecisionList{}, err
+	}
+	result, err := service.repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: normalized})
+	if err != nil {
+		return domain.DecisionList{}, err
+	}
+	return domain.CloneDecisionList(result), nil
+}
