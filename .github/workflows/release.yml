@@ -5,11 +5,11 @@ on:
     types: [published, prereleased]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-and-upload:
-    name: Build and upload assets
+  build-release-assets:
+    name: Build release assets
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -39,13 +39,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Derive versions with SVU
-        run: |
-          go install github.com/caarlos0/svu/v3@latest
-          SVU_NEXT="$(svu next)"
-          echo "svu_next=${SVU_NEXT}" >> "$GITHUB_OUTPUT"
-        id: svu
-
       - name: Build archive
         env:
           GOOS: ${{ matrix.goos }}
@@ -70,13 +63,74 @@ jobs:
             FILE="dist/${ASSET_BASE}.tar.gz"
           fi
           shasum -a 256 "$FILE" | awk '{print $1}' > "${FILE}.sha256"
-          echo "asset_file=${FILE}" >> "$GITHUB_OUTPUT"
-        id: build
+          rm -f "dist/${BIN_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  upload-release-assets:
+    name: Upload release assets
+    needs:
+      - build-release-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "$TAG" "${{ steps.build.outputs.asset_file }}" "${{ steps.build.outputs.asset_file }}.sha256" --clobber
+          set -euo pipefail
+          shopt -s nullglob
+
+          VERSION="${TAG#v}"
+          expected=(
+            "rhizome-mcp_${VERSION}_linux_amd64.tar.gz"
+            "rhizome-mcp_${VERSION}_linux_amd64.tar.gz.sha256"
+            "rhizome-mcp_${VERSION}_linux_arm64.tar.gz"
+            "rhizome-mcp_${VERSION}_linux_arm64.tar.gz.sha256"
+            "rhizome-mcp_${VERSION}_darwin_amd64.tar.gz"
+            "rhizome-mcp_${VERSION}_darwin_amd64.tar.gz.sha256"
+            "rhizome-mcp_${VERSION}_darwin_arm64.tar.gz"
+            "rhizome-mcp_${VERSION}_darwin_arm64.tar.gz.sha256"
+            "rhizome-mcp_${VERSION}_windows_amd64.zip"
+            "rhizome-mcp_${VERSION}_windows_amd64.zip.sha256"
+          )
+
+          files=()
+          for name in "${expected[@]}"; do
+            path="dist/${name}"
+            if [ ! -f "$path" ]; then
+              echo "Missing expected release asset: $path" >&2
+              exit 1
+            fi
+            files+=("$path")
+          done
+
+          actual_files=(dist/*)
+          if [ "${#actual_files[@]}" -ne 10 ]; then
+            echo "Expected 10 files in dist, found ${#actual_files[@]}" >&2
+            exit 1
+          fi
+
+          echo "Collected release assets:"
+          for file in "${files[@]}"; do
+            echo " - ${file}"
+          done
+
+          gh release upload "$TAG" "${files[@]}" --clobber
 
