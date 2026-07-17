@@ -11,6 +11,23 @@ Use this routine when you want safe, recoverable work in a shared repository.
 5. While the attempt is active, call `renew_attempt` and `save_attempt_note` as needed. The lease token is required for these attempt calls and must remain private.
 6. Finish the attempt once with `finish_attempt` after you have a result summary, verification, and any follow-up steps.
 
+## Logical interchange and recovery
+
+Use `project export` and `project import` when you need to move a Rhizome project between installations without treating the result as a SQLite backup. Start with a dry run:
+
+```bash
+rhizome-mcp project export --output /tmp/source.json
+rhizome-mcp project import --input /tmp/source.json --dry-run
+```
+
+Apply only to an empty destination project. The import is rejected if the destination already has content, so you should initialize a fresh repository and only then run:
+
+```bash
+rhizome-mcp project import --input /tmp/source.json --apply
+```
+
+Validation failures leave the destination untouched, so recover by correcting the document or re-exporting from the source repository. Active attempts are intentionally excluded from export, which keeps lease state from being transferred across installations. Terminal attempts, notes, and artifacts are retained where they remain logically meaningful. Version 1 is the only supported format for this workflow; unsupported versions are rejected before any mutation. Keep `backup` for database snapshots and `project export`/`project import` for logical interchange.
+
 ## Optional human inspection
 
 These CLI commands are useful for human inspection or debugging, but they are not substitutes for the MCP claim/work-context APIs above.
