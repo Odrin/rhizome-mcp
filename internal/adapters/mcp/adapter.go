@@ -52,10 +52,12 @@ type adapter struct {
 	appVersion    string
 	configVersion int
 
-	sessionMu          sync.Mutex
-	connectionSessions map[*sdkmcp.ServerSession]string
-	sessionStarted     map[*sdkmcp.ServerSession]struct{}
-	sessionEnded       map[*sdkmcp.ServerSession]struct{}
+	sessionMu            sync.Mutex
+	connectionSessions   map[*sdkmcp.ServerSession]string
+	sdkSessionIDs        map[string]string
+	sessionStarted       map[*sdkmcp.ServerSession]struct{}
+	sessionEnded         map[*sdkmcp.ServerSession]struct{}
+	endedDurableSessions map[string]struct{}
 }
 
 // Server owns the MCP SDK server and its adapter lifecycle tracking.
@@ -109,23 +111,25 @@ func NewServer(options Options) (*Server, error) {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server version is required", false)
 	}
 	adapter := &adapter{
-		issues:             options.IssueService,
-		projects:           options.ProjectService,
-		relations:          options.RelationService,
-		graphs:             options.GraphService,
-		plans:              options.PlanningService,
-		comments:           options.CommentService,
-		decisions:          options.DecisionService,
-		activities:         options.ActivityService,
-		searches:           options.SearchService,
-		attempts:           options.AttemptService,
-		sessions:           options.SessionService,
-		workContexts:       options.WorkContextService,
-		appVersion:         options.ServerVersion,
-		configVersion:      options.ConfigVersion,
-		connectionSessions: make(map[*sdkmcp.ServerSession]string),
-		sessionStarted:     make(map[*sdkmcp.ServerSession]struct{}),
-		sessionEnded:       make(map[*sdkmcp.ServerSession]struct{}),
+		issues:               options.IssueService,
+		projects:             options.ProjectService,
+		relations:            options.RelationService,
+		graphs:               options.GraphService,
+		plans:                options.PlanningService,
+		comments:             options.CommentService,
+		decisions:            options.DecisionService,
+		activities:           options.ActivityService,
+		searches:             options.SearchService,
+		attempts:             options.AttemptService,
+		sessions:             options.SessionService,
+		workContexts:         options.WorkContextService,
+		appVersion:           options.ServerVersion,
+		configVersion:        options.ConfigVersion,
+		connectionSessions:   make(map[*sdkmcp.ServerSession]string),
+		sdkSessionIDs:        make(map[string]string),
+		sessionStarted:       make(map[*sdkmcp.ServerSession]struct{}),
+		sessionEnded:         make(map[*sdkmcp.ServerSession]struct{}),
+		endedDurableSessions: make(map[string]struct{}),
 	}
 	server := sdkmcp.NewServer(
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
@@ -138,6 +142,24 @@ func NewServer(options Options) (*Server, error) {
 	adapter.register(server)
 	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
+}
+
+// SDKServer exposes the underlying SDK server for transports that manage their own lifecycle.
+func (server *Server) SDKServer() *sdkmcp.Server {
+	if server == nil {
+		return nil
+	}
+	return server.server
+}
+
+// EndSession removes a durable agent session associated with an SDK session ID.
+func (server *Server) EndSession(ctx context.Context, sdkSessionID string) error {
+	if server == nil || sdkSessionID == "" {
+		return nil
+	}
+	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return server.adapter.endSessionBySDKSessionID(endCtx, sdkSessionID)
 }
 
 // Run serves one MCP connection and records its durable session lifecycle.
@@ -197,12 +219,16 @@ func (adapter *adapter) startSession(ctx context.Context, request *sdkmcp.Initia
 		slog.Error("agent session creation failed", "error", err)
 		return
 	}
+	sdkSessionID := sdkSession.ID()
 	adapter.sessionMu.Lock()
 	ended := false
 	if _, ok := adapter.sessionEnded[sdkSession]; ok {
 		ended = true
 	} else {
 		adapter.connectionSessions[sdkSession] = created.ID
+		if sdkSessionID != "" {
+			adapter.sdkSessionIDs[sdkSessionID] = created.ID
+		}
 	}
 	adapter.sessionMu.Unlock()
 	if ended {
@@ -243,9 +269,19 @@ func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.Serve
 		return
 	}
 	adapter.sessionMu.Lock()
+	if _, ok := adapter.sessionEnded[sdkSession]; ok {
+		adapter.sessionMu.Unlock()
+		return
+	}
 	adapter.sessionEnded[sdkSession] = struct{}{}
 	sessionID := adapter.connectionSessions[sdkSession]
 	delete(adapter.connectionSessions, sdkSession)
+	if sdkSessionID := sdkSession.ID(); sdkSessionID != "" {
+		delete(adapter.sdkSessionIDs, sdkSessionID)
+	}
+	if sessionID != "" {
+		adapter.endedDurableSessions[sessionID] = struct{}{}
+	}
 	adapter.sessionMu.Unlock()
 	if sessionID == "" {
 		return
@@ -253,6 +289,46 @@ func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.Serve
 	if _, err := adapter.sessions.End(ctx, sessionID); err != nil && !isContextCancellation(err) {
 		slog.Error("agent session end failed", "error", err)
 	}
+}
+
+func (adapter *adapter) endSessionBySDKSessionID(ctx context.Context, sdkSessionID string) error {
+	if sdkSessionID == "" {
+		return nil
+	}
+	adapter.sessionMu.Lock()
+	durableSessionID, ok := adapter.sdkSessionIDs[sdkSessionID]
+	if !ok {
+		for sdkSession, sessionID := range adapter.connectionSessions {
+			if sdkSession != nil && sdkSession.ID() == sdkSessionID {
+				delete(adapter.connectionSessions, sdkSession)
+				if sessionID != "" {
+					adapter.endedDurableSessions[sessionID] = struct{}{}
+				}
+			}
+		}
+		adapter.sessionMu.Unlock()
+		return nil
+	}
+	delete(adapter.sdkSessionIDs, sdkSessionID)
+	for sdkSession := range adapter.connectionSessions {
+		if sdkSession != nil && sdkSession.ID() == sdkSessionID {
+			delete(adapter.connectionSessions, sdkSession)
+		}
+	}
+	if _, ended := adapter.endedDurableSessions[durableSessionID]; ended {
+		adapter.sessionMu.Unlock()
+		return nil
+	}
+	adapter.endedDurableSessions[durableSessionID] = struct{}{}
+	adapter.sessionMu.Unlock()
+	if durableSessionID == "" {
+		return nil
+	}
+	_, err := adapter.sessions.End(ctx, durableSessionID)
+	if err != nil && !isContextCancellation(err) {
+		slog.Error("agent session end failed", "error", err)
+	}
+	return err
 }
 
 func isContextCancellation(err error) bool {
