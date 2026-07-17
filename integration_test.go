@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +27,7 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/projectconfig"
+	projectruntime "rhizome-mcp/internal/runtime"
 )
 
 const integrationTimeout = 10 * time.Second
@@ -405,6 +408,62 @@ func TestIntegrationHTTPTransportUsesPerSessionMCPServers(t *testing.T) {
 
 	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 3); err != nil {
 		t.Fatalf("assert HTTP agent sessions: %v", err)
+	}
+}
+
+func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on loopback: %v", err)
+	}
+	defer listener.Close()
+
+	handler := projectruntime.WrapHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), listener.Addr().String(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := &http.Server{Handler: handler}
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+	defer func() {
+		if closeErr := server.Close(); closeErr != nil && closeErr != http.ErrServerClosed {
+			t.Errorf("close loopback listener: %v", closeErr)
+		}
+		if err := <-serveDone; err != nil && err != http.ErrServerClosed {
+			t.Errorf("serve loopback listener: %v", err)
+		}
+	}()
+
+	client := &http.Client{Timeout: integrationTimeout}
+
+	request, err := http.NewRequest(http.MethodGet, "http://"+listener.Addr().String()+"/mcp", nil)
+	if err != nil {
+		t.Fatalf("construct request: %v", err)
+	}
+	request.Host = "example.com:8080"
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("send hostile host request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("host mismatch status = %d, want %d", response.StatusCode, http.StatusMisdirectedRequest)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, "http://"+listener.Addr().String()+"/mcp", nil)
+	if err != nil {
+		t.Fatalf("construct request: %v", err)
+	}
+	request.Host = listener.Addr().String()
+	request.Header.Set("Origin", "http://127.0.0.1:9999")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatalf("send hostile origin request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("origin mismatch status = %d, want %d", response.StatusCode, http.StatusForbidden)
 	}
 }
 
