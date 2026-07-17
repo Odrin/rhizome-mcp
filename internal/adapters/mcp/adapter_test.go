@@ -6,9 +6,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
+	"rhizome-mcp/internal/ports"
 )
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -968,6 +972,133 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 	}
 }
 
+func TestAgentSessionHTTPStreamableSessionIDMapping(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "http-sessions.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	server, err := mcpadapter.NewServer(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server.SDKServer() }, nil)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	transport := &sdkmcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL,
+		HTTPClient:           httpServer.Client(),
+		DisableStandaloneSSE: true,
+	}
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-http-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	sdkSessionID := session.ID()
+	if sdkSessionID == "" {
+		t.Fatal("streamable session ID was empty")
+	}
+
+	waitForAgentSession(t, db)
+	created := readAgentSession(t, db)
+	if created.Count != 1 || created.EndedAt != nil {
+		t.Fatalf("created agent session = %#v", created)
+	}
+
+	if err := server.EndSession(ctx, sdkSessionID); err != nil {
+		t.Fatalf("EndSession() error = %v", err)
+	}
+	ended := readAgentSession(t, db)
+	if ended.Count != 1 || ended.EndedAt == nil {
+		t.Fatalf("ended agent session = %#v", ended)
+	}
+	endedAt := *ended.EndedAt
+	if err := server.EndSession(ctx, sdkSessionID); err != nil {
+		t.Fatalf("repeat EndSession() error = %v", err)
+	}
+	repeated := readAgentSession(t, db)
+	if repeated.Count != 1 || repeated.EndedAt == nil || !repeated.EndedAt.Equal(endedAt) {
+		t.Fatalf("repeated EndSession changed agent session = %#v", repeated)
+	}
+}
+
+func TestAgentSessionEndSessionIgnoresUnknownOrEmptyIDs(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "unknown-session.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	server, err := mcpadapter.NewServer(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server.SDKServer() }, nil)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	transport := &sdkmcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL,
+		HTTPClient:           httpServer.Client(),
+		DisableStandaloneSSE: true,
+	}
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-http-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	waitForAgentSession(t, db)
+	before := readAgentSession(t, db)
+	if before.EndedAt != nil {
+		t.Fatalf("created agent session before no-op = %#v", before)
+	}
+	if err := server.EndSession(ctx, ""); err != nil {
+		t.Fatalf("EndSession(empty) error = %v", err)
+	}
+	if err := server.EndSession(ctx, "unknown"); err != nil {
+		t.Fatalf("EndSession(unknown) error = %v", err)
+	}
+	after := readAgentSession(t, db)
+	if after.Count != before.Count || after.EndedAt != nil {
+		t.Fatalf("unknown/empty EndSession changed session = %#v", after)
+	}
+}
+
+func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "stdio-endonce.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	repository := &countingAgentSessionRepository{}
+	sessions, err := application.NewAgentSessionService(repository, source, staticSessionIDGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.SessionService = sessions
+	client, stop := newClient(t, options)
+	if client == nil {
+		t.Fatal("newClient() returned nil client")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for repository.CreateCalls() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := repository.CreateCalls(); got != 1 {
+		t.Fatalf("CreateAgentSession calls = %d, want 1", got)
+	}
+	stop()
+	if got := repository.EndCalls(); got != 1 {
+		t.Fatalf("EndAgentSession calls = %d, want 1", got)
+	}
+	stop()
+	if got := repository.EndCalls(); got != 1 {
+		t.Fatalf("second end call count = %d, want 1", got)
+	}
+}
+
 func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "attempt-sessions.db"))
@@ -1104,6 +1235,48 @@ func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
 	if attemptSession.Valid || eventSession.Valid {
 		t.Fatalf("unmapped claim sessions = attempt %#v event %#v", attemptSession, eventSession)
 	}
+}
+
+type staticSessionIDGenerator struct{}
+
+func (staticSessionIDGenerator) New() (string, error) {
+	return projectID, nil
+}
+
+type countingAgentSessionRepository struct {
+	mu          sync.Mutex
+	createCalls int
+	endCalls    int
+}
+
+func (repository *countingAgentSessionRepository) CreateAgentSession(ctx context.Context, cmd ports.CreateAgentSessionCommand) (domain.AgentSession, error) {
+	repository.mu.Lock()
+	repository.createCalls++
+	repository.mu.Unlock()
+	return cmd.Session, nil
+}
+
+func (repository *countingAgentSessionRepository) TouchAgentSession(ctx context.Context, cmd ports.TouchAgentSessionCommand) (domain.AgentSession, error) {
+	return domain.AgentSession{ID: cmd.SessionID}, nil
+}
+
+func (repository *countingAgentSessionRepository) EndAgentSession(ctx context.Context, cmd ports.EndAgentSessionCommand) (domain.AgentSession, error) {
+	repository.mu.Lock()
+	repository.endCalls++
+	repository.mu.Unlock()
+	return domain.AgentSession{ID: cmd.SessionID}, nil
+}
+
+func (repository *countingAgentSessionRepository) CreateCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.createCalls
+}
+
+func (repository *countingAgentSessionRepository) EndCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.endCalls
 }
 
 type failingSessionIDGenerator struct{}
