@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 type recordingProjectRepository struct {
 	project domain.Project
+	export  domain.LogicalProjectDocument
 	err     error
 	called  bool
 }
@@ -19,6 +21,11 @@ type recordingProjectRepository struct {
 func (repository *recordingProjectRepository) GetProject(context.Context) (domain.Project, error) {
 	repository.called = true
 	return repository.project, repository.err
+}
+
+func (repository *recordingProjectRepository) ExportLogicalProject(context.Context) (domain.LogicalProjectDocument, error) {
+	repository.called = true
+	return repository.export, repository.err
 }
 
 func TestProjectServiceGetsProjectMetadata(t *testing.T) {
@@ -53,6 +60,27 @@ func TestProjectServicePropagatesRepositoryError(t *testing.T) {
 	}
 	if _, err := service.GetProject(context.Background()); !errors.Is(err, want) {
 		t.Fatalf("GetProject() error = %v, want %v", err, want)
+	}
+}
+
+func TestProjectServiceExportsLogicalProjectDocument(t *testing.T) {
+	repository := &recordingProjectRepository{export: domain.LogicalProjectDocument{Format: "rhizome-logical-project", Version: 1}}
+	service, err := application.NewProjectService(repository)
+	if err != nil {
+		t.Fatalf("NewProjectService() error = %v", err)
+	}
+	got, err := service.ExportLogicalProject(context.Background())
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if !repository.called {
+		t.Fatal("repository was not called")
+	}
+	if !strings.Contains(string(got), "\"format\": \"rhizome-logical-project\"") ||
+		!strings.Contains(string(got), "\"version\": 1") ||
+		!strings.Contains(string(got), "\"issues\": []") ||
+		!strings.Contains(string(got), "\"project\": {") {
+		t.Fatalf("export bytes = %s", string(got))
 	}
 }
 

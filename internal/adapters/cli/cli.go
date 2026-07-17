@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +23,10 @@ const (
 	ansiReset = "\x1b[0m"
 )
 
-// ProjectService exposes current project metadata reads for CLI commands.
+// ProjectService exposes current project metadata reads and exports for CLI commands.
 type ProjectService interface {
 	GetProject(context.Context) (domain.Project, error)
+	ExportLogicalProject(context.Context) ([]byte, error)
 }
 
 // IssueService exposes issue list/show reads for CLI commands.
@@ -266,15 +269,23 @@ func (c *CLI) runProject(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return c.usageError()
 	}
-	if args[0] != "info" {
+	switch args[0] {
+	case "info":
+		return c.runProjectInfo(ctx, args[1:])
+	case "export":
+		return c.runProjectExport(ctx, args[1:])
+	default:
 		return c.usageError()
 	}
+}
+
+func (c *CLI) runProjectInfo(ctx context.Context, args []string) error {
 	if c.services.ProjectService == nil {
 		return fmt.Errorf("project service is not configured")
 	}
 	fs := flag.NewFlagSet("project info", flag.ContinueOnError)
 	format := fs.String("format", "table", "output format")
-	positionals, err := c.parseFlags(fs, args[1:])
+	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
 	}
@@ -292,6 +303,83 @@ func (c *CLI) runProject(ctx context.Context, args []string) error {
 		return writeJSON(c.stdoutWriter(), ProjectInfoResponse{Project: projectInfoFromDomain(project)})
 	}
 	return c.writeProjectInfoTable(project)
+}
+
+func (c *CLI) runProjectExport(ctx context.Context, args []string) error {
+	if c.services.ProjectService == nil {
+		return fmt.Errorf("project service is not configured")
+	}
+	fs := flag.NewFlagSet("project export", flag.ContinueOnError)
+	output := fs.String("output", "", "export output path or '-' for stdout")
+	overwrite := fs.Bool("overwrite", false, "replace an existing output file")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *output == "" {
+		return fmt.Errorf("output is required")
+	}
+	data, err := c.services.ProjectService.ExportLogicalProject(ctx)
+	if err != nil {
+		return err
+	}
+	if *output == "-" {
+		payload := append([]byte{}, data...)
+		payload = append(payload, '\n')
+		if c.stdout != nil {
+			_, err = c.stdout.Write(payload)
+			return err
+		}
+		_, err = io.Discard.Write(payload)
+		return err
+	}
+	return c.writeProjectExportFile(*output, data, *overwrite)
+}
+
+func (c *CLI) writeProjectExportFile(path string, data []byte, overwrite bool) error {
+	if _, err := os.Stat(path); err == nil {
+		if !overwrite {
+			return fmt.Errorf("refusing to overwrite existing path %q", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	temp, err := os.CreateTemp(dir, ".rhizome-export-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	payload := append([]byte{}, data...)
+	payload = append(payload, '\n')
+	if _, err := temp.Write(payload); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *CLI) runIssue(ctx context.Context, args []string) error {
@@ -751,6 +839,7 @@ func (c *CLI) usage() string {
   rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
   rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]
   rhizome-mcp [--data-root PATH] project info [--format table|json]
+  rhizome-mcp [--data-root PATH] project export --output PATH|- [--overwrite]
   rhizome-mcp [--data-root PATH] issue list [--format table|json] [--limit N] [--cursor CURSOR] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
   rhizome-mcp [--data-root PATH] search QUERY [--format table|json] [--limit N] [--cursor CURSOR] [--entity-type TYPE ...] [--issue ISSUE-ID] [--epic EPIC-ID] [--status STATUS ...] [--label LABEL ...] [--include-archived] [--snippet-length N]

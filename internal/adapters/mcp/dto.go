@@ -10,6 +10,8 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+type exportProjectInput struct{}
+
 type getProjectInput struct {
 	IncludeInstructions bool `json:"include_instructions,omitempty"`
 }

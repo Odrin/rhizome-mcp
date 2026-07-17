@@ -94,6 +94,31 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	}
 }
 
+func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if toolNamed(t, tools.Tools, "export_project") == nil {
+		t.Fatal("export_project tool missing")
+	}
+
+	result := call(t, client, "export_project", map[string]any{})
+	if result.IsError {
+		t.Fatalf("export_project result = %#v", result)
+	}
+	var document domain.LogicalProjectDocument
+	decodeStructured(t, result, &document)
+	if document.Format != "rhizome-logical-project" || document.Version != 1 || document.Project.ID == "" || len(document.Issues) != 0 {
+		t.Fatalf("document = %#v", document)
+	}
+}
+
 func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "project.db")
@@ -110,7 +135,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}

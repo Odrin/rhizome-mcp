@@ -57,31 +57,32 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 23 tools:
+The first version exposes 24 tools:
 
 1. `get_project`
-2. `list_labels`
-3. `create_issue`
-4. `update_issue`
-5. `get_issue`
-6. `list_issues`
-7. `archive_issue`
-8. `manage_issue_relation`
-9. `get_issue_graph`
-10. `get_planning_graph`
-11. `validate_issue_plan`
-12. `apply_issue_plan`
-13. `add_comment`
-14. `record_decision`
-15. `list_decisions`
-16. `get_issue_activity`
-17. `claim_issue`
-18. `renew_attempt`
-19. `save_attempt_note`
-20. `finish_attempt`
-21. `get_work_context`
-22. `search`
-23. `get_changes`
+2. `export_project`
+3. `list_labels`
+4. `create_issue`
+5. `update_issue`
+6. `get_issue`
+7. `list_issues`
+8. `archive_issue`
+9. `manage_issue_relation`
+10. `get_issue_graph`
+11. `get_planning_graph`
+12. `validate_issue_plan`
+13. `apply_issue_plan`
+14. `add_comment`
+15. `record_decision`
+16. `list_decisions`
+17. `get_issue_activity`
+18. `claim_issue`
+19. `renew_attempt`
+20. `save_attempt_note`
+21. `finish_attempt`
+22. `get_work_context`
+23. `search`
+24. `get_changes`
 
 ---
 
@@ -122,7 +123,26 @@ next_actions
 The project instructions are returned only when requested. `guides` links the
 three workflow resources advertised by the server.
 
-### 4.2. `list_labels`
+### 4.2. `export_project`
+
+Purpose:
+
+Export the current project as the version 1 logical interchange document.
+
+Input:
+
+```json
+{}
+```
+
+Output:
+
+The structured content is the full logical project document with the required
+`format`, `version`, `exported_at`, `project`, and entity arrays. The tool
+returns the document directly as structured content and does not duplicate it as
+text.
+
+### 4.3. `list_labels`
 
 Input:
 

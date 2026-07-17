@@ -68,6 +68,14 @@ func schemaGetProject() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{"include_instructions": booleanSchema()})
 }
 
+func schemaExportProject() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{})
+}
+
+func schemaExportProjectOutput() *jsonschema.Schema {
+	return typedSchema[domain.LogicalProjectDocument]()
+}
+
 func schemaListLabels() *jsonschema.Schema {
 	limit := boundedIntegerSchema(0, 100)
 	limit.Description = "0 uses the default limit of 50; maximum is 100."
