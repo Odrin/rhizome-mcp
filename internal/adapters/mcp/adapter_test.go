@@ -860,6 +860,97 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	}
 }
 
+func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "review-completion.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdIssue := call(t, client, "create_issue", map[string]any{"type": "bug", "title": "review completion", "status": "review"})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdIssue, &issue)
+	if createdIssue.IsError {
+		t.Fatalf("create issue = %#v", createdIssue)
+	}
+
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" || claim.LeaseToken == "" {
+		t.Fatalf("claim issue = %#v", claimed)
+	}
+
+	var latestEventID int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	createdReview := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 1,
+		"target_event_id":      latestEventID,
+		"artifact_ids":         []string{"artifact-1"},
+	})
+	var reviewRequest struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, createdReview, &reviewRequest)
+	if createdReview.IsError || reviewRequest.ID == "" {
+		t.Fatalf("create review request = %#v", createdReview)
+	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(ctx, ports.ReviewMutationCommand{
+		RequestID:       reviewRequest.ID,
+		ExpectedVersion: 1,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      source.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("claim review request: %v", err)
+	}
+
+	finished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":     claim.Attempt.ID,
+		"lease_token":    claim.LeaseToken,
+		"outcome":        "completed",
+		"result_summary": "reviewed through MCP",
+		"review_outcome": "changes_requested",
+		"verification":   []string{"mcp"},
+	})
+	var completion struct {
+		Issue struct {
+			Status string `json:"status"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, finished, &completion)
+	if finished.IsError || completion.Issue.Status != "ready" {
+		t.Fatalf("finish attempt = %#v", finished)
+	}
+
+	var requestStatus string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, reviewRequest.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusChangesRequested) {
+		t.Fatalf("review request status = %q, want changes_requested", requestStatus)
+	}
+}
+
 func TestSearchAndGetChangesTools(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "search-tools.db"))

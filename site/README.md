@@ -21,7 +21,7 @@ rhizome-mcp is a local-first MCP server for task tracking and coordination. It g
 ## Start here
 
 - [Quick start](./quick-start.md) to install, initialize, and connect clients.
-- [Workflow guide](./workflow.md) for safe claim, checkpoint, and finish cycles.
+- [Workflow guide](./workflow.md) for safe claim, checkpoint, and finish cycles, including review request, discover, claim, complete, follow-up, and re-request guidance.
 - [CLI reference](./cli.md) for every supported command and flag.
 - [Product scope](https://github.com/Odrin/rhizome-mcp/blob/main/docs/01-product-scope.md) and [MCP tools](https://github.com/Odrin/rhizome-mcp/blob/main/docs/03-mcp-tools.md) for the canonical specification.
 

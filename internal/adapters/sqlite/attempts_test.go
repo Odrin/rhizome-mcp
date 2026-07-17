@@ -311,7 +311,7 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 		RequestID:       created.Request.ID,
 		ExpectedVersion: created.Request.Version,
 		ActiveAttemptID: &claim.Attempt.ID,
-		OccurredAt:      fixture.clock.Now().Add(2 * time.Minute),
+		OccurredAt:      fixture.clock.Now(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -365,6 +365,64 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 	}
 }
 
+func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-changes-requested")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review changes requested", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latestEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: issue.Issue.Version,
+		TargetEventID:      latestEventID,
+		OccurredAt:         fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeChangesRequested)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("finish review changes requested: %v", err)
+	}
+
+	var requestStatus, issueStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusChangesRequested) || issueStatus != string(domain.StatusReady) {
+		t.Fatalf("review changes requested state = request %q issue %q", requestStatus, issueStatus)
+	}
+}
+
 func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "review-stale")
 	defer fixture.close()
@@ -392,7 +450,7 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 		RequestID:       created.Request.ID,
 		ExpectedVersion: created.Request.Version,
 		ActiveAttemptID: &claim.Attempt.ID,
-		OccurredAt:      fixture.clock.Now().Add(2 * time.Minute),
+		OccurredAt:      fixture.clock.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +503,7 @@ func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
 		RequestID:       created.Request.ID,
 		ExpectedVersion: created.Request.Version,
 		ActiveAttemptID: &claim.Attempt.ID,
-		OccurredAt:      fixture.clock.Now().Add(2 * time.Minute),
+		OccurredAt:      fixture.clock.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}

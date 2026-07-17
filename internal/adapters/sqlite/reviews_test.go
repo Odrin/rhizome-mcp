@@ -77,6 +77,120 @@ func TestReviewRepositoryLifecycleCreatesEventsAndOutcome(t *testing.T) {
 	}
 }
 
+func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.T) {
+	fixture := newReviewFixture(t, "review-follow-up")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "follow-up review")
+	attemptID := fixture.insertReviewAttempt(t, issueID)
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issueID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := fixture.repository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &attemptID,
+		OccurredAt:      time.Date(2026, 7, 17, 17, 1, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := fixture.repository.ResolveReviewRequest(fixture.ctx, ports.ResolveReviewRequestCommand{
+		RequestID:       claimed.Request.ID,
+		ExpectedVersion: claimed.Request.Version,
+		AttemptID:       attemptID,
+		Outcome:         domain.ReviewOutcomeChangesRequested,
+		OccurredAt:      time.Date(2026, 7, 17, 17, 2, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Request.Status != domain.ReviewRequestStatusChangesRequested {
+		t.Fatalf("changes requested status = %q, want changes_requested", resolved.Request.Status)
+	}
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_follow_ups(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, 'changes_requested', ?, 1, ?)`, "00000000000000000000000003", resolved.Request.ID, attemptID, "needs follow-up", time.Date(2026, 7, 17, 17, 3, 0, 0, time.UTC).Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewed, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issueID,
+		TargetIssueVersion: 2,
+		TargetEventID:      5,
+		ArtifactIDs:        []string{"artifact-2"},
+		OccurredAt:         time.Date(2026, 7, 17, 17, 4, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewed.Request.TargetIssueVersion != 2 || reviewed.Request.Status != domain.ReviewRequestStatusOpen {
+		t.Fatalf("re-review request = %+v", reviewed.Request)
+	}
+
+	var followUpCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_follow_ups WHERE request_id = ?`, resolved.Request.ID).Scan(&followUpCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if followUpCount != 1 {
+		t.Fatalf("follow-up count = %d, want 1", followUpCount)
+	}
+}
+
+func TestReviewRepositoryBlockedOutcomeKeepsReason(t *testing.T) {
+	fixture := newReviewFixture(t, "review-blocked")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "blocked review")
+	attemptID := fixture.insertReviewAttempt(t, issueID)
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issueID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         time.Date(2026, 7, 17, 18, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := fixture.repository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &attemptID,
+		OccurredAt:      time.Date(2026, 7, 17, 18, 1, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := fixture.repository.ResolveReviewRequest(fixture.ctx, ports.ResolveReviewRequestCommand{
+		RequestID:       claimed.Request.ID,
+		ExpectedVersion: claimed.Request.Version,
+		AttemptID:       attemptID,
+		Outcome:         domain.ReviewOutcomeBlocked,
+		Reason:          reviewStringPtr("needs design"),
+		OccurredAt:      time.Date(2026, 7, 17, 18, 2, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Request.Status != domain.ReviewRequestStatusBlocked {
+		t.Fatalf("blocked status = %q, want blocked", resolved.Request.Status)
+	}
+	if resolved.Outcome.Reason == nil || *resolved.Outcome.Reason != "needs design" {
+		t.Fatalf("blocked reason = %+v", resolved.Outcome.Reason)
+	}
+}
+
 func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T) {
 	fixture := newReviewFixture(t, "review-duplicates")
 	defer fixture.close()
@@ -242,6 +356,10 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("claim event count = %d, want 1", count)
 	}
+}
+
+func reviewStringPtr(value string) *string {
+	return &value
 }
 
 type reviewRepositoryFixture struct {
