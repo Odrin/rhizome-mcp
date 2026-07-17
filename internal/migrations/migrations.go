@@ -27,11 +27,15 @@ var searchIndexTriggersSQL string
 //go:embed sql/003_review_workflow.sql
 var reviewWorkflowSQL string
 
+//go:embed sql/004_review_context.sql
+var reviewContextSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
 const searchIndexTriggersChecksum = "817957b68b07b7d393fe21718743dc64dd90aa5a0d7e8da8153ff2b35bf1a695"
 const reviewWorkflowChecksum = "2377585c091c8a6603b1b5e7dfd7726e2121de08858cfbca26dd70dcad7e94e1"
+const reviewContextChecksum = "0790d44675b550e7dddcb54f2a66a80aaa4da02e6462d6d54bb3620763cc76b8"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -53,6 +57,12 @@ var (
 			name:     "review_workflow",
 			checksum: reviewWorkflowChecksum,
 			sql:      reviewWorkflowSQL,
+		},
+		{
+			version:  4,
+			name:     "review_context",
+			checksum: reviewContextChecksum,
+			sql:      reviewContextSQL,
 		},
 	}
 )
