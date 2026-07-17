@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ const (
 type ProjectService interface {
 	GetProject(context.Context) (domain.Project, error)
 	ExportLogicalProject(context.Context) ([]byte, error)
+	ValidateLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportDryRun, error)
 }
 
 // IssueService exposes issue list/show reads for CLI commands.
@@ -274,6 +276,8 @@ func (c *CLI) runProject(ctx context.Context, args []string) error {
 		return c.runProjectInfo(ctx, args[1:])
 	case "export":
 		return c.runProjectExport(ctx, args[1:])
+	case "import":
+		return c.runProjectImport(ctx, args[1:])
 	default:
 		return c.usageError()
 	}
@@ -337,6 +341,63 @@ func (c *CLI) runProjectExport(ctx context.Context, args []string) error {
 		return err
 	}
 	return c.writeProjectExportFile(*output, data, *overwrite)
+}
+
+func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
+	if c.services.ProjectService == nil {
+		return fmt.Errorf("project service is not configured")
+	}
+	fs := flag.NewFlagSet("project import", flag.ContinueOnError)
+	inputPath := fs.String("input", "", "input path or '-' for stdin")
+	dryRun := fs.Bool("dry-run", false, "validate without applying imports")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *inputPath == "" {
+		return fmt.Errorf("input is required")
+	}
+	if !*dryRun {
+		return fmt.Errorf("--dry-run is required")
+	}
+	data, err := readProjectImportInput(*inputPath, os.Stdin)
+	if err != nil {
+		return err
+	}
+	result, err := c.services.ProjectService.ValidateLogicalProjectImport(ctx, data)
+	if err != nil {
+		return err
+	}
+	return writeJSON(c.stdoutWriter(), result)
+}
+
+func readProjectImportInput(path string, stdin io.Reader) ([]byte, error) {
+	const maxProjectImportBytes = 1 << 20
+	if path == "-" {
+		if stdin == nil {
+			return nil, fmt.Errorf("stdin is not available")
+		}
+		var buf bytes.Buffer
+		_, err := io.Copy(&buf, io.LimitReader(stdin, maxProjectImportBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if buf.Len() > maxProjectImportBytes {
+			return nil, fmt.Errorf("input exceeds the maximum size of 1048576 bytes")
+		}
+		return buf.Bytes(), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxProjectImportBytes {
+		return nil, fmt.Errorf("input exceeds the maximum size of 1048576 bytes")
+	}
+	return data, nil
 }
 
 func (c *CLI) writeProjectExportFile(path string, data []byte, overwrite bool) error {

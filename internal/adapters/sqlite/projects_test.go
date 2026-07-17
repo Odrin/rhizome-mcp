@@ -203,22 +203,19 @@ func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *test
 	if len(first.Decisions) != 1 || first.Decisions[0].ID != decisionID {
 		t.Fatalf("decisions = %#v", first.Decisions)
 	}
-	if len(first.Attempts) != 1 || first.Attempts[0].ID != attemptID {
+	if len(first.Attempts) != 0 {
 		t.Fatalf("attempts = %#v", first.Attempts)
 	}
-	if first.Attempts[0].SessionID != nil || first.Attempts[0].AgentLabel != nil || len(first.Attempts[0].NextSteps) != 0 || len(first.Attempts[0].Verification) != 0 {
-		t.Fatalf("attempt export = %#v", first.Attempts[0])
-	}
-	if len(first.AttemptNotes) != 1 || first.AttemptNotes[0].ID != attemptNoteID {
+	if len(first.AttemptNotes) != 0 {
 		t.Fatalf("attempt notes = %#v", first.AttemptNotes)
 	}
-	if len(first.Artifacts) != 1 || first.Artifacts[0].ID != artifactID {
+	if len(first.Artifacts) != 0 {
 		t.Fatalf("artifacts = %#v", first.Artifacts)
 	}
 	if len(first.Events) != 2 || first.Events[0].IssueID == nil || first.Events[1].IssueID != nil {
 		t.Fatalf("events = %#v", first.Events)
 	}
-	if first.Attempts[0].SessionID != nil || first.Comments[0].CreatedBySessionID != nil || first.Decisions[0].CreatedBySessionID != nil || first.Events[0].SessionID != nil {
+	if first.Comments[0].CreatedBySessionID != nil || first.Decisions[0].CreatedBySessionID != nil || first.Events[0].SessionID != nil {
 		t.Fatalf("session references were leaked: %#v", first)
 	}
 	if len(first.IssueLabels) != 1 || first.IssueLabels[0].IssueID != issueID {
@@ -288,6 +285,44 @@ func TestProjectRepositoryRejectsMissingOrDuplicateProjectRows(t *testing.T) {
 		}
 		_, err = repository.GetProject(context.Background())
 		assertProjectDomainCode(t, err, domain.CodeStorageCorrupt)
+	})
+}
+
+func TestProjectRepositoryReportsDestinationContent(t *testing.T) {
+	t.Run("empty destination", func(t *testing.T) {
+		db, _ := openProjectDatabase(t, "name", "instructions")
+		repository, err := sqlite.NewProjectRepository(db)
+		if err != nil {
+			t.Fatalf("NewProjectRepository() error = %v", err)
+		}
+		hasContent, err := repository.HasLogicalProjectImportDestinationContent(context.Background())
+		if err != nil {
+			t.Fatalf("HasLogicalProjectImportDestinationContent() error = %v", err)
+		}
+		if hasContent {
+			t.Fatal("expected empty destination")
+		}
+	})
+
+	t.Run("nonempty destination", func(t *testing.T) {
+		db, _ := openProjectDatabase(t, "name", "instructions")
+		if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, "INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'issue', 'open', 'medium', 1, ?, ?)", "01ARZ3NDEKTSV4RRFFQ69G5FAJ", time.Now().Format(time.RFC3339Nano), time.Now().Format(time.RFC3339Nano))
+			return err
+		}); err != nil {
+			t.Fatalf("insert issue: %v", err)
+		}
+		repository, err := sqlite.NewProjectRepository(db)
+		if err != nil {
+			t.Fatalf("NewProjectRepository() error = %v", err)
+		}
+		hasContent, err := repository.HasLogicalProjectImportDestinationContent(context.Background())
+		if err != nil {
+			t.Fatalf("HasLogicalProjectImportDestinationContent() error = %v", err)
+		}
+		if !hasContent {
+			t.Fatal("expected nonempty destination")
+		}
 	})
 }
 

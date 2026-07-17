@@ -10,4 +10,5 @@ import (
 type ProjectRepository interface {
 	GetProject(context.Context) (domain.Project, error)
 	ExportLogicalProject(context.Context) (domain.LogicalProjectDocument, error)
+	HasLogicalProjectImportDestinationContent(context.Context) (bool, error)
 }

@@ -262,6 +262,7 @@ func isContextCancellation(err error) bool {
 func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
 	sdkmcp.AddTool(server, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput()), adapter.exportProject)
+	sdkmcp.AddTool(server, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput()), adapter.validateImport)
 	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
 	sdkmcp.AddTool(server, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
 	sdkmcp.AddTool(server, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
@@ -604,6 +605,15 @@ func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallT
 		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
 	}
 	return success(document, "project export returned")
+}
+
+func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.CallToolRequest, input validateImportInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, []byte(input.Document))
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(dryRun, "import validation dry run returned")
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {

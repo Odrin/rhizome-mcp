@@ -57,32 +57,33 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 24 tools:
+The first version exposes 25 tools:
 
 1. `get_project`
 2. `export_project`
-3. `list_labels`
-4. `create_issue`
-5. `update_issue`
-6. `get_issue`
-7. `list_issues`
-8. `archive_issue`
-9. `manage_issue_relation`
-10. `get_issue_graph`
-11. `get_planning_graph`
-12. `validate_issue_plan`
-13. `apply_issue_plan`
-14. `add_comment`
-15. `record_decision`
-16. `list_decisions`
-17. `get_issue_activity`
-18. `claim_issue`
-19. `renew_attempt`
-20. `save_attempt_note`
-21. `finish_attempt`
-22. `get_work_context`
-23. `search`
-24. `get_changes`
+3. `validate_import`
+4. `list_labels`
+5. `create_issue`
+6. `update_issue`
+7. `get_issue`
+8. `list_issues`
+9. `archive_issue`
+10. `manage_issue_relation`
+11. `get_issue_graph`
+12. `get_planning_graph`
+13. `validate_issue_plan`
+14. `apply_issue_plan`
+15. `add_comment`
+16. `record_decision`
+17. `list_decisions`
+18. `get_issue_activity`
+19. `claim_issue`
+20. `renew_attempt`
+21. `save_attempt_note`
+22. `finish_attempt`
+23. `get_work_context`
+24. `search`
+25. `get_changes`
 
 ---
 
@@ -142,7 +143,25 @@ The structured content is the full logical project document with the required
 returns the document directly as structured content and does not duplicate it as
 text.
 
-### 4.3. `list_labels`
+### 4.3. `validate_import`
+
+Purpose:
+
+Validate a version 1 logical project interchange document without mutating storage and return a deterministic dry-run summary.
+
+Input:
+
+```json
+{
+  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+}
+```
+
+Output:
+
+The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
+
+### 4.4. `list_labels`
 
 Input:
 

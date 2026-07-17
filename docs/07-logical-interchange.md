@@ -137,12 +137,12 @@ records, are retained.
 `result_summary`, `next_steps`, `verification`, `failure_reason_code`,
 `interruption_reason_code`, and `reason_details`.
 
-Raw lease tokens and `lease_token_hash` are never exported. `session_id`
-imports as `null`. Imported active attempts are rejected with
-`UNSUPPORTED_ACTIVE_ATTEMPT`: an execution lease cannot be transferred
-safely. Terminal attempts retain their historical status and timestamps, but
-destination issue versions and event positions are not reconstructed from
-source values.
+Raw lease tokens and `lease_token_hash` are never exported. Active attempts
+are excluded with their attempt notes, attempt-owned artifacts, and
+attempt-referencing events: an execution lease cannot be transferred safely.
+`session_id` imports as `null`. Terminal attempts retain their historical
+status and timestamps, but destination issue versions and event positions are
+not reconstructed from source values.
 
 `attempt_notes` records contain `id`, `attempt_id`, `kind`, `content`,
 `next_steps`, `important`, and `created_at`.
@@ -168,7 +168,8 @@ The following are intentionally excluded:
   FTS indexes, idempotency records, and runtime configuration;
 - session records and session lifecycle state;
 - archived issues and their owned data;
-- active attempt leases, raw tokens, token hashes, and heartbeat ownership;
+- active attempts, their leases, raw tokens, token hashes, heartbeat
+  ownership, and their dependent history;
 - generated issue display IDs, source row versions, and source event IDs;
 - binary artifact content, filesystem contents, absolute local paths, and
   machine-specific credentials;

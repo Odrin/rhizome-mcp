@@ -44,6 +44,11 @@ func (s *stubProjectService) ExportLogicalProject(context.Context) ([]byte, erro
 }`), s.err
 }
 
+func (s *stubProjectService) ValidateLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportDryRun, error) {
+	s.calls++
+	return domain.LogicalProjectImportDryRun{}, s.err
+}
+
 type stubIssueService struct {
 	listInput domain.ListIssuesInput
 	listPage  domain.IssueList
