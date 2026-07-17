@@ -775,7 +775,6 @@ Work completion also supplies:
 ```text
 target_issue_status: done | review | ready | blocked
 blocked_reason
-acceptance_check
 failure_reason_code
 interruption_reason_code
 reason_details
