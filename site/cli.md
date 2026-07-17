@@ -41,6 +41,39 @@ Supported flags:
 - `--output PATH` (required)
 - `--format table|json`
 
+### `project export`
+
+Export the current project as a version 1 logical interchange document.
+
+```bash
+rhizome-mcp project export --output /path/to/export.json
+rhizome-mcp project export --output -
+```
+
+Supported flags:
+
+- `--output PATH|-` (required)
+- `--overwrite` (allow replacing an existing output file)
+
+Use `project export` for JSON interchange with another Rhizome installation. The output is a logical document, not a SQLite backup. Existing files are protected unless `--overwrite` is supplied.
+
+### `project import`
+
+Validate or apply a version 1 logical interchange document.
+
+```bash
+rhizome-mcp project import --input /path/to/export.json --dry-run
+rhizome-mcp project import --input /path/to/export.json --apply
+```
+
+Supported flags:
+
+- `--input PATH|-` (required)
+- `--dry-run` (validate without writing)
+- `--apply` (apply the validated document into an empty destination)
+
+Run `--dry-run` first to confirm the document is accepted. `--apply` is only allowed for an empty destination project; a non-empty destination returns an overwrite-protection conflict and leaves the destination unchanged. Active attempts are excluded from export and therefore cannot be imported as active history. Validation failures stop before any writes, and a new import must be retried from the last successful dry run. Only version 1 documents are accepted; future format versions are rejected before any mutation.
+
 ### `doctor`
 
 Run a lightweight health check.
