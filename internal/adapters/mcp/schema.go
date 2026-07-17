@@ -345,7 +345,7 @@ func schemaFinishAttempt() *jsonschema.Schema {
 		"failure_reason_code":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"implementation_error", "environment_error", "missing_dependency", "invalid_requirements", "tests_failed", "context_lost", "timeout", "other", nil}},
 		"interruption_reason_code": &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}},
 		"reason_details":           nullableBoundedStringSchema(50_000),
-		"acknowledged_changes":     &jsonschema.Schema{Types: []string{"object", "null"}, OneOf: []*jsonschema.Schema{acknowledgement}},
+		"acknowledged_changes":     &jsonschema.Schema{OneOf: []*jsonschema.Schema{acknowledgement, &jsonschema.Schema{Type: "null"}}},
 		"artifacts":                schemaArtifacts(),
 		"idempotency_key":          nullableBoundedStringSchema(128),
 	}, "attempt_id", "lease_token", "outcome", "result_summary")
@@ -361,7 +361,7 @@ func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addC
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()
 }
-func schemaDecisionListOutput() *jsonschema.Schema { return typedSchema[decisionListOutput]() }
+func schemaDecisionListOutput() *jsonschema.Schema   { return typedSchema[decisionListOutput]() }
 func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
 func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
 func schemaIssueListOutput() *jsonschema.Schema      { return typedSchema[issueListOutput]() }
