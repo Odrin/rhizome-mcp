@@ -471,7 +471,7 @@ func readLogicalAttempts(ctx context.Context, query Queryer) ([]domain.LogicalAt
 		SELECT a.id, a.issue_id, a.agent_label, a.kind, a.status, a.issue_version_at_start, a.context_event_id_at_start, a.lease_expires_at, a.started_at, a.last_heartbeat_at, a.finished_at, a.result_summary, a.next_steps_json, a.verification_json, a.failure_reason_code, a.interruption_reason_code, a.reason_details
 		FROM work_attempts a
 		JOIN issues i ON a.issue_id = i.id
-		WHERE i.archived_at IS NULL
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
 		ORDER BY a.started_at ASC, a.id ASC`)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -579,7 +579,7 @@ func readLogicalAttemptNotes(ctx context.Context, query Queryer) ([]domain.Logic
 		FROM attempt_notes an
 		JOIN work_attempts a ON an.attempt_id = a.id
 		JOIN issues i ON a.issue_id = i.id
-		WHERE i.archived_at IS NULL
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
 		ORDER BY an.created_at ASC, an.id ASC`)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -633,6 +633,7 @@ func readLogicalArtifacts(ctx context.Context, query Queryer) ([]domain.LogicalA
 		FROM artifacts a
 		JOIN issues i ON a.issue_id = i.id
 		WHERE i.archived_at IS NULL
+			AND (a.attempt_id IS NULL OR a.attempt_id NOT IN (SELECT id FROM work_attempts WHERE status = 'active'))
 		ORDER BY a.created_at ASC, a.id ASC`)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -682,7 +683,8 @@ func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEven
 	rows, err := query.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, attempt_id, payload, created_at
 		FROM issue_events
-		WHERE issue_id IS NULL OR issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
+		WHERE (issue_id IS NULL OR issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL))
+			AND (attempt_id IS NULL OR attempt_id NOT IN (SELECT id FROM work_attempts WHERE status = 'active'))
 		ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, time.Time{}, err
