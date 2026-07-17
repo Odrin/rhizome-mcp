@@ -49,6 +49,11 @@ func (s *stubProjectService) ValidateLogicalProjectImport(context.Context, []byt
 	return domain.LogicalProjectImportDryRun{}, s.err
 }
 
+func (s *stubProjectService) ApplyLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportApplyResult, error) {
+	s.calls++
+	return domain.LogicalProjectImportApplyResult{}, s.err
+}
+
 type stubIssueService struct {
 	listInput domain.ListIssuesInput
 	listPage  domain.IssueList
@@ -152,6 +157,21 @@ func TestRunUsageAndErrors(t *testing.T) {
 				t.Fatalf("expected error to contain %q, got %q", tt.wantErrText, err.Error())
 			}
 		})
+	}
+}
+
+func TestRunProjectImportApply(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	services := Services{ProjectService: &stubProjectService{}}
+	cli := New(services, &stdout, &stderr, nil, nil)
+	if err := cli.Run(context.Background(), []string{"project", "import", "--input", "-", "--apply"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+	if stdout.Len() == 0 {
+		t.Fatal("expected JSON output")
 	}
 }
 

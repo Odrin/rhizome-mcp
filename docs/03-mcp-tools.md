@@ -57,33 +57,34 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 25 tools:
+The first version exposes 26 tools:
 
 1. `get_project`
 2. `export_project`
 3. `validate_import`
-4. `list_labels`
-5. `create_issue`
-6. `update_issue`
-7. `get_issue`
-8. `list_issues`
-9. `archive_issue`
-10. `manage_issue_relation`
-11. `get_issue_graph`
-12. `get_planning_graph`
-13. `validate_issue_plan`
-14. `apply_issue_plan`
-15. `add_comment`
-16. `record_decision`
-17. `list_decisions`
-18. `get_issue_activity`
-19. `claim_issue`
-20. `renew_attempt`
-21. `save_attempt_note`
-22. `finish_attempt`
-23. `get_work_context`
-24. `search`
-25. `get_changes`
+4. `apply_import`
+5. `list_labels`
+6. `create_issue`
+7. `update_issue`
+8. `get_issue`
+9. `list_issues`
+10. `archive_issue`
+11. `manage_issue_relation`
+12. `get_issue_graph`
+13. `get_planning_graph`
+14. `validate_issue_plan`
+15. `apply_issue_plan`
+16. `add_comment`
+17. `record_decision`
+18. `list_decisions`
+19. `get_issue_activity`
+20. `claim_issue`
+21. `renew_attempt`
+22. `save_attempt_note`
+23. `finish_attempt`
+24. `get_work_context`
+25. `search`
+26. `get_changes`
 
 ---
 
@@ -161,7 +162,25 @@ Output:
 
 The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
 
-### 4.4. `list_labels`
+### 4.4. `apply_import`
+
+Purpose:
+
+Apply a validated version 1 logical project interchange document into an empty destination and return a deterministic apply result with created counts, zero conflicts on success, and the latest destination event ID.
+
+Input:
+
+```json
+{
+  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+}
+```
+
+Output:
+
+The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
+
+### 4.5. `list_labels`
 
 Input:
 

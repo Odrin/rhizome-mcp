@@ -229,6 +229,274 @@ func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *test
 	}
 }
 
+func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.T) {
+	db, _ := openProjectDatabase(t, "Imported", "Instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(time.Date(2026, 7, 17, 18, 24, 6, 0, time.UTC)), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	parentIssueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("parent issue ID generation: %v", err)
+	}
+	childIssueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("child issue ID generation: %v", err)
+	}
+	labelID, err := generator.New()
+	if err != nil {
+		t.Fatalf("label ID generation: %v", err)
+	}
+	relationID, err := generator.New()
+	if err != nil {
+		t.Fatalf("relation ID generation: %v", err)
+	}
+	commentID, err := generator.New()
+	if err != nil {
+		t.Fatalf("comment ID generation: %v", err)
+	}
+	decisionID, err := generator.New()
+	if err != nil {
+		t.Fatalf("decision ID generation: %v", err)
+	}
+	attemptID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt ID generation: %v", err)
+	}
+	attemptNoteID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt note ID generation: %v", err)
+	}
+	artifactID, err := generator.New()
+	if err != nil {
+		t.Fatalf("artifact ID generation: %v", err)
+	}
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    1,
+		ExportedAt: "2026-07-17T18:24:06Z",
+		Project: domain.LogicalProjectProject{
+			ID:           sqliteTestProjectID,
+			Name:         stringValuePointer("Imported project"),
+			Instructions: stringValuePointer("Imported instructions"),
+			CreatedAt:    "2026-07-17T18:24:06Z",
+			UpdatedAt:    "2026-07-17T18:24:06Z",
+		},
+		Issues: []domain.LogicalIssue{{
+			ID:        parentIssueID,
+			Type:      "epic",
+			Title:     "Epic",
+			Status:    "open",
+			Priority:  "high",
+			CreatedAt: "2026-07-17T18:24:06Z",
+			UpdatedAt: "2026-07-17T18:24:06Z",
+		}, {
+			ID:                 childIssueID,
+			Type:               "task",
+			Title:              "Task",
+			Status:             "ready",
+			Priority:           "medium",
+			ParentID:           stringValuePointer(parentIssueID),
+			CreatedBySessionID: nil,
+			CreatedAt:          "2026-07-17T18:24:07Z",
+			UpdatedAt:          "2026-07-17T18:24:07Z",
+		}},
+		Labels:       []domain.LogicalLabel{{ID: labelID, Name: "alpha", CreatedAt: "2026-07-17T18:24:06Z"}},
+		IssueLabels:  []domain.LogicalIssueLabel{{IssueID: childIssueID, LabelID: labelID}},
+		Relations:    []domain.LogicalRelation{{ID: relationID, SourceIssueID: parentIssueID, TargetIssueID: childIssueID, Type: "related_to", CreatedAt: "2026-07-17T18:24:08Z"}},
+		Comments:     []domain.LogicalComment{{ID: commentID, IssueID: childIssueID, Content: "hello", CreatedAt: "2026-07-17T18:24:08Z"}},
+		Decisions:    []domain.LogicalDecision{{ID: decisionID, IssueID: stringValuePointer(childIssueID), Title: "Decision", Summary: "Why", Content: "Detail", Status: "active", CreatedAt: "2026-07-17T18:24:09Z"}},
+		Attempts:     []domain.LogicalAttempt{{ID: attemptID, IssueID: childIssueID, Kind: "work", Status: "completed", IssueVersionAtStart: 1, ContextEventIDAtStart: 0, LeaseExpiresAt: "2026-07-17T18:24:10Z", StartedAt: "2026-07-17T18:24:10Z", LastHeartbeatAt: "2026-07-17T18:24:10Z", FinishedAt: stringValuePointer("2026-07-17T18:24:11Z"), ResultSummary: stringValuePointer("done"), NextSteps: []string{"next"}, Verification: []string{"ok"}}},
+		AttemptNotes: []domain.LogicalAttemptNote{{ID: attemptNoteID, AttemptID: attemptID, Kind: "checkpoint", Content: "note", NextSteps: []string{"next"}, Important: true, CreatedAt: "2026-07-17T18:24:12Z"}},
+		Artifacts:    []domain.LogicalArtifact{{ID: artifactID, IssueID: childIssueID, AttemptID: stringValuePointer(attemptID), Type: "file", URI: "docs/example.md", Title: stringValuePointer("artifact"), Metadata: []byte(`{"type":"note"}`), CreatedAt: "2026-07-17T18:24:13Z"}},
+		Events:       []domain.LogicalEvent{{SourceID: 1, IssueID: stringValuePointer(childIssueID), EventType: "issue_created", Payload: []byte(`{"kind":"created"}`), CreatedAt: "2026-07-17T18:24:14Z"}},
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	result, err := repository.ApplyLogicalProjectImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+	if result.Counts.Issues != 2 || result.Counts.Labels != 1 || result.Counts.Attempts != 1 || len(result.Conflicts) != 0 || result.LatestEventID <= 0 {
+		t.Fatalf("apply result = %#v", result)
+	}
+
+	var issueCount int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues`).Scan(&issueCount)
+	}); err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if issueCount != 2 {
+		t.Fatalf("issue count = %d, want 2", issueCount)
+	}
+	var nextIssueNumber int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT next_issue_number FROM projects WHERE id = ?`, sqliteTestProjectID).Scan(&nextIssueNumber)
+	}); err != nil {
+		t.Fatalf("read next issue number: %v", err)
+	}
+	if nextIssueNumber != 9 {
+		t.Fatalf("next_issue_number = %d, want 9", nextIssueNumber)
+	}
+
+	var parentID string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT parent_id FROM issues WHERE title = ? ORDER BY sequence_no LIMIT 1`, "Task").Scan(&parentID)
+	}); err != nil {
+		t.Fatalf("read parent id: %v", err)
+	}
+	if parentID == "" || parentID == parentIssueID {
+		t.Fatalf("parent_id was not remapped: %q", parentID)
+	}
+	if parentID == "" {
+		t.Fatalf("parent_id = empty, want remapped value")
+	}
+
+	var labelCount int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COUNT(*) FROM labels`).Scan(&labelCount)
+	}); err != nil {
+		t.Fatalf("count labels: %v", err)
+	}
+	if labelCount != 1 {
+		t.Fatalf("label count = %d, want 1", labelCount)
+	}
+
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	exportedBytes, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	if _, err := domain.ParseLogicalProjectImportPlan(exportedBytes); err != nil {
+		t.Fatalf("exported document failed validation: %v", err)
+	}
+}
+
+func TestProjectRepositoryRollsBackFailedImportAndPreservesSequence(t *testing.T) {
+	db, _ := openProjectDatabase(t, "Failed", "Instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(time.Date(2026, 7, 17, 18, 24, 6, 0, time.UTC)), rand.New(rand.NewSource(2)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	attemptID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt ID generation: %v", err)
+	}
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    1,
+		ExportedAt: "2026-07-17T18:24:06Z",
+		Project: domain.LogicalProjectProject{
+			ID:           sqliteTestProjectID,
+			Name:         stringValuePointer("Imported project"),
+			Instructions: stringValuePointer("Imported instructions"),
+			CreatedAt:    "2026-07-17T18:24:06Z",
+			UpdatedAt:    "2026-07-17T18:24:06Z",
+		},
+		Issues:   []domain.LogicalIssue{{ID: issueID, Type: "task", Title: "Task", Status: "ready", Priority: "medium", CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"}},
+		Attempts: []domain.LogicalAttempt{{ID: attemptID, IssueID: issueID, Kind: "work", Status: "failed", IssueVersionAtStart: 1, ContextEventIDAtStart: 0, LeaseExpiresAt: "2026-07-17T18:24:07Z", StartedAt: "2026-07-17T18:24:07Z", LastHeartbeatAt: "2026-07-17T18:24:07Z", FinishedAt: stringValuePointer("2026-07-17T18:24:08Z"), ResultSummary: stringValuePointer("failed")}},
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := repository.ApplyLogicalProjectImport(ctx, plan); err == nil {
+		t.Fatal("ApplyLogicalProjectImport() succeeded for invalid attempt state")
+	}
+
+	var issueCount int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues`).Scan(&issueCount)
+	}); err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if issueCount != 0 {
+		t.Fatalf("issue count = %d, want 0", issueCount)
+	}
+	var nextIssueNumber int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT next_issue_number FROM projects WHERE id = ?`, sqliteTestProjectID).Scan(&nextIssueNumber)
+	}); err != nil {
+		t.Fatalf("read next issue number: %v", err)
+	}
+	if nextIssueNumber != 7 {
+		t.Fatalf("next_issue_number = %d, want 7", nextIssueNumber)
+	}
+}
+
+func TestProjectRepositoryReturnsConflictOnRetryAfterSuccessfulImport(t *testing.T) {
+	db, _ := openProjectDatabase(t, "Retry", "Instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(time.Date(2026, 7, 17, 18, 24, 6, 0, time.UTC)), rand.New(rand.NewSource(3)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    1,
+		ExportedAt: "2026-07-17T18:24:06Z",
+		Project:    domain.LogicalProjectProject{ID: sqliteTestProjectID, Name: stringValuePointer("Imported project"), Instructions: stringValuePointer("Imported instructions"), CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"},
+		Issues:     []domain.LogicalIssue{{ID: issueID, Type: "task", Title: "Task", Status: "ready", Priority: "medium", CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"}},
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := repository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("first apply failed: %v", err)
+	}
+	result, err := repository.ApplyLogicalProjectImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("second apply failed: %v", err)
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "empty_destination_required" {
+		t.Fatalf("retry result = %#v", result)
+	}
+}
+
 func TestProjectRepositoryMapsTimestampCorruptionToStableError(t *testing.T) {
 	db, _ := openProjectDatabase(t, "name", "instructions")
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
@@ -414,4 +682,8 @@ func assertProjectDomainCode(t *testing.T, err error, code string) {
 	if !errors.Is(err, &domain.Error{Code: code}) {
 		t.Fatalf("error = %v, want domain code %s", err, code)
 	}
+}
+
+func stringValuePointer(value string) *string {
+	return &value
 }

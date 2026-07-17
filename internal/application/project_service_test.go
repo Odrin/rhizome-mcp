@@ -12,11 +12,15 @@ import (
 )
 
 type recordingProjectRepository struct {
-	project    domain.Project
-	export     domain.LogicalProjectDocument
-	err        error
-	called     bool
-	hasContent bool
+	project        domain.Project
+	export         domain.LogicalProjectDocument
+	err            error
+	called         bool
+	hasContent     bool
+	applyResult    domain.LogicalProjectImportApplyResult
+	applyPlan      domain.LogicalProjectImportPlan
+	applyCalls     int
+	applyResultErr error
 }
 
 func (repository *recordingProjectRepository) GetProject(context.Context) (domain.Project, error) {
@@ -32,6 +36,11 @@ func (repository *recordingProjectRepository) ExportLogicalProject(context.Conte
 func (repository *recordingProjectRepository) HasLogicalProjectImportDestinationContent(context.Context) (bool, error) {
 	repository.called = true
 	return repository.hasContent, repository.err
+}
+
+func (repository *recordingProjectRepository) ApplyLogicalProjectImport(context.Context, domain.LogicalProjectImportPlan) (domain.LogicalProjectImportApplyResult, error) {
+	repository.applyCalls++
+	return repository.applyResult, repository.applyResultErr
 }
 
 func TestProjectServiceGetsProjectMetadata(t *testing.T) {
@@ -143,5 +152,41 @@ func TestProjectServiceRejectsMalformedLogicalProjectImport(t *testing.T) {
 	}
 	if _, err := service.ValidateLogicalProjectImport(context.Background(), []byte(`{"format":"rhizome-logical-project"}`)); err == nil {
 		t.Fatal("ValidateLogicalProjectImport() succeeded for malformed document")
+	}
+}
+
+func TestProjectServiceAppliesLogicalProjectImport(t *testing.T) {
+	repository := &recordingProjectRepository{applyResult: domain.LogicalProjectImportApplyResult{LatestEventID: 12}}
+	service, err := application.NewProjectService(repository)
+	if err != nil {
+		t.Fatalf("NewProjectService() error = %v", err)
+	}
+	result, err := service.ApplyLogicalProjectImport(context.Background(), []byte(`{
+		"format": "rhizome-logical-project",
+		"version": 1,
+		"exported_at": "2026-07-17T18:24:06Z",
+		"project": {
+			"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			"name": null,
+			"instructions": null,
+			"created_at": "2026-07-17T18:24:06Z",
+			"updated_at": "2026-07-17T18:24:06Z"
+		},
+		"issues": [],
+		"labels": [],
+		"issue_labels": [],
+		"relations": [],
+		"comments": [],
+		"decisions": [],
+		"attempts": [],
+		"attempt_notes": [],
+		"artifacts": [],
+		"events": []
+	}`))
+	if err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+	if repository.applyCalls != 1 || result.LatestEventID != 12 {
+		t.Fatalf("apply calls = %d, result = %#v", repository.applyCalls, result)
 	}
 }

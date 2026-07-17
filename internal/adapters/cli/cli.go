@@ -29,6 +29,7 @@ type ProjectService interface {
 	GetProject(context.Context) (domain.Project, error)
 	ExportLogicalProject(context.Context) ([]byte, error)
 	ValidateLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportDryRun, error)
+	ApplyLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportApplyResult, error)
 }
 
 // IssueService exposes issue list/show reads for CLI commands.
@@ -350,6 +351,7 @@ func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("project import", flag.ContinueOnError)
 	inputPath := fs.String("input", "", "input path or '-' for stdin")
 	dryRun := fs.Bool("dry-run", false, "validate without applying imports")
+	apply := fs.Bool("apply", false, "apply a validated import into an empty destination")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -360,12 +362,22 @@ func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
 	if *inputPath == "" {
 		return fmt.Errorf("input is required")
 	}
-	if !*dryRun {
-		return fmt.Errorf("--dry-run is required")
+	if *dryRun && *apply {
+		return fmt.Errorf("--dry-run and --apply are mutually exclusive")
+	}
+	if !*dryRun && !*apply {
+		return fmt.Errorf("--dry-run or --apply is required")
 	}
 	data, err := readProjectImportInput(*inputPath, os.Stdin)
 	if err != nil {
 		return err
+	}
+	if *apply {
+		result, err := c.services.ProjectService.ApplyLogicalProjectImport(ctx, data)
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdoutWriter(), result)
 	}
 	result, err := c.services.ProjectService.ValidateLogicalProjectImport(ctx, data)
 	if err != nil {

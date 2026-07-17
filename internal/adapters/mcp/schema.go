@@ -84,6 +84,14 @@ func schemaValidateImportOutput() *jsonschema.Schema {
 	return typedSchema[domain.LogicalProjectImportDryRun]()
 }
 
+func schemaApplyImport() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{"document": boundedStringSchema(domain.MaxLogicalProjectImportBytes)})
+}
+
+func schemaApplyImportOutput() *jsonschema.Schema {
+	return typedSchema[domain.LogicalProjectImportApplyResult]()
+}
+
 func schemaListLabels() *jsonschema.Schema {
 	limit := boundedIntegerSchema(0, 100)
 	limit.Description = "0 uses the default limit of 50; maximum is 100."

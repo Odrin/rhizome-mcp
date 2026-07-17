@@ -53,3 +53,12 @@ func (service *ProjectService) ValidateLogicalProjectImport(ctx context.Context,
 	}
 	return plan.DryRun, nil
 }
+
+// ApplyLogicalProjectImport applies a validated logical project document into an empty destination.
+func (service *ProjectService) ApplyLogicalProjectImport(ctx context.Context, document []byte) (domain.LogicalProjectImportApplyResult, error) {
+	plan, err := domain.ParseLogicalProjectImportPlan(document)
+	if err != nil {
+		return domain.LogicalProjectImportApplyResult{}, err
+	}
+	return service.repository.ApplyLogicalProjectImport(ctx, plan)
+}
