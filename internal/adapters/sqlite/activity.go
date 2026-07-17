@@ -195,17 +195,20 @@ func buildActivityUnionArms(types []domain.ActivityCategory, issueID string) ([]
 		case domain.ActivityCategoryDecisions:
 			arms = append(arms, `SELECT 'decision' AS entity_type, decisions.id AS entity_id, decisions.created_at AS occurred_at, 2 AS type_rank, decisions.id AS sort_id FROM decisions WHERE decisions.issue_id = ?`)
 			args = append(args, issueID)
+		case domain.ActivityCategoryReviews:
+			arms = append(arms, `SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`)
+			args = append(args, issueID)
 		case domain.ActivityCategoryAttempts:
-			arms = append(arms, `SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 3 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`)
+			arms = append(arms, `SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 4 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`)
 			args = append(args, issueID)
 		case domain.ActivityCategoryAttemptNotes:
-			arms = append(arms, `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 4 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`)
+			arms = append(arms, `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`)
 			args = append(args, issueID)
 		case domain.ActivityCategoryEvents:
-			arms = append(arms, `SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 5 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`)
+			arms = append(arms, `SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 6 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`)
 			args = append(args, issueID)
 		case domain.ActivityCategoryArtifacts:
-			arms = append(arms, `SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 6 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`)
+			arms = append(arms, `SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 7 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`)
 			args = append(args, issueID)
 		default:
 			return nil, nil, domain.NewError(domain.CodeInvalidArgument, "activity category is invalid", false)
@@ -232,14 +235,16 @@ func activityCategoryRank(category domain.ActivityCategory) int {
 		return 1
 	case domain.ActivityCategoryDecisions:
 		return 2
-	case domain.ActivityCategoryAttempts:
+	case domain.ActivityCategoryReviews:
 		return 3
-	case domain.ActivityCategoryAttemptNotes:
+	case domain.ActivityCategoryAttempts:
 		return 4
-	case domain.ActivityCategoryEvents:
+	case domain.ActivityCategoryAttemptNotes:
 		return 5
-	case domain.ActivityCategoryArtifacts:
+	case domain.ActivityCategoryEvents:
 		return 6
+	case domain.ActivityCategoryArtifacts:
+		return 7
 	default:
 		return 0
 	}
@@ -259,7 +264,7 @@ func scanActivityDescriptor(scanner scanner) (activityDescriptor, error) {
 	if !entity.Valid() {
 		return activityDescriptor{}, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
 	}
-	if typeRank < 1 || typeRank > 6 {
+	if typeRank < 1 || typeRank > 7 {
 		return activityDescriptor{}, activityCorruptField(nil, "type_rank", "INVALID_VALUE")
 	}
 	if entity != expectedActivityEntityType(typeRank) {
@@ -301,12 +306,14 @@ func expectedActivityEntityType(rank int) domain.ActivityEntityType {
 	case 2:
 		return domain.ActivityEntityTypeDecision
 	case 3:
-		return domain.ActivityEntityTypeAttempt
+		return domain.ActivityEntityTypeReview
 	case 4:
-		return domain.ActivityEntityTypeAttemptNote
+		return domain.ActivityEntityTypeAttempt
 	case 5:
-		return domain.ActivityEntityTypeEvent
+		return domain.ActivityEntityTypeAttemptNote
 	case 6:
+		return domain.ActivityEntityTypeEvent
+	case 7:
 		return domain.ActivityEntityTypeArtifact
 	default:
 		return ""
@@ -317,7 +324,7 @@ func isValidActivityCursorSortID(typeRank int, value string) bool {
 	if value == "" {
 		return false
 	}
-	if typeRank == 5 {
+	if typeRank == 6 {
 		if len(value) != 20 {
 			return false
 		}
@@ -371,6 +378,12 @@ func loadActivityItem(ctx context.Context, query Queryer, issueID string, descri
 			return domain.ActivityItem{}, err
 		}
 		item.Artifact = &artifact
+	case domain.ActivityEntityTypeReview:
+		review, err := loadActivityReview(ctx, query, descriptor.EntityID)
+		if err != nil {
+			return domain.ActivityItem{}, err
+		}
+		item.Review = &review
 	default:
 		return domain.ActivityItem{}, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
 	}
@@ -834,6 +847,46 @@ func loadActivityArtifact(ctx context.Context, query Queryer, id string) (domain
 		return domain.Artifact{}, err
 	}
 	return artifact, nil
+}
+
+func loadActivityReview(ctx context.Context, query Queryer, id string) (domain.ReviewRequest, error) {
+	return scanActivityReview(query.QueryRowContext(ctx, `SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at FROM review_requests WHERE id = ?`, id))
+}
+
+func scanActivityReview(scanner scanner) (domain.ReviewRequest, error) {
+	var request domain.ReviewRequest
+	var artifactIDsJSON []byte
+	var status string
+	var supersedesID sql.NullString
+	var activeAttemptID sql.NullString
+	var createdAtText string
+	var resolvedAtText sql.NullString
+	var err error
+	if err = scanner.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.ReviewRequest{}, activityCorrupt(err)
+		}
+		return domain.ReviewRequest{}, err
+	}
+	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
+	if err != nil {
+		return domain.ReviewRequest{}, activityCorrupt(err)
+	}
+	request.Status = domain.ReviewRequestStatus(status)
+	if supersedesID.Valid {
+		value := supersedesID.String
+		request.SupersedesID = &value
+	}
+	if activeAttemptID.Valid {
+		value := activeAttemptID.String
+		request.ActiveAttemptID = &value
+	}
+	request.CreatedAt = parseTimestamp(createdAtText)
+	if resolvedAtText.Valid {
+		value := parseTimestamp(resolvedAtText.String)
+		request.ResolvedAt = &value
+	}
+	return request, nil
 }
 
 func scanActivityArtifact(scanner scanner) (domain.Artifact, error) {

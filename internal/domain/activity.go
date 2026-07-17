@@ -14,6 +14,7 @@ type ActivityCategory string
 const (
 	ActivityCategoryComments     ActivityCategory = "comments"
 	ActivityCategoryDecisions    ActivityCategory = "decisions"
+	ActivityCategoryReviews      ActivityCategory = "reviews"
 	ActivityCategoryAttempts     ActivityCategory = "attempts"
 	ActivityCategoryAttemptNotes ActivityCategory = "attempt_notes"
 	ActivityCategoryEvents       ActivityCategory = "events"
@@ -22,8 +23,8 @@ const (
 
 func (value ActivityCategory) Valid() bool {
 	switch value {
-	case ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryAttempts,
-		ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts:
+	case ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryReviews,
+		ActivityCategoryAttempts, ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts:
 		return true
 	default:
 		return false
@@ -47,6 +48,7 @@ type ActivityEntityType string
 const (
 	ActivityEntityTypeComment     ActivityEntityType = "comment"
 	ActivityEntityTypeDecision    ActivityEntityType = "decision"
+	ActivityEntityTypeReview      ActivityEntityType = "review"
 	ActivityEntityTypeAttempt     ActivityEntityType = "attempt"
 	ActivityEntityTypeAttemptNote ActivityEntityType = "attempt_note"
 	ActivityEntityTypeEvent       ActivityEntityType = "event"
@@ -55,8 +57,8 @@ const (
 
 func (value ActivityEntityType) Valid() bool {
 	switch value {
-	case ActivityEntityTypeComment, ActivityEntityTypeDecision, ActivityEntityTypeAttempt,
-		ActivityEntityTypeAttemptNote, ActivityEntityTypeEvent, ActivityEntityTypeArtifact:
+	case ActivityEntityTypeComment, ActivityEntityTypeDecision, ActivityEntityTypeReview,
+		ActivityEntityTypeAttempt, ActivityEntityTypeAttemptNote, ActivityEntityTypeEvent, ActivityEntityTypeArtifact:
 		return true
 	default:
 		return false
@@ -161,6 +163,7 @@ type ActivityItem struct {
 	AttemptNote *AttemptNote       `json:"attempt_note,omitempty"`
 	Event       *IssueEvent        `json:"event,omitempty"`
 	Artifact    *Artifact          `json:"artifact,omitempty"`
+	Review      *ReviewRequest     `json:"review,omitempty"`
 }
 
 // IssueActivity is one cursor-paginated activity result.
@@ -203,6 +206,9 @@ func ValidateActivityItem(item ActivityItem) error {
 		payloads++
 	}
 	if item.Artifact != nil {
+		payloads++
+	}
+	if item.Review != nil {
 		payloads++
 	}
 	if payloads != 1 {
@@ -278,6 +284,17 @@ func ValidateActivityItem(item ActivityItem) error {
 			!item.Artifact.CreatedAt.Equal(item.OccurredAt) {
 			return validationError("artifact", "MISMATCH", "does not match activity identity, scope, or timestamp")
 		}
+	case ActivityEntityTypeReview:
+		if item.Review == nil {
+			return validationError("review", "REQUIRED", "is required for review activity")
+		}
+		if err := validateActivityULID("entity_id", item.EntityID); err != nil {
+			return err
+		}
+		if item.Review.ID != item.EntityID || item.Review.IssueID != item.IssueID ||
+			!item.Review.CreatedAt.Equal(item.OccurredAt) {
+			return validationError("review", "MISMATCH", "does not match activity identity, scope, or timestamp")
+		}
 	}
 	return nil
 }
@@ -305,6 +322,7 @@ func CloneActivityItem(item ActivityItem) ActivityItem {
 	item.AttemptNote = cloneActivityNote(item.AttemptNote)
 	item.Event = cloneActivityEvent(item.Event)
 	item.Artifact = cloneActivityArtifact(item.Artifact)
+	item.Review = cloneActivityReview(item.Review)
 	return item
 }
 
@@ -387,6 +405,18 @@ func cloneActivityArtifact(value *Artifact) *Artifact {
 		return nil
 	}
 	result := CloneArtifact(*value)
+	return &result
+}
+
+func cloneActivityReview(value *ReviewRequest) *ReviewRequest {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.ArtifactIDs = append([]string(nil), value.ArtifactIDs...)
+	result.SupersedesID = copyOptionalString(value.SupersedesID)
+	result.ActiveAttemptID = copyOptionalString(value.ActiveAttemptID)
+	result.ResolvedAt = cloneTimePointer(value.ResolvedAt)
 	return &result
 }
 

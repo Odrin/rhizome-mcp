@@ -202,6 +202,21 @@ type WorkContextAttemptSummary struct {
 	NextSteps     []string
 }
 
+// WorkContextReview is the compact review projection used by default work context.
+type WorkContextReview struct {
+	ID                 string
+	Status             ReviewRequestStatus
+	TargetIssueVersion int64
+	TargetEventID      int64
+	ArtifactIDs        []string
+	Outcome            *ReviewOutcomeRecord
+	Reason             *string
+	FollowUpID         *string
+	Claimable          bool
+	CreatedAt          time.Time
+	ResolvedAt         *time.Time
+}
+
 // WorkContext is the compact work-context domain contract.
 type WorkContext struct {
 	Issue           WorkContextIssue
@@ -219,6 +234,7 @@ type WorkContext struct {
 	DecisionContent             []Decision
 	AttemptHistory              []WorkAttempt
 	Artifacts                   []Artifact
+	Reviews                     []WorkContextReview
 	ProjectInstructions         *string
 	ChangesSincePreviousAttempt []IssueEvent
 
@@ -240,6 +256,7 @@ func NewEmptyWorkContext() WorkContext {
 		DecisionContent:             []Decision{},
 		AttemptHistory:              []WorkAttempt{},
 		Artifacts:                   []Artifact{},
+		Reviews:                     []WorkContextReview{},
 		ChangesSincePreviousAttempt: []IssueEvent{},
 		TruncatedSections:           []WorkContextInclude{},
 	}
@@ -262,6 +279,7 @@ func CloneWorkContext(value WorkContext) WorkContext {
 	result.DecisionContent = cloneDecisions(value.DecisionContent)
 	result.AttemptHistory = cloneWorkAttempts(value.AttemptHistory)
 	result.Artifacts = CloneArtifacts(value.Artifacts)
+	result.Reviews = cloneWorkContextReviews(value.Reviews)
 	result.ProjectInstructions = copyOptionalString(value.ProjectInstructions)
 	result.ChangesSincePreviousAttempt = cloneIssueEvents(value.ChangesSincePreviousAttempt)
 	result.TruncatedSections = cloneWorkContextIncludes(value.TruncatedSections)
@@ -317,6 +335,36 @@ func cloneWorkContextAttemptSummary(value *WorkContextAttemptSummary) *WorkConte
 	result.FinishedAt = cloneTimePointer(value.FinishedAt)
 	result.ResultSummary = cloneOptionalString(value.ResultSummary)
 	result.NextSteps = cloneStringSlice(value.NextSteps)
+	return &result
+}
+
+func cloneWorkContextReviews(values []WorkContextReview) []WorkContextReview {
+	if values == nil {
+		return nil
+	}
+	result := make([]WorkContextReview, len(values))
+	for index, value := range values {
+		result[index] = cloneWorkContextReview(value)
+	}
+	return result
+}
+
+func cloneWorkContextReview(value WorkContextReview) WorkContextReview {
+	result := value
+	result.ArtifactIDs = cloneStringSlice(value.ArtifactIDs)
+	result.Outcome = cloneReviewOutcomeRecord(value.Outcome)
+	result.Reason = cloneOptionalString(value.Reason)
+	result.FollowUpID = cloneOptionalString(value.FollowUpID)
+	result.ResolvedAt = cloneTimePointer(value.ResolvedAt)
+	return result
+}
+
+func cloneReviewOutcomeRecord(value *ReviewOutcomeRecord) *ReviewOutcomeRecord {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.Reason = cloneOptionalString(value.Reason)
 	return &result
 }
 
