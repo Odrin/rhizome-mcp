@@ -299,7 +299,7 @@ func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.
 		}},
 		Labels:       []domain.LogicalLabel{{ID: labelID, Name: "alpha", CreatedAt: "2026-07-17T18:24:06Z"}},
 		IssueLabels:  []domain.LogicalIssueLabel{{IssueID: childIssueID, LabelID: labelID}},
-		Relations:    []domain.LogicalRelation{{ID: relationID, SourceIssueID: parentIssueID, TargetIssueID: childIssueID, Type: "related_to", CreatedAt: "2026-07-17T18:24:08Z"}},
+		Relations:    []domain.LogicalRelation{{ID: relationID, SourceIssueID: parentIssueID, TargetIssueID: childIssueID, Type: "blocks", CreatedAt: "2026-07-17T18:24:08Z"}},
 		Comments:     []domain.LogicalComment{{ID: commentID, IssueID: childIssueID, Content: "hello", CreatedAt: "2026-07-17T18:24:08Z"}},
 		Decisions:    []domain.LogicalDecision{{ID: decisionID, IssueID: stringValuePointer(childIssueID), Title: "Decision", Summary: "Why", Content: "Detail", Status: "active", CreatedAt: "2026-07-17T18:24:09Z"}},
 		Attempts:     []domain.LogicalAttempt{{ID: attemptID, IssueID: childIssueID, Kind: "work", Status: "completed", IssueVersionAtStart: 1, ContextEventIDAtStart: 0, LeaseExpiresAt: "2026-07-17T18:24:10Z", StartedAt: "2026-07-17T18:24:10Z", LastHeartbeatAt: "2026-07-17T18:24:10Z", FinishedAt: stringValuePointer("2026-07-17T18:24:11Z"), ResultSummary: stringValuePointer("done"), NextSteps: []string{"next"}, Verification: []string{"ok"}}},
