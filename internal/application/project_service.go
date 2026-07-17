@@ -24,3 +24,16 @@ func NewProjectService(repository ports.ProjectRepository) (*ProjectService, err
 func (service *ProjectService) GetProject(ctx context.Context) (domain.Project, error) {
 	return service.repository.GetProject(ctx)
 }
+
+// ExportLogicalProject renders the current project's logical interchange document as JSON bytes.
+func (service *ProjectService) ExportLogicalProject(ctx context.Context) ([]byte, error) {
+	document, err := service.repository.ExportLogicalProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		return nil, domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be encoded", false)
+	}
+	return data, nil
+}

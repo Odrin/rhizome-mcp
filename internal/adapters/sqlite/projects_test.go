@@ -1,15 +1,19 @@
 package sqlite_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"math/rand"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 )
 
@@ -86,6 +90,145 @@ func TestProjectRepositoryMapsNullableMetadataAndNoEventToZero(t *testing.T) {
 	}
 	if !got.CreatedAt.Equal(now) || !got.UpdatedAt.Equal(now) {
 		t.Fatalf("timestamps = %v, %v; want %v", got.CreatedAt, got.UpdatedAt, now)
+	}
+}
+
+func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *testing.T) {
+	db, now := openProjectDatabase(t, "name", "instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	archivedIssueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("archived issue ID generation: %v", err)
+	}
+	relatedIssueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("related issue ID generation: %v", err)
+	}
+	labelID, err := generator.New()
+	if err != nil {
+		t.Fatalf("label ID generation: %v", err)
+	}
+	attemptID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt ID generation: %v", err)
+	}
+	attemptNoteID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt note ID generation: %v", err)
+	}
+	artifactID, err := generator.New()
+	if err != nil {
+		t.Fatalf("artifact ID generation: %v", err)
+	}
+	commentID, err := generator.New()
+	if err != nil {
+		t.Fatalf("comment ID generation: %v", err)
+	}
+	decisionID, err := generator.New()
+	if err != nil {
+		t.Fatalf("decision ID generation: %v", err)
+	}
+	relationID, err := generator.New()
+	if err != nil {
+		t.Fatalf("relation ID generation: %v", err)
+	}
+	if err = db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		for _, row := range []struct {
+			query string
+			args  []any
+		}{
+			{query: `INSERT INTO issues(id, sequence_no, type, title, description, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 1, 'task', 'Visible issue', 'desc', 'ready', 'high', 1, ?, ?, NULL)`, args: []any{issueID, now.Add(1 * time.Second).Format(time.RFC3339Nano), now.Add(2 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 2, 'task', 'Archived issue', 'ready', 'high', 1, ?, ?, ?)`, args: []any{archivedIssueID, now.Add(3 * time.Second).Format(time.RFC3339Nano), now.Add(4 * time.Second).Format(time.RFC3339Nano), now.Add(5 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 3, 'task', 'Target issue', 'ready', 'high', 1, ?, ?)`, args: []any{relatedIssueID, now.Add(6 * time.Second).Format(time.RFC3339Nano), now.Add(7 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO labels(id, name, description, created_at) VALUES (?, 'visible', 'label', ?)`, args: []any{labelID, now.Add(8 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issue_labels(issue_id, label_id) VALUES (?, ?)`, args: []any{issueID, labelID}},
+			{query: `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, args: []any{relationID, issueID, relatedIssueID, now.Add(9 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'visible comment', ?)`, args: []any{commentID, issueID, now.Add(10 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'archived comment', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAK", archivedIssueID, now.Add(11 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Decision', 'Reason', 'Detail', 'active', ?)`, args: []any{decisionID, issueID, now.Add(12 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Archived decision', 'Reason', 'Detail', 'active', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAL", archivedIssueID, now.Add(13 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'work', 'active', 1, 0, X'00', ?, ?, ?, ?, ?, ?)`, args: []any{attemptID, issueID, now.Add(14 * time.Second).Format(time.RFC3339Nano), now.Add(15 * time.Second).Format(time.RFC3339Nano), now.Add(16 * time.Second).Format(time.RFC3339Nano), "done", `[]`, `[]`}},
+			{query: `INSERT INTO attempt_notes(id, attempt_id, kind, content, next_steps_json, important, created_at) VALUES (?, ?, 'checkpoint', 'note', ?, 1, ?)`, args: []any{attemptNoteID, attemptID, `[]`, now.Add(17 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, 'file', 'docs/example.md', 'artifact', '{"kind":"note"}', ?)`, args: []any{artifactID, issueID, attemptID, now.Add(18 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"created"}', ?)`, args: []any{issueID, now.Add(19 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"archived"}', ?)`, args: []any{archivedIssueID, now.Add(20 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (NULL, 'project_event', '{"kind":"project"}', ?)`, args: []any{now.Add(21 * time.Second).Format(time.RFC3339Nano)}},
+		} {
+			if _, err := tx.ExecContext(ctx, row.query, row.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed export rows: %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	first, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	second, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	firstBytes, err := domain.MarshalLogicalProjectDocument(first)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	secondBytes, err := domain.MarshalLogicalProjectDocument(second)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	if !bytes.Equal(firstBytes, secondBytes) {
+		t.Fatalf("exports differ across repeated calls\nfirst=%s\nsecond=%s", firstBytes, secondBytes)
+	}
+	if len(first.Issues) != 2 || first.Issues[0].ID != issueID || first.Issues[1].ID != relatedIssueID {
+		t.Fatalf("issues = %#v", first.Issues)
+	}
+	if len(first.Comments) != 1 || first.Comments[0].ID != commentID {
+		t.Fatalf("comments = %#v", first.Comments)
+	}
+	if len(first.Decisions) != 1 || first.Decisions[0].ID != decisionID {
+		t.Fatalf("decisions = %#v", first.Decisions)
+	}
+	if len(first.Attempts) != 1 || first.Attempts[0].ID != attemptID {
+		t.Fatalf("attempts = %#v", first.Attempts)
+	}
+	if first.Attempts[0].SessionID != nil || first.Attempts[0].AgentLabel != nil || len(first.Attempts[0].NextSteps) != 0 || len(first.Attempts[0].Verification) != 0 {
+		t.Fatalf("attempt export = %#v", first.Attempts[0])
+	}
+	if len(first.AttemptNotes) != 1 || first.AttemptNotes[0].ID != attemptNoteID {
+		t.Fatalf("attempt notes = %#v", first.AttemptNotes)
+	}
+	if len(first.Artifacts) != 1 || first.Artifacts[0].ID != artifactID {
+		t.Fatalf("artifacts = %#v", first.Artifacts)
+	}
+	if len(first.Events) != 2 || first.Events[0].IssueID == nil || first.Events[1].IssueID != nil {
+		t.Fatalf("events = %#v", first.Events)
+	}
+	if first.Attempts[0].SessionID != nil || first.Comments[0].CreatedBySessionID != nil || first.Decisions[0].CreatedBySessionID != nil || first.Events[0].SessionID != nil {
+		t.Fatalf("session references were leaked: %#v", first)
+	}
+	if len(first.IssueLabels) != 1 || first.IssueLabels[0].IssueID != issueID {
+		t.Fatalf("issue labels = %#v", first.IssueLabels)
+	}
+	if len(first.Relations) != 1 || first.Relations[0].ID != relationID {
+		t.Fatalf("relations = %#v", first.Relations)
+	}
+	if first.Project.ID != sqliteTestProjectID || first.Format != "rhizome-logical-project" || first.Version != 1 {
+		t.Fatalf("document metadata = %#v", first)
 	}
 }
 

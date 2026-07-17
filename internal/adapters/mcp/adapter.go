@@ -3,6 +3,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -260,6 +261,7 @@ func isContextCancellation(err error) bool {
 
 func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
+	sdkmcp.AddTool(server, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput()), adapter.exportProject)
 	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
 	sdkmcp.AddTool(server, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
 	sdkmcp.AddTool(server, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
@@ -589,6 +591,19 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 	output := graphOutputFromDomain(graph)
 	output.NextActions = []string{"Inspect an entry point with get_work_context."}
 	return success(output, "planning graph returned")
+}
+
+func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallToolRequest, input exportProjectInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	data, err := adapter.projects.ExportLogicalProject(ctx)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	var document domain.LogicalProjectDocument
+	if err := json.Unmarshal(data, &document); err != nil {
+		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
+	}
+	return success(document, "project export returned")
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
