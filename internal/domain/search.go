@@ -14,12 +14,13 @@ const (
 	SearchEntityTypeIssue       SearchEntityType = "issue"
 	SearchEntityTypeComment     SearchEntityType = "comment"
 	SearchEntityTypeDecision    SearchEntityType = "decision"
+	SearchEntityTypeReview      SearchEntityType = "review"
 	SearchEntityTypeAttemptNote SearchEntityType = "attempt_note"
 )
 
 func (value SearchEntityType) Valid() bool {
 	switch value {
-	case SearchEntityTypeIssue, SearchEntityTypeComment, SearchEntityTypeDecision, SearchEntityTypeAttemptNote:
+	case SearchEntityTypeIssue, SearchEntityTypeComment, SearchEntityTypeDecision, SearchEntityTypeReview, SearchEntityTypeAttemptNote:
 		return true
 	default:
 		return false

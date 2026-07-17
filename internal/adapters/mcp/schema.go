@@ -141,7 +141,7 @@ func schemaGetIssue() *jsonschema.Schema {
 func schemaGetIssueActivity() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(),
-		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(6), UniqueItems: true},
+		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "reviews", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(7), UniqueItems: true},
 		"limit":    boundedIntegerSchema(0, 100),
 		"cursor":   nullableBoundedStringSchema(4096),
 		"order":    enumSchema("newest_first"),
@@ -151,7 +151,7 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 func schemaSearch() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"query":            boundedStringSchema(domain.MaxSearchQueryRunes),
-		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "attempt_note"), MaxItems: intPointer(4), UniqueItems: true},
+		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true},
 		"issue_id":         nullableIssueIdentifierSchema(),
 		"epic_id":          nullableIssueIdentifierSchema(),
 		"statuses":         &jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true},

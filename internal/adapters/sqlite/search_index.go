@@ -36,6 +36,10 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 				SELECT 'decision', id, issue_id, title, summary || char(10) || content
 				FROM decisions`,
 			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
+				SELECT 'review', review_requests.id, review_requests.issue_id, issues.title || ' review', review_requests.status || char(10) || COALESCE(review_requests.artifact_ids_json, '')
+				FROM review_requests
+				LEFT JOIN issues ON issues.id = review_requests.issue_id`,
+			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
 				SELECT 'attempt_note', attempt_notes.id, work_attempts.issue_id, '', attempt_notes.content
 				FROM attempt_notes
 				JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id`,

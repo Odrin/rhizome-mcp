@@ -707,6 +707,29 @@ type workContextDecisionSummaryDTO struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type workContextReviewOutcomeDTO struct {
+	ID        string    `json:"id"`
+	AttemptID string    `json:"attempt_id"`
+	Outcome   string    `json:"outcome"`
+	Reason    *string   `json:"reason,omitempty"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type workContextReviewDTO struct {
+	ID                 string                       `json:"id"`
+	Status             string                       `json:"status"`
+	TargetIssueVersion int64                        `json:"target_issue_version"`
+	TargetEventID      int64                        `json:"target_event_id"`
+	ArtifactIDs        []string                     `json:"artifact_ids"`
+	Outcome            *workContextReviewOutcomeDTO `json:"outcome,omitempty"`
+	Reason             *string                      `json:"reason,omitempty"`
+	FollowUpID         *string                      `json:"follow_up_id,omitempty"`
+	Claimable          bool                         `json:"claimable"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	ResolvedAt         *time.Time                   `json:"resolved_at"`
+}
+
 type workContextAttemptSummaryDTO struct {
 	ID            string     `json:"id"`
 	Kind          string     `json:"kind"`
@@ -720,6 +743,7 @@ type workContextOutput struct {
 	Issue                       workContextIssueDTO             `json:"issue"`
 	Blockers                    []workContextIssueDTO           `json:"blockers"`
 	Decisions                   []workContextDecisionSummaryDTO `json:"decisions"`
+	Reviews                     []workContextReviewDTO          `json:"reviews"`
 	PreviousAttempt             *workContextAttemptSummaryDTO   `json:"previous_attempt"`
 	Checkpoint                  *attemptNoteDTO                 `json:"checkpoint"`
 	Warnings                    []string                        `json:"warnings"`
@@ -1073,6 +1097,7 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		Issue:                       workContextIssueDTOFromDomain(value.Issue),
 		Blockers:                    make([]workContextIssueDTO, len(value.Blockers)),
 		Decisions:                   make([]workContextDecisionSummaryDTO, len(value.Decisions)),
+		Reviews:                     make([]workContextReviewDTO, len(value.Reviews)),
 		Warnings:                    make([]string, len(value.Warnings)),
 		ParentEpic:                  workContextIssueDTOFromDomainPointer(value.ParentEpic),
 		Relations:                   make([]relationDTO, len(value.Relations)),
@@ -1091,6 +1116,9 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 	}
 	for index, decision := range value.Decisions {
 		result.Decisions[index] = workContextDecisionSummaryDTOFromDomain(decision)
+	}
+	for index, review := range value.Reviews {
+		result.Reviews[index] = workContextReviewDTOFromDomain(review)
 	}
 	for index, warning := range value.Warnings {
 		result.Warnings[index] = warning
@@ -1163,6 +1191,32 @@ func workContextDecisionSummaryDTOFromDomain(value domain.WorkContextDecisionSum
 		Status:    string(value.Status),
 		CreatedAt: value.CreatedAt,
 	}
+}
+
+func workContextReviewDTOFromDomain(value domain.WorkContextReview) workContextReviewDTO {
+	result := workContextReviewDTO{
+		ID:                 value.ID,
+		Status:             string(value.Status),
+		TargetIssueVersion: value.TargetIssueVersion,
+		TargetEventID:      value.TargetEventID,
+		ArtifactIDs:        append([]string(nil), value.ArtifactIDs...),
+		Reason:             copyString(value.Reason),
+		FollowUpID:         copyString(value.FollowUpID),
+		Claimable:          value.Claimable,
+		CreatedAt:          value.CreatedAt,
+		ResolvedAt:         copyTime(value.ResolvedAt),
+	}
+	if value.Outcome != nil {
+		result.Outcome = &workContextReviewOutcomeDTO{
+			ID:        value.Outcome.ID,
+			AttemptID: value.Outcome.AttemptID,
+			Outcome:   string(value.Outcome.Outcome),
+			Reason:    copyString(value.Outcome.Reason),
+			Version:   value.Outcome.Version,
+			CreatedAt: value.Outcome.CreatedAt,
+		}
+	}
+	return result
 }
 
 func workContextAttemptSummaryDTOFromDomain(value *domain.WorkContextAttemptSummary) *workContextAttemptSummaryDTO {
