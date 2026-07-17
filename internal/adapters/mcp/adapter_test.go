@@ -233,7 +233,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_issue", "create_review_request", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "supersede_review_request", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -269,6 +269,10 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("get_issue_activity required = %v, want [issue_id]", schema.Required)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
+	assertRequired(t, toolNamed(t, tools.Tools, "create_review_request"), "issue_id", "target_issue_version", "target_event_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "get_review_request"), "review_request_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "cancel_review_request"), "review_request_id", "expected_version")
+	assertRequired(t, toolNamed(t, tools.Tools, "supersede_review_request"), "review_request_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
@@ -750,6 +754,109 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	restartedStop()
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("close after restart: %v", err)
+	}
+}
+
+func TestReviewRequestToolsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "review-tools.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdIssue := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Review target"})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdIssue, &issue)
+	if createdIssue.IsError {
+		t.Fatalf("create issue = %#v", createdIssue)
+	}
+
+	created := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 2,
+		"target_event_id":      7,
+		"artifact_ids":         []string{"artifact-1", "artifact-2"},
+	})
+	var createdOutput struct {
+		ID                 string   `json:"id"`
+		IssueID            string   `json:"issue_id"`
+		TargetIssueVersion int64    `json:"target_issue_version"`
+		TargetEventID      int64    `json:"target_event_id"`
+		ArtifactIDs        []string `json:"artifact_ids"`
+		Status             string   `json:"status"`
+		Claimable          bool     `json:"claimable"`
+	}
+	decodeStructured(t, created, &createdOutput)
+	if created.IsError || createdOutput.Status != "open" || !createdOutput.Claimable || createdOutput.IssueID != issue.ID || len(createdOutput.ArtifactIDs) != 2 {
+		t.Fatalf("create review request = %#v", createdOutput)
+	}
+
+	conflict := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 2,
+		"target_event_id":      7,
+		"artifact_ids":         []string{"artifact-3"},
+	})
+	assertDomainError(t, conflict, "REVIEW_ALREADY_EXISTS", false)
+
+	got := call(t, client, "get_review_request", map[string]any{"review_request_id": createdOutput.ID})
+	decodeStructured(t, got, &createdOutput)
+	if got.IsError || createdOutput.Status != "open" || !createdOutput.Claimable {
+		t.Fatalf("get review request = %#v", createdOutput)
+	}
+
+	listed := call(t, client, "list_review_requests", map[string]any{"status": "open", "claimable": true, "limit": 20})
+	var listOutput struct {
+		Items []struct {
+			ID        string `json:"id"`
+			Status    string `json:"status"`
+			Claimable bool   `json:"claimable"`
+		} `json:"items"`
+		HasMore bool `json:"has_more"`
+	}
+	decodeStructured(t, listed, &listOutput)
+	if listed.IsError || len(listOutput.Items) != 1 || listOutput.Items[0].ID != createdOutput.ID || !listOutput.Items[0].Claimable {
+		t.Fatalf("list review requests = %#v", listOutput)
+	}
+
+	cancelled := call(t, client, "cancel_review_request", map[string]any{"review_request_id": createdOutput.ID, "expected_version": 1})
+	var cancelledOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, cancelled, &cancelledOutput)
+	if cancelled.IsError || cancelledOutput.Status != "cancelled" || cancelledOutput.Claimable {
+		t.Fatalf("cancel review request = %#v", cancelledOutput)
+	}
+
+	second := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 3,
+		"target_event_id":      9,
+		"artifact_ids":         []string{"artifact-9"},
+	})
+	var secondOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, second, &secondOutput)
+	if second.IsError || secondOutput.Status != "open" || !secondOutput.Claimable {
+		t.Fatalf("create second review request = %#v", secondOutput)
+	}
+	superseded := call(t, client, "supersede_review_request", map[string]any{"review_request_id": secondOutput.ID, "expected_version": 1})
+	var supersededOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, superseded, &supersededOutput)
+	if superseded.IsError || supersededOutput.Status != "superseded" || supersededOutput.Claimable {
+		t.Fatalf("supersede review request = %#v", supersededOutput)
 	}
 }
 
@@ -1990,6 +2097,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -2038,6 +2149,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviews, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -2055,7 +2170,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, ReviewService: reviews, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

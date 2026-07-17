@@ -51,6 +51,7 @@ type composedServices struct {
 	decisionService    *application.DecisionService
 	activityService    *application.ActivityService
 	searchService      *application.SearchService
+	reviewService      *application.ReviewService
 	attemptService     *application.AttemptService
 	maintenanceService *application.MaintenanceService
 	workContextService *application.WorkContextService
@@ -282,6 +283,7 @@ func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bu
 		DecisionService:    bundle.decisionService,
 		ActivityService:    bundle.activityService,
 		SearchService:      bundle.searchService,
+		ReviewService:      bundle.reviewService,
 		AttemptService:     bundle.attemptService,
 		SessionService:     bundle.sessionService,
 		WorkContextService: bundle.workContextService,
@@ -324,6 +326,7 @@ func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler,
 			DecisionService:    bundle.decisionService,
 			ActivityService:    bundle.activityService,
 			SearchService:      bundle.searchService,
+			ReviewService:      bundle.reviewService,
 			AttemptService:     bundle.attemptService,
 			SessionService:     bundle.sessionService,
 			WorkContextService: bundle.workContextService,
@@ -415,6 +418,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	reviewRepository, err := sqlite.NewReviewRepository(project.Database)
+	if err != nil {
+		return nil, nil, err
+	}
 	searchIndexRepository, err := sqlite.NewSearchIndexRepository(project.Database)
 	if err != nil {
 		return nil, nil, err
@@ -467,6 +474,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	if err != nil {
+		return nil, nil, err
+	}
 	attemptService, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		return nil, nil, err
@@ -499,6 +510,7 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		decisionService:    decisionService,
 		activityService:    activityService,
 		searchService:      searchService,
+		reviewService:      reviewService,
 		attemptService:     attemptService,
 		maintenanceService: maintenanceService,
 		workContextService: workContextService,

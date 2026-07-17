@@ -57,7 +57,7 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 26 tools:
+The first version exposes 31 tools:
 
 1. `get_project`
 2. `export_project`
@@ -69,22 +69,27 @@ The first version exposes 26 tools:
 8. `get_issue`
 9. `list_issues`
 10. `archive_issue`
-11. `manage_issue_relation`
-12. `get_issue_graph`
-13. `get_planning_graph`
-14. `validate_issue_plan`
-15. `apply_issue_plan`
-16. `add_comment`
-17. `record_decision`
-18. `list_decisions`
-19. `get_issue_activity`
-20. `claim_issue`
-21. `renew_attempt`
-22. `save_attempt_note`
-23. `finish_attempt`
-24. `get_work_context`
-25. `search`
-26. `get_changes`
+11. `create_review_request`
+12. `get_review_request`
+13. `list_review_requests`
+14. `cancel_review_request`
+15. `supersede_review_request`
+16. `manage_issue_relation`
+17. `get_issue_graph`
+18. `get_planning_graph`
+19. `validate_issue_plan`
+20. `apply_issue_plan`
+21. `add_comment`
+22. `record_decision`
+23. `list_decisions`
+24. `get_issue_activity`
+25. `claim_issue`
+26. `renew_attempt`
+27. `save_attempt_note`
+28. `finish_attempt`
+29. `get_work_context`
+30. `search`
+31. `get_changes`
 
 ---
 

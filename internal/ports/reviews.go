@@ -40,6 +40,26 @@ type ReviewMutationResult struct {
 	Target  domain.ReviewTarget
 }
 
+// GetReviewRequestResult is the persisted request and target snapshot for one review request.
+type GetReviewRequestResult struct {
+	Request domain.ReviewRequest
+	Target  domain.ReviewTarget
+}
+
+// ListReviewRequestsQuery carries filtering and pagination for review requests.
+type ListReviewRequestsQuery struct {
+	Status *domain.ReviewRequestStatus
+	Limit  int
+	Offset int
+}
+
+// ListReviewRequestsResult is a deterministic page of review requests.
+type ListReviewRequestsResult struct {
+	Items      []domain.ReviewRequest
+	HasMore    bool
+	NextOffset int
+}
+
 // ResolveReviewRequestCommand carries the outcome for a reviewed request.
 type ResolveReviewRequestCommand struct {
 	RequestID       string
@@ -60,6 +80,8 @@ type ResolveReviewRequestResult struct {
 // ReviewRepository persists review workflow requests and their state transitions.
 type ReviewRepository interface {
 	CreateReviewRequest(context.Context, CreateReviewRequestCommand) (CreateReviewRequestResult, error)
+	GetReviewRequest(context.Context, string) (GetReviewRequestResult, error)
+	ListReviewRequests(context.Context, ListReviewRequestsQuery) (ListReviewRequestsResult, error)
 	CancelReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	SupersedeReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	ClaimReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)

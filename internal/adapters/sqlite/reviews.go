@@ -118,6 +118,97 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 	return result, nil
 }
 
+// GetReviewRequest loads one review request and its target snapshot.
+func (repository *ReviewRepository) GetReviewRequest(ctx context.Context, requestID string) (ports.GetReviewRequestResult, error) {
+	if repository == nil || repository.db == nil {
+		return ports.GetReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
+	}
+	var request domain.ReviewRequest
+	var target domain.ReviewTarget
+	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
+		var err error
+		request, target, err = repository.loadRequestForMutation(ctx, queryer, requestID)
+		return err
+	})
+	if err != nil {
+		return ports.GetReviewRequestResult{}, err
+	}
+	return ports.GetReviewRequestResult{Request: request, Target: target}, nil
+}
+
+// ListReviewRequests loads review requests with optional status filtering and offset pagination.
+func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, query ports.ListReviewRequestsQuery) (ports.ListReviewRequestsResult, error) {
+	if repository == nil || repository.db == nil {
+		return ports.ListReviewRequestsResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
+	}
+	if query.Limit < 1 {
+		query.Limit = 20
+	}
+	if query.Limit > 100 {
+		query.Limit = 100
+	}
+	if query.Offset < 0 {
+		query.Offset = 0
+	}
+	var where string
+	var args []any
+	if query.Status != nil {
+		where = "WHERE review_requests.status = ?"
+		args = append(args, string(*query.Status))
+	}
+	var items []domain.ReviewRequest
+	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
+		rows, err := queryer.QueryContext(ctx, `SELECT review_requests.id, review_requests.target_id, review_requests.issue_id, review_requests.target_issue_version, review_requests.target_event_id, review_requests.artifact_ids_json, review_requests.status, review_requests.supersedes_id, review_requests.active_attempt_id, review_requests.version, review_requests.created_at, review_requests.resolved_at
+            FROM review_requests
+            LEFT JOIN review_targets ON review_targets.id = review_requests.target_id
+            `+where+` ORDER BY review_requests.created_at DESC, review_requests.id DESC LIMIT ? OFFSET ?`, append(args, query.Limit+1, query.Offset)...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var request domain.ReviewRequest
+			var artifactIDsJSON []byte
+			var status string
+			var supersedesID sql.NullString
+			var activeAttemptID sql.NullString
+			var createdAtText string
+			var resolvedAtText sql.NullString
+			if err := rows.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
+				return err
+			}
+			request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
+			if err != nil {
+				return err
+			}
+			request.Status = domain.ReviewRequestStatus(status)
+			if supersedesID.Valid {
+				value := supersedesID.String
+				request.SupersedesID = &value
+			}
+			if activeAttemptID.Valid {
+				value := activeAttemptID.String
+				request.ActiveAttemptID = &value
+			}
+			request.CreatedAt = parseTimestamp(createdAtText)
+			if resolvedAtText.Valid {
+				value := parseTimestamp(resolvedAtText.String)
+				request.ResolvedAt = &value
+			}
+			items = append(items, request)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return ports.ListReviewRequestsResult{}, err
+	}
+	hasMore := len(items) > query.Limit
+	if hasMore {
+		items = items[:query.Limit]
+	}
+	return ports.ListReviewRequestsResult{Items: items, HasMore: hasMore, NextOffset: query.Offset + len(items)}, nil
+}
+
 // CancelReviewRequest transitions an open or claimed request to cancelled.
 func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, command ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
 	if repository == nil || repository.db == nil {

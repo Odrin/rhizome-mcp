@@ -28,6 +28,7 @@ type Options struct {
 	DecisionService    *application.DecisionService
 	ActivityService    *application.ActivityService
 	SearchService      *application.SearchService
+	ReviewService      *application.ReviewService
 	AttemptService     *application.AttemptService
 	SessionService     *application.AgentSessionService
 	WorkContextService *application.WorkContextService
@@ -46,6 +47,7 @@ type adapter struct {
 	decisions     *application.DecisionService
 	activities    *application.ActivityService
 	searches      *application.SearchService
+	reviews       *application.ReviewService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
 	workContexts  *application.WorkContextService
@@ -95,6 +97,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.SearchService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
 	}
+	if options.ReviewService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "review service is required", false)
+	}
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
@@ -120,6 +125,7 @@ func NewServer(options Options) (*Server, error) {
 		decisions:            options.DecisionService,
 		activities:           options.ActivityService,
 		searches:             options.SearchService,
+		reviews:              options.ReviewService,
 		attempts:             options.AttemptService,
 		sessions:             options.SessionService,
 		workContexts:         options.WorkContextService,
@@ -346,7 +352,12 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput()), adapter.getIssue)
 	sdkmcp.AddTool(server, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
 	sdkmcp.AddTool(server, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
+	sdkmcp.AddTool(server, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput()), adapter.cancelReviewRequest)
+	sdkmcp.AddTool(server, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set.", schemaCreateReviewRequest(), schemaReviewRequestOutput()), adapter.createReviewRequest)
+	sdkmcp.AddTool(server, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput()), adapter.getReviewRequest)
+	sdkmcp.AddTool(server, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput()), adapter.listReviewRequests)
 	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
+	sdkmcp.AddTool(server, tool("supersede_review_request", "Supersede an open or claimed review request using its current version.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput()), adapter.supersedeReviewRequest)
 	sdkmcp.AddTool(server, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
@@ -895,6 +906,70 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 		return adapter.failure(err)
 	}
 	return success(issueDTOFromDomain(result.Issue), "issue archived")
+}
+
+func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID:            input.IssueID,
+		TargetIssueVersion: input.TargetIssueVersion,
+		TargetEventID:      input.TargetEventID,
+		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
+		SupersedesID:       copyReviewOptionalString(input.SupersedesID),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request created")
+}
+
+func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.GetReviewRequest(ctx, input.ReviewRequestID)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request read")
+}
+
+func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.CallToolRequest, input listReviewRequestsInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.ListReviewRequests(ctx, application.ListReviewRequestsInput{
+		Status:    input.Status,
+		Claimable: input.Claimable,
+		Limit:     input.Limit,
+		Cursor:    input.Cursor,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	items := make([]reviewRequestDTO, len(result.Items))
+	for index, item := range result.Items {
+		items[index] = reviewRequestDTOFromDomain(item.Request, item.Claimable)
+	}
+	output := reviewRequestListOutput{Items: items, HasMore: result.HasMore}
+	if result.NextCursor != nil {
+		output.NextCursor = result.NextCursor
+	}
+	return success(output, "review requests listed")
+}
+
+func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request cancelled")
+}
+
+func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input supersedeReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.SupersedeReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request superseded")
 }
 
 func success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {

@@ -152,6 +152,35 @@ type claimIssueInput struct {
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
 }
 
+type createReviewRequestInput struct {
+	IssueID            string   `json:"issue_id"`
+	TargetIssueVersion int64    `json:"target_issue_version"`
+	TargetEventID      int64    `json:"target_event_id"`
+	ArtifactIDs        []string `json:"artifact_ids,omitempty"`
+	SupersedesID       *string  `json:"supersedes_id,omitempty"`
+}
+
+type getReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+}
+
+type listReviewRequestsInput struct {
+	Status    *string `json:"status,omitempty"`
+	Claimable *bool   `json:"claimable,omitempty"`
+	Limit     int     `json:"limit,omitempty"`
+	Cursor    *string `json:"cursor,omitempty"`
+}
+
+type cancelReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+	ExpectedVersion int64  `json:"expected_version"`
+}
+
+type supersedeReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+	ExpectedVersion int64  `json:"expected_version"`
+}
+
 type renewAttemptInput struct {
 	AttemptID    string `json:"attempt_id"`
 	LeaseToken   string `json:"lease_token"`
@@ -398,6 +427,36 @@ func (input patchInput) domainPatch() domain.IssuePatch {
 	}
 }
 
+func reviewRequestDTOFromDomain(request domain.ReviewRequest, claimable bool) reviewRequestDTO {
+	var resolvedAt *time.Time
+	if request.ResolvedAt != nil {
+		copyValue := request.ResolvedAt.UTC()
+		resolvedAt = &copyValue
+	}
+	return reviewRequestDTO{
+		ID:                 request.ID,
+		IssueID:            request.IssueID,
+		TargetIssueVersion: request.TargetIssueVersion,
+		TargetEventID:      request.TargetEventID,
+		ArtifactIDs:        append([]string(nil), request.ArtifactIDs...),
+		Status:             string(request.Status),
+		SupersedesID:       copyReviewOptionalString(request.SupersedesID),
+		ActiveAttemptID:    copyReviewOptionalString(request.ActiveAttemptID),
+		Claimable:          claimable,
+		Version:            request.Version,
+		CreatedAt:          request.CreatedAt.UTC(),
+		ResolvedAt:         resolvedAt,
+	}
+}
+
+func copyReviewOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
 type errorOutput struct {
 	Code      string          `json:"code"`
 	Message   string          `json:"message"`
@@ -494,6 +553,27 @@ type issueEventDTO struct {
 	AttemptID *string         `json:"attempt_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+}
+
+type reviewRequestDTO struct {
+	ID                 string     `json:"id"`
+	IssueID            string     `json:"issue_id"`
+	TargetIssueVersion int64      `json:"target_issue_version"`
+	TargetEventID      int64      `json:"target_event_id"`
+	ArtifactIDs        []string   `json:"artifact_ids"`
+	Status             string     `json:"status"`
+	SupersedesID       *string    `json:"supersedes_id,omitempty"`
+	ActiveAttemptID    *string    `json:"active_attempt_id,omitempty"`
+	Claimable          bool       `json:"claimable"`
+	Version            int64      `json:"version"`
+	CreatedAt          time.Time  `json:"created_at"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+}
+
+type reviewRequestListOutput struct {
+	Items      []reviewRequestDTO `json:"items"`
+	NextCursor *string            `json:"next_cursor,omitempty"`
+	HasMore    bool               `json:"has_more"`
 }
 
 type activityItemDTO struct {
