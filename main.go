@@ -33,6 +33,8 @@ const attemptCleanupInterval = time.Minute
 var (
 	initRunner  = runInit
 	serveRunner = runServe
+	serveStdio  = runServeStdio
+	serveHTTP   = runServeHTTP
 )
 
 type composedServices struct {
@@ -103,7 +105,10 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return initRunner(ctx, startingPath, pathInputs, dataRoot, stdout)
 	}
-	serveHandler := func(ctx context.Context) error {
+	serveHandler := func(ctx context.Context, httpAddress string) error {
+		if httpAddress != "" {
+			cfg.HTTPAddress = httpAddress
+		}
 		if bundle == nil {
 			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 			if err != nil {
@@ -228,6 +233,9 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 }
 
 func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
@@ -238,8 +246,10 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()
 		for {
-			if _, err := bundle.attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-				slog.Error("attempt expiry cleanup failed", "error", err)
+			if bundle != nil && bundle.attemptService != nil {
+				if _, err := bundle.attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+					slog.Error("attempt expiry cleanup failed", "error", err)
+				}
 			}
 			select {
 			case <-cleanupCtx.Done():
@@ -252,6 +262,14 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		stopCleanup()
 		<-cleanupDone
 	}()
+
+	if cfg.HTTPAddress != "" {
+		return serveHTTP(ctx, cfg, stderr, bundle)
+	}
+	return serveStdio(ctx, cfg, stderr, bundle)
+}
+
+func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:       bundle.issueService,
 		ProjectService:     bundle.projectService,
@@ -273,6 +291,12 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		return err
 	}
 	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	_ = bundle
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	return projectruntime.ServeHTTPServer(ctx, projectruntime.HTTPServerOptions{Address: cfg.HTTPAddress, Logger: logger})
 }
 
 func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {

@@ -67,7 +67,7 @@ type Services struct {
 type InitHandler func(context.Context, string) error
 
 // ServeHandler runs CLI serve logic after the adapter parses the command.
-type ServeHandler func(context.Context) error
+type ServeHandler func(context.Context, string) error
 
 // BackupReport summarizes a validated backup database artifact for CLI output.
 type BackupReport struct {
@@ -191,6 +191,7 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("serve handler is not configured")
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	httpAddress := fs.String("http-address", "", "serve over loopback HTTP instead of stdio")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -198,7 +199,7 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	if len(positionals) != 0 {
 		return c.usageError()
 	}
-	return c.serveHandler(ctx)
+	return c.serveHandler(ctx, *httpAddress)
 }
 
 func (c *CLI) runBackup(ctx context.Context, args []string) error {

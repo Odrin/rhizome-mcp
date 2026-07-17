@@ -173,6 +173,23 @@ func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
 	}
 }
 
+func TestServeWithoutHTTPAddressUsesStdioTransport(t *testing.T) {
+	originalServeStdio := serveStdio
+	called := false
+	serveStdio = func(context.Context, *config.Config, io.Writer, *composedServices) error {
+		called = true
+		return nil
+	}
+	defer func() { serveStdio = originalServeStdio }()
+
+	if err := runServe(context.Background(), &config.Config{}, io.Discard, nil); err != nil {
+		t.Fatalf("serve without HTTP address failed: %v", err)
+	}
+	if !called {
+		t.Fatal("expected stdio serve path to be used")
+	}
+}
+
 func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()
