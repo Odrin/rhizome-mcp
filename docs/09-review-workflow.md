@@ -44,6 +44,22 @@ when its request content is identical; otherwise it fails with
 general workflow status. Attempt expiry returns a claimed request to `open`
 unless it has become stale. No table stores `in_progress`.
 
+## Operational guide: request, discover, claim, complete, follow-up, and re-request
+
+Use the review workflow in this order when you need a durable review handoff:
+
+1. Request: create a review request with the exact target issue version, latest event position, and artifact IDs you want to freeze. The request captures that immutable snapshot and remains open until it is claimed or superseded.
+2. Discover: list or get review requests to find the request for the target you want to review. Review requests are discoverable from planning and work context, and a request that is still claimable is reported as `claimable`.
+3. Claim: start a review attempt with `claim_issue` against the review issue, then attach that active review attempt to the request. A claimed request is derived from the active review attempt; if the lease expires before completion, the request returns to `open` and can be claimed again.
+4. Complete: finish the active review attempt with `finish_attempt` and an explicit review outcome of `approved`, `changes_requested`, or `blocked`. `approved` finishes the request and marks the issue `done`; `changes_requested` leaves the issue `ready` and records that follow-up is required; `blocked` marks the issue `blocked`.
+5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, create a fresh review request for the new target version/event and repeat the discover/claim/complete cycle.
+
+Recovery examples:
+
+- If a session disappears after claim, the review request returns to `open` when the lease expires. Re-discover the request and repeat the claim step with a fresh review attempt.
+- If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Create a new review request against the new target instead of reusing the stale one.
+- If two agents race to claim the same request, one wins and the other gets `VERSION_CONFLICT` or `ACTIVE_ATTEMPT_EXISTS`. Re-discover the request and retry the claim with the new state.
+
 ## Staleness and concurrency
 
 Before review completion, the service compares the target issue version and

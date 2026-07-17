@@ -68,6 +68,22 @@ func TestReviewServiceCreatesAndMutatesRequests(t *testing.T) {
 	}
 }
 
+func TestReviewServiceListFiltersByStatusAndClaimability(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	service, err := NewReviewService(&reviewRepositoryStub{request: domain.ReviewRequest{ID: "req-1", Status: domain.ReviewRequestStatusApproved}}, &issueRepositoryStub{}, clock.NewFakeClock(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Status: stringPointer("approved"), Claimable: boolPointer(false), Limit: 20})
+	if err != nil {
+		t.Fatalf("ListReviewRequests() error = %v", err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].Request.ID != "req-1" || listed.Items[0].Claimable {
+		t.Fatalf("ListReviewRequests() = %#v", listed)
+	}
+}
+
 type issueRepositoryStub struct {
 	issue domain.Issue
 }
