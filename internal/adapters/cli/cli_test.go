@@ -160,6 +160,24 @@ func TestRunUsageAndErrors(t *testing.T) {
 	}
 }
 
+func TestServeCommandParsesHTTPAddress(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var captured string
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string) error {
+		captured = httpAddress
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"serve", "--http-address", "127.0.0.1:0"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured != "127.0.0.1:0" {
+		t.Fatalf("captured HTTP address = %q, want %q", captured, "127.0.0.1:0")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+}
+
 func TestRunProjectImportApply(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	services := Services{ProjectService: &stubProjectService{}}
