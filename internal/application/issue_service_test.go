@@ -37,6 +37,10 @@ func (repository *recordingIssueRepository) CreateIssue(_ context.Context, comma
 	}, nil
 }
 
+func (repository *recordingIssueRepository) LookupCreateIssue(context.Context, string, []byte) (domain.Issue, bool, error) {
+	return domain.Issue{}, false, nil
+}
+
 func (repository *recordingIssueRepository) UpdateIssue(_ context.Context, command ports.UpdateIssueCommand) (ports.UpdateIssueResult, error) {
 	repository.updateCalled = true
 	repository.updateCommand = command

@@ -471,9 +471,10 @@ type AttemptNote struct {
 }
 
 type ClaimIssueInput struct {
-	IssueID      string
-	LeaseSeconds *int
-	SessionID    *string
+	IssueID        string
+	LeaseSeconds   *int
+	SessionID      *string
+	IdempotencyKey *string
 }
 
 func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
@@ -488,7 +489,29 @@ func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
 	if err != nil {
 		return ClaimIssueInput{}, err
 	}
-	return ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: lease, SessionID: sessionID}, nil
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return ClaimIssueInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return ClaimIssueInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
+	return ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: lease, SessionID: sessionID, IdempotencyKey: idempotencyKey}, nil
+}
+
+// CanonicalClaimIssueRequest returns deterministic JSON for a normalized claim
+// request. The idempotency key, transient session identity, and generated
+// lease values are intentionally excluded.
+func CanonicalClaimIssueRequest(input ClaimIssueInput) ([]byte, error) {
+	request := struct {
+		IssueID      string `json:"issue_id"`
+		LeaseSeconds int    `json:"lease_seconds"`
+	}{IssueID: input.IssueID, LeaseSeconds: *input.LeaseSeconds}
+	return json.Marshal(request)
 }
 
 type RenewAttemptInput struct {

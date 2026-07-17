@@ -115,7 +115,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "create_issue"), "type", "title")
-	assertPropertyAbsent(t, toolNamed(t, tools.Tools, "create_issue"), "idempotency_key")
+	assertPropertyPresent(t, toolNamed(t, tools.Tools, "create_issue"), "idempotency_key")
 	assertRequired(t, toolNamed(t, tools.Tools, "add_comment"), "issue_id", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "record_decision"), "title", "summary", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "update_issue"), "issue_id", "expected_version", "changes")
@@ -587,10 +587,10 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	unsupportedListView := call(t, client, "list_issues", map[string]any{"view": "standard"})
 	assertDomainError(t, unsupportedListView, "INVALID_ARGUMENT", false)
 	unsupportedIdempotency := call(t, client, "create_issue", map[string]any{
-		"type": "task", "title": "unsupported idempotency", "idempotency_key": "key",
+		"type": "task", "title": "supported idempotency", "idempotency_key": "key",
 	})
-	if !unsupportedIdempotency.IsError {
-		t.Fatalf("create_issue idempotency_key should be rejected by schema: %#v", unsupportedIdempotency)
+	if unsupportedIdempotency.IsError {
+		t.Fatalf("create_issue idempotency_key should be accepted: %#v", unsupportedIdempotency)
 	}
 
 	archived := call(t, client, "archive_issue", map[string]any{"issue_id": issue.DisplayID, "expected_version": 2})
@@ -604,12 +604,12 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	hidden := call(t, client, "list_issues", map[string]any{})
 	decodeStructured(t, hidden, &issuePage)
-	if hidden.IsError || len(issuePage.Items) != 1 {
+	if hidden.IsError || len(issuePage.Items) != 2 {
 		t.Fatalf("default archive visibility = %#v", issuePage)
 	}
 	visible := call(t, client, "list_issues", map[string]any{"include_archived": true})
 	decodeStructured(t, visible, &issuePage)
-	if visible.IsError || len(issuePage.Items) != 2 {
+	if visible.IsError || len(issuePage.Items) != 3 {
 		t.Fatalf("archived list visibility = %#v", issuePage)
 	}
 
@@ -627,6 +627,45 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	restartedStop()
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("close after restart: %v", err)
+	}
+}
+
+func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "claim-idempotency.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "claimable", "status": "ready"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create issue = %#v", created)
+	}
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID, "idempotency_key": "claim-key"})
+	var firstOutput struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &firstOutput)
+	if claimed.IsError || firstOutput.Attempt.ID == "" || firstOutput.LeaseToken == "" {
+		t.Fatalf("claim output = %#v", claimed)
+	}
+	replayed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID, "idempotency_key": "claim-key"})
+	var replayOutput struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Attempt.ID != firstOutput.Attempt.ID || replayOutput.LeaseToken != firstOutput.LeaseToken {
+		t.Fatalf("claim replay = %#v", replayed)
 	}
 }
 
@@ -1935,6 +1974,23 @@ func assertIssueIdentifierProperty(t *testing.T, tool *sdkmcp.Tool, field string
 	}
 	if property.Pattern == "" || !strings.Contains(property.Description, "ULID") || !strings.Contains(property.Description, "ISSUE-N") {
 		t.Fatalf("%s %s schema = %#v", tool.Name, field, property)
+	}
+}
+
+func assertPropertyPresent(t *testing.T, tool *sdkmcp.Tool, field string) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := schema.Properties[field]; !ok {
+		t.Fatalf("%s missing %s property", tool.Name, field)
 	}
 }
 

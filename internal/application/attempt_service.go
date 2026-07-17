@@ -42,6 +42,24 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 	if err != nil {
 		return ClaimIssueResult{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalClaimIssueRequest(normalized)
+		if err != nil {
+			return ClaimIssueResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode claim request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupClaimIssue(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ClaimIssueResult{}, err
+		}
+		if found {
+			return ClaimIssueResult{Issue: result.Issue, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
+		}
+	}
 	id, err := service.ids.New()
 	if err != nil {
 		return ClaimIssueResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt identifier", false)
@@ -57,13 +75,14 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 	hash := sha256.Sum256([]byte(token))
 	now := service.clock.Now().UTC()
 	result, err := service.repository.ClaimIssue(ctx, ports.ClaimIssueCommand{
-		Identifier: identifier, AttemptID: id, SessionID: normalized.SessionID, TokenHash: hash[:],
+		Identifier: identifier, AttemptID: id, SessionID: normalized.SessionID, TokenHash: hash[:], LeaseToken: token,
 		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
+		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 	if err != nil {
 		return ClaimIssueResult{}, err
 	}
-	return ClaimIssueResult{Issue: result.Issue, Attempt: result.Attempt, LeaseToken: token}, nil
+	return ClaimIssueResult{Issue: result.Issue, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
 }
 
 func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.RenewAttemptInput) (ports.RenewAttemptResult, error) {

@@ -167,7 +167,8 @@ Input:
   "parent_issue_id": null,
   "blocked_reason": null,
   "labels": [],
-  "create_missing_labels": true
+  "create_missing_labels": true,
+  "idempotency_key": null
 }
 ```
 
@@ -178,6 +179,7 @@ Rules:
 - `priority` defaults to `medium`.
 - `blocked_reason` is required when status is `blocked`.
 - Parent constraints are validated.
+- `idempotency_key` is optional. When supplied, it must be a non-blank string up to 128 runes. Reusing the same key with the same normalized request replays the original issue response; reusing it with a different request returns `IDEMPOTENCY_CONFLICT`.
 
 Output:
 
@@ -664,7 +666,8 @@ Behavior:
 - determines `work` or `review`;
 - creates attempt atomically;
 - records issue version and event ID;
-- creates an opaque lease token.
+- creates an opaque lease token;
+- accepts an optional `idempotency_key` that replays the original claim response for the same normalized request and returns `IDEMPOTENCY_CONFLICT` for a different request with the same key.
 
 Output:
 

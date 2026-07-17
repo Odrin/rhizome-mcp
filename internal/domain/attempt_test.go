@@ -188,8 +188,39 @@ func TestAttemptInputsNormalizeOptionalSessionIDs(t *testing.T) {
 	}
 }
 
+func TestClaimIssueIdempotencyKeyValidationAndCanonicalRequest(t *testing.T) {
+	key := "  claim-key  "
+	input := domain.ClaimIssueInput{IssueID: "ISSUE-1", LeaseSeconds: optionalIntPointer(900), IdempotencyKey: &key}
+	normalized, err := input.Validate()
+	if err != nil || normalized.IdempotencyKey == nil || *normalized.IdempotencyKey != "claim-key" || *normalized.LeaseSeconds != 900 {
+		t.Fatalf("normalized = %#v, %v", normalized, err)
+	}
+	key = "changed"
+	if *normalized.IdempotencyKey != "claim-key" {
+		t.Fatal("idempotency key was not defensively copied")
+	}
+	first, err := domain.CanonicalClaimIssueRequest(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different := normalized
+	different.LeaseSeconds = optionalIntPointer(60)
+	second, err := domain.CanonicalClaimIssueRequest(different)
+	if err != nil || string(first) == string(second) {
+		t.Fatal("request change did not change canonical bytes")
+	}
+	for _, value := range []string{" ", strings.Repeat("x", domain.MaxIdempotencyKeyRunes+1)} {
+		value := value
+		_, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1", IdempotencyKey: &value}).Validate()
+		if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) && !errors.Is(err, &domain.Error{Code: domain.CodeLimitExceeded}) {
+			t.Fatalf("key %q error = %v", value, err)
+		}
+	}
+}
+
 func optionalStringPointer(value string) *string                                      { return &value }
 func optionalFailurePointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }
+func optionalIntPointer(value int) *int                                               { return &value }
 
 func TestFinishAttemptIdempotencyKeyValidationAndCanonicalRequest(t *testing.T) {
 	key := "  retry-key  "

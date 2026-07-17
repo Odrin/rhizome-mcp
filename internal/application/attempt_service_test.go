@@ -324,6 +324,10 @@ func (repository *recordingAttemptRepository) ClaimIssue(_ context.Context, comm
 	return ports.ClaimIssueResult{}, nil
 }
 
+func (repository *recordingAttemptRepository) LookupClaimIssue(context.Context, string, []byte) (ports.ClaimIssueResult, bool, error) {
+	return ports.ClaimIssueResult{}, false, nil
+}
+
 func (repository *recordingAttemptRepository) RenewAttempt(_ context.Context, command ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
 	repository.renewCalled = true
 	repository.renewCommand = command

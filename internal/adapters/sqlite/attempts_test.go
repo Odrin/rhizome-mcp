@@ -23,6 +23,45 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+func TestClaimIssueIdempotentReplayAndConflict(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-idempotency")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "claim retry", domain.StatusReady)
+	key := "claim-retry"
+	input := domain.ClaimIssueInput{IssueID: issue.ID, IdempotencyKey: &key}
+	first, err := fixture.attempts.ClaimIssue(fixture.ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.attempts.ClaimIssue(fixture.ctx, input)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !reflect.DeepEqual(first.Attempt, second.Attempt) || first.LeaseToken != second.LeaseToken {
+		t.Fatalf("replay = %#v, want %#v", second, first)
+	}
+	changed := input
+	changed.LeaseSeconds = intPointer(60)
+	if _, err := fixture.attempts.ClaimIssue(fixture.ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var attempts, events, records int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM work_attempts WHERE issue_id = ?`, issue.ID).Scan(&attempts); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_started'`, issue.ID).Scan(&events); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records WHERE operation = 'claim_issue' AND idempotency_key = ?`, key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || events != 1 || records != 1 {
+		t.Fatalf("durable state = attempts %d events %d records %d", attempts, events, records)
+	}
+}
+
 func TestFinishAttemptIdempotentReplayAndConflict(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "finish-idempotency")
 	defer fixture.close()
@@ -393,6 +432,62 @@ func TestFinishAttemptIdempotencyInsertFailureRollsBack(t *testing.T) {
 		issueVersion != issue.Issue.Version || events != 0 || artifacts != 0 || records != 0 {
 		t.Fatalf("idempotency rollback state = attempt %q issue %q version %d events %d artifacts %d records %d",
 			attemptStatus, issueStatus, issueVersion, events, artifacts, records)
+	}
+}
+
+func TestClaimIssueIdempotencyInsertFailureRollsBack(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-idempotency-rollback")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "claim idempotency rollback", domain.StatusReady)
+	key := "claim-idempotency-rollback-key"
+	const triggerName = "test_fail_claim_issue_idempotency_insert"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER `+triggerName+`
+			BEFORE INSERT ON idempotency_records
+			WHEN NEW.operation = 'claim_issue'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced claim issue idempotency insert failure');
+			END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `DROP TRIGGER `+triggerName)
+			return err
+		}); err != nil {
+			t.Errorf("drop test trigger: %v", err)
+		}
+	}()
+
+	_, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID, LeaseSeconds: intPointer(60), IdempotencyKey: &key})
+	assertDomainCode(t, err, domain.CodeStorageConstraint)
+
+	var attemptCount, eventCount, recordCount int
+	var issueStatus string
+	var issueVersion int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM work_attempts WHERE issue_id = ?`, issue.ID).Scan(&attemptCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_started'`, issue.ID).Scan(&eventCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM idempotency_records WHERE operation = 'claim_issue' AND idempotency_key = ?`, key).Scan(&recordCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, version FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus, &issueVersion); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 0 || eventCount != 0 || recordCount != 0 || issueStatus != string(domain.StatusReady) || issueVersion != issue.Issue.Version {
+		t.Fatalf("claim rollback state = attempts %d events %d records %d issue %q version %d",
+			attemptCount, eventCount, recordCount, issueStatus, issueVersion)
 	}
 }
 
@@ -1196,6 +1291,8 @@ func finishInput(claim application.ClaimIssueResult, outcome domain.AttemptOutco
 }
 
 func statusPointer(value domain.Status) *domain.Status { return &value }
+
+func intPointer(value int) *int { return &value }
 
 func reviewPointer(value domain.ReviewOutcome) *domain.ReviewOutcome { return &value }
 

@@ -82,6 +82,7 @@ func schemaCreateIssue() *jsonschema.Schema {
 		"acceptance_criteria": nullableStringSchema(), "status": stringSchema(), "priority": stringSchema(),
 		"parent_issue_id": nullableIssueIdentifierSchema(), "blocked_reason": nullableStringSchema(),
 		"labels": stringsSchema(), "create_missing_labels": booleanSchema(),
+		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "type", "title")
 }
 
@@ -361,7 +362,7 @@ func schemaAddCommentOutput() *jsonschema.Schema       { return typedSchema[addC
 func schemaRecordDecisionOutput() *jsonschema.Schema {
 	return typedSchema[recordDecisionOutput]()
 }
-func schemaDecisionListOutput() *jsonschema.Schema { return typedSchema[decisionListOutput]() }
+func schemaDecisionListOutput() *jsonschema.Schema   { return typedSchema[decisionListOutput]() }
 func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
 func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
 func schemaIssueListOutput() *jsonschema.Schema      { return typedSchema[issueListOutput]() }

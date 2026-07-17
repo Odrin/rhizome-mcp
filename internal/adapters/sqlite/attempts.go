@@ -20,13 +20,45 @@ import (
 // AttemptRepository is the SQLite implementation of ports.AttemptRepository.
 type AttemptRepository struct{ db *DB }
 
-const finishAttemptOperation = "finish_attempt"
+const (
+	claimIssueOperation    = "claim_issue"
+	finishAttemptOperation = "finish_attempt"
+)
 
 func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "attempt database is required", false)
 	}
 	return &AttemptRepository{db: database}, nil
+}
+
+// LookupClaimIssue serves a replay before the lease token is generated and the
+// attempt ID is allocated. Claim still repeats the lookup in the writer transaction to close the race.
+func (repository *AttemptRepository) LookupClaimIssue(ctx context.Context, key string, hash []byte) (ports.ClaimIssueResult, bool, error) {
+	var result ports.ClaimIssueResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, claimIssueOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
 }
 
 func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
@@ -42,6 +74,26 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 	expiresTimestamp := expires.Format(time.RFC3339Nano)
 	var result ports.ClaimIssueResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, claimIssueOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		issue, err := loadIssueForMutation(ctx, tx, command.Identifier)
 		if err != nil {
 			return err
@@ -114,6 +166,19 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 			ID: command.AttemptID, IssueID: issue.ID, SessionID: copyOptionalString(command.SessionID), Kind: kind, Status: domain.AttemptStatusActive,
 			IssueVersionAtStart: issue.Version, ContextEventIDAtStart: latestEventID,
 			LeaseExpiresAt: expires, StartedAt: now, LastHeartbeatAt: now,
+		}
+		result.LeaseToken = command.LeaseToken
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode claim response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, claimIssueOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})

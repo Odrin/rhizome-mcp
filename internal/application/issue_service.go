@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -64,6 +65,24 @@ func (service *IssueService) CreateIssue(ctx context.Context, input domain.Creat
 	if err != nil {
 		return CreateIssueResult{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalCreateIssueRequest(normalized)
+		if err != nil {
+			return CreateIssueResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode create issue request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		issue, found, err := service.repository.LookupCreateIssue(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return CreateIssueResult{}, err
+		}
+		if found {
+			return CreateIssueResult{ID: issue.ID, DisplayID: issue.DisplayID, SequenceNo: issue.SequenceNo, Issue: issue}, nil
+		}
+	}
 	id, err := service.ids.New()
 	if err != nil {
 		return CreateIssueResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate issue identifier", false)
@@ -76,10 +95,12 @@ func (service *IssueService) CreateIssue(ctx context.Context, input domain.Creat
 		return CreateIssueResult{}, err
 	}
 	issue, err := service.repository.CreateIssue(ctx, ports.CreateIssueCommand{
-		ID:        id,
-		Input:     normalized,
-		LabelIDs:  labelIDs,
-		CreatedAt: service.clock.Now().UTC(),
+		ID:             id,
+		Input:          normalized,
+		LabelIDs:       labelIDs,
+		CreatedAt:      service.clock.Now().UTC(),
+		IdempotencyKey: idempotencyKey,
+		RequestHash:    requestHash,
 	})
 	if err != nil {
 		return CreateIssueResult{}, err

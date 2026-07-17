@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -18,12 +19,43 @@ type IssueRepository struct {
 	afterGetIssueProjectionReadForTest func()
 }
 
+const createIssueOperation = "create_issue"
+
 // NewIssueRepository returns an issue repository backed by database.
 func NewIssueRepository(database *DB) (*IssueRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "issue database is required", false)
 	}
 	return &IssueRepository{db: database}, nil
+}
+
+// LookupCreateIssue serves a replay before IDs are allocated. Create still
+// repeats this check in its writer transaction to close the lookup/write race.
+func (repository *IssueRepository) LookupCreateIssue(ctx context.Context, key string, hash []byte) (domain.Issue, bool, error) {
+	var result domain.Issue
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, createIssueOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
 }
 
 // CreateIssue atomically allocates a project-local sequence number, inserts the
@@ -41,6 +73,26 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 	timestamp := now.Format(time.RFC3339Nano)
 	var issue domain.Issue
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, createIssueOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &issue); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		var sequenceNo int64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE projects
@@ -112,6 +164,18 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 			CreatedAt:          now,
 			UpdatedAt:          now,
 			Labels:             labels,
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(issue)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue create response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, createIssueOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})

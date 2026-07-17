@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // CreateIssueInput is the validated input for creating an issue. Empty Status
 // and Priority default to open and medium. When Status is blocked,
@@ -20,6 +23,7 @@ type CreateIssueInput struct {
 	BlockedReason       *string
 	Labels              []string
 	CreateMissingLabels bool
+	IdempotencyKey      *string
 }
 
 // Validate applies creation defaults and validates invariants that do not
@@ -100,6 +104,17 @@ func (input CreateIssueInput) Validate() (CreateIssueInput, error) {
 	if err != nil {
 		return CreateIssueInput{}, err
 	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return CreateIssueInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return CreateIssueInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
 
 	return CreateIssueInput{
 		Type:                input.Type,
@@ -112,7 +127,37 @@ func (input CreateIssueInput) Validate() (CreateIssueInput, error) {
 		BlockedReason:       copyString(input.BlockedReason),
 		Labels:              labels,
 		CreateMissingLabels: input.CreateMissingLabels,
+		IdempotencyKey:      idempotencyKey,
 	}, nil
+}
+
+// CanonicalCreateIssueRequest returns deterministic JSON for a normalized
+// create request. The idempotency key is intentionally excluded.
+func CanonicalCreateIssueRequest(input CreateIssueInput) ([]byte, error) {
+	request := struct {
+		Type                Type     `json:"type"`
+		Title               string   `json:"title"`
+		Description         *string  `json:"description"`
+		AcceptanceCriteria  *string  `json:"acceptance_criteria"`
+		Status              Status   `json:"status"`
+		Priority            Priority `json:"priority"`
+		ParentID            *string  `json:"parent_id"`
+		BlockedReason       *string  `json:"blocked_reason"`
+		Labels              []string `json:"labels"`
+		CreateMissingLabels bool     `json:"create_missing_labels"`
+	}{
+		Type:                input.Type,
+		Title:               input.Title,
+		Description:         copyString(input.Description),
+		AcceptanceCriteria:  copyString(input.AcceptanceCriteria),
+		Status:              input.Status,
+		Priority:            input.Priority,
+		ParentID:            copyString(input.ParentID),
+		BlockedReason:       copyString(input.BlockedReason),
+		Labels:              append([]string(nil), input.Labels...),
+		CreateMissingLabels: input.CreateMissingLabels,
+	}
+	return json.Marshal(request)
 }
 
 func validateOptionalText(field string, value *string, maximum int) error {

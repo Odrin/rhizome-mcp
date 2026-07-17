@@ -8,17 +8,21 @@ import (
 )
 
 type ClaimIssueCommand struct {
-	Identifier    domain.IssueIdentifier
-	AttemptID     string
-	SessionID     *string
-	TokenHash     []byte
-	LeaseDuration time.Duration
-	OccurredAt    time.Time
+	Identifier     domain.IssueIdentifier
+	AttemptID      string
+	SessionID      *string
+	TokenHash      []byte
+	LeaseToken     string
+	LeaseDuration  time.Duration
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
 }
 
 type ClaimIssueResult struct {
-	Issue   domain.Issue
-	Attempt domain.WorkAttempt
+	Issue      domain.Issue
+	Attempt    domain.WorkAttempt
+	LeaseToken string
 }
 
 type RenewAttemptCommand struct {
@@ -92,6 +96,7 @@ type ExpireAttemptsResult struct {
 // AttemptRepository executes all attempt lifecycle mutations atomically.
 type AttemptRepository interface {
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
+	LookupClaimIssue(context.Context, string, []byte) (ClaimIssueResult, bool, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
 	LookupFinishedAttempt(context.Context, string, []byte) (FinishAttemptResult, bool, error)

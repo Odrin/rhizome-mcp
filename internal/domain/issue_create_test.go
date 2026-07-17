@@ -114,4 +114,34 @@ func TestCreateIssueInputValidateParentReferenceAndTypeRules(t *testing.T) {
 	}
 }
 
+func TestCreateIssueIdempotencyKeyValidationAndCanonicalRequest(t *testing.T) {
+	key := "  retry-key  "
+	input := domain.CreateIssueInput{Type: domain.TypeTask, Title: "Ship it", IdempotencyKey: &key}
+	normalized, err := input.Validate()
+	if err != nil || normalized.IdempotencyKey == nil || *normalized.IdempotencyKey != "retry-key" {
+		t.Fatalf("normalized key = %#v, %v", normalized.IdempotencyKey, err)
+	}
+	key = "changed"
+	if *normalized.IdempotencyKey != "retry-key" {
+		t.Fatal("idempotency key was not defensively copied")
+	}
+	first, err := domain.CanonicalCreateIssueRequest(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different := normalized
+	different.Title = "different"
+	second, err := domain.CanonicalCreateIssueRequest(different)
+	if err != nil || string(first) == string(second) {
+		t.Fatal("request change did not change canonical bytes")
+	}
+	for _, value := range []string{" ", strings.Repeat("x", domain.MaxIdempotencyKeyRunes+1)} {
+		value := value
+		_, err := (domain.CreateIssueInput{Type: domain.TypeTask, Title: "Ship it", IdempotencyKey: &value}).Validate()
+		if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) && !errors.Is(err, &domain.Error{Code: domain.CodeLimitExceeded}) {
+			t.Fatalf("key %q error = %v", value, err)
+		}
+	}
+}
+
 func stringPointer(value string) *string { return &value }

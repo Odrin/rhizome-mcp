@@ -354,10 +354,7 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
-	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID})
+	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID, IdempotencyKey: input.IdempotencyKey})
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -674,9 +671,6 @@ func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallTool
 
 func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	result, err := adapter.issues.CreateIssue(ctx, domain.CreateIssueInput{
 		Type:                domain.Type(input.Type),
 		Title:               input.Title,
@@ -688,6 +682,7 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 		BlockedReason:       input.BlockedReason,
 		Labels:              input.Labels,
 		CreateMissingLabels: input.CreateMissingLabels,
+		IdempotencyKey:      input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)

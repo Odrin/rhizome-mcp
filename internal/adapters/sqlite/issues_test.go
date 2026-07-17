@@ -119,6 +119,48 @@ func TestIssueCreationPersistsProjectionEventAndCounter(t *testing.T) {
 	}
 }
 
+func TestIssueCreateIdempotencyReplayAndConflict(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	key := "issue-retry"
+	input := domain.CreateIssueInput{Type: domain.TypeTask, Title: "Retry issue", IdempotencyKey: &key}
+	first, err := service.CreateIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	second, err := service.CreateIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("replay create: %v", err)
+	}
+	if !reflect.DeepEqual(first.Issue, second.Issue) {
+		t.Fatalf("replay mismatch: %#v != %#v", first.Issue, second.Issue)
+	}
+	changed := input
+	changed.Title = "Changed title"
+	if _, err := service.CreateIssue(ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var issues, events, records int64
+	var nextIssueNumber int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issues").Scan(&issues); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE event_type = 'issue_created'").Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'create_issue' AND idempotency_key = ?", key).Scan(&records); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT next_issue_number FROM projects").Scan(&nextIssueNumber)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issues != 1 || events != 1 || records != 1 || nextIssueNumber != 2 {
+		t.Fatalf("durable state = issues %d events %d records %d next_issue_number %d", issues, events, records, nextIssueNumber)
+	}
+}
+
 func TestIssueReadByInternalAndDisplayIDMapsProjectionWithoutSideEffects(t *testing.T) {
 	service, db, now := openIssueService(t)
 	ctx := context.Background()
@@ -441,6 +483,55 @@ func TestIssueCreationRollsBackWhenEventInsertFails(t *testing.T) {
 	}
 	if issues != 0 || events != 0 || nextNumber != 1 {
 		t.Fatalf("after rollback: issues=%d events=%d next_issue_number=%d", issues, events, nextNumber)
+	}
+}
+
+func TestIssueCreationRollsBackWhenIdempotencyInsertFails(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	key := "issue-idempotency-rollback"
+	const triggerName = "test_fail_create_issue_idempotency_insert"
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER `+triggerName+`
+			BEFORE INSERT ON idempotency_records
+			WHEN NEW.operation = 'create_issue'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced create issue idempotency insert failure');
+			END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `DROP TRIGGER `+triggerName)
+			return err
+		}); err != nil {
+			t.Errorf("drop test trigger: %v", err)
+		}
+	}()
+
+	_, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "must rollback", IdempotencyKey: &key})
+	assertDomainCode(t, err, domain.CodeStorageConstraint)
+
+	var issues, events, records int64
+	var nextNumber int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issues").Scan(&issues); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events").Scan(&events); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'create_issue' AND idempotency_key = ?", key).Scan(&records); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT next_issue_number FROM projects").Scan(&nextNumber)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issues != 0 || events != 0 || records != 0 || nextNumber != 1 {
+		t.Fatalf("after rollback: issues=%d events=%d records=%d next_issue_number=%d", issues, events, records, nextNumber)
 	}
 }
 
