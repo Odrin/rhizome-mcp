@@ -26,11 +26,6 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 			VALUES (4, 'later_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO schema_migrations(version, name, checksum, applied_at)
-			VALUES (3, 'middle_migration', 'checksum', ?)`, now.Format(time.RFC3339Nano)); err != nil {
-			return err
-		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, payload, created_at)
 			VALUES (NULL, 'project_event', '{}', ?)`, now.Format(time.RFC3339Nano))

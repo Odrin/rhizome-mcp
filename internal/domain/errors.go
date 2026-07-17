@@ -63,6 +63,10 @@ const (
 	CodeStorageMigration = "STORAGE_MIGRATION"
 	// CodeStorageFailure identifies another SQLite operation failure.
 	CodeStorageFailure = "STORAGE_FAILURE"
+	// CodeReviewAlreadyExists identifies a conflicting review request for the same target.
+	CodeReviewAlreadyExists = "REVIEW_ALREADY_EXISTS"
+	// CodeReviewTargetStale identifies a request whose target content changed since creation.
+	CodeReviewTargetStale = "STALE_REVIEW_TARGET"
 )
 
 // Detail is one stable, field-oriented domain error detail. EntityIndex is nil

@@ -28,15 +28,15 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 2}) {
-		t.Fatalf("Migrate() result = %+v, want current version with two applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 3}) {
+		t.Fatalf("Migrate() result = %+v, want current version with three applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
 	ordinaryTables := []string{
 		"agent_sessions", "artifacts", "attempt_notes", "comments", "decisions", "idempotency_records",
 		"issue_events", "issue_labels", "issue_relations", "issues", "labels", "projects",
-		"schema_migrations", "work_attempts",
+		"review_events", "review_outcomes", "review_requests", "review_targets", "schema_migrations", "work_attempts",
 	}
 	for _, table := range ordinaryTables {
 		var tableType string
@@ -63,6 +63,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_decisions_issue_status", "idx_decisions_supersedes", "idx_events_issue_id",
 		"idx_issue_labels_label", "idx_issues_archived", "idx_issues_parent", "idx_issues_status_priority",
 		"idx_labels_name_nocase", "idx_one_active_attempt_per_issue", "idx_relations_source", "idx_relations_target",
+		"idx_review_requests_active_attempt", "idx_review_requests_active_target", "idx_review_targets_issue_version",
 	}
 	rows, err := inspect.Query("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name")
 	if err != nil {
@@ -89,10 +90,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "search_index_triggers" || checksum != searchIndexTriggersChecksum {
+	if version != CurrentVersion() || name != "review_workflow" || checksum != reviewWorkflowChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(searchIndexTriggersSQL))
+	actualChecksum := sha256.Sum256([]byte(reviewWorkflowSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -114,7 +115,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 2 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 3 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -177,8 +178,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 1}) {
-		t.Fatalf("upgrade result = %+v, want one applied migration", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 2}) {
+		t.Fatalf("upgrade result = %+v, want two applied migrations", result)
 	}
 
 	var count int
@@ -278,7 +279,7 @@ func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	}{
 		{name: "checksum", tamper: "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"},
 		{name: "name", tamper: "UPDATE schema_migrations SET name = 'renamed_schema'"},
-		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (3, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
+		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (4, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
 		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0 WHERE version = 1"},
 		{name: "malformed checksum", tamper: "UPDATE schema_migrations SET checksum = 'not-sha256'"},
 		{name: "malformed timestamp", tamper: "UPDATE schema_migrations SET applied_at = 'not-a-timestamp'"},
