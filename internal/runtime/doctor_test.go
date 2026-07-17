@@ -11,6 +11,8 @@ import (
 )
 
 func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
+	t.Setenv("HTTP_ADDRESS", "")
+
 	repository, dataRoot := initializeProject(t)
 	fakeClock := clock.NewFakeClock(testTime)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
@@ -30,7 +32,7 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 	if !report.Healthy() {
 		t.Fatalf("Doctor() unhealthy report = %+v", report)
 	}
-	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts"}
+	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts", "http_address"}
 	if len(report.Checks) != len(wantChecks) {
 		t.Fatalf("doctor checks = %+v", report.Checks)
 	}
@@ -52,7 +54,46 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 	}
 }
 
+func TestProjectDoctorReportsInvalidHTTPAddressConfiguration(t *testing.T) {
+	t.Setenv("HTTP_ADDRESS", "localhost:0")
+
+	repository, dataRoot := initializeProject(t)
+	fakeClock := clock.NewFakeClock(testTime)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        fakeClock,
+	})
+	if err != nil {
+		t.Fatalf("OpenProject() error = %v", err)
+	}
+	defer func() { _ = project.Close(context.Background()) }()
+
+	report, err := project.Doctor(context.Background(), false)
+	if err == nil {
+		t.Fatalf("Doctor() unexpectedly succeeded: %+v", report)
+	}
+	assertDomainCode(t, err, projectruntime.CodeHealthCheck)
+	if report.Healthy() {
+		t.Fatalf("Doctor() healthy report = %+v", report)
+	}
+	var found bool
+	for _, check := range report.Checks {
+		if check.Name == "http_address" {
+			found = true
+			if check.Healthy {
+				t.Fatalf("http_address unexpectedly healthy: %+v", check)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("doctor report missing http_address check: %+v", report.Checks)
+	}
+}
+
 func TestProjectDoctorReportsExpiredActiveAttemptsWithoutMutatingState(t *testing.T) {
+	t.Setenv("HTTP_ADDRESS", "")
+
 	repository, dataRoot := initializeProject(t)
 	fakeClock := clock.NewFakeClock(testTime)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{

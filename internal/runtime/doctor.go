@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -20,6 +22,7 @@ const (
 	checkFreeDiskSpace         = "free_disk_space"
 	checkWALSize               = "wal_size"
 	checkExpiredActiveAttempts = "expired_active_attempts"
+	checkHTTPAddress           = "http_address"
 	checkIntegrity             = "integrity_check"
 )
 
@@ -135,6 +138,11 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 		{checkExpiredActiveAttempts, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			return checkExpiredActiveAttemptsQuery(ctx, query, project.clock)
 		}},
+		{checkHTTPAddress, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			_ = ctx
+			_ = query
+			return checkHTTPAddressConfiguration()
+		}},
 	}
 	if report.Full {
 		checks = append(checks, struct {
@@ -246,6 +254,18 @@ func checkExpiredActiveAttemptsQuery(ctx context.Context, query sqlite.Queryer, 
 		return "", fmt.Errorf("expired active attempts=%d", count)
 	}
 	return fmt.Sprintf("count=%d", count), nil
+}
+
+func checkHTTPAddressConfiguration() (string, error) {
+	cfg := config.Load()
+	address := strings.TrimSpace(cfg.HTTPAddress)
+	if address == "" {
+		return "not configured", nil
+	}
+	if _, err := ValidateLoopbackAddress(address); err != nil {
+		return "", fmt.Errorf("invalid http address %q: %w", address, err)
+	}
+	return fmt.Sprintf("configured=%s", address), nil
 }
 
 func checkIntegrityQuery(ctx context.Context, query sqlite.Queryer) (string, error) {
