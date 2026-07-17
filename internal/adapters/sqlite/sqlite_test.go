@@ -17,7 +17,6 @@ import (
 )
 
 func TestOpenConfiguresAndVerifiesSQLite(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, Options{})
 
 	stats := db.pool.Stats()
@@ -90,7 +89,6 @@ func TestOpenConfiguresAndVerifiesSQLite(t *testing.T) {
 }
 
 func TestOpenRequiresExistingParentAndDoesNotCreateIt(t *testing.T) {
-	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "missing")
 	_, err := Open(context.Background(), filepath.Join(parent, "tasks.db"), Options{})
 	assertDomainCode(t, err, domain.CodeStorageConfiguration)
@@ -100,7 +98,6 @@ func TestOpenRequiresExistingParentAndDoesNotCreateIt(t *testing.T) {
 }
 
 func TestWriteCommitsAndRollsBack(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, noRetryOptions())
 	ctx := context.Background()
 	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE values_test (value TEXT NOT NULL)"); err != nil {
@@ -135,7 +132,6 @@ func TestWriteCommitsAndRollsBack(t *testing.T) {
 }
 
 func TestReadUsesConfiguredConnectionAndPropagatesErrors(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, Options{})
 	ctx := context.Background()
 
@@ -162,7 +158,6 @@ func TestReadUsesConfiguredConnectionAndPropagatesErrors(t *testing.T) {
 }
 
 func TestWriteRollsBackCommitFailure(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, noRetryOptions())
 	ctx := context.Background()
 	statements := []string{
@@ -190,7 +185,6 @@ func TestWriteRollsBackCommitFailure(t *testing.T) {
 }
 
 func TestWriteRetriesBusyWithConfiguredDelaysAndMapsExhaustion(t *testing.T) {
-	t.Parallel()
 	delays := []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}
 	sleeper := &recordingSleeper{}
 	db := openTestDB(t, Options{RetryPolicy: &RetryPolicy{Delays: delays, Sleeper: sleeper}})
@@ -215,7 +209,6 @@ func TestWriteRetriesBusyWithConfiguredDelaysAndMapsExhaustion(t *testing.T) {
 }
 
 func TestWriteCancellationStopsDuringRetryWait(t *testing.T) {
-	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	sleeper := SleepFunc(func(ctx context.Context, _ time.Duration) error {
 		cancel()
@@ -238,7 +231,6 @@ func TestWriteCancellationStopsDuringRetryWait(t *testing.T) {
 }
 
 func TestWriteDoesNotRetryConstraintOrDomainError(t *testing.T) {
-	t.Parallel()
 	sleeper := &recordingSleeper{}
 	db := openTestDB(t, Options{RetryPolicy: &RetryPolicy{Delays: defaultRetryDelays, Sleeper: sleeper}})
 	ctx := context.Background()
@@ -281,7 +273,6 @@ func TestWriteDoesNotRetryConstraintOrDomainError(t *testing.T) {
 }
 
 func TestOpenTranslatesCorruptDatabase(t *testing.T) {
-	t.Parallel()
 	path := filepath.Join(t.TempDir(), "not-a-database.db")
 	if err := os.WriteFile(path, []byte("this is not SQLite"), 0o600); err != nil {
 		t.Fatal(err)
@@ -295,7 +286,6 @@ func TestOpenTranslatesCorruptDatabase(t *testing.T) {
 }
 
 func TestBackupCreatesIndependentCopyFromWALData(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, noRetryOptions())
 	ctx := context.Background()
 	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
@@ -352,7 +342,6 @@ func TestBackupCreatesIndependentCopyFromWALData(t *testing.T) {
 }
 
 func TestBackupRejectsInvalidDestinationsWithoutOverwritingData(t *testing.T) {
-	t.Parallel()
 	db := openTestDB(t, noRetryOptions())
 	ctx := context.Background()
 	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE backup_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
@@ -416,7 +405,6 @@ func TestBackupRejectsInvalidDestinationsWithoutOverwritingData(t *testing.T) {
 }
 
 func TestOpenTranslatesUnavailableDatabase(t *testing.T) {
-	t.Parallel()
 	_, err := Open(context.Background(), t.TempDir(), Options{})
 	assertDomainCode(t, err, domain.CodeStorageUnavailable)
 	var sqliteErr *moderncsqlite.Error
@@ -426,7 +414,6 @@ func TestOpenTranslatesUnavailableDatabase(t *testing.T) {
 }
 
 func TestCloseAlwaysClosesPoolWhenCheckpointContextCanceled(t *testing.T) {
-	t.Parallel()
 	db := openTestDBWithoutCleanup(t, Options{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -440,7 +427,6 @@ func TestCloseAlwaysClosesPoolWhenCheckpointContextCanceled(t *testing.T) {
 }
 
 func TestCloseCheckpointsAndCloses(t *testing.T) {
-	t.Parallel()
 	db := openTestDBWithoutCleanup(t, Options{})
 	if err := db.Close(context.Background()); err != nil {
 		var sqliteErr *moderncsqlite.Error
