@@ -4,12 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+)
+
+var (
+	errInvalidRequestHost  = errors.New("invalid request host")
+	errMisdirectedRequest  = errors.New("misdirected request")
+	errOriginMismatch      = errors.New("origin mismatch")
+	errRequestBodyTooLarge = errors.New("request body too large")
 )
 
 const (
@@ -34,6 +42,214 @@ type HTTPServerOptions struct {
 	IdleTimeout         time.Duration
 	MaxHeaderBytes      int
 	MaxRequestBodyBytes int64
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+type requestBodyReader struct {
+	io.ReadCloser
+	limit     int64
+	readSoFar int64
+	exceeded  bool
+}
+
+func (r *requestBodyReader) Read(data []byte) (int, error) {
+	if r.exceeded {
+		return 0, errRequestBodyTooLarge
+	}
+	n, err := r.ReadCloser.Read(data)
+	if n > 0 {
+		r.readSoFar += int64(n)
+	}
+	if r.readSoFar > r.limit {
+		r.exceeded = true
+		if err == nil {
+			err = errRequestBodyTooLarge
+		}
+		return n, err
+	}
+	return n, err
+}
+
+func (r *statusRecorder) WriteHeader(statusCode int) {
+	if r.wroteHeader {
+		return
+	}
+	r.statusCode = statusCode
+	r.wroteHeader = true
+	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (r *statusRecorder) Write(data []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(data)
+}
+
+// WrapHTTPHandler hardens a local HTTP handler by validating the request host
+// and origin against the configured loopback endpoint before the next handler
+// runs, and by recovering panics to return a 500 without leaking payloads.
+func WrapHTTPHandler(handler http.Handler, authority string, logger *slog.Logger) http.Handler {
+	return wrapHTTPHandler(handler, authority, logger, 0)
+}
+
+// WrapHTTPHandlerWithBodyLimit hardens a local HTTP handler and applies a
+// request-body size limit before the next handler runs.
+func WrapHTTPHandlerWithBodyLimit(handler http.Handler, authority string, logger *slog.Logger, maxRequestBodyBytes int64) http.Handler {
+	return wrapHTTPHandler(handler, authority, logger, maxRequestBodyBytes)
+}
+
+func wrapHTTPHandler(handler http.Handler, authority string, logger *slog.Logger, maxRequestBodyBytes int64) http.Handler {
+	if handler == nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		})
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		var bodyReader *requestBodyReader
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.Error("http handler panic", "error", recovered)
+				if !recorder.wroteHeader {
+					recorder.WriteHeader(http.StatusInternalServerError)
+				}
+				if recorder.statusCode == http.StatusOK {
+					recorder.statusCode = http.StatusInternalServerError
+				}
+			}
+			if bodyReader != nil && bodyReader.exceeded && !recorder.wroteHeader {
+				recorder.WriteHeader(http.StatusRequestEntityTooLarge)
+			}
+			method := ""
+			var sessionID string
+			if request != nil {
+				method = request.Method
+				sessionID = strings.TrimSpace(request.Header.Get("Mcp-Session-Id"))
+			}
+			attrs := []any{"method", method, "path", requestPath(request), "status", recorder.statusCode, "duration", time.Since(startedAt)}
+			if sessionID != "" {
+				attrs = append(attrs, "mcp_session_id", sessionID)
+			}
+			logger.Info("http request completed", attrs...)
+		}()
+
+		if err := validateRequest(request, authority); err != nil {
+			switch {
+			case errors.Is(err, errInvalidRequestHost):
+				http.Error(recorder, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			case errors.Is(err, errMisdirectedRequest):
+				http.Error(recorder, http.StatusText(http.StatusMisdirectedRequest), http.StatusMisdirectedRequest)
+			case errors.Is(err, errOriginMismatch):
+				http.Error(recorder, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			default:
+				http.Error(recorder, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+			return
+		}
+		if maxRequestBodyBytes > 0 {
+			if request != nil && request.ContentLength > maxRequestBodyBytes {
+				http.Error(recorder, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+				return
+			}
+			if request != nil && request.Body != nil {
+				bodyReader = &requestBodyReader{ReadCloser: request.Body, limit: maxRequestBodyBytes}
+				request.Body = bodyReader
+			}
+		}
+		handler.ServeHTTP(recorder, request)
+	})
+}
+
+func requestPath(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	if request.URL != nil && request.URL.Path != "" {
+		return request.URL.Path
+	}
+	return "/"
+}
+
+func validateRequest(request *http.Request, authority string) error {
+	if request == nil {
+		return errInvalidRequestHost
+	}
+	if authority == "" {
+		return errInvalidRequestHost
+	}
+	canonicalAuthority, err := normalizeLoopbackAuthority(authority)
+	if err != nil {
+		return errInvalidRequestHost
+	}
+	requestHost := strings.TrimSpace(request.Host)
+	if requestHost == "" && request.URL != nil {
+		requestHost = strings.TrimSpace(request.URL.Host)
+	}
+	if requestHost == "" {
+		return errInvalidRequestHost
+	}
+	requestAuthority, err := parseAuthority(requestHost)
+	if err != nil {
+		return errInvalidRequestHost
+	}
+	allowedAuthority, err := parseAuthority(canonicalAuthority)
+	if err != nil {
+		return errInvalidRequestHost
+	}
+	if requestAuthority.host != allowedAuthority.host || requestAuthority.port != allowedAuthority.port {
+		return errMisdirectedRequest
+	}
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		return nil
+	}
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	expectedOrigin := scheme + "://" + canonicalAuthority
+	if origin != expectedOrigin {
+		return errOriginMismatch
+	}
+	return nil
+}
+
+type parsedAuthority struct {
+	host string
+	port string
+}
+
+func parseAuthority(value string) (parsedAuthority, error) {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return parsedAuthority{}, err
+	}
+	if host == "" || port == "" {
+		return parsedAuthority{}, errInvalidRequestHost
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return parsedAuthority{host: ip.String(), port: port}, nil
+	}
+	return parsedAuthority{host: strings.ToLower(host), port: port}, nil
+}
+
+func normalizeLoopbackAuthority(value string) (string, error) {
+	canonical, err := ValidateLoopbackAddress(value)
+	if err != nil {
+		return "", err
+	}
+	return canonical, nil
 }
 
 // ServeHTTPServer starts a loopback-only HTTP listener and blocks until the
@@ -83,8 +299,9 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 	}
 	options.Logger.Info("http server listening", "endpoint", listener.Addr().String())
 
+	hardeningHandler := WrapHTTPHandlerWithBodyLimit(options.Handler, listener.Addr().String(), options.Logger, options.MaxRequestBodyBytes)
 	server := &http.Server{
-		Handler:           http.MaxBytesHandler(options.Handler, options.MaxRequestBodyBytes),
+		Handler:           hardeningHandler,
 		ReadHeaderTimeout: options.ReadHeaderTimeout,
 		ReadTimeout:       options.ReadTimeout,
 		WriteTimeout:      options.WriteTimeout,
