@@ -37,3 +37,19 @@ func (service *ProjectService) ExportLogicalProject(ctx context.Context) ([]byte
 	}
 	return data, nil
 }
+
+// ValidateLogicalProjectImport validates a logical project document and reports a deterministic dry run.
+func (service *ProjectService) ValidateLogicalProjectImport(ctx context.Context, document []byte) (domain.LogicalProjectImportDryRun, error) {
+	plan, err := domain.ParseLogicalProjectImportPlan(document)
+	if err != nil {
+		return domain.LogicalProjectImportDryRun{}, err
+	}
+	hasContent, err := service.repository.HasLogicalProjectImportDestinationContent(ctx)
+	if err != nil {
+		return domain.LogicalProjectImportDryRun{}, err
+	}
+	if hasContent {
+		domain.AddDestinationConflicts(&plan, "empty_destination_required", "destination project must be empty for this import", "$.destination")
+	}
+	return plan.DryRun, nil
+}

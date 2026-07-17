@@ -185,6 +185,40 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 	return document, nil
 }
 
+// HasLogicalProjectImportDestinationContent reports whether any durable project data exists.
+func (repository *ProjectRepository) HasLogicalProjectImportDestinationContent(ctx context.Context) (bool, error) {
+	var hasContent bool
+	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
+		row := query.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM issues
+				UNION ALL
+				SELECT 1 FROM labels
+				UNION ALL
+				SELECT 1 FROM issue_labels
+				UNION ALL
+				SELECT 1 FROM issue_relations
+				UNION ALL
+				SELECT 1 FROM comments
+				UNION ALL
+				SELECT 1 FROM decisions
+				UNION ALL
+				SELECT 1 FROM work_attempts
+				UNION ALL
+				SELECT 1 FROM attempt_notes
+				UNION ALL
+				SELECT 1 FROM artifacts
+				UNION ALL
+				SELECT 1 FROM issue_events
+			)`)
+		return row.Scan(&hasContent)
+	})
+	if err != nil {
+		return false, err
+	}
+	return hasContent, nil
+}
+
 func readLogicalIssues(ctx context.Context, query Queryer) ([]domain.LogicalIssue, time.Time, error) {
 	rows, err := query.QueryContext(ctx, `
 		SELECT id, type, title, description, acceptance_criteria, status, priority, parent_id, blocked_reason, created_at, updated_at, closed_at

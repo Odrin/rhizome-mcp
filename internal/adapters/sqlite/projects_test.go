@@ -291,6 +291,44 @@ func TestProjectRepositoryRejectsMissingOrDuplicateProjectRows(t *testing.T) {
 	})
 }
 
+func TestProjectRepositoryReportsDestinationContent(t *testing.T) {
+	t.Run("empty destination", func(t *testing.T) {
+		db, _ := openProjectDatabase(t, "name", "instructions")
+		repository, err := sqlite.NewProjectRepository(db)
+		if err != nil {
+			t.Fatalf("NewProjectRepository() error = %v", err)
+		}
+		hasContent, err := repository.HasLogicalProjectImportDestinationContent(context.Background())
+		if err != nil {
+			t.Fatalf("HasLogicalProjectImportDestinationContent() error = %v", err)
+		}
+		if hasContent {
+			t.Fatal("expected empty destination")
+		}
+	})
+
+	t.Run("nonempty destination", func(t *testing.T) {
+		db, _ := openProjectDatabase(t, "name", "instructions")
+		if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, "INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'issue', 'open', 'medium', 1, ?, ?)", "01ARZ3NDEKTSV4RRFFQ69G5FAJ", time.Now().Format(time.RFC3339Nano), time.Now().Format(time.RFC3339Nano))
+			return err
+		}); err != nil {
+			t.Fatalf("insert issue: %v", err)
+		}
+		repository, err := sqlite.NewProjectRepository(db)
+		if err != nil {
+			t.Fatalf("NewProjectRepository() error = %v", err)
+		}
+		hasContent, err := repository.HasLogicalProjectImportDestinationContent(context.Background())
+		if err != nil {
+			t.Fatalf("HasLogicalProjectImportDestinationContent() error = %v", err)
+		}
+		if !hasContent {
+			t.Fatal("expected nonempty destination")
+		}
+	})
+}
+
 func TestProjectRepositoryHasNoWriteSideEffects(t *testing.T) {
 	db, _ := openProjectDatabase(t, "name", "instructions")
 	var before, after struct {

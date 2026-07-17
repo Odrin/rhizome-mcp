@@ -12,6 +12,10 @@ import (
 
 type exportProjectInput struct{}
 
+type validateImportInput struct {
+	Document string `json:"document"`
+}
+
 type getProjectInput struct {
 	IncludeInstructions bool `json:"include_instructions,omitempty"`
 }
