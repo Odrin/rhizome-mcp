@@ -49,8 +49,9 @@ rhizome-mcp project info --format json
 ```
 
 To connect an MCP client, launch `serve` with the repository as its working
-directory. The transport is stdio; protocol output is written only to stdout
-and logs/errors are written to stderr.
+directory. Stdio remains the default and is the recommended transport for
+clients; protocol output is written only to stdout and logs/errors are written
+to stderr.
 
 ```json
 {
@@ -62,6 +63,15 @@ and logs/errors are written to stderr.
   }
 }
 ```
+
+For a local HTTP endpoint instead, run `rhizome-mcp serve --http-address
+127.0.0.1:0`. The process logs the bound endpoint to stderr and the
+Streamable HTTP endpoint is `http://127.0.0.1:<port>/mcp`. Configure local
+clients to use that URL. The HTTP transport is loopback-only, has no
+authentication, and rejects Host/Origin values that do not match the
+configured local endpoint. Use literal loopback IPs such as `127.0.0.1` or
+`[::1]`; hostname binds like `localhost` are not supported by the current
+implementation.
 
 The CLI also provides `issue list`, `issue show`, `search`, `graph`, and
 maintenance commands. Run the binary without arguments to print complete

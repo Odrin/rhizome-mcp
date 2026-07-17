@@ -65,6 +65,16 @@ Run the binary from the repository that should be tracked. `init` writes `.agent
 rhizome-mcp init
 ```
 
+## Optional loopback HTTP transport
+
+The default transport is stdio. For a local HTTP endpoint instead, start the server with a literal loopback IP address:
+
+```bash
+rhizome-mcp serve --http-address 127.0.0.1:0
+```
+
+The process logs the bound endpoint to stderr. Configure local MCP clients to use `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The HTTP transport is loopback-only, has no authentication, and rejects unexpected Host or Origin values. Hostnames such as `localhost` are not supported by the current implementation, so use literal loopback IPs such as `127.0.0.1` or `[::1]`. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify the configured address, Host header, and Origin header before retrying.
+
 ## Connect common clients
 
 ### VS Code

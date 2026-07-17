@@ -1,6 +1,6 @@
 # CLI reference
 
-The CLI is for human-facing operations such as initialization, inspection, backup, and maintenance. The MCP server itself runs with `rhizome-mcp serve` over stdio for clients.
+The CLI is for human-facing operations such as initialization, inspection, backup, and maintenance. The MCP server itself runs with `rhizome-mcp serve` over stdio for clients by default. For local testing, `serve --http-address 127.0.0.1:0` switches to a loopback-only Streamable HTTP transport at `http://127.0.0.1:<port>/mcp`.
 
 ## Global option
 
@@ -22,11 +22,19 @@ rhizome-mcp init
 
 ### `serve`
 
-Start the MCP server over stdio.
+Start the MCP server over stdio by default.
 
 ```bash
 rhizome-mcp serve
 ```
+
+To opt into loopback HTTP instead, use a literal loopback IP address and an explicit port:
+
+```bash
+rhizome-mcp serve --http-address 127.0.0.1:0
+```
+
+The server logs the bound endpoint to stderr. Point local MCP clients at `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The transport is loopback-only and does not use authentication. Rejects non-loopback bind addresses, hostnames such as `localhost`, and mismatched Host/Origin headers. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify that the address uses a literal loopback IP and that the client sends the expected Host and Origin values.
 
 ### `backup`
 

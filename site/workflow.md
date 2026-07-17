@@ -2,6 +2,8 @@
 
 Use this routine when you want safe, recoverable work in a shared repository.
 
+By default, clients should use the stdio transport. If you need a local HTTP endpoint for a nearby client, start `rhizome-mcp serve --http-address 127.0.0.1:0` and point that client at `http://127.0.0.1:<port>/mcp`. Keep the transport loopback-only, do not expose it on a LAN or through a proxy, and do not rely on authentication because the server does not provide it. Use literal loopback IPs such as `127.0.0.1` or `[::1]`; hostname binds such as `localhost` are rejected.
+
 ## The recommended loop
 
 1. Call `get_project` to learn the current project metadata and capabilities.

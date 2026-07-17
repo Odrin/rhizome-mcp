@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -465,6 +468,223 @@ func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("origin mismatch status = %d, want %d", response.StatusCode, http.StatusForbidden)
 	}
+}
+
+func TestIntegrationHTTPServeEphemeralPortWorkflow(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })
+
+	endpoint := "http://" + server.waitForEndpoint(t) + "/mcp"
+	if _, _, err := communicateThroughHTTP(t, endpoint, "http-client"); err != nil {
+		t.Fatalf("HTTP workflow failed: %v\nstderr:\n%s", err, server.output.String())
+	}
+}
+
+func TestIntegrationHTTPServeConcurrentClientsOnEphemeralPort(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })
+
+	endpoint := "http://" + server.waitForEndpoint(t) + "/mcp"
+	results := make(chan error, 3)
+	for _, clientName := range []string{"concurrent-a", "concurrent-b", "concurrent-c"} {
+		clientName := clientName
+		go func() {
+			_, _, err := communicateThroughHTTP(t, endpoint, clientName)
+			results <- err
+		}()
+	}
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent HTTP workflow failed: %v\nstderr:\n%s", err, server.output.String())
+		}
+	}
+
+	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 3); err != nil {
+		t.Fatalf("assert concurrent HTTP agent sessions: %v", err)
+	}
+}
+
+func TestIntegrationHTTPServeStopsOnInterrupt(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
+	endpoint := "http://" + server.waitForEndpoint(t) + "/mcp"
+	if _, _, err := communicateThroughHTTP(t, endpoint, "shutdown-client"); err != nil {
+		t.Fatalf("HTTP workflow failed before shutdown: %v\nstderr:\n%s", err, server.output.String())
+	}
+
+	stopIntegrationHTTPServer(t, server)
+
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Get(endpoint)
+	if err == nil {
+		response.Body.Close()
+		t.Fatalf("expected HTTP endpoint to be closed after shutdown")
+	}
+}
+
+func TestIntegrationHTTPServeRejectsHostnameAddress(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	server := launchIntegrationHTTPServer(t, env, "localhost:0")
+	if err := server.waitForExit(t); err == nil {
+		t.Fatalf("expected hostname address to fail startup")
+	}
+	if stderr := server.output.String(); !strings.Contains(stderr, "invalid http address") {
+		t.Fatalf("expected invalid address error in stderr, got %s", stderr)
+	}
+}
+
+type integrationHTTPServer struct {
+	cmd       *exec.Cmd
+	output    *capturedOutput
+	endpoint  string
+	endpointC chan string
+	doneC     chan error
+}
+
+type capturedOutput struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (output *capturedOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.buf.Write(data)
+}
+
+func (output *capturedOutput) WriteString(value string) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	_, _ = output.buf.WriteString(value)
+}
+
+func (output *capturedOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.buf.String()
+}
+
+func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpAddress string) *integrationHTTPServer {
+	t.Helper()
+	cmd := exec.Command(integrationBinary, "--data-root", env.dataRoot, "serve", "--http-address", httpAddress)
+	cmd.Dir = env.repository
+
+	stderrReader, stderrWriter := io.Pipe()
+	output := &capturedOutput{}
+	server := &integrationHTTPServer{
+		cmd:       cmd,
+		output:    output,
+		endpointC: make(chan string, 1),
+		doneC:     make(chan error, 1),
+	}
+	cmd.Stderr = stderrWriter
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start integration HTTP server: %v", err)
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(stderrReader)
+		for scanner.Scan() {
+			line := scanner.Text()
+			output.WriteString(line + "\n")
+			if endpoint := parseIntegrationHTTPListenerEndpoint(line); endpoint != "" {
+				select {
+				case server.endpointC <- endpoint:
+				default:
+				}
+				return
+			}
+		}
+		_ = scanner.Err()
+		_ = stderrReader.Close()
+	}()
+	go func() {
+		err := cmd.Wait()
+		_ = stderrWriter.Close()
+		server.doneC <- err
+	}()
+	return server
+}
+
+func (server *integrationHTTPServer) waitForEndpoint(t *testing.T) string {
+	t.Helper()
+	deadline := time.NewTimer(integrationTimeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case endpoint := <-server.endpointC:
+			server.endpoint = endpoint
+			return endpoint
+		case err := <-server.doneC:
+			t.Fatalf("integration HTTP server exited before listening: %v\nstderr:\n%s", err, server.output.String())
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for integration HTTP server endpoint\nstderr:\n%s", server.output.String())
+		}
+	}
+}
+
+func (server *integrationHTTPServer) waitForExit(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-server.doneC:
+		return err
+	case <-time.After(integrationTimeout):
+		t.Fatalf("timed out waiting for integration HTTP server exit\nstderr:\n%s", server.output.String())
+		return nil
+	}
+}
+
+func stopIntegrationHTTPServer(t *testing.T, server *integrationHTTPServer) {
+	t.Helper()
+	if server == nil || server.cmd == nil || server.cmd.Process == nil {
+		return
+	}
+	if server.cmd.ProcessState != nil {
+		return
+	}
+	if err := server.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		_ = server.cmd.Process.Kill()
+	}
+	select {
+	case err := <-server.doneC:
+		_ = err
+	case <-time.After(2 * time.Second):
+		_ = server.cmd.Process.Kill()
+		select {
+		case err := <-server.doneC:
+			_ = err
+		case <-time.After(integrationTimeout):
+		}
+	}
+}
+
+func parseIntegrationHTTPListenerEndpoint(line string) string {
+	prefix := "endpoint="
+	start := strings.Index(line, prefix)
+	if start < 0 {
+		return ""
+	}
+	start += len(prefix)
+	if start >= len(line) {
+		return ""
+	}
+	value := line[start:]
+	if strings.HasPrefix(value, `"`) {
+		value = strings.TrimPrefix(value, `"`)
+		end := strings.Index(value, `"`)
+		if end < 0 {
+			return ""
+		}
+		return value[:end]
+	}
+	end := strings.IndexAny(value, " \t")
+	if end < 0 {
+		return value
+	}
+	return value[:end]
 }
 
 func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[string]any, string, error) {
