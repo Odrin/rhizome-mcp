@@ -29,6 +29,7 @@ import (
 	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
@@ -186,6 +187,118 @@ func TestIntegrationIssueWorkflow(t *testing.T) {
 	decodeIntegrationResult(t, retrieved, &persisted)
 	if retrieved.IsError || persisted.ID != issue.ID || persisted.Status != "done" {
 		t.Fatalf("get_issue result = %#v, decoded = %#v", retrieved, persisted)
+	}
+}
+
+func TestIntegrationReviewWorkflow(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type":                  "bug",
+		"title":                 "Review workflow integration",
+		"description":           "Exercise review request completion through the MCP transport.",
+		"status":                "review",
+		"labels":                []string{"integration"},
+		"create_missing_labels": true,
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" || issue.DisplayID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+
+	claimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
+		"issue_id":      issue.DisplayID,
+		"lease_seconds": 60,
+	})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeIntegrationResult(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" || claim.LeaseToken == "" {
+		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimed, claim)
+	}
+
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+	var latestEventID int64
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatalf("read latest issue event id: %v", err)
+	}
+	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 1,
+		"target_event_id":      latestEventID,
+		"artifact_ids":         []string{"artifact-1"},
+	})
+	var reviewRequest struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	decodeIntegrationResult(t, requested, &reviewRequest)
+	if requested.IsError || reviewRequest.ID == "" || reviewRequest.Status != "open" {
+		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, reviewRequest)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
+		RequestID:       reviewRequest.ID,
+		ExpectedVersion: 1,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("claim review request: %v", err)
+	}
+
+	finished := callIntegrationTool(t, session, "finish_attempt", map[string]any{
+		"attempt_id":     claim.Attempt.ID,
+		"lease_token":    claim.LeaseToken,
+		"outcome":        "completed",
+		"result_summary": "Review workflow integration passed.",
+		"review_outcome": "approved",
+		"verification":   []string{"go test -tags=integration ."},
+	})
+	var completion struct {
+		Attempt struct {
+			Status string `json:"status"`
+		} `json:"attempt"`
+		Issue struct {
+			Status string `json:"status"`
+		} `json:"issue"`
+	}
+	decodeIntegrationResult(t, finished, &completion)
+	if finished.IsError || completion.Attempt.Status != "completed" || completion.Issue.Status != "done" {
+		t.Fatalf("finish_attempt result = %#v, decoded = %#v", finished, completion)
+	}
+
+	var requestStatus string
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, reviewRequest.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatalf("read review request status: %v", err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) {
+		t.Fatalf("review request status = %q, want approved", requestStatus)
 	}
 }
 
