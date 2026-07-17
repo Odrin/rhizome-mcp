@@ -16,6 +16,10 @@ type validateImportInput struct {
 	Document string `json:"document"`
 }
 
+type applyImportInput struct {
+	Document string `json:"document"`
+}
+
 type getProjectInput struct {
 	IncludeInstructions bool `json:"include_instructions,omitempty"`
 }

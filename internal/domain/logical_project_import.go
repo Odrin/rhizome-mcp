@@ -34,6 +34,13 @@ type LogicalProjectImportDryRun struct {
 	Writes    LogicalProjectImportWrites     `json:"writes"`
 }
 
+// LogicalProjectImportApplyResult captures deterministic apply state for a logical import.
+type LogicalProjectImportApplyResult struct {
+	Counts        LogicalProjectImportCounts     `json:"counts"`
+	Conflicts     []LogicalProjectImportConflict `json:"conflicts"`
+	LatestEventID int64                          `json:"latest_event_id"`
+}
+
 // LogicalProjectImportCounts summarizes the import surface by entity type.
 type LogicalProjectImportCounts struct {
 	Project      int `json:"project"`

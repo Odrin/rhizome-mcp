@@ -166,6 +166,53 @@ func TestValidateImportToolReturnsDryRunSummary(t *testing.T) {
 	}
 }
 
+func TestApplyImportToolReturnsApplyResult(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if toolNamed(t, tools.Tools, "apply_import") == nil {
+		t.Fatal("apply_import tool missing")
+	}
+
+	document := `{
+		"format": "rhizome-logical-project",
+		"version": 1,
+		"exported_at": "2026-07-17T18:24:06Z",
+		"project": {
+			"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			"name": null,
+			"instructions": null,
+			"created_at": "2026-07-17T18:24:06Z",
+			"updated_at": "2026-07-17T18:24:06Z"
+		},
+		"issues": [],
+		"labels": [],
+		"issue_labels": [],
+		"relations": [],
+		"comments": [],
+		"decisions": [],
+		"attempts": [],
+		"attempt_notes": [],
+		"artifacts": [],
+		"events": []
+	}`
+	result := call(t, client, "apply_import", map[string]any{"document": document})
+	if result.IsError {
+		t.Fatalf("apply_import result = %#v", result)
+	}
+	var apply domain.LogicalProjectImportApplyResult
+	decodeStructured(t, result, &apply)
+	if apply.Counts.Project != 1 || len(apply.Conflicts) != 0 || apply.LatestEventID != 0 {
+		t.Fatalf("apply = %#v", apply)
+	}
+}
+
 func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "project.db")
@@ -182,7 +229,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}

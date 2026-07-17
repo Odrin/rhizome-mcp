@@ -2,11 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
@@ -217,6 +219,409 @@ func (repository *ProjectRepository) HasLogicalProjectImportDestinationContent(c
 		return false, err
 	}
 	return hasContent, nil
+}
+
+// ApplyLogicalProjectImport validates and atomically imports a logical project document into an empty destination.
+func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Context, plan domain.LogicalProjectImportPlan) (domain.LogicalProjectImportApplyResult, error) {
+	result := domain.LogicalProjectImportApplyResult{Counts: plan.DryRun.Counts}
+	generator, err := ids.NewGenerator(clock.RealClock{}, rand.Reader)
+	if err != nil {
+		return result, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate import identifiers", false)
+	}
+
+	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		hasContent, err := hasLogicalProjectImportDestinationContentInTransaction(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if hasContent {
+			latestEventID, err := latestIssueEventIDInTransaction(ctx, tx)
+			if err != nil {
+				return err
+			}
+			result.Conflicts = []domain.LogicalProjectImportConflict{{
+				Code:    "empty_destination_required",
+				Message: "destination project must be empty for this import",
+				Field:   "$.destination",
+			}}
+			result.LatestEventID = latestEventID
+			return nil
+		}
+
+		projectCreatedAt, err := parseLogicalProjectTimestamp("project.created_at", plan.Document.Project.CreatedAt)
+		if err != nil {
+			return err
+		}
+		projectUpdatedAt, err := parseLogicalProjectTimestamp("project.updated_at", plan.Document.Project.UpdatedAt)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE projects
+			SET name = ?, instructions = ?, created_at = ?, updated_at = ?
+		`, nullableString(plan.Document.Project.Name), nullableString(plan.Document.Project.Instructions),
+			projectCreatedAt.UTC().Format(time.RFC3339Nano), projectUpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+
+		var nextIssueNumber int64
+		if err := tx.QueryRowContext(ctx, `SELECT next_issue_number FROM projects`).Scan(&nextIssueNumber); err != nil {
+			return err
+		}
+
+		issueDestIDs := make(map[string]string, len(plan.Document.Issues))
+		labelDestIDs := make(map[string]string, len(plan.Document.Labels))
+		relationDestIDs := make(map[string]string, len(plan.Document.Relations))
+		commentDestIDs := make(map[string]string, len(plan.Document.Comments))
+		decisionDestIDs := make(map[string]string, len(plan.Document.Decisions))
+		attemptDestIDs := make(map[string]string, len(plan.Document.Attempts))
+		attemptNoteDestIDs := make(map[string]string, len(plan.Document.AttemptNotes))
+		artifactDestIDs := make(map[string]string, len(plan.Document.Artifacts))
+
+		for _, issue := range plan.Document.Issues {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate issue identifier", false)
+			}
+			issueDestIDs[issue.ID] = destID
+		}
+		for _, label := range plan.Document.Labels {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate label identifier", false)
+			}
+			labelDestIDs[label.ID] = destID
+		}
+		for _, relation := range plan.Document.Relations {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate relation identifier", false)
+			}
+			relationDestIDs[relation.ID] = destID
+		}
+		for _, comment := range plan.Document.Comments {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate comment identifier", false)
+			}
+			commentDestIDs[comment.ID] = destID
+		}
+		for _, decision := range plan.Document.Decisions {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate decision identifier", false)
+			}
+			decisionDestIDs[decision.ID] = destID
+		}
+		for _, attempt := range plan.Document.Attempts {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt identifier", false)
+			}
+			attemptDestIDs[attempt.ID] = destID
+		}
+		for _, note := range plan.Document.AttemptNotes {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+			}
+			attemptNoteDestIDs[note.ID] = destID
+		}
+		for _, artifact := range plan.Document.Artifacts {
+			destID, err := generator.New()
+			if err != nil {
+				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false)
+			}
+			artifactDestIDs[artifact.ID] = destID
+		}
+
+		for _, label := range plan.Document.Labels {
+			createdAt, err := parseLogicalProjectTimestamp("labels.created_at", label.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO labels(id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+				labelDestIDs[label.ID], label.Name, nullableString(label.Description), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for index, issue := range plan.Document.Issues {
+			createdAt, err := parseLogicalProjectTimestamp("issues.created_at", issue.CreatedAt)
+			if err != nil {
+				return err
+			}
+			updatedAt, err := parseLogicalProjectTimestamp("issues.updated_at", issue.UpdatedAt)
+			if err != nil {
+				return err
+			}
+			var parentID *string
+			if issue.ParentID != nil {
+				mappedParentID, ok := issueDestIDs[*issue.ParentID]
+				if ok {
+					parentID = &mappedParentID
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO issues(
+					id, sequence_no, type, title, description, acceptance_criteria,
+					status, priority, parent_id, blocked_reason, version,
+					created_by_session_id, created_at, updated_at, closed_at,
+					archived_at, archived_by_session_id
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, NULL, NULL)
+			`, issueDestIDs[issue.ID], nextIssueNumber+int64(index), issue.Type, issue.Title,
+				nullableString(issue.Description), nullableString(issue.AcceptanceCriteria), issue.Status,
+				issue.Priority, nullableString(parentID), nullableString(issue.BlockedReason),
+				createdAt.UTC().Format(time.RFC3339Nano), updatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for _, link := range plan.Document.IssueLabels {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_labels(issue_id, label_id) VALUES (?, ?)`, issueDestIDs[link.IssueID], labelDestIDs[link.LabelID]); err != nil {
+				return err
+			}
+		}
+
+		for _, relation := range plan.Document.Relations {
+			createdAt, err := parseLogicalProjectTimestamp("relations.created_at", relation.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`,
+				relationDestIDs[relation.ID], issueDestIDs[relation.SourceIssueID], issueDestIDs[relation.TargetIssueID], relation.Type, createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for _, comment := range plan.Document.Comments {
+			createdAt, err := parseLogicalProjectTimestamp("comments.created_at", comment.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var editedAt *string
+			if comment.EditedAt != nil {
+				parsedEditedAt, err := parseLogicalProjectTimestamp("comments.edited_at", *comment.EditedAt)
+				if err != nil {
+					return err
+				}
+				text := parsedEditedAt.UTC().Format(time.RFC3339Nano)
+				editedAt = &text
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_by_session_id, author_label, created_at, edited_at) VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
+				commentDestIDs[comment.ID], issueDestIDs[comment.IssueID], comment.Content, createdAt.UTC().Format(time.RFC3339Nano), nullableString(editedAt)); err != nil {
+				return err
+			}
+		}
+
+		for _, decision := range plan.Document.Decisions {
+			createdAt, err := parseLogicalProjectTimestamp("decisions.created_at", decision.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var issueID *string
+			if decision.IssueID != nil {
+				mappedID := issueDestIDs[*decision.IssueID]
+				issueID = &mappedID
+			}
+			var supersedesID *string
+			if decision.SupersedesID != nil {
+				mappedID := decisionDestIDs[*decision.SupersedesID]
+				supersedesID = &mappedID
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+				decisionDestIDs[decision.ID], nullableString(issueID), decision.Title, decision.Summary, decision.Content, decision.Status, nullableString(supersedesID), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for _, attempt := range plan.Document.Attempts {
+			createdAt, err := parseLogicalProjectTimestamp("attempts.started_at", attempt.StartedAt)
+			if err != nil {
+				return err
+			}
+			leaseExpiresAt, err := parseLogicalProjectTimestamp("attempts.lease_expires_at", attempt.LeaseExpiresAt)
+			if err != nil {
+				return err
+			}
+			lastHeartbeatAt, err := parseLogicalProjectTimestamp("attempts.last_heartbeat_at", attempt.LastHeartbeatAt)
+			if err != nil {
+				return err
+			}
+			var finishedAt *string
+			if attempt.FinishedAt != nil {
+				parsedFinishedAt, err := parseLogicalProjectTimestamp("attempts.finished_at", *attempt.FinishedAt)
+				if err != nil {
+					return err
+				}
+				text := parsedFinishedAt.UTC().Format(time.RFC3339Nano)
+				finishedAt = &text
+			}
+			var resultSummary *string
+			if attempt.ResultSummary != nil {
+				resultSummary = attempt.ResultSummary
+			}
+			var nextStepsJSON *string
+			if len(attempt.NextSteps) > 0 {
+				payload, err := json.Marshal(attempt.NextSteps)
+				if err != nil {
+					return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt next steps", false)
+				}
+				text := string(payload)
+				nextStepsJSON = &text
+			}
+			var verificationJSON *string
+			if len(attempt.Verification) > 0 {
+				payload, err := json.Marshal(attempt.Verification)
+				if err != nil {
+					return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt verification", false)
+				}
+				text := string(payload)
+				verificationJSON = &text
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+				id, issue_id, session_id, agent_label, kind, status, issue_version_at_start,
+				context_event_id_at_start, lease_token_hash, lease_expires_at, started_at,
+				last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json,
+				failure_reason_code, interruption_reason_code, reason_details
+			) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				attemptDestIDs[attempt.ID], issueDestIDs[attempt.IssueID], nullableString(attempt.AgentLabel), attempt.Kind, attempt.Status,
+				attempt.IssueVersionAtStart, attempt.ContextEventIDAtStart, []byte("logical-import-lease"), leaseExpiresAt.UTC().Format(time.RFC3339Nano),
+				createdAt.UTC().Format(time.RFC3339Nano), lastHeartbeatAt.UTC().Format(time.RFC3339Nano), nullableString(finishedAt),
+				nullableString(resultSummary), nullableString(nextStepsJSON), nullableString(verificationJSON), nullableString(attempt.FailureReasonCode),
+				nullableString(attempt.InterruptionReasonCode), nullableString(attempt.ReasonDetails)); err != nil {
+				return err
+			}
+		}
+
+		for _, note := range plan.Document.AttemptNotes {
+			createdAt, err := parseLogicalProjectTimestamp("attempt_notes.created_at", note.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var nextStepsJSON *string
+			if len(note.NextSteps) > 0 {
+				payload, err := json.Marshal(note.NextSteps)
+				if err != nil {
+					return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt note next steps", false)
+				}
+				text := string(payload)
+				nextStepsJSON = &text
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, next_steps_json, important, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				attemptNoteDestIDs[note.ID], attemptDestIDs[note.AttemptID], note.Kind, note.Content, nullableString(nextStepsJSON), boolToInt(note.Important), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for _, artifact := range plan.Document.Artifacts {
+			createdAt, err := parseLogicalProjectTimestamp("artifacts.created_at", artifact.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var attemptID *string
+			if artifact.AttemptID != nil {
+				mappedID := attemptDestIDs[*artifact.AttemptID]
+				attemptID = &mappedID
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				artifactDestIDs[artifact.ID], issueDestIDs[artifact.IssueID], nullableString(attemptID), artifact.Type, artifact.URI, nullableString(artifact.Title), nullableStringFromRawMessage(artifact.Metadata), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		for _, event := range plan.Document.Events {
+			createdAt, err := parseLogicalProjectTimestamp("events.created_at", event.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var issueID *string
+			if event.IssueID != nil {
+				mappedID := issueDestIDs[*event.IssueID]
+				issueID = &mappedID
+			}
+			var attemptID *string
+			if event.AttemptID != nil {
+				mappedID := attemptDestIDs[*event.AttemptID]
+				attemptID = &mappedID
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, NULL, ?, ?, ?)`,
+				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		if len(plan.Document.Issues) > 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE projects SET next_issue_number = ?, updated_at = ?`, nextIssueNumber+int64(len(plan.Document.Issues)), projectUpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+
+		result.LatestEventID, err = latestIssueEventIDInTransaction(ctx, tx)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func hasLogicalProjectImportDestinationContentInTransaction(ctx context.Context, tx Executor) (bool, error) {
+	var hasContent bool
+	row := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM issues
+			UNION ALL
+			SELECT 1 FROM labels
+			UNION ALL
+			SELECT 1 FROM issue_labels
+			UNION ALL
+			SELECT 1 FROM issue_relations
+			UNION ALL
+			SELECT 1 FROM comments
+			UNION ALL
+			SELECT 1 FROM decisions
+			UNION ALL
+			SELECT 1 FROM work_attempts
+			UNION ALL
+			SELECT 1 FROM attempt_notes
+			UNION ALL
+			SELECT 1 FROM artifacts
+			UNION ALL
+			SELECT 1 FROM issue_events
+		)`)
+	if err := row.Scan(&hasContent); err != nil {
+		return false, err
+	}
+	return hasContent, nil
+}
+
+func latestIssueEventIDInTransaction(ctx context.Context, tx Executor) (int64, error) {
+	var latestEventID int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
+		return 0, err
+	}
+	return latestEventID, nil
+}
+
+func nullableStringFromRawMessage(value json.RawMessage) any {
+	if value == nil {
+		return nil
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	return string(value)
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func readLogicalIssues(ctx context.Context, query Queryer) ([]domain.LogicalIssue, time.Time, error) {
