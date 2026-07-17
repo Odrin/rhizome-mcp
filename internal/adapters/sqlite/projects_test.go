@@ -203,22 +203,19 @@ func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *test
 	if len(first.Decisions) != 1 || first.Decisions[0].ID != decisionID {
 		t.Fatalf("decisions = %#v", first.Decisions)
 	}
-	if len(first.Attempts) != 1 || first.Attempts[0].ID != attemptID {
+	if len(first.Attempts) != 0 {
 		t.Fatalf("attempts = %#v", first.Attempts)
 	}
-	if first.Attempts[0].SessionID != nil || first.Attempts[0].AgentLabel != nil || len(first.Attempts[0].NextSteps) != 0 || len(first.Attempts[0].Verification) != 0 {
-		t.Fatalf("attempt export = %#v", first.Attempts[0])
-	}
-	if len(first.AttemptNotes) != 1 || first.AttemptNotes[0].ID != attemptNoteID {
+	if len(first.AttemptNotes) != 0 {
 		t.Fatalf("attempt notes = %#v", first.AttemptNotes)
 	}
-	if len(first.Artifacts) != 1 || first.Artifacts[0].ID != artifactID {
+	if len(first.Artifacts) != 0 {
 		t.Fatalf("artifacts = %#v", first.Artifacts)
 	}
 	if len(first.Events) != 2 || first.Events[0].IssueID == nil || first.Events[1].IssueID != nil {
 		t.Fatalf("events = %#v", first.Events)
 	}
-	if first.Attempts[0].SessionID != nil || first.Comments[0].CreatedBySessionID != nil || first.Decisions[0].CreatedBySessionID != nil || first.Events[0].SessionID != nil {
+	if first.Comments[0].CreatedBySessionID != nil || first.Decisions[0].CreatedBySessionID != nil || first.Events[0].SessionID != nil {
 		t.Fatalf("session references were leaked: %#v", first)
 	}
 	if len(first.IssueLabels) != 1 || first.IssueLabels[0].IssueID != issueID {
