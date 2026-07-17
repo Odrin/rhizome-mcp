@@ -305,15 +305,36 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 		if request.Status != domain.ReviewRequestStatusOpen {
 			return domain.NewError(domain.CodeInvalidArgument, "review request cannot be claimed", false)
 		}
-		var attemptKind string
-		if err := tx.QueryRowContext(ctx, `SELECT kind FROM work_attempts WHERE id = ?`, *command.ActiveAttemptID).Scan(&attemptKind); err != nil {
+		var attemptIssueID, attemptKind, attemptStatus, leaseExpiresAtText string
+		if err := tx.QueryRowContext(ctx, `SELECT issue_id, kind, status, lease_expires_at FROM work_attempts WHERE id = ?`, *command.ActiveAttemptID).Scan(&attemptIssueID, &attemptKind, &attemptStatus, &leaseExpiresAtText); err != nil {
 			if isNoRowsError(err) {
 				return domain.NewError(domain.CodeAttemptNotFound, "review attempt not found", false)
 			}
 			return err
 		}
-		if attemptKind != "review" {
+		if attemptStatus != string(domain.AttemptStatusActive) {
+			return domain.NewError(domain.CodeAttemptNotActive, "review attempt is not active", false)
+		}
+		if attemptKind != string(domain.AttemptKindReview) {
 			return domain.NewError(domain.CodeInvalidArgument, "attempt is not a review attempt", false)
+		}
+		if attemptIssueID != request.IssueID {
+			return domain.NewError(domain.CodeInvalidArgument, "attempt does not belong to the review request issue", false)
+		}
+		leaseExpiresAt, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAtText)
+		if err != nil {
+			return err
+		}
+		if !leaseExpiresAt.After(command.OccurredAt.UTC()) {
+			return domain.NewError(domain.CodeLeaseExpired, "review attempt lease has expired", false)
+		}
+		var assignedRequestID string
+		err = tx.QueryRowContext(ctx, `SELECT id FROM review_requests WHERE active_attempt_id = ? AND id <> ? AND status IN ('open','claimed')`, *command.ActiveAttemptID, request.ID).Scan(&assignedRequestID)
+		switch {
+		case err == nil:
+			return domain.NewError(domain.CodeActiveAttemptExists, "review attempt is already assigned to another review request", false)
+		case !isNoRowsError(err):
+			return err
 		}
 		claimedAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = ?, resolved_at = NULL, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusClaimed, *command.ActiveAttemptID, request.ID, request.Version); err != nil {

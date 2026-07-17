@@ -145,6 +145,60 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 	}
 }
 
+func TestReviewRepositoryConcurrentClaimsHaveOneWinner(t *testing.T) {
+	fixture := newReviewFixture(t, "review-claim-concurrency")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "concurrent review claim")
+	attemptID := fixture.insertReviewAttempt(t, issueID)
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issueID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"artifact"},
+		OccurredAt:         time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, err := fixture.repository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+				RequestID:       created.Request.ID,
+				ExpectedVersion: created.Request.Version,
+				ActiveAttemptID: &attemptID,
+				OccurredAt:      time.Date(2026, 7, 17, 15, 1, 0, 0, time.UTC),
+			})
+			results <- err
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var success, versionConflicts int
+	for err := range results {
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, &domain.Error{Code: domain.CodeVersionConflict}):
+			versionConflicts++
+		default:
+			t.Fatalf("concurrent claim error = %v", err)
+		}
+	}
+	if success != 1 || versionConflicts != 1 {
+		t.Fatalf("concurrent claim outcomes = success %d version_conflicts %d", success, versionConflicts)
+	}
+}
+
 func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 	fixture := newReviewFixture(t, "review-version-conflict")
 	defer fixture.close()
