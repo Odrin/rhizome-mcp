@@ -405,9 +405,7 @@ func cloneIssueRelations(values []IssueRelation) []IssueRelation {
 		return nil
 	}
 	result := make([]IssueRelation, len(values))
-	for index, value := range values {
-		result[index] = value
-	}
+	copy(result, values)
 	return result
 }
 

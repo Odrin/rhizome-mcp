@@ -77,6 +77,9 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		}
 		gotIndexes = append(gotIndexes, name)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -219,7 +219,7 @@ func schemaListIssues() *jsonschema.Schema {
 		"priorities": stringsSchema(), "labels": stringsSchema(), "parent_issue_id": nullableIssueIdentifierSchema(),
 		"is_blocked":       &jsonschema.Schema{Types: []string{"boolean", "null"}},
 		"is_claimable":     &jsonschema.Schema{Types: []string{"boolean", "null"}},
-		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": stringSchema(),
+		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": enumSchema("compact"),
 	})
 }
 

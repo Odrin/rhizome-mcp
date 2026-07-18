@@ -276,6 +276,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
+	assertStringPropertyEnum(t, toolNamed(t, tools.Tools, "list_issues"), "view", "compact")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_labels"), "limit", 0, 100)
 	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "finish_attempt"), "attempt_id", "lease_token", "outcome", "result_summary")
@@ -712,7 +713,9 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("get_issue limits should be rejected by schema: %#v", unsupportedLimits)
 	}
 	unsupportedListView := call(t, client, "list_issues", map[string]any{"view": "standard"})
-	assertDomainError(t, unsupportedListView, "INVALID_ARGUMENT", false)
+	if !unsupportedListView.IsError || unsupportedListView.StructuredContent != nil {
+		t.Fatalf("list_issues standard view should be rejected by the advertised schema: %#v", unsupportedListView)
+	}
 	unsupportedIdempotency := call(t, client, "create_issue", map[string]any{
 		"type": "task", "title": "supported idempotency", "idempotency_key": "key",
 	})
@@ -2474,6 +2477,34 @@ func assertIntegerPropertyBounds(t *testing.T, tool *sdkmcp.Tool, field string, 
 	if property.Type != "integer" || property.Minimum == nil || property.Maximum == nil ||
 		*property.Minimum != minimum || *property.Maximum != maximum {
 		t.Fatalf("%s %s schema = %#v", tool.Name, field, property)
+	}
+}
+
+func assertStringPropertyEnum(t *testing.T, tool *sdkmcp.Tool, field string, values ...string) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	propertyRaw, ok := schema.Properties[field]
+	if !ok {
+		t.Fatalf("%s missing %s property", tool.Name, field)
+	}
+	var property struct {
+		Type string   `json:"type"`
+		Enum []string `json:"enum"`
+	}
+	if err := json.Unmarshal(propertyRaw, &property); err != nil {
+		t.Fatal(err)
+	}
+	if property.Type != "string" || !reflect.DeepEqual(property.Enum, values) {
+		t.Fatalf("%s %s schema = %#v, want string enum %v", tool.Name, field, property, values)
 	}
 }
 

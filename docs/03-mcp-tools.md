@@ -357,6 +357,9 @@ is_claimable DESC
 sequence_no ASC
 ```
 
+`view` defaults to `compact`, which is currently the only supported list
+projection.
+
 ### 5.5. `archive_issue`
 
 Input:
