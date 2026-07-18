@@ -1120,9 +1120,7 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 	for index, review := range value.Reviews {
 		result.Reviews[index] = workContextReviewDTOFromDomain(review)
 	}
-	for index, warning := range value.Warnings {
-		result.Warnings[index] = warning
-	}
+	copy(result.Warnings, value.Warnings)
 	for index, relation := range value.Relations {
 		result.Relations[index] = relationDTOFromDomain(relation)
 	}
