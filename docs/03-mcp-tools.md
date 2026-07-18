@@ -768,6 +768,7 @@ Input:
   "types": [
     "comments",
     "decisions",
+    "reviews",
     "attempts",
     "attempt_notes",
     "events",
@@ -788,12 +789,13 @@ has_more
 ```
 
 Every item contains `entity_type` and exactly one matching typed payload among
-`comment`, `decision`, `attempt`, `attempt_note`, `event`, and `artifact`.
+`comment`, `decision`, `review`, `attempt`, `attempt_note`, `event`, and
+`artifact`.
 
 The `types` input is optional; when omitted or empty, all categories are
-returned. Supported categories are exactly `comments`, `decisions`, `attempts`,
-`attempt_notes`, `events`, and `artifacts`. The default limit is `20`, the
-maximum limit is `100`, and only `newest_first` ordering is supported.
+returned. Supported categories are exactly `comments`, `decisions`, `reviews`,
+`attempts`, `attempt_notes`, `events`, and `artifacts`. The default limit is
+`20`, the maximum limit is `100`, and only `newest_first` ordering is supported.
 
 Pagination uses an opaque, versioned cursor; invalid cursors fail with
 structured invalid-argument errors. The response includes `items`,
