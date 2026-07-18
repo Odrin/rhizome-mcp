@@ -993,6 +993,7 @@ acceptance criteria
 effective status
 unresolved blockers
 active decision summaries
+review summaries
 previous attempt result summary
 previous attempt next steps
 latest checkpoint
@@ -1020,11 +1021,14 @@ Output:
 issue
 blockers
 decisions
+reviews
 previous_attempt
 checkpoint
-requested sections
+requested optional sections
 warnings
 truncated
+truncated_sections
+next_actions
 ```
 
 ---
