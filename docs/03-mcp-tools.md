@@ -381,6 +381,104 @@ Output:
 issue compact projection
 ```
 
+### 5.6. Review requests
+
+Review requests bind review work to an issue version, event position, and
+optional artifact set. A review request is claimable only while its status is
+`open`.
+
+#### `create_review_request`
+
+Input:
+
+```json
+{
+  "issue_id": "ISSUE-42",
+  "target_issue_version": 9,
+  "target_event_id": 1842,
+  "artifact_ids": [],
+  "supersedes_id": null
+}
+```
+
+`issue_id`, `target_issue_version`, and `target_event_id` are required.
+`artifact_ids` may contain at most 20 IDs. Creating another review request for
+the same target returns `REVIEW_ALREADY_EXISTS`.
+
+#### `get_review_request`
+
+Input:
+
+```json
+{
+  "review_request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+}
+```
+
+#### `list_review_requests`
+
+Input:
+
+```json
+{
+  "status": "open",
+  "claimable": true,
+  "limit": 20,
+  "cursor": null
+}
+```
+
+`status` and `claimable` are optional filters. Supported statuses are:
+
+```text
+open
+claimed
+approved
+changes_requested
+blocked
+cancelled
+superseded
+```
+
+Output:
+
+```text
+items
+next_cursor
+has_more
+```
+
+#### `cancel_review_request` and `supersede_review_request`
+
+Both operations require the request ID and its current version:
+
+```json
+{
+  "review_request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "expected_version": 1
+}
+```
+
+They apply only to open or claimed review requests and return the updated
+review request.
+
+Every review-request tool returns a review request with:
+
+```text
+id
+issue_id
+target_issue_version
+target_event_id
+artifact_ids
+status
+supersedes_id
+active_attempt_id
+claimable
+version
+created_at
+resolved_at
+```
+
 ---
 
 ## 6. Relations and graphs
