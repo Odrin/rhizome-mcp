@@ -832,6 +832,29 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	if created.IsError || createdOutput.Status != "open" || !createdOutput.Claimable || createdOutput.IssueID != issue.ID || len(createdOutput.ArtifactIDs) != 2 {
 		t.Fatalf("create review request = %#v", createdOutput)
 	}
+	activity := call(t, client, "get_issue_activity", map[string]any{
+		"issue_id": issue.DisplayID, "types": []string{"reviews"}, "limit": 20,
+	})
+	var activityOutput struct {
+		Items []struct {
+			EntityType string `json:"entity_type"`
+			EntityID   string `json:"entity_id"`
+			IssueID    string `json:"issue_id"`
+			Review     *struct {
+				ID        string `json:"id"`
+				IssueID   string `json:"issue_id"`
+				Status    string `json:"status"`
+				Claimable bool   `json:"claimable"`
+			} `json:"review"`
+		} `json:"items"`
+	}
+	decodeStructured(t, activity, &activityOutput)
+	if activity.IsError || len(activityOutput.Items) != 1 || activityOutput.Items[0].EntityType != "review" ||
+		activityOutput.Items[0].EntityID != createdOutput.ID || activityOutput.Items[0].IssueID != issue.ID ||
+		activityOutput.Items[0].Review == nil || activityOutput.Items[0].Review.ID != createdOutput.ID ||
+		activityOutput.Items[0].Review.IssueID != issue.ID || activityOutput.Items[0].Review.Status != "open" || !activityOutput.Items[0].Review.Claimable {
+		t.Fatalf("review activity = %#v", activityOutput)
+	}
 
 	conflict := call(t, client, "create_review_request", map[string]any{
 		"issue_id":             issue.DisplayID,

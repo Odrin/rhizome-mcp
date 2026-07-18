@@ -583,6 +583,7 @@ type activityItemDTO struct {
 	OccurredAt  time.Time                  `json:"occurred_at"`
 	Comment     *commentDTO                `json:"comment,omitempty"`
 	Decision    *recordDecisionDecisionDTO `json:"decision,omitempty"`
+	Review      *reviewRequestDTO          `json:"review,omitempty"`
 	Attempt     *attemptDTO                `json:"attempt,omitempty"`
 	AttemptNote *attemptNoteDTO            `json:"attempt_note,omitempty"`
 	Event       *issueEventDTO             `json:"event,omitempty"`
@@ -1245,6 +1246,9 @@ func activityItemDTOFromDomain(item domain.ActivityItem) activityItemDTO {
 	} else if item.Decision != nil {
 		decision := recordDecisionDTOFromDomain(*item.Decision)
 		result.Decision = &decision
+	} else if item.Review != nil {
+		review := reviewRequestDTOFromDomain(*item.Review, item.Review.Status == domain.ReviewRequestStatusOpen)
+		result.Review = &review
 	} else if item.Attempt != nil {
 		attempt := attemptDTOFromDomain(*item.Attempt)
 		result.Attempt = &attempt
