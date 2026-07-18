@@ -1046,6 +1046,7 @@ Input:
     "issue",
     "comment",
     "decision",
+    "review",
     "attempt_note"
   ],
   "issue_id": null,
@@ -1058,6 +1059,9 @@ Input:
   "snippet_length": 300
 }
 ```
+
+Supported entity types are `issue`, `comment`, `decision`, `review`, and
+`attempt_note`.
 
 Maximum snippet length: `1000`.
 
