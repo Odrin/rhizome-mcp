@@ -3,6 +3,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ type Options struct {
 	DecisionService    *application.DecisionService
 	ActivityService    *application.ActivityService
 	SearchService      *application.SearchService
+	ReviewService      *application.ReviewService
 	AttemptService     *application.AttemptService
 	SessionService     *application.AgentSessionService
 	WorkContextService *application.WorkContextService
@@ -45,16 +47,19 @@ type adapter struct {
 	decisions     *application.DecisionService
 	activities    *application.ActivityService
 	searches      *application.SearchService
+	reviews       *application.ReviewService
 	attempts      *application.AttemptService
 	sessions      *application.AgentSessionService
 	workContexts  *application.WorkContextService
 	appVersion    string
 	configVersion int
 
-	sessionMu          sync.Mutex
-	connectionSessions map[*sdkmcp.ServerSession]string
-	sessionStarted     map[*sdkmcp.ServerSession]struct{}
-	sessionEnded       map[*sdkmcp.ServerSession]struct{}
+	sessionMu            sync.Mutex
+	connectionSessions   map[*sdkmcp.ServerSession]string
+	sdkSessionIDs        map[string]string
+	sessionStarted       map[*sdkmcp.ServerSession]struct{}
+	sessionEnded         map[*sdkmcp.ServerSession]struct{}
+	endedDurableSessions map[string]struct{}
 }
 
 // Server owns the MCP SDK server and its adapter lifecycle tracking.
@@ -92,6 +97,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.SearchService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
 	}
+	if options.ReviewService == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "review service is required", false)
+	}
 	if options.AttemptService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
 	}
@@ -108,23 +116,26 @@ func NewServer(options Options) (*Server, error) {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server version is required", false)
 	}
 	adapter := &adapter{
-		issues:             options.IssueService,
-		projects:           options.ProjectService,
-		relations:          options.RelationService,
-		graphs:             options.GraphService,
-		plans:              options.PlanningService,
-		comments:           options.CommentService,
-		decisions:          options.DecisionService,
-		activities:         options.ActivityService,
-		searches:           options.SearchService,
-		attempts:           options.AttemptService,
-		sessions:           options.SessionService,
-		workContexts:       options.WorkContextService,
-		appVersion:         options.ServerVersion,
-		configVersion:      options.ConfigVersion,
-		connectionSessions: make(map[*sdkmcp.ServerSession]string),
-		sessionStarted:     make(map[*sdkmcp.ServerSession]struct{}),
-		sessionEnded:       make(map[*sdkmcp.ServerSession]struct{}),
+		issues:               options.IssueService,
+		projects:             options.ProjectService,
+		relations:            options.RelationService,
+		graphs:               options.GraphService,
+		plans:                options.PlanningService,
+		comments:             options.CommentService,
+		decisions:            options.DecisionService,
+		activities:           options.ActivityService,
+		searches:             options.SearchService,
+		reviews:              options.ReviewService,
+		attempts:             options.AttemptService,
+		sessions:             options.SessionService,
+		workContexts:         options.WorkContextService,
+		appVersion:           options.ServerVersion,
+		configVersion:        options.ConfigVersion,
+		connectionSessions:   make(map[*sdkmcp.ServerSession]string),
+		sdkSessionIDs:        make(map[string]string),
+		sessionStarted:       make(map[*sdkmcp.ServerSession]struct{}),
+		sessionEnded:         make(map[*sdkmcp.ServerSession]struct{}),
+		endedDurableSessions: make(map[string]struct{}),
 	}
 	server := sdkmcp.NewServer(
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
@@ -137,6 +148,24 @@ func NewServer(options Options) (*Server, error) {
 	adapter.register(server)
 	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
+}
+
+// SDKServer exposes the underlying SDK server for transports that manage their own lifecycle.
+func (server *Server) SDKServer() *sdkmcp.Server {
+	if server == nil {
+		return nil
+	}
+	return server.server
+}
+
+// EndSession removes a durable agent session associated with an SDK session ID.
+func (server *Server) EndSession(ctx context.Context, sdkSessionID string) error {
+	if server == nil || sdkSessionID == "" {
+		return nil
+	}
+	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return server.adapter.endSessionBySDKSessionID(endCtx, sdkSessionID)
 }
 
 // Run serves one MCP connection and records its durable session lifecycle.
@@ -196,12 +225,16 @@ func (adapter *adapter) startSession(ctx context.Context, request *sdkmcp.Initia
 		slog.Error("agent session creation failed", "error", err)
 		return
 	}
+	sdkSessionID := sdkSession.ID()
 	adapter.sessionMu.Lock()
 	ended := false
 	if _, ok := adapter.sessionEnded[sdkSession]; ok {
 		ended = true
 	} else {
 		adapter.connectionSessions[sdkSession] = created.ID
+		if sdkSessionID != "" {
+			adapter.sdkSessionIDs[sdkSessionID] = created.ID
+		}
 	}
 	adapter.sessionMu.Unlock()
 	if ended {
@@ -242,9 +275,19 @@ func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.Serve
 		return
 	}
 	adapter.sessionMu.Lock()
+	if _, ok := adapter.sessionEnded[sdkSession]; ok {
+		adapter.sessionMu.Unlock()
+		return
+	}
 	adapter.sessionEnded[sdkSession] = struct{}{}
 	sessionID := adapter.connectionSessions[sdkSession]
 	delete(adapter.connectionSessions, sdkSession)
+	if sdkSessionID := sdkSession.ID(); sdkSessionID != "" {
+		delete(adapter.sdkSessionIDs, sdkSessionID)
+	}
+	if sessionID != "" {
+		adapter.endedDurableSessions[sessionID] = struct{}{}
+	}
 	adapter.sessionMu.Unlock()
 	if sessionID == "" {
 		return
@@ -254,19 +297,67 @@ func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.Serve
 	}
 }
 
+func (adapter *adapter) endSessionBySDKSessionID(ctx context.Context, sdkSessionID string) error {
+	if sdkSessionID == "" {
+		return nil
+	}
+	adapter.sessionMu.Lock()
+	durableSessionID, ok := adapter.sdkSessionIDs[sdkSessionID]
+	if !ok {
+		for sdkSession, sessionID := range adapter.connectionSessions {
+			if sdkSession != nil && sdkSession.ID() == sdkSessionID {
+				delete(adapter.connectionSessions, sdkSession)
+				if sessionID != "" {
+					adapter.endedDurableSessions[sessionID] = struct{}{}
+				}
+			}
+		}
+		adapter.sessionMu.Unlock()
+		return nil
+	}
+	delete(adapter.sdkSessionIDs, sdkSessionID)
+	for sdkSession := range adapter.connectionSessions {
+		if sdkSession != nil && sdkSession.ID() == sdkSessionID {
+			delete(adapter.connectionSessions, sdkSession)
+		}
+	}
+	if _, ended := adapter.endedDurableSessions[durableSessionID]; ended {
+		adapter.sessionMu.Unlock()
+		return nil
+	}
+	adapter.endedDurableSessions[durableSessionID] = struct{}{}
+	adapter.sessionMu.Unlock()
+	if durableSessionID == "" {
+		return nil
+	}
+	_, err := adapter.sessions.End(ctx, durableSessionID)
+	if err != nil && !isContextCancellation(err) {
+		slog.Error("agent session end failed", "error", err)
+	}
+	return err
+}
+
 func isContextCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput()), adapter.getProject)
+	sdkmcp.AddTool(server, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput()), adapter.exportProject)
+	sdkmcp.AddTool(server, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput()), adapter.validateImport)
+	sdkmcp.AddTool(server, tool("apply_import", "Apply a validated logical project import document into an empty destination.", schemaApplyImport(), schemaApplyImportOutput()), adapter.applyImport)
 	sdkmcp.AddTool(server, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput()), adapter.listLabels)
 	sdkmcp.AddTool(server, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput()), adapter.createIssue)
 	sdkmcp.AddTool(server, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput()), adapter.updateIssue)
 	sdkmcp.AddTool(server, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput()), adapter.getIssue)
 	sdkmcp.AddTool(server, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput()), adapter.listIssues)
 	sdkmcp.AddTool(server, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput()), adapter.archiveIssue)
+	sdkmcp.AddTool(server, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput()), adapter.cancelReviewRequest)
+	sdkmcp.AddTool(server, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set.", schemaCreateReviewRequest(), schemaReviewRequestOutput()), adapter.createReviewRequest)
+	sdkmcp.AddTool(server, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput()), adapter.getReviewRequest)
+	sdkmcp.AddTool(server, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput()), adapter.listReviewRequests)
 	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput()), adapter.manageIssueRelation)
+	sdkmcp.AddTool(server, tool("supersede_review_request", "Supersede an open or claimed review request using its current version.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput()), adapter.supersedeReviewRequest)
 	sdkmcp.AddTool(server, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput()), adapter.getIssueGraph)
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput()), adapter.getPlanningGraph)
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput()), adapter.validateIssuePlan)
@@ -588,6 +679,37 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 	return success(output, "planning graph returned")
 }
 
+func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallToolRequest, input exportProjectInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	data, err := adapter.projects.ExportLogicalProject(ctx)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	var document domain.LogicalProjectDocument
+	if err := json.Unmarshal(data, &document); err != nil {
+		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
+	}
+	return success(document, "project export returned")
+}
+
+func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.CallToolRequest, input validateImportInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, []byte(input.Document))
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(dryRun, "import validation dry run returned")
+}
+
+func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToolRequest, input applyImportInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.projects.ApplyLogicalProjectImport(ctx, []byte(input.Document))
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(result, "import apply result returned")
+}
+
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
 	project, err := adapter.projects.GetProject(ctx)
@@ -779,6 +901,70 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 		return adapter.failure(err)
 	}
 	return success(issueDTOFromDomain(result.Issue), "issue archived")
+}
+
+func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID:            input.IssueID,
+		TargetIssueVersion: input.TargetIssueVersion,
+		TargetEventID:      input.TargetEventID,
+		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
+		SupersedesID:       copyReviewOptionalString(input.SupersedesID),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request created")
+}
+
+func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.GetReviewRequest(ctx, input.ReviewRequestID)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request read")
+}
+
+func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.CallToolRequest, input listReviewRequestsInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.ListReviewRequests(ctx, application.ListReviewRequestsInput{
+		Status:    input.Status,
+		Claimable: input.Claimable,
+		Limit:     input.Limit,
+		Cursor:    input.Cursor,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	items := make([]reviewRequestDTO, len(result.Items))
+	for index, item := range result.Items {
+		items[index] = reviewRequestDTOFromDomain(item.Request, item.Claimable)
+	}
+	output := reviewRequestListOutput{Items: items, HasMore: result.HasMore}
+	if result.NextCursor != nil {
+		output.NextCursor = result.NextCursor
+	}
+	return success(output, "review requests listed")
+}
+
+func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request cancelled")
+}
+
+func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input supersedeReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.SupersedeReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request superseded")
 }
 
 func success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -648,6 +649,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 	timestamp := now.Format(time.RFC3339Nano)
 	var result ports.FinishAttemptResult
 	var leaseExpired bool
+	var staleReviewTargetErr error
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
 			saved, found, err := lookupFinishedAttempt(ctx, tx, command.IdempotencyKey, command.RequestHash)
@@ -720,6 +722,22 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
 			return err
 		}
+		var reviewRequest *domain.ReviewRequest
+		if kind == domain.AttemptKindReview && input.Outcome == domain.AttemptOutcomeCompleted {
+			reviewRequest, err = loadActiveReviewRequestForAttempt(ctx, tx, command.AttemptID)
+			if err != nil {
+				return err
+			}
+			if reviewRequest != nil && reviewRequest.Status == domain.ReviewRequestStatusClaimed && reviewRequest.ActiveAttemptID != nil && *reviewRequest.ActiveAttemptID == command.AttemptID {
+				if reviewRequest.TargetIssueVersion != issue.Version || reviewRequest.TargetEventID != latestEventID {
+					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now); err != nil {
+						return err
+					}
+					staleReviewTargetErr = domain.NewError(domain.CodeReviewTargetStale, "review target is stale", false)
+					return nil
+				}
+			}
+		}
 		warnings, required, err := completionIssueChanges(ctx, tx, issue.ID, contextEventID)
 		if err != nil {
 			return err
@@ -761,7 +779,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			res, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, blocked_reason = ?, version = version + 1, updated_at = ?, closed_at = ?
 					WHERE id = ? AND version = ? AND archived_at IS NULL`, target, nullableStringValue(blockedReason), timestamp, nullableTime(closedAt), issue.ID, issue.Version)
 			if err != nil {
-				return err
+				return fmt.Errorf("update issue status: %w", err)
 			}
 			affected, err := res.RowsAffected()
 			if err != nil {
@@ -771,6 +789,11 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				return classifyConditionalUpdateFailure(ctx, tx, issue.ID)
 			}
 			issue.Status, issue.Version, issue.UpdatedAt, issue.BlockedReason, issue.ClosedAt = target, issue.Version+1, now, nullableAttemptString(blockedReason), closedAt
+			if reviewRequest != nil && reviewRequest.Status == domain.ReviewRequestStatusClaimed && reviewRequest.ActiveAttemptID != nil && *reviewRequest.ActiveAttemptID == command.AttemptID {
+				if err := resolveReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now, *input.ReviewOutcome, input.BlockedReason); err != nil {
+					return err
+				}
+			}
 		}
 		var nextValue, verificationValue any
 		if input.NextSteps != nil {
@@ -799,7 +822,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				WHERE id = ? AND status = 'active'`, input.Outcome, timestamp, input.ResultSummary, nextValue, verificationValue,
 			failure, interruption, nullableStringValuePtr(input.ReasonDetails), command.AttemptID)
 		if err != nil {
-			return err
+			return fmt.Errorf("update work attempt: %w", err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
@@ -822,7 +845,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				id, issue_id, attempt_id, type, uri, title, metadata, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, artifact.ID, issue.ID, command.AttemptID,
 				artifact.Type, artifact.URI, title, metadata, timestamp); err != nil {
-				return err
+				return fmt.Errorf("insert artifact: %w", err)
 			}
 			attemptID := command.AttemptID
 			result.Artifacts[index] = domain.Artifact{
@@ -855,7 +878,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		}
 		if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
 				VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, issue.ID, eventType, nullableStringValuePtr(command.SessionID), command.AttemptID, string(encoded), timestamp).Scan(&latestEventID); err != nil {
-			return err
+			return fmt.Errorf("insert issue event: %w", err)
 		}
 		parsedStarted, err := parseNullableAttemptTimestamp(started)
 		if err != nil {
@@ -917,6 +940,9 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			return ports.FinishAttemptResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
 		}
 		return ports.FinishAttemptResult{}, err
+	}
+	if staleReviewTargetErr != nil {
+		return ports.FinishAttemptResult{}, staleReviewTargetErr
 	}
 	if leaseExpired {
 		return ports.FinishAttemptResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
@@ -984,6 +1010,92 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 		return ports.ForceReleaseAttemptResult{}, err
 	}
 	return result, nil
+}
+
+func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptID string) (*domain.ReviewRequest, error) {
+	var request domain.ReviewRequest
+	var artifactIDsJSON []byte
+	var status string
+	var supersedesID sql.NullString
+	var activeAttemptID sql.NullString
+	var createdAtText string
+	var resolvedAtText sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at
+		FROM review_requests WHERE active_attempt_id = ? AND status = 'claimed'`, attemptID).Scan(
+		&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
+	if err != nil {
+		return nil, err
+	}
+	request.Status = domain.ReviewRequestStatus(status)
+	if supersedesID.Valid {
+		value := supersedesID.String
+		request.SupersedesID = &value
+	}
+	if activeAttemptID.Valid {
+		value := activeAttemptID.String
+		request.ActiveAttemptID = &value
+	}
+	request.CreatedAt = parseTimestamp(createdAtText)
+	if resolvedAtText.Valid {
+		value := parseTimestamp(resolvedAtText.String)
+		request.ResolvedAt = &value
+	}
+	return &request, nil
+}
+
+func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time) error {
+	resolvedAt := occurredAt.UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
+		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID, attemptID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
+		VALUES (?, ?, ?, 'review_superseded', ?, ?)`, request.ID, request.TargetID, attemptID, string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), resolvedAt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time, outcome domain.ReviewOutcome, reason *string) error {
+	nextStatus := reviewRequestStatusForOutcome(outcome)
+	resolvedAt := occurredAt.UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
+		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, nextStatus, resolvedAt, request.ID, attemptID)
+	if err != nil {
+		return fmt.Errorf("update review request: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return domain.NewError(domain.CodeInvalidArgument, "review request is not active", false)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at)
+		VALUES (?, ?, ?, ?, ?, 1, ?)`, attemptID, request.ID, attemptID, outcome, stringOrNil(reason), resolvedAt); err != nil {
+		return fmt.Errorf("insert review outcome: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, request.ID, request.TargetID, attemptID, reviewEventTypeForOutcome(outcome), string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason)), resolvedAt); err != nil {
+		return fmt.Errorf("insert review event: %w", err)
+	}
+	return nil
 }
 
 func completionIssueChanges(ctx context.Context, tx Queryer, issueID string, startID int64) ([]string, []string, error) {
@@ -1152,6 +1264,28 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 	var issueID string
 	if err := tx.QueryRowContext(ctx, `SELECT issue_id FROM work_attempts WHERE id = ?`, attemptID).Scan(&issueID); err != nil {
 		return false, err
+	}
+	request, err := loadActiveReviewRequestForAttempt(ctx, tx, attemptID)
+	if err != nil {
+		return false, err
+	}
+	if request != nil {
+		resolvedAt := now.UTC().Format(time.RFC3339Nano)
+		res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = NULL, version = version + 1
+			WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusOpen, request.ID, attemptID)
+		if err != nil {
+			return false, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if affected == 1 {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
+				VALUES (?, ?, ?, 'review_requested', ?, ?)`, request.ID, request.TargetID, attemptID, string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), resolvedAt); err != nil {
+				return false, err
+			}
+		}
 	}
 	payload, err := json.Marshal(struct {
 		AttemptID string `json:"attempt_id"`

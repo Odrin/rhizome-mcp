@@ -10,6 +10,16 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+type exportProjectInput struct{}
+
+type validateImportInput struct {
+	Document string `json:"document"`
+}
+
+type applyImportInput struct {
+	Document string `json:"document"`
+}
+
 type getProjectInput struct {
 	IncludeInstructions bool `json:"include_instructions,omitempty"`
 }
@@ -140,6 +150,35 @@ type claimIssueInput struct {
 	IssueID        string  `json:"issue_id"`
 	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
+type createReviewRequestInput struct {
+	IssueID            string   `json:"issue_id"`
+	TargetIssueVersion int64    `json:"target_issue_version"`
+	TargetEventID      int64    `json:"target_event_id"`
+	ArtifactIDs        []string `json:"artifact_ids,omitempty"`
+	SupersedesID       *string  `json:"supersedes_id,omitempty"`
+}
+
+type getReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+}
+
+type listReviewRequestsInput struct {
+	Status    *string `json:"status,omitempty"`
+	Claimable *bool   `json:"claimable,omitempty"`
+	Limit     int     `json:"limit,omitempty"`
+	Cursor    *string `json:"cursor,omitempty"`
+}
+
+type cancelReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+	ExpectedVersion int64  `json:"expected_version"`
+}
+
+type supersedeReviewRequestInput struct {
+	ReviewRequestID string `json:"review_request_id"`
+	ExpectedVersion int64  `json:"expected_version"`
 }
 
 type renewAttemptInput struct {
@@ -388,6 +427,36 @@ func (input patchInput) domainPatch() domain.IssuePatch {
 	}
 }
 
+func reviewRequestDTOFromDomain(request domain.ReviewRequest, claimable bool) reviewRequestDTO {
+	var resolvedAt *time.Time
+	if request.ResolvedAt != nil {
+		copyValue := request.ResolvedAt.UTC()
+		resolvedAt = &copyValue
+	}
+	return reviewRequestDTO{
+		ID:                 request.ID,
+		IssueID:            request.IssueID,
+		TargetIssueVersion: request.TargetIssueVersion,
+		TargetEventID:      request.TargetEventID,
+		ArtifactIDs:        append([]string(nil), request.ArtifactIDs...),
+		Status:             string(request.Status),
+		SupersedesID:       copyReviewOptionalString(request.SupersedesID),
+		ActiveAttemptID:    copyReviewOptionalString(request.ActiveAttemptID),
+		Claimable:          claimable,
+		Version:            request.Version,
+		CreatedAt:          request.CreatedAt.UTC(),
+		ResolvedAt:         resolvedAt,
+	}
+}
+
+func copyReviewOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
 type errorOutput struct {
 	Code      string          `json:"code"`
 	Message   string          `json:"message"`
@@ -484,6 +553,27 @@ type issueEventDTO struct {
 	AttemptID *string         `json:"attempt_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+}
+
+type reviewRequestDTO struct {
+	ID                 string     `json:"id"`
+	IssueID            string     `json:"issue_id"`
+	TargetIssueVersion int64      `json:"target_issue_version"`
+	TargetEventID      int64      `json:"target_event_id"`
+	ArtifactIDs        []string   `json:"artifact_ids"`
+	Status             string     `json:"status"`
+	SupersedesID       *string    `json:"supersedes_id,omitempty"`
+	ActiveAttemptID    *string    `json:"active_attempt_id,omitempty"`
+	Claimable          bool       `json:"claimable"`
+	Version            int64      `json:"version"`
+	CreatedAt          time.Time  `json:"created_at"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+}
+
+type reviewRequestListOutput struct {
+	Items      []reviewRequestDTO `json:"items"`
+	NextCursor *string            `json:"next_cursor,omitempty"`
+	HasMore    bool               `json:"has_more"`
 }
 
 type activityItemDTO struct {
@@ -617,6 +707,29 @@ type workContextDecisionSummaryDTO struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type workContextReviewOutcomeDTO struct {
+	ID        string    `json:"id"`
+	AttemptID string    `json:"attempt_id"`
+	Outcome   string    `json:"outcome"`
+	Reason    *string   `json:"reason,omitempty"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type workContextReviewDTO struct {
+	ID                 string                       `json:"id"`
+	Status             string                       `json:"status"`
+	TargetIssueVersion int64                        `json:"target_issue_version"`
+	TargetEventID      int64                        `json:"target_event_id"`
+	ArtifactIDs        []string                     `json:"artifact_ids"`
+	Outcome            *workContextReviewOutcomeDTO `json:"outcome,omitempty"`
+	Reason             *string                      `json:"reason,omitempty"`
+	FollowUpID         *string                      `json:"follow_up_id,omitempty"`
+	Claimable          bool                         `json:"claimable"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	ResolvedAt         *time.Time                   `json:"resolved_at"`
+}
+
 type workContextAttemptSummaryDTO struct {
 	ID            string     `json:"id"`
 	Kind          string     `json:"kind"`
@@ -630,6 +743,7 @@ type workContextOutput struct {
 	Issue                       workContextIssueDTO             `json:"issue"`
 	Blockers                    []workContextIssueDTO           `json:"blockers"`
 	Decisions                   []workContextDecisionSummaryDTO `json:"decisions"`
+	Reviews                     []workContextReviewDTO          `json:"reviews"`
 	PreviousAttempt             *workContextAttemptSummaryDTO   `json:"previous_attempt"`
 	Checkpoint                  *attemptNoteDTO                 `json:"checkpoint"`
 	Warnings                    []string                        `json:"warnings"`
@@ -983,6 +1097,7 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		Issue:                       workContextIssueDTOFromDomain(value.Issue),
 		Blockers:                    make([]workContextIssueDTO, len(value.Blockers)),
 		Decisions:                   make([]workContextDecisionSummaryDTO, len(value.Decisions)),
+		Reviews:                     make([]workContextReviewDTO, len(value.Reviews)),
 		Warnings:                    make([]string, len(value.Warnings)),
 		ParentEpic:                  workContextIssueDTOFromDomainPointer(value.ParentEpic),
 		Relations:                   make([]relationDTO, len(value.Relations)),
@@ -1001,6 +1116,9 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 	}
 	for index, decision := range value.Decisions {
 		result.Decisions[index] = workContextDecisionSummaryDTOFromDomain(decision)
+	}
+	for index, review := range value.Reviews {
+		result.Reviews[index] = workContextReviewDTOFromDomain(review)
 	}
 	for index, warning := range value.Warnings {
 		result.Warnings[index] = warning
@@ -1073,6 +1191,32 @@ func workContextDecisionSummaryDTOFromDomain(value domain.WorkContextDecisionSum
 		Status:    string(value.Status),
 		CreatedAt: value.CreatedAt,
 	}
+}
+
+func workContextReviewDTOFromDomain(value domain.WorkContextReview) workContextReviewDTO {
+	result := workContextReviewDTO{
+		ID:                 value.ID,
+		Status:             string(value.Status),
+		TargetIssueVersion: value.TargetIssueVersion,
+		TargetEventID:      value.TargetEventID,
+		ArtifactIDs:        append([]string(nil), value.ArtifactIDs...),
+		Reason:             copyString(value.Reason),
+		FollowUpID:         copyString(value.FollowUpID),
+		Claimable:          value.Claimable,
+		CreatedAt:          value.CreatedAt,
+		ResolvedAt:         copyTime(value.ResolvedAt),
+	}
+	if value.Outcome != nil {
+		result.Outcome = &workContextReviewOutcomeDTO{
+			ID:        value.Outcome.ID,
+			AttemptID: value.Outcome.AttemptID,
+			Outcome:   string(value.Outcome.Outcome),
+			Reason:    copyString(value.Outcome.Reason),
+			Version:   value.Outcome.Version,
+			CreatedAt: value.Outcome.CreatedAt,
+		}
+	}
+	return result
 }
 
 func workContextAttemptSummaryDTOFromDomain(value *domain.WorkContextAttemptSummary) *workContextAttemptSummaryDTO {

@@ -6,9 +6,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
+	"rhizome-mcp/internal/ports"
 )
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -94,6 +98,125 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	}
 }
 
+func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if toolNamed(t, tools.Tools, "export_project") == nil {
+		t.Fatal("export_project tool missing")
+	}
+
+	result := call(t, client, "export_project", map[string]any{})
+	if result.IsError {
+		t.Fatalf("export_project result = %#v", result)
+	}
+	var document domain.LogicalProjectDocument
+	decodeStructured(t, result, &document)
+	if document.Format != "rhizome-logical-project" || document.Version != 1 || document.Project.ID == "" || len(document.Issues) != 0 {
+		t.Fatalf("document = %#v", document)
+	}
+}
+
+func TestValidateImportToolReturnsDryRunSummary(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if toolNamed(t, tools.Tools, "validate_import") == nil {
+		t.Fatal("validate_import tool missing")
+	}
+
+	document := `{
+		"format": "rhizome-logical-project",
+		"version": 1,
+		"exported_at": "2026-07-17T18:24:06Z",
+		"project": {
+			"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			"name": null,
+			"instructions": null,
+			"created_at": "2026-07-17T18:24:06Z",
+			"updated_at": "2026-07-17T18:24:06Z"
+		},
+		"issues": [],
+		"labels": [],
+		"issue_labels": [],
+		"relations": [],
+		"comments": [],
+		"decisions": [],
+		"attempts": [],
+		"attempt_notes": [],
+		"artifacts": [],
+		"events": []
+	}`
+	result := call(t, client, "validate_import", map[string]any{"document": document})
+	if result.IsError {
+		t.Fatalf("validate_import result = %#v", result)
+	}
+	var dryRun domain.LogicalProjectImportDryRun
+	decodeStructured(t, result, &dryRun)
+	if dryRun.Counts.Project != 1 || dryRun.Writes.Count != 0 || len(dryRun.Conflicts) != 0 {
+		t.Fatalf("dryRun = %#v", dryRun)
+	}
+}
+
+func TestApplyImportToolReturnsApplyResult(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if toolNamed(t, tools.Tools, "apply_import") == nil {
+		t.Fatal("apply_import tool missing")
+	}
+
+	document := `{
+		"format": "rhizome-logical-project",
+		"version": 1,
+		"exported_at": "2026-07-17T18:24:06Z",
+		"project": {
+			"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			"name": null,
+			"instructions": null,
+			"created_at": "2026-07-17T18:24:06Z",
+			"updated_at": "2026-07-17T18:24:06Z"
+		},
+		"issues": [],
+		"labels": [],
+		"issue_labels": [],
+		"relations": [],
+		"comments": [],
+		"decisions": [],
+		"attempts": [],
+		"attempt_notes": [],
+		"artifacts": [],
+		"events": []
+	}`
+	result := call(t, client, "apply_import", map[string]any{"document": document})
+	if result.IsError {
+		t.Fatalf("apply_import result = %#v", result)
+	}
+	var apply domain.LogicalProjectImportApplyResult
+	decodeStructured(t, result, &apply)
+	if apply.Counts.Project != 1 || len(apply.Conflicts) != 0 || apply.LatestEventID != 0 {
+		t.Fatalf("apply = %#v", apply)
+	}
+}
+
 func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "project.db")
@@ -110,7 +233,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_issue_plan", "archive_issue", "claim_issue", "create_issue", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_work_context", "list_decisions", "list_issues", "list_labels", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "update_issue", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_issue", "create_review_request", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "record_decision", "renew_attempt", "save_attempt_note", "search", "supersede_review_request", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -146,6 +269,10 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("get_issue_activity required = %v, want [issue_id]", schema.Required)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
+	assertRequired(t, toolNamed(t, tools.Tools, "create_review_request"), "issue_id", "target_issue_version", "target_event_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "get_review_request"), "review_request_id")
+	assertRequired(t, toolNamed(t, tools.Tools, "cancel_review_request"), "review_request_id", "expected_version")
+	assertRequired(t, toolNamed(t, tools.Tools, "supersede_review_request"), "review_request_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
@@ -669,6 +796,200 @@ func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestReviewRequestToolsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "review-tools.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdIssue := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Review target"})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdIssue, &issue)
+	if createdIssue.IsError {
+		t.Fatalf("create issue = %#v", createdIssue)
+	}
+
+	created := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 2,
+		"target_event_id":      7,
+		"artifact_ids":         []string{"artifact-1", "artifact-2"},
+	})
+	var createdOutput struct {
+		ID                 string   `json:"id"`
+		IssueID            string   `json:"issue_id"`
+		TargetIssueVersion int64    `json:"target_issue_version"`
+		TargetEventID      int64    `json:"target_event_id"`
+		ArtifactIDs        []string `json:"artifact_ids"`
+		Status             string   `json:"status"`
+		Claimable          bool     `json:"claimable"`
+	}
+	decodeStructured(t, created, &createdOutput)
+	if created.IsError || createdOutput.Status != "open" || !createdOutput.Claimable || createdOutput.IssueID != issue.ID || len(createdOutput.ArtifactIDs) != 2 {
+		t.Fatalf("create review request = %#v", createdOutput)
+	}
+
+	conflict := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 2,
+		"target_event_id":      7,
+		"artifact_ids":         []string{"artifact-3"},
+	})
+	assertDomainError(t, conflict, "REVIEW_ALREADY_EXISTS", false)
+
+	got := call(t, client, "get_review_request", map[string]any{"review_request_id": createdOutput.ID})
+	decodeStructured(t, got, &createdOutput)
+	if got.IsError || createdOutput.Status != "open" || !createdOutput.Claimable {
+		t.Fatalf("get review request = %#v", createdOutput)
+	}
+
+	listed := call(t, client, "list_review_requests", map[string]any{"status": "open", "claimable": true, "limit": 20})
+	var listOutput struct {
+		Items []struct {
+			ID        string `json:"id"`
+			Status    string `json:"status"`
+			Claimable bool   `json:"claimable"`
+		} `json:"items"`
+		HasMore bool `json:"has_more"`
+	}
+	decodeStructured(t, listed, &listOutput)
+	if listed.IsError || len(listOutput.Items) != 1 || listOutput.Items[0].ID != createdOutput.ID || !listOutput.Items[0].Claimable {
+		t.Fatalf("list review requests = %#v", listOutput)
+	}
+
+	cancelled := call(t, client, "cancel_review_request", map[string]any{"review_request_id": createdOutput.ID, "expected_version": 1})
+	var cancelledOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, cancelled, &cancelledOutput)
+	if cancelled.IsError || cancelledOutput.Status != "cancelled" || cancelledOutput.Claimable {
+		t.Fatalf("cancel review request = %#v", cancelledOutput)
+	}
+
+	second := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 3,
+		"target_event_id":      9,
+		"artifact_ids":         []string{"artifact-9"},
+	})
+	var secondOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, second, &secondOutput)
+	if second.IsError || secondOutput.Status != "open" || !secondOutput.Claimable {
+		t.Fatalf("create second review request = %#v", secondOutput)
+	}
+	superseded := call(t, client, "supersede_review_request", map[string]any{"review_request_id": secondOutput.ID, "expected_version": 1})
+	var supersededOutput struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeStructured(t, superseded, &supersededOutput)
+	if superseded.IsError || supersededOutput.Status != "superseded" || supersededOutput.Claimable {
+		t.Fatalf("supersede review request = %#v", supersededOutput)
+	}
+}
+
+func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "review-completion.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdIssue := call(t, client, "create_issue", map[string]any{"type": "bug", "title": "review completion", "status": "review"})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdIssue, &issue)
+	if createdIssue.IsError {
+		t.Fatalf("create issue = %#v", createdIssue)
+	}
+
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" || claim.LeaseToken == "" {
+		t.Fatalf("claim issue = %#v", claimed)
+	}
+
+	var latestEventID int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	createdReview := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 1,
+		"target_event_id":      latestEventID,
+		"artifact_ids":         []string{"artifact-1"},
+	})
+	var reviewRequest struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, createdReview, &reviewRequest)
+	if createdReview.IsError || reviewRequest.ID == "" {
+		t.Fatalf("create review request = %#v", createdReview)
+	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(ctx, ports.ReviewMutationCommand{
+		RequestID:       reviewRequest.ID,
+		ExpectedVersion: 1,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      source.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("claim review request: %v", err)
+	}
+
+	finished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":     claim.Attempt.ID,
+		"lease_token":    claim.LeaseToken,
+		"outcome":        "completed",
+		"result_summary": "reviewed through MCP",
+		"review_outcome": "changes_requested",
+		"verification":   []string{"mcp"},
+	})
+	var completion struct {
+		Issue struct {
+			Status string `json:"status"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, finished, &completion)
+	if finished.IsError || completion.Issue.Status != "ready" {
+		t.Fatalf("finish attempt = %#v", finished)
+	}
+
+	var requestStatus string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, reviewRequest.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusChangesRequested) {
+		t.Fatalf("review request status = %q, want changes_requested", requestStatus)
+	}
+}
+
 func TestSearchAndGetChangesTools(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "search-tools.db"))
@@ -888,6 +1209,133 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 	}
 }
 
+func TestAgentSessionHTTPStreamableSessionIDMapping(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "http-sessions.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	server, err := mcpadapter.NewServer(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server.SDKServer() }, nil)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	transport := &sdkmcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL,
+		HTTPClient:           httpServer.Client(),
+		DisableStandaloneSSE: true,
+	}
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-http-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	sdkSessionID := session.ID()
+	if sdkSessionID == "" {
+		t.Fatal("streamable session ID was empty")
+	}
+
+	waitForAgentSession(t, db)
+	created := readAgentSession(t, db)
+	if created.Count != 1 || created.EndedAt != nil {
+		t.Fatalf("created agent session = %#v", created)
+	}
+
+	if err := server.EndSession(ctx, sdkSessionID); err != nil {
+		t.Fatalf("EndSession() error = %v", err)
+	}
+	ended := readAgentSession(t, db)
+	if ended.Count != 1 || ended.EndedAt == nil {
+		t.Fatalf("ended agent session = %#v", ended)
+	}
+	endedAt := *ended.EndedAt
+	if err := server.EndSession(ctx, sdkSessionID); err != nil {
+		t.Fatalf("repeat EndSession() error = %v", err)
+	}
+	repeated := readAgentSession(t, db)
+	if repeated.Count != 1 || repeated.EndedAt == nil || !repeated.EndedAt.Equal(endedAt) {
+		t.Fatalf("repeated EndSession changed agent session = %#v", repeated)
+	}
+}
+
+func TestAgentSessionEndSessionIgnoresUnknownOrEmptyIDs(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "unknown-session.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	server, err := mcpadapter.NewServer(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server.SDKServer() }, nil)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	transport := &sdkmcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL,
+		HTTPClient:           httpServer.Client(),
+		DisableStandaloneSSE: true,
+	}
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-http-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	waitForAgentSession(t, db)
+	before := readAgentSession(t, db)
+	if before.EndedAt != nil {
+		t.Fatalf("created agent session before no-op = %#v", before)
+	}
+	if err := server.EndSession(ctx, ""); err != nil {
+		t.Fatalf("EndSession(empty) error = %v", err)
+	}
+	if err := server.EndSession(ctx, "unknown"); err != nil {
+		t.Fatalf("EndSession(unknown) error = %v", err)
+	}
+	after := readAgentSession(t, db)
+	if after.Count != before.Count || after.EndedAt != nil {
+		t.Fatalf("unknown/empty EndSession changed session = %#v", after)
+	}
+}
+
+func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "stdio-endonce.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	repository := &countingAgentSessionRepository{}
+	sessions, err := application.NewAgentSessionService(repository, source, staticSessionIDGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.SessionService = sessions
+	client, stop := newClient(t, options)
+	if client == nil {
+		t.Fatal("newClient() returned nil client")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for repository.CreateCalls() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := repository.CreateCalls(); got != 1 {
+		t.Fatalf("CreateAgentSession calls = %d, want 1", got)
+	}
+	stop()
+	if got := repository.EndCalls(); got != 1 {
+		t.Fatalf("EndAgentSession calls = %d, want 1", got)
+	}
+	stop()
+	if got := repository.EndCalls(); got != 1 {
+		t.Fatalf("second end call count = %d, want 1", got)
+	}
+}
+
 func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "attempt-sessions.db"))
@@ -1024,6 +1472,48 @@ func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
 	if attemptSession.Valid || eventSession.Valid {
 		t.Fatalf("unmapped claim sessions = attempt %#v event %#v", attemptSession, eventSession)
 	}
+}
+
+type staticSessionIDGenerator struct{}
+
+func (staticSessionIDGenerator) New() (string, error) {
+	return projectID, nil
+}
+
+type countingAgentSessionRepository struct {
+	mu          sync.Mutex
+	createCalls int
+	endCalls    int
+}
+
+func (repository *countingAgentSessionRepository) CreateAgentSession(ctx context.Context, cmd ports.CreateAgentSessionCommand) (domain.AgentSession, error) {
+	repository.mu.Lock()
+	repository.createCalls++
+	repository.mu.Unlock()
+	return cmd.Session, nil
+}
+
+func (repository *countingAgentSessionRepository) TouchAgentSession(ctx context.Context, cmd ports.TouchAgentSessionCommand) (domain.AgentSession, error) {
+	return domain.AgentSession{ID: cmd.SessionID}, nil
+}
+
+func (repository *countingAgentSessionRepository) EndAgentSession(ctx context.Context, cmd ports.EndAgentSessionCommand) (domain.AgentSession, error) {
+	repository.mu.Lock()
+	repository.endCalls++
+	repository.mu.Unlock()
+	return domain.AgentSession{ID: cmd.SessionID}, nil
+}
+
+func (repository *countingAgentSessionRepository) CreateCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.createCalls
+}
+
+func (repository *countingAgentSessionRepository) EndCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.endCalls
 }
 
 type failingSessionIDGenerator struct{}
@@ -1205,10 +1695,17 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		"result_summary": "done", "failure_reason_code": "other", "artifacts": []any{map[string]any{"type": "file", "uri": "../outside"}},
 	})
 	assertDomainError(t, invalidFinishArtifacts, "INVALID_ARGUMENT", false)
+	invalidAcknowledgement := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
+		"result_summary": "implemented", "target_issue_status": "done", "acknowledged_changes": map[string]any{},
+	})
+	if !invalidAcknowledgement.IsError {
+		t.Fatalf("invalid acknowledgement was accepted: %#v", invalidAcknowledgement)
+	}
 	finished := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
 		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
-		"idempotency_key": "finish-retry",
+		"idempotency_key": "finish-retry", "acknowledged_changes": nil,
 		"artifacts": []any{
 			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
 			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
@@ -1730,6 +2227,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptRepository, err := sqlite.NewAttemptRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1778,6 +2279,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviews, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempts, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
@@ -1795,7 +2300,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		t.Fatal(err)
 	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
+		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, ReviewService: reviews, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
 		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
 	}
 }

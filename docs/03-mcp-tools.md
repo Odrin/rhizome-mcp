@@ -57,31 +57,39 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 23 tools:
+The first version exposes 31 tools:
 
 1. `get_project`
-2. `list_labels`
-3. `create_issue`
-4. `update_issue`
-5. `get_issue`
-6. `list_issues`
-7. `archive_issue`
-8. `manage_issue_relation`
-9. `get_issue_graph`
-10. `get_planning_graph`
-11. `validate_issue_plan`
-12. `apply_issue_plan`
-13. `add_comment`
-14. `record_decision`
-15. `list_decisions`
-16. `get_issue_activity`
-17. `claim_issue`
-18. `renew_attempt`
-19. `save_attempt_note`
-20. `finish_attempt`
-21. `get_work_context`
-22. `search`
-23. `get_changes`
+2. `export_project`
+3. `validate_import`
+4. `apply_import`
+5. `list_labels`
+6. `create_issue`
+7. `update_issue`
+8. `get_issue`
+9. `list_issues`
+10. `archive_issue`
+11. `create_review_request`
+12. `get_review_request`
+13. `list_review_requests`
+14. `cancel_review_request`
+15. `supersede_review_request`
+16. `manage_issue_relation`
+17. `get_issue_graph`
+18. `get_planning_graph`
+19. `validate_issue_plan`
+20. `apply_issue_plan`
+21. `add_comment`
+22. `record_decision`
+23. `list_decisions`
+24. `get_issue_activity`
+25. `claim_issue`
+26. `renew_attempt`
+27. `save_attempt_note`
+28. `finish_attempt`
+29. `get_work_context`
+30. `search`
+31. `get_changes`
 
 ---
 
@@ -122,7 +130,62 @@ next_actions
 The project instructions are returned only when requested. `guides` links the
 three workflow resources advertised by the server.
 
-### 4.2. `list_labels`
+### 4.2. `export_project`
+
+Purpose:
+
+Export the current project as the version 1 logical interchange document.
+
+Input:
+
+```json
+{}
+```
+
+Output:
+
+The structured content is the full logical project document with the required
+`format`, `version`, `exported_at`, `project`, and entity arrays. The tool
+returns the document directly as structured content and does not duplicate it as
+text.
+
+### 4.3. `validate_import`
+
+Purpose:
+
+Validate a version 1 logical project interchange document without mutating storage and return a deterministic dry-run summary.
+
+Input:
+
+```json
+{
+  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+}
+```
+
+Output:
+
+The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
+
+### 4.4. `apply_import`
+
+Purpose:
+
+Apply a validated version 1 logical project interchange document into an empty destination and return a deterministic apply result with created counts, zero conflicts on success, and the latest destination event ID.
+
+Input:
+
+```json
+{
+  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+}
+```
+
+Output:
+
+The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
+
+### 4.5. `list_labels`
 
 Input:
 
@@ -778,7 +841,6 @@ Work completion also supplies:
 ```text
 target_issue_status: done | review | ready | blocked
 blocked_reason
-acceptance_check
 failure_reason_code
 interruption_reason_code
 reason_details

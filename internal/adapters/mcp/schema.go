@@ -28,6 +28,16 @@ func issueIdentifierSchema() *jsonschema.Schema {
 		Description: "Canonical issue identifier (ULID or ISSUE-N).",
 	}
 }
+func reviewRequestIdentifierSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Pattern:     "^[0-9A-HJKMNP-TV-Z]{26}$",
+		Description: "Canonical review request identifier (ULID).",
+	}
+}
+func nullableReviewRequestIdentifierSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{Types: []string{"string", "null"}, Pattern: "^[0-9A-HJKMNP-TV-Z]{26}$", Description: "Canonical review request identifier (ULID)."}
+}
 func nullableIssueIdentifierSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Types:       []string{"string", "null"},
@@ -66,6 +76,30 @@ func enumSchema(values ...string) *jsonschema.Schema {
 
 func schemaGetProject() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{"include_instructions": booleanSchema()})
+}
+
+func schemaExportProject() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{})
+}
+
+func schemaExportProjectOutput() *jsonschema.Schema {
+	return typedSchema[domain.LogicalProjectDocument]()
+}
+
+func schemaValidateImport() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{"document": boundedStringSchema(domain.MaxLogicalProjectImportBytes)})
+}
+
+func schemaValidateImportOutput() *jsonschema.Schema {
+	return typedSchema[domain.LogicalProjectImportDryRun]()
+}
+
+func schemaApplyImport() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{"document": boundedStringSchema(domain.MaxLogicalProjectImportBytes)})
+}
+
+func schemaApplyImportOutput() *jsonschema.Schema {
+	return typedSchema[domain.LogicalProjectImportApplyResult]()
 }
 
 func schemaListLabels() *jsonschema.Schema {
@@ -108,7 +142,7 @@ func schemaGetIssue() *jsonschema.Schema {
 func schemaGetIssueActivity() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(),
-		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(6), UniqueItems: true},
+		"types":    &jsonschema.Schema{Type: "array", Items: enumSchema("comments", "decisions", "reviews", "attempts", "attempt_notes", "events", "artifacts"), MaxItems: intPointer(7), UniqueItems: true},
 		"limit":    boundedIntegerSchema(0, 100),
 		"cursor":   nullableBoundedStringSchema(4096),
 		"order":    enumSchema("newest_first"),
@@ -118,7 +152,7 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 func schemaSearch() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"query":            boundedStringSchema(domain.MaxSearchQueryRunes),
-		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "attempt_note"), MaxItems: intPointer(4), UniqueItems: true},
+		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true},
 		"issue_id":         nullableIssueIdentifierSchema(),
 		"epic_id":          nullableIssueIdentifierSchema(),
 		"statuses":         &jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true},
@@ -193,6 +227,45 @@ func schemaArchiveIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableStringSchema(),
 	}, "issue_id", "expected_version")
+}
+
+func schemaCreateReviewRequest() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_id":             issueIdentifierSchema(),
+		"target_issue_version": boundedIntegerSchema(1, 9_223_372_036_854_775_807),
+		"target_event_id":      boundedIntegerSchema(0, 9_223_372_036_854_775_807),
+		"artifact_ids":         boundedStringsSchema(20, 4_096),
+		"supersedes_id":        nullableReviewRequestIdentifierSchema(),
+	}, "issue_id", "target_issue_version", "target_event_id")
+}
+
+func schemaGetReviewRequest() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{"review_request_id": reviewRequestIdentifierSchema()}, "review_request_id")
+}
+
+func schemaListReviewRequests() *jsonschema.Schema {
+	limit := boundedIntegerSchema(1, 100)
+	limit.Description = "Maximum is 100; the default is 20."
+	return object(map[string]*jsonschema.Schema{
+		"status":    &jsonschema.Schema{Type: "string", Enum: []any{"open", "claimed", "approved", "changes_requested", "blocked", "cancelled", "superseded"}},
+		"claimable": &jsonschema.Schema{Type: "boolean"},
+		"limit":     limit,
+		"cursor":    nullableBoundedStringSchema(64),
+	})
+}
+
+func schemaCancelReviewRequest() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"review_request_id": reviewRequestIdentifierSchema(),
+		"expected_version":  integerSchema(),
+	}, "review_request_id", "expected_version")
+}
+
+func schemaSupersedeReviewRequest() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"review_request_id": reviewRequestIdentifierSchema(),
+		"expected_version":  integerSchema(),
+	}, "review_request_id", "expected_version")
 }
 
 func schemaAddComment() *jsonschema.Schema {
@@ -346,15 +419,19 @@ func schemaFinishAttempt() *jsonschema.Schema {
 		"failure_reason_code":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"implementation_error", "environment_error", "missing_dependency", "invalid_requirements", "tests_failed", "context_lost", "timeout", "other", nil}},
 		"interruption_reason_code": &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}},
 		"reason_details":           nullableBoundedStringSchema(50_000),
-		"acknowledged_changes":     &jsonschema.Schema{Types: []string{"object", "null"}, OneOf: []*jsonschema.Schema{acknowledgement}},
+		"acknowledged_changes":     &jsonschema.Schema{OneOf: []*jsonschema.Schema{acknowledgement, &jsonschema.Schema{Type: "null"}}},
 		"artifacts":                schemaArtifacts(),
 		"idempotency_key":          nullableBoundedStringSchema(128),
 	}, "attempt_id", "lease_token", "outcome", "result_summary")
 }
 
-func schemaProjectOutput() *jsonschema.Schema          { return typedSchema[projectOutput]() }
-func schemaLabelListOutput() *jsonschema.Schema        { return typedSchema[labelListOutput]() }
-func schemaIssueOutput() *jsonschema.Schema            { return typedSchema[issueDTO]() }
+func schemaProjectOutput() *jsonschema.Schema       { return typedSchema[projectOutput]() }
+func schemaLabelListOutput() *jsonschema.Schema     { return typedSchema[labelListOutput]() }
+func schemaIssueOutput() *jsonschema.Schema         { return typedSchema[issueDTO]() }
+func schemaReviewRequestOutput() *jsonschema.Schema { return typedSchema[reviewRequestDTO]() }
+func schemaReviewRequestListOutput() *jsonschema.Schema {
+	return typedSchema[reviewRequestListOutput]()
+}
 func schemaGetIssueActivityOutput() *jsonschema.Schema { return typedSchema[issueActivityOutput]() }
 func schemaSearchOutput() *jsonschema.Schema           { return typedSchema[searchOutput]() }
 func schemaChangesOutput() *jsonschema.Schema          { return typedSchema[changesOutput]() }

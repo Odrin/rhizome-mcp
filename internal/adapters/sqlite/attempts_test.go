@@ -317,6 +317,256 @@ func TestFinishAttemptIdempotentReplayAcrossSessionReconnect(t *testing.T) {
 	}
 }
 
+func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-completion")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review completion", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latestEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: issue.Issue.Version,
+		TargetEventID:      latestEventID,
+		OccurredAt:         fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'review-test', ?, ?)`, sessionID, fixture.clock.Now().Format(time.RFC3339Nano), fixture.clock.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.SessionID = &sessionID
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("finish review attempt: %v (cause=%v)", err, errors.Unwrap(err))
+	}
+
+	if claimed.Request.Status != domain.ReviewRequestStatusClaimed {
+		t.Fatalf("claimed request status = %q, want claimed", claimed.Request.Status)
+	}
+
+	var requestStatus string
+	var outcomeCount int
+	var outcome string
+	var issueStatus string
+	var eventSession sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM review_outcomes WHERE request_id = ?`, created.Request.ID).Scan(&outcomeCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT outcome FROM review_outcomes WHERE request_id = ?`, created.Request.ID).Scan(&outcome); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_completed'`, claim.Attempt.ID).Scan(&eventSession)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) || outcomeCount != 1 || outcome != string(domain.ReviewOutcomeApproved) || issueStatus != string(domain.StatusDone) {
+		t.Fatalf("review completion state = request %q outcome_count %d outcome %q issue %q", requestStatus, outcomeCount, outcome, issueStatus)
+	}
+	if !eventSession.Valid || eventSession.String != sessionID {
+		t.Fatalf("attempt completed session = %#v, want %q", eventSession, sessionID)
+	}
+}
+
+func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-changes-requested")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review changes requested", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latestEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: issue.Issue.Version,
+		TargetEventID:      latestEventID,
+		OccurredAt:         fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeChangesRequested)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("finish review changes requested: %v", err)
+	}
+
+	var requestStatus, issueStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusChangesRequested) || issueStatus != string(domain.StatusReady) {
+		t.Fatalf("review changes requested state = request %q issue %q", requestStatus, issueStatus)
+	}
+}
+
+func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-stale")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review stale", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: issue.Issue.Version,
+		TargetEventID:      0,
+		OccurredAt:         fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
+		t.Fatalf("stale review completion error = %v", err)
+	}
+
+	var requestStatus string
+	var outcomeCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_outcomes WHERE request_id = ?`, created.Request.ID).Scan(&outcomeCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusSuperseded) || outcomeCount != 0 {
+		t.Fatalf("stale review request state = status %q outcomes %d", requestStatus, outcomeCount)
+	}
+}
+
+func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-expiry")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review expiry", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: issue.Issue.Version,
+		TargetEventID:      0,
+		OccurredAt:         fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       created.Request.ID,
+		ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt:      fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.clock.Advance(2 * time.Hour)
+	if _, err := fixture.attempts.ExpireAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var requestStatus string
+	var activeAttemptID sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT active_attempt_id FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&activeAttemptID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusOpen) || activeAttemptID.Valid {
+		t.Fatalf("expired review request state = status %q active_attempt_id %#v", requestStatus, activeAttemptID)
+	}
+}
+
 func TestFinishAttemptCorruptStoredResponses(t *testing.T) {
 	tests := []struct {
 		name        string

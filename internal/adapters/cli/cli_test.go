@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,35 @@ type stubProjectService struct {
 func (s *stubProjectService) GetProject(context.Context) (domain.Project, error) {
 	s.calls++
 	return s.project, s.err
+}
+
+func (s *stubProjectService) ExportLogicalProject(context.Context) ([]byte, error) {
+	s.calls++
+	return []byte(`{
+  "format": "rhizome-logical-project",
+  "version": 1,
+  "project": {},
+  "issues": [],
+  "labels": [],
+  "issue_labels": [],
+  "relations": [],
+  "comments": [],
+  "decisions": [],
+  "attempts": [],
+  "attempt_notes": [],
+  "artifacts": [],
+  "events": []
+}`), s.err
+}
+
+func (s *stubProjectService) ValidateLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportDryRun, error) {
+	s.calls++
+	return domain.LogicalProjectImportDryRun{}, s.err
+}
+
+func (s *stubProjectService) ApplyLogicalProjectImport(context.Context, []byte) (domain.LogicalProjectImportApplyResult, error) {
+	s.calls++
+	return domain.LogicalProjectImportApplyResult{}, s.err
 }
 
 type stubIssueService struct {
@@ -127,6 +158,106 @@ func TestRunUsageAndErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestServeCommandParsesHTTPAddress(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var captured string
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string) error {
+		captured = httpAddress
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"serve", "--http-address", "127.0.0.1:0"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured != "127.0.0.1:0" {
+		t.Fatalf("captured HTTP address = %q, want %q", captured, "127.0.0.1:0")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+}
+
+func TestRunProjectImportApply(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	services := Services{ProjectService: &stubProjectService{}}
+	cli := New(services, &stdout, &stderr, nil, nil)
+	if err := cli.Run(context.Background(), []string{"project", "import", "--input", "-", "--apply"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+	if stdout.Len() == 0 {
+		t.Fatal("expected JSON output")
+	}
+}
+
+func TestRunProjectExport(t *testing.T) {
+	t.Run("stdout", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{ProjectService: &stubProjectService{}}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"project", "export", "--output", "-"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		output := stdout.String()
+		if !strings.Contains(output, "\"format\": \"rhizome-logical-project\"") || !strings.HasSuffix(output, "\n") {
+			t.Fatalf("expected newline-terminated JSON stdout, got %q", output)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("expected no stderr output, got %q", stderr.String())
+		}
+	})
+
+	t.Run("file overwrite", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "export.json")
+		if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+			t.Fatalf("write existing file: %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{ProjectService: &stubProjectService{}}, &stdout, &stderr, nil, nil)
+		if err := cli.Run(context.Background(), []string{"project", "export", "--output", path, "--overwrite"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no stdout output for file export, got %q", stdout.String())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read exported file: %v", err)
+		}
+		if !strings.Contains(string(data), "\"format\": \"rhizome-logical-project\"") || !strings.HasSuffix(string(data), "\n") {
+			t.Fatalf("expected exported file JSON, got %q", string(data))
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat exported file: %v", err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("mode = %o, want 0600", info.Mode().Perm())
+		}
+	})
+
+	t.Run("refuse overwrite", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "export.json")
+		if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+			t.Fatalf("write existing file: %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{ProjectService: &stubProjectService{}}, &stdout, &stderr, nil, nil)
+		err := cli.Run(context.Background(), []string{"project", "export", "--output", path})
+		if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+			t.Fatalf("expected overwrite refusal, got %v", err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no stdout output, got %q", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("expected no stderr output, got %q", stderr.String())
+		}
+	})
 }
 
 func TestRunBackup(t *testing.T) {

@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/config"
 	cliadapter "rhizome-mcp/internal/adapters/cli"
@@ -33,6 +35,8 @@ const attemptCleanupInterval = time.Minute
 var (
 	initRunner  = runInit
 	serveRunner = runServe
+	serveStdio  = runServeStdio
+	serveHTTP   = runServeHTTP
 )
 
 type composedServices struct {
@@ -47,6 +51,7 @@ type composedServices struct {
 	decisionService    *application.DecisionService
 	activityService    *application.ActivityService
 	searchService      *application.SearchService
+	reviewService      *application.ReviewService
 	attemptService     *application.AttemptService
 	maintenanceService *application.MaintenanceService
 	workContextService *application.WorkContextService
@@ -103,7 +108,10 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return initRunner(ctx, startingPath, pathInputs, dataRoot, stdout)
 	}
-	serveHandler := func(ctx context.Context) error {
+	serveHandler := func(ctx context.Context, httpAddress string) error {
+		if httpAddress != "" {
+			cfg.HTTPAddress = httpAddress
+		}
 		if bundle == nil {
 			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 			if err != nil {
@@ -228,6 +236,9 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 }
 
 func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
@@ -238,8 +249,10 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()
 		for {
-			if _, err := bundle.attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-				slog.Error("attempt expiry cleanup failed", "error", err)
+			if bundle != nil && bundle.attemptService != nil {
+				if _, err := bundle.attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+					slog.Error("attempt expiry cleanup failed", "error", err)
+				}
 			}
 			select {
 			case <-cleanupCtx.Done():
@@ -252,6 +265,14 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		stopCleanup()
 		<-cleanupDone
 	}()
+
+	if cfg.HTTPAddress != "" {
+		return serveHTTP(ctx, cfg, stderr, bundle)
+	}
+	return serveStdio(ctx, cfg, stderr, bundle)
+}
+
+func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
 	server, err := mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:       bundle.issueService,
 		ProjectService:     bundle.projectService,
@@ -262,6 +283,7 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 		DecisionService:    bundle.decisionService,
 		ActivityService:    bundle.activityService,
 		SearchService:      bundle.searchService,
+		ReviewService:      bundle.reviewService,
 		AttemptService:     bundle.attemptService,
 		SessionService:     bundle.sessionService,
 		WorkContextService: bundle.workContextService,
@@ -272,7 +294,73 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 	if err != nil {
 		return err
 	}
-	return server.Run(ctx, &mcp.StdioTransport{})
+	return server.Run(ctx, &sdkmcp.StdioTransport{})
+}
+
+func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	handler, err := newHTTPHandler(cfg, bundle)
+	if err != nil {
+		return err
+	}
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	return projectruntime.ServeHTTPServer(ctx, projectruntime.HTTPServerOptions{Address: cfg.HTTPAddress, Logger: logger, Handler: handler})
+}
+
+func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler, error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	if bundle == nil {
+		return nil, errors.New("mcp services are required")
+	}
+	var serverMu sync.Mutex
+	servers := make([]*mcpadapter.Server, 0)
+	serverFactory := func(*http.Request) *sdkmcp.Server {
+		server, err := mcpadapter.NewServer(mcpadapter.Options{
+			IssueService:       bundle.issueService,
+			ProjectService:     bundle.projectService,
+			RelationService:    bundle.relationService,
+			GraphService:       bundle.graphService,
+			PlanningService:    bundle.planningService,
+			CommentService:     bundle.commentService,
+			DecisionService:    bundle.decisionService,
+			ActivityService:    bundle.activityService,
+			SearchService:      bundle.searchService,
+			ReviewService:      bundle.reviewService,
+			AttemptService:     bundle.attemptService,
+			SessionService:     bundle.sessionService,
+			WorkContextService: bundle.workContextService,
+			ServerName:         cfg.ServerName,
+			ServerVersion:      cfg.Version,
+			ConfigVersion:      projectconfig.CurrentIdentityVersion,
+		})
+		if err != nil {
+			return nil
+		}
+		serverMu.Lock()
+		servers = append(servers, server)
+		serverMu.Unlock()
+		return server.SDKServer()
+	}
+	streamableHandler := sdkmcp.NewStreamableHTTPHandler(serverFactory, &sdkmcp.StreamableHTTPOptions{JSONResponse: true})
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			sessionID := request.Header.Get("Mcp-Session-Id")
+			serverMu.Lock()
+			activeServers := append([]*mcpadapter.Server(nil), servers...)
+			serverMu.Unlock()
+			for _, server := range activeServers {
+				if err := server.EndSession(request.Context(), sessionID); err != nil {
+					slog.Error("http agent session end failed", "error", err)
+				}
+			}
+		}
+		streamableHandler.ServeHTTP(writer, request)
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+	mux.Handle("/mcp/", handler)
+	return mux, nil
 }
 
 func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {
@@ -330,6 +418,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	reviewRepository, err := sqlite.NewReviewRepository(project.Database)
+	if err != nil {
+		return nil, nil, err
+	}
 	searchIndexRepository, err := sqlite.NewSearchIndexRepository(project.Database)
 	if err != nil {
 		return nil, nil, err
@@ -382,6 +474,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	if err != nil {
+		return nil, nil, err
+	}
 	attemptService, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
 		return nil, nil, err
@@ -414,6 +510,7 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		decisionService:    decisionService,
 		activityService:    activityService,
 		searchService:      searchService,
+		reviewService:      reviewService,
 		attemptService:     attemptService,
 		maintenanceService: maintenanceService,
 		workContextService: workContextService,
