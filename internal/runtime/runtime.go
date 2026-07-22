@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -90,7 +91,8 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateDatabaseDestination(databasePath); err != nil {
+	databaseExists, err := prepareDatabaseDestination(databasePath)
+	if err != nil {
 		return nil, lifecycleError(err, domain.CodeStorageConfiguration, "project database destination is invalid")
 	}
 
@@ -117,6 +119,9 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 	}
 	if err := ensureProjectRow(ctx, db, discovered.Identity.ProjectID, options.Clock.Now()); err != nil {
 		return nil, err
+	}
+	if !databaseExists {
+		slog.Info("initialized empty project database", "project_id", discovered.Identity.ProjectID, "path", databasePath)
 	}
 
 	keep = true
@@ -164,25 +169,28 @@ func startsWithParent(path string) bool {
 	return path == ".." || len(path) > 3 && path[:3] == ".."+string(filepath.Separator)
 }
 
-func validateDatabaseDestination(path string) error {
+func prepareDatabaseDestination(path string) (bool, error) {
 	parent := filepath.Dir(path)
 	info, err := os.Stat(parent)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("project data path is not a directory")
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return false, err
+		}
+	} else if err != nil {
+		return false, err
+	} else if !info.IsDir() {
+		return false, errors.New("project data path is not a directory")
 	}
 	info, err = os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil
+		return false, nil
 	case err != nil:
-		return err
+		return false, err
 	case !info.Mode().IsRegular():
-		return errors.New("database path is not a regular file")
+		return false, errors.New("database path is not a regular file")
 	default:
-		return nil
+		return true, nil
 	}
 }
 

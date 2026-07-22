@@ -121,6 +121,42 @@ func TestOpenProjectResolvesDataRootFromInputs(t *testing.T) {
 	}
 }
 
+func TestOpenProjectInitializesMissingDatabaseForExistingIdentity(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := "{\n  \"version\": 1,\n  \"project_id\": \"" + projectID + "\"\n}\n"
+	if err := os.WriteFile(filepath.Join(repository, projectconfig.IdentityFileName), []byte(identity), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(t.TempDir(), "application-data", "rhizome-mcp")
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatalf("OpenProject() error = %v", err)
+	}
+	t.Cleanup(func() { _ = project.Close(context.Background()) })
+
+	resolvedDataRoot, err := filepath.EvalSymlinks(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDatabasePath := filepath.Join(resolvedDataRoot, "projects", projectID, "tasks.db")
+	if project.DatabasePath != wantDatabasePath {
+		t.Fatalf("database path = %q, want %q", project.DatabasePath, wantDatabasePath)
+	}
+	assertProjectRow(t, project, projectID, testTime.UTC().Format(time.RFC3339Nano))
+	assertHealthy(t, project)
+}
+
 func TestOpenProjectRejectsMismatchedPreseededProject(t *testing.T) {
 	repository, dataRoot := initializeProject(t)
 	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
