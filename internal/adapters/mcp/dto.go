@@ -464,9 +464,24 @@ type errorOutput struct {
 	Retryable bool            `json:"retryable"`
 }
 
+// sessionDTO mirrors domain.AgentSession for the get_project output. The field
+// is typed (rather than `any`) because an untyped field generates the boolean
+// schema `true`, which some MCP clients reject when validating tools/list.
+type sessionDTO struct {
+	ID            string     `json:"id"`
+	ClientName    string     `json:"client_name"`
+	ClientVersion *string    `json:"client_version"`
+	AgentLabel    *string    `json:"agent_label"`
+	Model         *string    `json:"model"`
+	InstanceKey   *string    `json:"instance_key"`
+	StartedAt     time.Time  `json:"started_at"`
+	LastSeenAt    time.Time  `json:"last_seen_at"`
+	EndedAt       *time.Time `json:"ended_at"`
+}
+
 type projectOutput struct {
 	Project                projectDTO     `json:"project"`
-	Session                any            `json:"session"`
+	Session                *sessionDTO    `json:"session"`
 	AppVersion             string         `json:"app_version"`
 	SchemaVersion          int            `json:"schema_version"`
 	ConfigVersion          int            `json:"config_version"`
