@@ -297,6 +297,26 @@ func (adapter *adapter) endSession(ctx context.Context, sdkSession *sdkmcp.Serve
 	}
 }
 
+// releaseConnectionsLocked drops per-connection tracking for every connection
+// carrying the SDK session ID and reports the durable session IDs they held.
+// A transport that serves many sessions from one server reuses the adapter, so
+// terminated connections must not stay reachable from any tracking map.
+// The caller must hold sessionMu.
+func (adapter *adapter) releaseConnectionsLocked(sdkSessionID string) []string {
+	var durableSessionIDs []string
+	for sdkSession, sessionID := range adapter.connectionSessions {
+		if sdkSession == nil || sdkSession.ID() != sdkSessionID {
+			continue
+		}
+		delete(adapter.connectionSessions, sdkSession)
+		delete(adapter.sessionStarted, sdkSession)
+		if sessionID != "" {
+			durableSessionIDs = append(durableSessionIDs, sessionID)
+		}
+	}
+	return durableSessionIDs
+}
+
 func (adapter *adapter) endSessionBySDKSessionID(ctx context.Context, sdkSessionID string) error {
 	if sdkSessionID == "" {
 		return nil
@@ -304,23 +324,14 @@ func (adapter *adapter) endSessionBySDKSessionID(ctx context.Context, sdkSession
 	adapter.sessionMu.Lock()
 	durableSessionID, ok := adapter.sdkSessionIDs[sdkSessionID]
 	if !ok {
-		for sdkSession, sessionID := range adapter.connectionSessions {
-			if sdkSession != nil && sdkSession.ID() == sdkSessionID {
-				delete(adapter.connectionSessions, sdkSession)
-				if sessionID != "" {
-					adapter.endedDurableSessions[sessionID] = struct{}{}
-				}
-			}
+		for _, sessionID := range adapter.releaseConnectionsLocked(sdkSessionID) {
+			adapter.endedDurableSessions[sessionID] = struct{}{}
 		}
 		adapter.sessionMu.Unlock()
 		return nil
 	}
 	delete(adapter.sdkSessionIDs, sdkSessionID)
-	for sdkSession := range adapter.connectionSessions {
-		if sdkSession != nil && sdkSession.ID() == sdkSessionID {
-			delete(adapter.connectionSessions, sdkSession)
-		}
-	}
+	adapter.releaseConnectionsLocked(sdkSessionID)
 	if _, ended := adapter.endedDurableSessions[durableSessionID]; ended {
 		adapter.sessionMu.Unlock()
 		return nil

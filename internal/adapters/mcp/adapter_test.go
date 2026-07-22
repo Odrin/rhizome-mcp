@@ -1330,6 +1330,55 @@ func TestAgentSessionEndSessionIgnoresUnknownOrEmptyIDs(t *testing.T) {
 	}
 }
 
+func TestAgentSessionTrackingIsReleasedAcrossHTTPSessions(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "session-tracking.db"))
+	defer db.Close(ctx)
+	options := composeServices(t, db, source)
+	server, err := mcpadapter.NewServer(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server.SDKServer() }, nil)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	// One server serves every session, so ending a session must leave nothing
+	// behind. EndSession stands in for the DELETE handling the HTTP transport
+	// wires up around this same server.
+	const cycles = 5
+	for cycle := 1; cycle <= cycles; cycle++ {
+		transport := &sdkmcp.StreamableClientTransport{
+			Endpoint:             httpServer.URL,
+			HTTPClient:           httpServer.Client(),
+			DisableStandaloneSSE: true,
+		}
+		client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-http-client", Version: "test"}, nil)
+		session, err := client.Connect(ctx, transport, nil)
+		if err != nil {
+			t.Fatalf("cycle %d connect: %v", cycle, err)
+		}
+		waitForTrackedConnections(t, server, 1)
+		if err := server.EndSession(ctx, session.ID()); err != nil {
+			t.Fatalf("cycle %d EndSession() error = %v", cycle, err)
+		}
+		if err := session.Close(); err != nil {
+			t.Fatalf("cycle %d close: %v", cycle, err)
+		}
+		connections, started := server.TrackedSessionCounts()
+		if connections != 0 || started != 0 {
+			t.Fatalf("cycle %d tracked connections = %d, started = %d, want 0 and 0", cycle, connections, started)
+		}
+	}
+
+	if total := readAgentSession(t, db).Count; total != cycles {
+		t.Fatalf("durable agent sessions = %d, want %d", total, cycles)
+	}
+	if open := readOpenAgentSessionCount(t, db); open != 0 {
+		t.Fatalf("open durable agent sessions = %d, want 0", open)
+	}
+}
+
 func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "stdio-endonce.db"))
@@ -1447,6 +1496,32 @@ func waitForAgentSession(t *testing.T, db *sqlite.DB) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func waitForTrackedConnections(t *testing.T, server *mcpadapter.Server, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		connections, started := server.TrackedSessionCounts()
+		if connections == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tracked connections = %d, started = %d, want %d connections", connections, started, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func readOpenAgentSessionCount(t *testing.T, db *sqlite.DB) int {
+	t.Helper()
+	var open int
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_sessions WHERE ended_at IS NULL").Scan(&open)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return open
 }
 
 func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {

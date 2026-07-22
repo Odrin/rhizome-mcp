@@ -622,7 +622,7 @@ func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
 	}
 }
 
-func TestIntegrationHTTPTransportUsesPerSessionMCPServers(t *testing.T) {
+func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	ctx := context.Background()
 	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}

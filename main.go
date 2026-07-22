@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	goruntime "runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -272,8 +271,8 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 	return serveStdio(ctx, cfg, stderr, bundle)
 }
 
-func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
-	server, err := mcpadapter.NewServer(mcpadapter.Options{
+func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Server, error) {
+	return mcpadapter.NewServer(mcpadapter.Options{
 		IssueService:       bundle.issueService,
 		ProjectService:     bundle.projectService,
 		RelationService:    bundle.relationService,
@@ -291,6 +290,10 @@ func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bu
 		ServerVersion:      cfg.Version,
 		ConfigVersion:      projectconfig.CurrentIdentityVersion,
 	})
+}
+
+func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	server, err := newMCPServer(cfg, bundle)
 	if err != nil {
 		return err
 	}
@@ -313,46 +316,20 @@ func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler,
 	if bundle == nil {
 		return nil, errors.New("mcp services are required")
 	}
-	var serverMu sync.Mutex
-	servers := make([]*mcpadapter.Server, 0)
+	// One server serves every session: the adapter keys all of its state per
+	// session, and the SDK allows the factory to return the same server.
+	server, err := newMCPServer(cfg, bundle)
+	if err != nil {
+		return nil, err
+	}
 	serverFactory := func(*http.Request) *sdkmcp.Server {
-		server, err := mcpadapter.NewServer(mcpadapter.Options{
-			IssueService:       bundle.issueService,
-			ProjectService:     bundle.projectService,
-			RelationService:    bundle.relationService,
-			GraphService:       bundle.graphService,
-			PlanningService:    bundle.planningService,
-			CommentService:     bundle.commentService,
-			DecisionService:    bundle.decisionService,
-			ActivityService:    bundle.activityService,
-			SearchService:      bundle.searchService,
-			ReviewService:      bundle.reviewService,
-			AttemptService:     bundle.attemptService,
-			SessionService:     bundle.sessionService,
-			WorkContextService: bundle.workContextService,
-			ServerName:         cfg.ServerName,
-			ServerVersion:      cfg.Version,
-			ConfigVersion:      projectconfig.CurrentIdentityVersion,
-		})
-		if err != nil {
-			return nil
-		}
-		serverMu.Lock()
-		servers = append(servers, server)
-		serverMu.Unlock()
 		return server.SDKServer()
 	}
 	streamableHandler := sdkmcp.NewStreamableHTTPHandler(serverFactory, &sdkmcp.StreamableHTTPOptions{JSONResponse: true})
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodDelete {
-			sessionID := request.Header.Get("Mcp-Session-Id")
-			serverMu.Lock()
-			activeServers := append([]*mcpadapter.Server(nil), servers...)
-			serverMu.Unlock()
-			for _, server := range activeServers {
-				if err := server.EndSession(request.Context(), sessionID); err != nil {
-					slog.Error("http agent session end failed", "error", err)
-				}
+			if err := server.EndSession(request.Context(), request.Header.Get("Mcp-Session-Id")); err != nil {
+				slog.Error("http agent session end failed", "error", err)
 			}
 		}
 		streamableHandler.ServeHTTP(writer, request)
