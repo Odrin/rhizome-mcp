@@ -35,7 +35,7 @@ func NewGenerator(source clock.Clock, entropy io.Reader) (*Generator, error) {
 	if entropy == nil {
 		return nil, fmt.Errorf("%w: entropy", ErrMissingDependency)
 	}
-	return &Generator{clock: source, entropy: entropy}, nil
+	return &Generator{clock: source, entropy: ulid.Monotonic(entropy, 0)}, nil
 }
 
 // New returns a canonical ULID string using the injected clock and entropy.

@@ -3,6 +3,7 @@ package ids_test
 import (
 	"crypto/rand"
 	"errors"
+	mathrand "math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,31 @@ func TestGeneratorUsesInjectedTime(t *testing.T) {
 	}
 	if got, want := parsed.Time(), ulid.Timestamp(instant); got != want {
 		t.Fatalf("ULID timestamp = %d, want %d", got, want)
+	}
+}
+
+func TestGeneratorIsMonotonicWithinMillisecond(t *testing.T) {
+	generator, err := ids.NewGenerator(
+		clock.NewFakeClock(time.Unix(1_700_000_000, 0)),
+		mathrand.New(mathrand.NewSource(1)),
+	)
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+
+	previous, err := generator.New()
+	if err != nil {
+		t.Fatalf("first New() error = %v", err)
+	}
+	for index := 1; index < 100; index++ {
+		current, err := generator.New()
+		if err != nil {
+			t.Fatalf("New() call %d error = %v", index+1, err)
+		}
+		if current <= previous {
+			t.Fatalf("New() call %d = %q, want greater than %q", index+1, current, previous)
+		}
+		previous = current
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -248,6 +249,12 @@ func TestWriteDoesNotRetryConstraintOrDomainError(t *testing.T) {
 		return err
 	})
 	assertDomainCode(t, err, domain.CodeStorageConstraint)
+	var constraintErr *domain.Error
+	if !errors.As(err, &constraintErr) || len(constraintErr.Details) != 1 ||
+		constraintErr.Details[0].Code != "SQLITE_CONSTRAINT" ||
+		!strings.Contains(constraintErr.Details[0].Message, "unique_test.value") {
+		t.Fatalf("constraint details = %#v", err)
+	}
 	if attempts != 1 || len(sleeper.Delays()) != 0 {
 		t.Fatalf("constraint attempts = %d, delays = %v", attempts, sleeper.Delays())
 	}

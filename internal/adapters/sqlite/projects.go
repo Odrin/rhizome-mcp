@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -230,6 +231,9 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 	}
 
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
+			return err
+		}
 		hasContent, err := hasLogicalProjectImportDestinationContentInTransaction(ctx, tx)
 		if err != nil {
 			return err
@@ -383,14 +387,17 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			}
 		}
 
-		for _, relation := range plan.Document.Relations {
+		for index, relation := range plan.Document.Relations {
 			createdAt, err := parseLogicalProjectTimestamp("relations.created_at", relation.CreatedAt)
 			if err != nil {
 				return err
 			}
+			sourceID, targetID := domain.CanonicalRelationEndpoints(
+				domain.RelationType(relation.Type), issueDestIDs[relation.SourceIssueID], issueDestIDs[relation.TargetIssueID],
+			)
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`,
-				relationDestIDs[relation.ID], issueDestIDs[relation.SourceIssueID], issueDestIDs[relation.TargetIssueID], relation.Type, createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
-				return err
+				relationDestIDs[relation.ID], sourceID, targetID, relation.Type, createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				return logicalImportRelationWriteError(err, index)
 			}
 		}
 
@@ -567,6 +574,22 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 		return result, err
 	}
 	return result, nil
+}
+
+func logicalImportRelationWriteError(err error, index int) error {
+	translated := TranslateError(err)
+	var domainErr *domain.Error
+	if !errors.As(translated, &domainErr) || domainErr.Code != domain.CodeStorageConstraint {
+		return err
+	}
+	details := append([]domain.Detail(nil), domainErr.Details...)
+	details = append(details, domain.Detail{
+		EntityIndex: &index,
+		Field:       fmt.Sprintf("$.relations[%d]", index),
+		Code:        "IMPORT_STORAGE_CONSTRAINT",
+		Message:     "relation violates a storage constraint",
+	})
+	return domain.WrapError(err, domainErr.Code, domainErr.Message, domainErr.Retryable, details...)
 }
 
 func hasLogicalProjectImportDestinationContentInTransaction(ctx context.Context, tx Executor) (bool, error) {

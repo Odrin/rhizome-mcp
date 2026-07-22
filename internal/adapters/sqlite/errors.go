@@ -46,7 +46,8 @@ func TranslateError(err error) error {
 	case sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_FULL, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_PERM:
 		return domain.WrapError(err, domain.CodeStorageUnavailable, "storage is unavailable", false)
 	case sqlite3.SQLITE_CONSTRAINT:
-		return domain.WrapError(err, domain.CodeStorageConstraint, "storage constraint rejected the operation", false)
+		return domain.WrapError(err, domain.CodeStorageConstraint, "storage constraint rejected the operation", false,
+			domain.Detail{Field: "storage", Code: "SQLITE_CONSTRAINT", Message: err.Error()})
 	default:
 		return domain.WrapError(err, domain.CodeStorageFailure, "storage operation failed", false)
 	}

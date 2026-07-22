@@ -3,9 +3,11 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"math/rand"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -279,14 +281,6 @@ func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.
 			UpdatedAt:    "2026-07-17T18:24:06Z",
 		},
 		Issues: []domain.LogicalIssue{{
-			ID:        parentIssueID,
-			Type:      "epic",
-			Title:     "Epic",
-			Status:    "open",
-			Priority:  "high",
-			CreatedAt: "2026-07-17T18:24:06Z",
-			UpdatedAt: "2026-07-17T18:24:06Z",
-		}, {
 			ID:                 childIssueID,
 			Type:               "task",
 			Title:              "Task",
@@ -296,6 +290,14 @@ func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.
 			CreatedBySessionID: nil,
 			CreatedAt:          "2026-07-17T18:24:07Z",
 			UpdatedAt:          "2026-07-17T18:24:07Z",
+		}, {
+			ID:        parentIssueID,
+			Type:      "epic",
+			Title:     "Epic",
+			Status:    "open",
+			Priority:  "high",
+			CreatedAt: "2026-07-17T18:24:06Z",
+			UpdatedAt: "2026-07-17T18:24:06Z",
 		}},
 		Labels:       []domain.LogicalLabel{{ID: labelID, Name: "alpha", CreatedAt: "2026-07-17T18:24:06Z"}},
 		IssueLabels:  []domain.LogicalIssueLabel{{IssueID: childIssueID, LabelID: labelID}},
@@ -380,6 +382,99 @@ func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.
 	}
 	if _, err := domain.ParseLogicalProjectImportPlan(exportedBytes); err != nil {
 		t.Fatalf("exported document failed validation: %v", err)
+	}
+}
+
+func TestProjectRepositoryCanonicalizesRelatedToAfterImportRemapping(t *testing.T) {
+	db, _ := openProjectDatabase(t, "Imported", "Instructions")
+	ctx := context.Background()
+	sourceIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+	targetIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FAB"
+	relationID := "01ARZ3NDEKTSV4RRFFQ69G5FAC"
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    1,
+		ExportedAt: "2026-07-17T18:24:06Z",
+		Project: domain.LogicalProjectProject{
+			ID:        sqliteTestProjectID,
+			CreatedAt: "2026-07-17T18:24:06Z",
+			UpdatedAt: "2026-07-17T18:24:06Z",
+		},
+		Issues: []domain.LogicalIssue{
+			{ID: targetIssueID, Type: "task", Title: "Target", Status: "ready", Priority: "medium", CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"},
+			{ID: sourceIssueID, Type: "task", Title: "Source", Status: "ready", Priority: "medium", CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"},
+		},
+		Relations: []domain.LogicalRelation{{
+			ID: relationID, SourceIssueID: sourceIssueID, TargetIssueID: targetIssueID,
+			Type: "related_to", CreatedAt: "2026-07-17T18:24:06Z",
+		}},
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+
+	originalReader := cryptorand.Reader
+	cryptorand.Reader = bytes.NewReader(bytes.Join([][]byte{
+		bytes.Repeat([]byte{0x01}, 10),
+		bytes.Repeat([]byte{0x02}, 10),
+		bytes.Repeat([]byte{0x03}, 10),
+	}, nil))
+	t.Cleanup(func() { cryptorand.Reader = originalReader })
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := repository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+
+	var storedSourceID, storedTargetID string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT source_issue_id, target_issue_id FROM issue_relations`).Scan(&storedSourceID, &storedTargetID)
+	}); err != nil {
+		t.Fatalf("read imported relation: %v", err)
+	}
+	if storedSourceID >= storedTargetID {
+		t.Fatalf("related_to endpoints = %q, %q; want canonical lexical order", storedSourceID, storedTargetID)
+	}
+
+	constraintDB, _ := openProjectDatabase(t, "Imported", "Instructions")
+	if err := constraintDB.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER reject_imported_relations
+			BEFORE INSERT ON issue_relations
+			BEGIN
+				SELECT RAISE(ABORT, 'forced relation constraint');
+			END`)
+		return err
+	}); err != nil {
+		t.Fatalf("create relation rejection trigger: %v", err)
+	}
+	cryptorand.Reader = bytes.NewReader(bytes.Repeat([]byte{0x04}, 64))
+	constraintRepository, err := sqlite.NewProjectRepository(constraintDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	_, err = constraintRepository.ApplyLogicalProjectImport(ctx, plan)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStorageConstraint {
+		t.Fatalf("ApplyLogicalProjectImport() error = %#v, want storage constraint", err)
+	}
+	var foundPath, foundDiagnostic bool
+	for _, detail := range domainErr.Details {
+		if detail.EntityIndex != nil && *detail.EntityIndex == 0 && detail.Field == "$.relations[0]" {
+			foundPath = true
+		}
+		if detail.Code == "SQLITE_CONSTRAINT" && strings.Contains(detail.Message, "forced relation constraint") {
+			foundDiagnostic = true
+		}
+	}
+	if !foundPath || !foundDiagnostic {
+		t.Fatalf("constraint details = %#v", domainErr.Details)
 	}
 }
 
