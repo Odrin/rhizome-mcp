@@ -4,7 +4,7 @@
   "description": "Bundles the rhizome-mcp server as a VS Code MCP provider for local issue tracking, planning, and agent workflows.",
   "version": "0.0.1",
   "publisher": "odrin",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Odrin/rhizome-mcp.git",
