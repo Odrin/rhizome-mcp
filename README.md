@@ -132,9 +132,12 @@ PATH.
 - [Storage and runtime](docs/04-storage-runtime.md)
 - [Implementation requirements](docs/05-implementation-requirements.md)
 - [Deferred features and non-goals](docs/06-deferred-and-open.md)
+- [Logical project interchange format](docs/07-logical-interchange.md)
+- [Local HTTP transport contract](docs/08-local-http-transport.md)
+- [Review workflow contract](docs/09-review-workflow.md)
 - [Specification index and reading guide](SPEC.md)
 
-The six modular files are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current MCP issue.
+The nine modular files (docs/01 through docs/09) are the canonical specification. `SPEC.md` is a lightweight index so contract text has one source of truth. Agents should load only the sections relevant to the current MCP issue.
 
 Connected MCP clients receive compact initialize guidance. `get_project` links
 the full `rhizome://guides/agent-workflow`,

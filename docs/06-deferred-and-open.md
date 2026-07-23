@@ -53,15 +53,20 @@ Do not include these in the first version unless required to satisfy a core inva
 - resource subscriptions;
 - background model calls.
 
-## 2. Candidate post-MVP features
+## 2. Implemented post-MVP features
+
+The following features were initially candidate features but have been completed:
+
+- logical project import/export format (see [docs/07-logical-interchange.md](07-logical-interchange.md));
+- richer review workflow with multi-stage request lifecycle (see [docs/09-review-workflow.md](09-review-workflow.md));
+- HTTP transport bound to localhost with built-in security boundaries (see [docs/08-local-http-transport.md](08-local-http-transport.md)).
+
+## 3. Candidate post-MVP features
 
 These are plausible future additions, not current requirements.
 
 - `open_question` entity;
-- logical project import/export format;
 - dynamically generated project instruction resources;
-- richer review workflow;
-- HTTP transport bound to localhost;
 - IDE extension;
 - GUI dependency graph;
 - hybrid FTS and embeddings;
@@ -70,7 +75,17 @@ These are plausible future additions, not current requirements.
 - optional permanent agent profiles;
 - capability matching.
 
-## 3. MVP implementation choices
+## 3.1. Ranked recommendations for next epics
+
+Based on architectural completeness and user value, the top three next work items are:
+
+1. **`open_question` entity and decision lifecycle** — Many workflows need lightweight structured Q&A without full issue overhead. Adding a linked `open_question` entity with resolution tracking provides agents and humans a proven collaboration pattern without bloating the core issue model. Rationale: broadens use cases (architectural exploration, design review Q&A) and improves agent-to-human handoff workflows.
+
+2. **Dynamically generated project instruction resources** — Projects vary widely in complexity and context depth. Generating task-specific context instructions from the MCP issue graph (dependency order, related decisions, affected components) would reduce prompt engineering burden and improve agent focus. Rationale: makes agents self-sufficient across diverse codebases; reduces manual AGENT_BRIEF maintenance overhead.
+
+3. **PostgreSQL backend with multi-project dashboard** — Current SQLite single-writer design suits local workflows but limits hosted multi-project scenarios. PostgreSQL backend plus a cloud-hosted dashboard would unblock team and enterprise use. Rationale: expands addressable market; enables monitoring and audit across multiple projects without local setup friction.
+
+## 4. MVP implementation choices
 
 These choices were resolved during MVP implementation and are preserved in the active MCP decision named `Implementation baseline`:
 
@@ -94,7 +109,7 @@ These choices were resolved during MVP implementation and are preserved in the a
 
 These choices must not contradict the domain model.
 
-## 4. Confirmed MVP defaults
+## 5. Confirmed MVP defaults
 
 The MVP uses:
 
@@ -113,7 +128,7 @@ graph maximum nodes: 500
 
 Future changes must be recorded as a superseding MCP decision when they affect public contracts or invariants.
 
-## 5. Known design trade-offs
+## 6. Known design trade-offs
 
 ### No permanent agent identity
 
@@ -178,7 +193,7 @@ Trade-off:
 
 - output is heterogeneous and requires an `entity_type` discriminator.
 
-## 6. Prohibited silent behavior
+## 7. Prohibited silent behavior
 
 The implementation must not silently:
 

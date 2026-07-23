@@ -8,6 +8,9 @@ The canonical specification is split into focused documents so agents can load o
 4. [Storage and runtime](docs/04-storage-runtime.md)
 5. [Implementation requirements](docs/05-implementation-requirements.md)
 6. [Deferred features and open decisions](docs/06-deferred-and-open.md)
+7. [Logical project interchange format](docs/07-logical-interchange.md)
+8. [Local HTTP transport contract](docs/08-local-http-transport.md)
+9. [Review workflow contract](docs/09-review-workflow.md)
 
 Use the configured `rhizome-mcp` project for current status, dependency order, implementation history, and accepted decisions.
 
