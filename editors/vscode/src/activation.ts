@@ -21,7 +21,8 @@ const INSTALL_INSTRUCTIONS_URL = 'https://github.com/Odrin/rhizome-mcp#readme';
 
 let outputChannel: vscode.OutputChannel | undefined;
 
-function getOutputChannel(): vscode.OutputChannel {
+/** The extension's shared output channel, created lazily. Exported so other modules (e.g. the MCP server provider) can log to the same channel. */
+export function getOutputChannel(): vscode.OutputChannel {
   outputChannel ??= vscode.window.createOutputChannel('Rhizome MCP');
   return outputChannel;
 }
