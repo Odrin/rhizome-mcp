@@ -61,25 +61,31 @@
  * ---------------------------------------------------------------------------
  * DIST-TAG POLICY (the "should `latest` point at beta" decision)
  * ---------------------------------------------------------------------------
- * - Stable tag (no `-beta.N` suffix): published with `--tag latest`
- *   (explicit, even though `latest` is npm's own default — being explicit
- *   here means the behavior doesn't depend on npm's default tag config).
- * - Beta tag (`-beta.N` suffix): published with `--tag beta`.
+ * Every package is published with exactly ONE `npm publish --tag <x>` call
+ * and nothing else — no follow-up `npm dist-tag add`. Earlier versions of
+ * this script tried to publish beta releases under `--tag beta` and then
+ * separately move `latest` with `npm dist-tag add` when appropriate; that
+ * failed in real CI with a 401, because npm's OIDC Trusted Publishing only
+ * authenticates the `npm publish` command itself — it does not extend to
+ * other authenticated registry writes run afterward in the same job. So
+ * the dist-tag decision has to be folded into the one publish call:
  *
- * Additionally: because `npx rhizome-mcp` / `npm install rhizome-mcp` both
- * resolve the `latest` dist-tag by default, and all 7 packages currently
- * have `latest` pointing at a non-functional `0.0.1` placeholder (published
- * manually before this pipeline existed), leaving `latest` stuck on that
- * placeholder while every real release ships under `beta` would make the
- * plain `npx rhizome-mcp` command useless for a long time (this project is
- * pre-1.0, so betas may be the only thing shipping for a while).
+ * - Stable tag (no `-beta.N` suffix): always `--tag latest`.
+ * - Beta tag (`-beta.N` suffix): `--tag latest` UNTIL a real stable version
+ *   has ever been published for that package, then `--tag beta` from then
+ *   on.
  *
- * So: while no *real* stable version has ever been published, a beta
- * publish ALSO moves `latest` to point at that same beta version (via
- * `npm dist-tag add <pkg>@<version> latest` immediately after the
- * `--tag beta` publish succeeds). Once a real stable version is published
- * for a package, this stops — from then on only stable publishes move
- * `latest`.
+ * Why betas chase `latest` pre-stable: `npx rhizome-mcp` / `npm install
+ * rhizome-mcp` both resolve the `latest` dist-tag by default, and all 7
+ * packages currently have `latest` pointing at a non-functional `0.0.1`
+ * placeholder (published manually before this pipeline existed). Leaving
+ * `latest` stuck there while every real release ships under `beta` would
+ * make the plain `npx rhizome-mcp` command useless for a long time (this
+ * project is pre-1.0, so betas may be the only thing shipping for a while).
+ * Once a real stable version exists, betas stop touching `latest` — from
+ * then on only stable publishes move it, and `--no-latest-follow` forces
+ * `--tag beta` regardless (a beta version can never itself carry `latest`
+ * once this flag is set).
  *
  * "Has a real stable version ever been published" is detected per-package
  * via `npm view <pkg> versions --json`: any returned version that (a) does
@@ -118,28 +124,26 @@
  *   --binaries-dir <dir>   Required unless --skip-staging. See INPUT CONTRACT.
  *   --tag <tag>            Required. Git release tag, e.g. v1.0.0-beta.3 or v1.0.0.
  *   --dry-run              Pass --dry-run to `npm publish` (packs + validates,
- *                          does NOT upload) and only LOG what `npm dist-tag add`
- *                          calls would run instead of running them. Staging,
- *                          package.json version-stamping, and the read-only
- *                          `npm view` checks (idempotency + stable-shipped
- *                          detection) still run for real — they're safe reads
- *                          (or, for staging/stamping, local-disk-only writes).
+ *                          does NOT upload). Staging, package.json version-
+ *                          stamping, and the read-only `npm view` checks
+ *                          (idempotency + stable-shipped detection) still
+ *                          run for real — they're safe reads (or, for
+ *                          staging/stamping, local-disk-only writes).
  *   --skip-staging         Skip the binary-staging step (assumes bin/ payloads
  *                          are already staged in each platform package, e.g.
  *                          for re-running just the publish logic).
- *   --no-latest-follow     Disable the "beta also moves latest" behavior
- *                          described above, regardless of what the
- *                          stable-shipped detection would otherwise decide.
- *                          Escape hatch for manual intervention.
+ *   --no-latest-follow     Forces --tag beta for beta publishes regardless
+ *                          of the stable-shipped detection (see DIST-TAG
+ *                          POLICY above). Escape hatch for manual intervention.
  *   --npm-root <dir>       Root directory containing the 7 package dirs.
  *                          Defaults to the packages/npm/ directory this
  *                          script lives under.
  *
  * Per package, this script: stages the right binary into bin/ (unless
  * --skip-staging), stamps package.json's version, checks whether that
- * version is already published (skip if so), publishes (or --dry-run
- * publishes), and — for beta publishes, while no real stable version has
- * ever shipped — also repoints the `latest` dist-tag at the new version.
+ * version is already published (skip if so), and publishes once with the
+ * single dist-tag the DIST-TAG POLICY above decides — no separate
+ * dist-tag-add call, ever.
  */
 
 import {
@@ -354,6 +358,29 @@ function hasRealStableVersionShipped(name) {
   );
 }
 
+/**
+ * Decides the single `--tag` argument to publish with. There is
+ * deliberately no separate `npm dist-tag add` call anywhere in this
+ * script: npm's OIDC Trusted Publishing authenticates the `npm publish`
+ * command specifically — it does NOT extend to other authenticated
+ * registry writes (like `npm dist-tag add`) run afterward in the same
+ * job, which fail with a 401 (confirmed against a real CI run: `npm
+ * publish --provenance` succeeded via OIDC, the follow-up `npm dist-tag
+ * add` immediately failed with "Unable to authenticate"). So the
+ * "should this land on `latest`" decision has to be folded into the one
+ * authenticated call this script ever makes.
+ */
+function decidePublishTag(name, isBeta, opts) {
+  if (!isBeta) {
+    return 'latest';
+  }
+  if (opts.noLatestFollow) {
+    return 'beta';
+  }
+  const stableShipped = hasRealStableVersionShipped(name);
+  return stableShipped ? 'beta' : 'latest';
+}
+
 function publishPackage(npmRoot, pkgDir, version, isBeta, opts) {
   const cwd = path.join(npmRoot, pkgDir);
   const name = readPackageName(npmRoot, pkgDir);
@@ -364,7 +391,7 @@ function publishPackage(npmRoot, pkgDir, version, isBeta, opts) {
     return;
   }
 
-  const distTag = isBeta ? 'beta' : 'latest';
+  const distTag = decidePublishTag(name, isBeta, opts);
   const publishArgs = ['publish', '--provenance', '--tag', distTag];
   if (opts.dryRun) {
     publishArgs.push('--dry-run');
@@ -375,26 +402,6 @@ function publishPackage(npmRoot, pkgDir, version, isBeta, opts) {
     throw new Error(`npm publish failed for ${fullRef}`);
   }
   console.log(`[publish] published ${fullRef} (tag=${distTag}${opts.dryRun ? ', dry-run' : ''})`);
-
-  if (isBeta && !opts.noLatestFollow) {
-    const stableShipped = hasRealStableVersionShipped(name);
-    if (!stableShipped) {
-      const distTagArgs = ['dist-tag', 'add', fullRef, 'latest'];
-      if (opts.dryRun) {
-        console.log(`[publish] [dry-run] would run: npm ${distTagArgs.join(' ')}`);
-      } else {
-        const ok = run('npm', distTagArgs, cwd);
-        if (!ok) {
-          throw new Error(`npm dist-tag add failed for ${fullRef}`);
-        }
-        console.log(`[publish] moved 'latest' -> ${fullRef} (no real stable version shipped yet)`);
-      }
-    } else {
-      console.log(
-        `[publish] leaving 'latest' alone for ${name} - a real stable version has already shipped`,
-      );
-    }
-  }
 }
 
 function main() {
