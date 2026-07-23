@@ -30,10 +30,12 @@ go test ./...
 The real-process MCP smoke and workflow tests are isolated behind the
 `integration` build tag. They build a temporary server binary, initialize a
 fresh repository and SQLite data root for each test, and communicate with
-`serve` over stdio:
+`serve` over stdio. Most of them live in the dedicated `integration` package;
+one test that needs unexported package-main internals stays at the
+repository root:
 
 ```bash
-go test -tags=integration .
+go test -tags=integration ./...
 ```
 
 Continuous integration tests run on every push and pull request targeting `main`.

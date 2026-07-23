@@ -440,7 +440,7 @@ view stays under **64 KB** of structured-content JSON regardless of how large
 each issue's `description`/`acceptance_criteria` bodies are, because those
 bodies are never present in the compact projection. This is enforced by an
 integration test (`TestIntegrationListIssuesCompactViewStaysWithinByteBudget`
-in `integration_test.go`) that creates 100 issues with multi-kilobyte
+in `integration/list_issues_test.go`) that creates 100 issues with multi-kilobyte
 description and acceptance-criteria bodies and asserts the default response
 stays within budget; measured response size for that fixture is approximately
 46 KB. The equivalent `view: "full"` call over the same 100 issues measures

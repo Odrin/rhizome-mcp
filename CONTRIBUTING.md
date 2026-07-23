@@ -20,10 +20,10 @@ Run the full test suite:
 go test ./...
 ```
 
-The real-process MCP workflow tests are isolated behind the `integration` build tag. These build a temporary server binary, initialize a fresh database, and test the full MCP lifecycle:
+The real-process MCP workflow tests are isolated behind the `integration` build tag. These build a temporary server binary, initialize a fresh database, and test the full MCP lifecycle. Most of them live in the `integration` package, split into files by tested area (init, smoke/issue workflow, review, logical project round-trip, HTTP transport, connect, board); one test that needs unexported package-main internals stays in `integration_test.go` at the repository root:
 
 ```bash
-go test -tags=integration .
+go test -tags=integration ./...
 ```
 
 Both test commands should pass before submitting a pull request.
