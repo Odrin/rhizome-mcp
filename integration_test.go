@@ -44,7 +44,11 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	integrationBinary = filepath.Join(tempDir, "rhizome-mcp")
+	binaryName := "rhizome-mcp"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	integrationBinary = filepath.Join(tempDir, binaryName)
 	command := exec.Command("go", "build", "-o", integrationBinary, ".")
 	var output bytes.Buffer
 	command.Stdout = &output
