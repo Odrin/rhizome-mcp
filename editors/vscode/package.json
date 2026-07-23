@@ -58,7 +58,8 @@
     "test": "vscode-test",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
-    "package": "npm run build -- --production && vsce package"
+    "package": "npm run build -- --production && vsce package",
+    "package:local": "node scripts/package-platforms.mjs --local"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -30,6 +30,9 @@ jobs:
           - goos: windows
             goarch: amd64
             ext: zip
+          - goos: windows
+            goarch: arm64
+            ext: zip
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,6 +114,8 @@ jobs:
             "rhizome-mcp_${VERSION}_darwin_arm64.tar.gz.sha256"
             "rhizome-mcp_${VERSION}_windows_amd64.zip"
             "rhizome-mcp_${VERSION}_windows_amd64.zip.sha256"
+            "rhizome-mcp_${VERSION}_windows_arm64.zip"
+            "rhizome-mcp_${VERSION}_windows_arm64.zip.sha256"
           )
 
           files=()
@@ -124,8 +129,8 @@ jobs:
           done
 
           actual_files=(dist/*)
-          if [ "${#actual_files[@]}" -ne 10 ]; then
-            echo "Expected 10 files in dist, found ${#actual_files[@]}" >&2
+          if [ "${#actual_files[@]}" -ne 12 ]; then
+            echo "Expected 12 files in dist, found ${#actual_files[@]}" >&2
             exit 1
           fi
 

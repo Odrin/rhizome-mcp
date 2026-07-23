@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 .vscode-test.mjs
+scripts/**
 src/**
 out/**
 node_modules/**
