@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -365,5 +366,255 @@ func TestMaintenanceCommandsUseCustomDataRoot(t *testing.T) {
 	}
 	if searchCount == 0 {
 		t.Fatal("expected search index to contain rebuilt rows")
+	}
+}
+
+func TestVersionSubcommand(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+
+	var stdout, stderr bytes.Buffer
+	cfg := &config.Config{Version: "v1.2.3", VersionCommit: "abc1234", VersionDate: "2024-01-01T00:00:00Z"}
+
+	if err := runCLI(ctx, cfg, &stdout, &stderr, []string{"version"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("version command failed: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "v1.2.3") {
+		t.Fatalf("expected version v1.2.3 in output, got %q", output)
+	}
+	if !strings.Contains(output, "abc1234") {
+		t.Fatalf("expected commit abc1234 in output, got %q", output)
+	}
+	if !strings.Contains(output, "2024-01-01") {
+		t.Fatalf("expected date 2024-01-01 in output, got %q", output)
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+
+	var stdout, stderr bytes.Buffer
+	cfg := &config.Config{Version: "v2.0.0", VersionCommit: "def5678", VersionDate: "2024-02-01T00:00:00Z"}
+
+	if err := runCLI(ctx, cfg, &stdout, &stderr, []string{"--version"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("--version flag failed: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "v2.0.0") {
+		t.Fatalf("expected version v2.0.0 in output, got %q", output)
+	}
+}
+
+func TestVersionShortFlag(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+
+	var stdout, stderr bytes.Buffer
+	cfg := &config.Config{Version: "v2.1.0", VersionCommit: "ghi9012", VersionDate: "2024-03-01T00:00:00Z"}
+
+	if err := runCLI(ctx, cfg, &stdout, &stderr, []string{"-v"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("-v flag failed: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "v2.1.0") {
+		t.Fatalf("expected version v2.1.0 in output, got %q", output)
+	}
+}
+
+func TestDoctorCommandIncludesVersion(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("reopen project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	cfg := &config.Config{Version: "v1.5.0", VersionCommit: "jkl3456", VersionDate: "2024-04-01T00:00:00Z"}
+	if err := runCLI(ctx, cfg, &stdout, &stderr, []string{"--data-root", dataRoot, "doctor", "--format", "json"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("doctor command failed: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "app_version") {
+		t.Fatalf("expected app_version in doctor output, got %q", output)
+	}
+	if !strings.Contains(output, "v1.5.0") {
+		t.Fatalf("expected version v1.5.0 in doctor output, got %q", output)
+	}
+}
+
+func TestProjectInfoIncludesVersion(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("reopen project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	cfg := &config.Config{Version: "v1.6.0", VersionCommit: "mno7890", VersionDate: "2024-05-01T00:00:00Z"}
+	if err := runCLI(ctx, cfg, &stdout, &stderr, []string{"--data-root", dataRoot, "project", "info", "--format", "json"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("project info command failed: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "app_version") {
+		t.Fatalf("expected app_version in project info output, got %q", output)
+	}
+	if !strings.Contains(output, "v1.6.0") {
+		t.Fatalf("expected version v1.6.0 in project info output, got %q", output)
+	}
+}
+
+func TestComputeVersionInfoEnvVarOverride(t *testing.T) {
+	// Test that VERSION env var has highest precedence
+	ver, commit, date := computeVersionInfo("v1.2.3", "abc1234", "2024-01-01T00:00:00Z", "v2.0.0-env", nil, false)
+	if ver != "v2.0.0-env" {
+		t.Fatalf("expected env override v2.0.0-env, got %s", ver)
+	}
+	if commit != "abc1234" || date != "2024-01-01T00:00:00Z" {
+		t.Fatalf("commit and date should use injected values when env overrides version")
+	}
+}
+
+func TestComputeVersionInfoLdflagsInjection(t *testing.T) {
+	// Test that ldflags-injected version is used when not "dev" and no env override
+	ver, commit, date := computeVersionInfo("v1.2.3", "abc1234", "2024-01-01T00:00:00Z", "", nil, false)
+	if ver != "v1.2.3" {
+		t.Fatalf("expected ldflags version v1.2.3, got %s", ver)
+	}
+	if commit != "abc1234" || date != "2024-01-01T00:00:00Z" {
+		t.Fatalf("expected ldflags commit and date, got %s/%s", commit, date)
+	}
+}
+
+func TestComputeVersionInfoVCSFallback(t *testing.T) {
+	// Test that VCS info from debug.BuildInfo is used when ldflags is "dev"
+	buildInfo := &debug.BuildInfo{
+		Main: debug.Module{Version: "v1.5.0"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abc123456789abcdef"},
+			{Key: "vcs.time", Value: "2024-06-15T10:30:45Z"},
+			{Key: "vcs.modified", Value: "false"},
+		},
+	}
+	ver, commit, date := computeVersionInfo("dev", "none", "unknown", "", buildInfo, true)
+	if ver != "v1.5.0" {
+		t.Fatalf("expected VCS version v1.5.0, got %s", ver)
+	}
+	if commit != "abc1234" { // shortened to 7 chars
+		t.Fatalf("expected shortened commit abc1234, got %s", commit)
+	}
+	if date != "2024-06-15T10:30:45Z" {
+		t.Fatalf("expected VCS date 2024-06-15T10:30:45Z, got %s", date)
+	}
+}
+
+func TestComputeVersionInfoVCSDirtyFlag(t *testing.T) {
+	// Test that vcs.modified=true appends -dirty to commit hash
+	buildInfo := &debug.BuildInfo{
+		Main: debug.Module{Version: "v1.0.0"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "def987654321def987"},
+			{Key: "vcs.time", Value: "2024-07-01T00:00:00Z"},
+			{Key: "vcs.modified", Value: "true"},
+		},
+	}
+	ver, commit, date := computeVersionInfo("dev", "none", "unknown", "", buildInfo, true)
+	if ver != "v1.0.0" {
+		t.Fatalf("expected VCS version v1.0.0, got %s", ver)
+	}
+	if commit != "def9876-dirty" {
+		t.Fatalf("expected dirty commit def9876-dirty, got %s", commit)
+	}
+	if date != "2024-07-01T00:00:00Z" {
+		t.Fatalf("expected VCS date 2024-07-01T00:00:00Z, got %s", date)
+	}
+}
+
+func TestComputeVersionInfoDevFallback(t *testing.T) {
+	// Test that "dev" is returned when nothing is available
+	ver, commit, date := computeVersionInfo("dev", "none", "unknown", "", nil, false)
+	if ver != "dev" {
+		t.Fatalf("expected dev fallback, got %s", ver)
+	}
+	if commit != "none" || date != "unknown" {
+		t.Fatalf("expected fallback commit/date, got %s/%s", commit, date)
+	}
+}
+
+func TestComputeVersionInfoVCSWithNoRevision(t *testing.T) {
+	// Test VCS fallback when revision is missing but other info exists
+	buildInfo := &debug.BuildInfo{
+		Main: debug.Module{Version: "v2.0.0"},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.time", Value: "2024-08-01T12:00:00Z"},
+		},
+	}
+	ver, commit, date := computeVersionInfo("dev", "none", "unknown", "", buildInfo, true)
+	if ver != "v2.0.0" {
+		t.Fatalf("expected version v2.0.0, got %s", ver)
+	}
+	// commit should remain as injected value since no vcs.revision
+	if commit != "none" {
+		t.Fatalf("expected injected commit none when no vcs.revision, got %s", commit)
+	}
+	if date != "2024-08-01T12:00:00Z" {
+		t.Fatalf("expected VCS date, got %s", date)
 	}
 }

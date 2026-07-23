@@ -80,8 +80,9 @@ type BackupHandler func(context.Context, string) (BackupReport, error)
 
 // DoctorReport summarizes a runtime doctor report for CLI output.
 type DoctorReport struct {
-	Full   bool          `json:"full"`
-	Checks []DoctorCheck `json:"checks"`
+	Full       bool          `json:"full"`
+	AppVersion string        `json:"app_version,omitempty"`
+	Checks     []DoctorCheck `json:"checks"`
 }
 
 // DoctorCheck is one doctor verification result.
@@ -94,11 +95,12 @@ type DoctorCheck struct {
 // MarshalJSON writes doctor report JSON with a computed healthy field.
 func (report DoctorReport) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Full    bool          `json:"full"`
-		Healthy bool          `json:"healthy"`
-		Checks  []DoctorCheck `json:"checks"`
+		Full       bool          `json:"full"`
+		Healthy    bool          `json:"healthy"`
+		AppVersion string        `json:"app_version,omitempty"`
+		Checks     []DoctorCheck `json:"checks"`
 	}
-	return json.Marshal(alias{Full: report.Full, Healthy: report.Healthy(), Checks: report.Checks})
+	return json.Marshal(alias{Full: report.Full, Healthy: report.Healthy(), AppVersion: report.AppVersion, Checks: report.Checks})
 }
 
 // Healthy reports whether every named check passed.
@@ -123,6 +125,7 @@ type CLI struct {
 	serveHandler  ServeHandler
 	backupHandler BackupHandler
 	doctorHandler DoctorHandler
+	appVersion    string
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -138,6 +141,11 @@ func (c *CLI) SetBackupHandler(handler BackupHandler) {
 // SetDoctorHandler installs a handler for the doctor command.
 func (c *CLI) SetDoctorHandler(handler DoctorHandler) {
 	c.doctorHandler = handler
+}
+
+// SetAppVersion sets the application version string for display in CLI outputs.
+func (c *CLI) SetAppVersion(version string) {
+	c.appVersion = version
 }
 
 // Run parses the supplied arguments and dispatches the matching subcommand.
@@ -306,9 +314,9 @@ func (c *CLI) runProjectInfo(ctx context.Context, args []string) error {
 		return err
 	}
 	if *format == "json" {
-		return writeJSON(c.stdoutWriter(), ProjectInfoResponse{Project: projectInfoFromDomain(project)})
+		return writeJSON(c.stdoutWriter(), ProjectInfoResponse{Project: projectInfoFromDomain(project, c.appVersion)})
 	}
-	return c.writeProjectInfoTable(project)
+	return c.writeProjectInfoTable(project, c.appVersion)
 }
 
 func (c *CLI) runProjectExport(ctx context.Context, args []string) error {
@@ -734,14 +742,17 @@ func (c *CLI) writeMaintenanceReleaseAttemptTable(result ports.ForceReleaseAttem
 	return err
 }
 
-func (c *CLI) writeProjectInfoTable(project domain.Project) error {
+func (c *CLI) writeProjectInfoTable(project domain.Project, appVersion string) error {
 	lines := []string{
 		fmt.Sprintf("id\t%s", project.ID),
 		fmt.Sprintf("name\t%s", formatOptionalString(project.Name)),
 		fmt.Sprintf("next_issue_number\t%d", project.NextIssueNumber),
 		fmt.Sprintf("schema_version\t%d", project.SchemaVersion),
-		fmt.Sprintf("latest_event_id\t%d", project.LatestEventID),
 	}
+	if appVersion != "" {
+		lines = append(lines, fmt.Sprintf("app_version\t%s", appVersion))
+	}
+	lines = append(lines, fmt.Sprintf("latest_event_id\t%d", project.LatestEventID))
 	_, err := fmt.Fprintln(c.stdoutWriter(), strings.Join(lines, "\n"))
 	return err
 }
@@ -756,6 +767,9 @@ func (c *CLI) writeDoctorTable(report DoctorReport) error {
 	}
 	statusWidth := len("healthy")
 	builder.WriteString(fmt.Sprintf("%-*s  %-*s\n", checkWidth, "mode", statusWidth, strconv.FormatBool(report.Full)))
+	if report.AppVersion != "" {
+		builder.WriteString(fmt.Sprintf("%-*s  %s\n", checkWidth, "app_version", report.AppVersion))
+	}
 	builder.WriteString(fmt.Sprintf("%-*s  %s\n", checkWidth, "overall_health", colorizeDoctorStatus(padStatus(report.Healthy()), report.Healthy())))
 	builder.WriteString(fmt.Sprintf("%-*s  %-*s  %s\n", checkWidth, "check", statusWidth, "healthy", "message"))
 	for _, check := range report.Checks {
@@ -968,10 +982,11 @@ type ProjectInfo struct {
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 	SchemaVersion   int       `json:"schema_version"`
+	AppVersion      string    `json:"app_version,omitempty"`
 	LatestEventID   int64     `json:"latest_event_id"`
 }
 
-func projectInfoFromDomain(project domain.Project) ProjectInfo {
+func projectInfoFromDomain(project domain.Project, appVersion string) ProjectInfo {
 	return ProjectInfo{
 		ID:              project.ID,
 		Name:            copyOptionalString(project.Name),
@@ -980,6 +995,7 @@ func projectInfoFromDomain(project domain.Project) ProjectInfo {
 		CreatedAt:       project.CreatedAt,
 		UpdatedAt:       project.UpdatedAt,
 		SchemaVersion:   project.SchemaVersion,
+		AppVersion:      appVersion,
 		LatestEventID:   project.LatestEventID,
 	}
 }

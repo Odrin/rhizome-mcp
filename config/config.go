@@ -7,18 +7,22 @@ import (
 )
 
 type Config struct {
-	ServerName  string
-	Version     string
-	LogLevel    slog.Level
-	HTTPAddress string
+	ServerName    string
+	Version       string
+	VersionCommit string
+	VersionDate   string
+	LogLevel      slog.Level
+	HTTPAddress   string
 }
 
 func Load() *Config {
 	return &Config{
-		ServerName:  getEnv("SERVER_NAME", "rhizome-mcp"),
-		Version:     getEnv("VERSION", "v1.0.0"),
-		LogLevel:    parseLevel(getEnv("LOG_LEVEL", "info")),
-		HTTPAddress: getEnv("HTTP_ADDRESS", ""),
+		ServerName:    getEnv("SERVER_NAME", "rhizome-mcp"),
+		Version:       "", // set by main() after resolveVersion()
+		VersionCommit: "",
+		VersionDate:   "",
+		LogLevel:      parseLevel(getEnv("LOG_LEVEL", "info")),
+		HTTPAddress:   getEnv("HTTP_ADDRESS", ""),
 	}
 }
 

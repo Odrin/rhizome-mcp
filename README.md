@@ -81,6 +81,23 @@ The CLI also provides `issue list`, `issue show`, `search`, `graph`, and
 maintenance commands. Run the binary without arguments to print complete
 usage.
 
+## Version information
+
+Display the binary version with `rhizome-mcp version`, `rhizome-mcp --version`, or `rhizome-mcp -v`:
+
+```bash
+rhizome-mcp version
+# Output: rhizome-mcp v1.2.3 (commit abc1234, built 2024-01-01T12:00:00Z)
+```
+
+Version information is resolved with the following precedence (highest to lowest):
+1. `VERSION` environment variable — if set, this value overrides all other sources
+2. Version injected at build time via `-X main.version` (used in release binaries)
+3. Git VCS information embedded by Go in local builds
+4. Fallback to `"dev"` if no other version is available
+
+Release binaries built by the GitHub Actions workflow inject the semantic version tag, commit hash, and build timestamp. Local builds (plain `go build .`) report the git revision or `"dev"` if not building from a git checkout.
+
 ## Release automation and installers
 
 GitHub Releases are built by `.github/workflows/release.yml` on both published

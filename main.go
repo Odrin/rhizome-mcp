@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	goruntime "runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -31,12 +32,94 @@ import (
 
 const attemptCleanupInterval = time.Minute
 
+// Version information is injected at build time via ldflags.
+// If not injected (e.g., in local builds), fallback values are used.
+var (
+	version = "dev"     // injected via -X main.version=...
+	commit  = "none"    // injected via -X main.commit=...
+	date    = "unknown" // injected via -X main.date=...
+)
+
 var (
 	initRunner  = runInit
 	serveRunner = runServe
 	serveStdio  = runServeStdio
 	serveHTTP   = runServeHTTP
 )
+
+// computeVersionInfo computes version, commit, and date with the following precedence:
+// 1. VERSION environment variable (if set) - allows runtime override
+// 2. ldflags-injected version (if not "dev")
+// 3. git VCS info from build info
+// 4. "dev" fallback if nothing else is available
+//
+// This is a pure function that does not mutate globals. It is used by resolveVersion()
+// and can be called directly from tests with injected build info.
+func computeVersionInfo(injectedVersion, injectedCommit, injectedDate, envVersion string, buildInfo *debug.BuildInfo, buildInfoOK bool) (string, string, string) {
+	// Precedence 1: VERSION env var (highest)
+	if envVersion != "" {
+		return envVersion, injectedCommit, injectedDate
+	}
+
+	// Precedence 2: ldflags-injected version
+	if injectedVersion != "dev" {
+		return injectedVersion, injectedCommit, injectedDate
+	}
+
+	// Precedence 3: fallback to runtime/debug.ReadBuildInfo() for git VCS info
+	if buildInfoOK && buildInfo != nil {
+		var vcsRev, vcsTime, vcsModified string
+		for _, setting := range buildInfo.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRev = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			case "vcs.modified":
+				vcsModified = setting.Value
+			}
+		}
+		// Use module version as base if available
+		moduleVersion := buildInfo.Main.Version
+		if moduleVersion == "" {
+			moduleVersion = "dev"
+		}
+		// Compute commit from git info
+		resultCommit := injectedCommit
+		if vcsRev != "" {
+			shortRev := vcsRev
+			if len(shortRev) > 7 {
+				shortRev = shortRev[:7]
+			}
+			resultCommit = shortRev
+			if vcsModified == "true" {
+				resultCommit += "-dirty"
+			}
+		}
+		// Compute date from git info
+		resultDate := injectedDate
+		if vcsTime != "" {
+			resultDate = vcsTime
+		}
+		return moduleVersion, resultCommit, resultDate
+	}
+
+	// Precedence 4: fallback to "dev"
+	return "dev", injectedCommit, injectedDate
+}
+
+// resolveVersion determines the effective version string by reading package-level
+// version variables, environment, and build info, and returns the resolved values.
+// It does not mutate any globals.
+func resolveVersion() (string, string, string) {
+	info, ok := debug.ReadBuildInfo()
+	return computeVersionInfo(version, commit, date, os.Getenv("VERSION"), info, ok)
+}
+
+// formatVersionOutput returns a formatted version string for display.
+func formatVersionOutput(version, commit, date string) string {
+	return fmt.Sprintf("rhizome-mcp %s (commit %s, built %s)", version, commit, date)
+}
 
 type composedServices struct {
 	project *projectruntime.Project
@@ -58,7 +141,11 @@ type composedServices struct {
 }
 
 func main() {
+	resolvedVersion, resolvedCommit, resolvedDate := resolveVersion()
 	cfg := config.Load()
+	cfg.Version = resolvedVersion
+	cfg.VersionCommit = resolvedCommit
+	cfg.VersionDate = resolvedDate
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
@@ -89,6 +176,20 @@ func main() {
 }
 
 func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, args []string, startingPath string, pathInputs projectconfig.PathInputs) error {
+	// Handle version subcommand and --version/--help flags early (before project initialization)
+	if len(args) > 0 && args[0] == "version" {
+		versionStr := formatVersionOutput(cfg.Version, cfg.VersionCommit, cfg.VersionDate)
+		fmt.Fprintln(stdout, versionStr)
+		return nil
+	}
+	for _, arg := range args {
+		if arg == "--version" || arg == "-v" {
+			versionStr := formatVersionOutput(cfg.Version, cfg.VersionCommit, cfg.VersionDate)
+			fmt.Fprintln(stdout, versionStr)
+			return nil
+		}
+	}
+
 	var err error
 	args, dataRootOverride, err := extractDataRootOption(args)
 	if err != nil {
@@ -134,7 +235,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 			return cliadapter.DoctorReport{}, errors.New("project is not open")
 		}
 		report, err := project.Doctor(ctx, full)
-		return doctorReportFromRuntime(report), err
+		return doctorReportFromRuntime(report, cfg.Version), err
 	}
 
 	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor") {
@@ -167,6 +268,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
 	adapter.SetBackupHandler(backupHandler)
 	adapter.SetDoctorHandler(doctorHandler)
+	adapter.SetAppVersion(cfg.Version)
 	return adapter.Run(ctx, args)
 }
 
@@ -530,12 +632,12 @@ func resolveDataRoot(pathInputs projectconfig.PathInputs, dataRootOverride strin
 	return dataRoot, nil
 }
 
-func doctorReportFromRuntime(report projectruntime.DoctorReport) cliadapter.DoctorReport {
+func doctorReportFromRuntime(report projectruntime.DoctorReport, appVersion string) cliadapter.DoctorReport {
 	checks := make([]cliadapter.DoctorCheck, len(report.Checks))
 	for index, check := range report.Checks {
 		checks[index] = cliadapter.DoctorCheck{Check: check.Name, Healthy: check.Healthy, Message: check.Message}
 	}
-	return cliadapter.DoctorReport{Full: report.Full, Checks: checks}
+	return cliadapter.DoctorReport{Full: report.Full, AppVersion: appVersion, Checks: checks}
 }
 
 func writeJSON(w io.Writer, value any) error {

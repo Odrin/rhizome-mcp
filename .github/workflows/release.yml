@@ -54,7 +54,9 @@ jobs:
           fi
           ASSET_BASE="${BIN_BASE}_${VERSION}_${GOOS}_${GOARCH}"
           mkdir -p dist
-          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "-s -w" -o "dist/${BIN_NAME}" .
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${{ github.sha }} -X main.date=${BUILD_DATE}"
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "${LDFLAGS}" -o "dist/${BIN_NAME}" .
           if [ "${{ matrix.ext }}" = "zip" ]; then
             (cd dist && zip -q "${ASSET_BASE}.zip" "${BIN_NAME}")
             FILE="dist/${ASSET_BASE}.zip"
