@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,7 +106,12 @@ func Open(ctx context.Context, path string, options Options) (*DB, error) {
 	return db, nil
 }
 
-func dataSourceName(path string) string {
+func dataSourceName(databasePath string) string {
+	uriPath := filepath.ToSlash(databasePath)
+	if len(uriPath) >= 2 && uriPath[1] == ':' && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+
 	query := url.Values{}
 	for _, pragma := range []string{
 		"foreign_keys(ON)",
@@ -117,7 +123,7 @@ func dataSourceName(path string) string {
 	} {
 		query.Add("_pragma", pragma)
 	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: query.Encode()}).String()
+	return (&url.URL{Scheme: "file", Path: uriPath, RawQuery: query.Encode()}).String()
 }
 
 func (db *DB) verify(ctx context.Context) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,44 @@ import (
 
 	moderncsqlite "modernc.org/sqlite"
 )
+
+func TestDataSourceNameUsesValidFileURI(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "POSIX",
+			path: "/tmp/rhizome data/tasks.db",
+			want: "file:///tmp/rhizome%20data/tasks.db",
+		},
+		{
+			name: "Windows drive",
+			path: "D:/work/rhizome data/tasks.db",
+			want: "file:///D:/work/rhizome%20data/tasks.db",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := dataSourceName(test.path)
+			parsed, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("url.Parse(%q): %v", got, err)
+			}
+			if parsed.Scheme != "file" {
+				t.Errorf("scheme = %q, want file", parsed.Scheme)
+			}
+			if parsed.Host != "" {
+				t.Errorf("host = %q, want empty", parsed.Host)
+			}
+			if !strings.HasPrefix(got, test.want+"?") {
+				t.Errorf("dataSourceName() = %q, want prefix %q", got, test.want+"?")
+			}
+		})
+	}
+}
 
 func TestOpenConfiguresAndVerifiesSQLite(t *testing.T) {
 	db := openTestDB(t, Options{})
