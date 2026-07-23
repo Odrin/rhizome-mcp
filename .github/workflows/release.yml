@@ -228,3 +228,50 @@ jobs:
             --binaries-dir "$(pwd)/npm-binaries" \
             --tag "$TAG"
 
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    # Hard dependency, not just ordering: the registry validates that the
+    # referenced npm package version actually exists (and carries the
+    # matching mcpName marker) before accepting the entry, so this can only
+    # succeed after publish-npm has actually published that version.
+    needs:
+      - publish-npm
+    runs-on: ubuntu-latest
+    # Same isolation rule as publish-npm: a registry-listing hiccup must
+    # never fail the overall release.
+    continue-on-error: true
+    permissions:
+      contents: read
+      # Required for `mcp-publisher login github-oidc`.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          # Always fetch the current release rather than pinning a version
+          # here, so this step doesn't need manual bumps over time.
+          URL=$(curl -fsSL https://api.github.com/repos/modelcontextprotocol/registry/releases/latest \
+            | jq -r '.assets[] | select(.name == "mcp-publisher_linux_amd64.tar.gz") | .browser_download_url')
+          curl -fsSL "$URL" -o mcp-publisher.tar.gz
+          mkdir -p mcp-publisher-bin
+          tar -xzf mcp-publisher.tar.gz -C mcp-publisher-bin
+          echo "$(pwd)/mcp-publisher-bin" >> "$GITHUB_PATH"
+
+      - name: Stamp server.json version from the tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+          mcp-publisher validate
+
+      - name: Login via GitHub OIDC
+        run: mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: mcp-publisher publish
+
