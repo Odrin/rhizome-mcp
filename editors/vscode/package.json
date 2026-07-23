@@ -19,11 +19,18 @@
   ],
   "keywords": [
     "mcp",
-    "rhizome",
-    "issue-tracker",
-    "agent"
+    "model context protocol",
+    "agents",
+    "task tracking",
+    "copilot",
+    "claude",
+    "codex"
   ],
   "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#f5f8fc",
+    "theme": "light"
+  },
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false

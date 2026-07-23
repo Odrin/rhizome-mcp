@@ -68,6 +68,8 @@ npm run watch      # esbuild in watch mode
 
 Press F5 from that folder to launch an Extension Development Host. Run `npm run lint`, `npm run typecheck`, and `npm test` before submitting changes; `npm run package` produces an installable `.vsix`.
 
+### Platform packaging
+
 Published VSIXes bundle a platform-specific `rhizome-mcp` Go binary; see
 `editors/vscode/scripts/package-platforms.mjs`'s header comment for the exact
 input contract (binary naming) and the Go-binary-to-Marketplace-target
@@ -75,7 +77,9 @@ mapping. Run `npm run package:local` from `editors/vscode/` to cross-compile
 the current platform's binary and produce one installable `.vsix` for manual
 testing.
 
-**Version policy**: the Marketplace requires a plain `major.minor.patch`
+### Version policy
+
+The Marketplace requires a plain `major.minor.patch`
 version, but this project's git tags carry a prerelease suffix
 (`v1.0.0-beta.N`). The packaging script derives the extension's version from
 the git tag:
