@@ -32,6 +32,7 @@ const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
@@ -101,6 +102,7 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
@@ -126,6 +128,7 @@ func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
 func TestValidateImportToolReturnsDryRunSummary(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
@@ -173,6 +176,7 @@ func TestValidateImportToolReturnsDryRunSummary(t *testing.T) {
 func TestApplyImportToolReturnsApplyResult(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
@@ -2343,6 +2347,7 @@ func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.
 func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "plan.db"))
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 	plan := map[string]any{
@@ -2389,13 +2394,13 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 	if replay.IsError {
 		t.Fatalf("replay = %#v", replay)
 	}
-	_ = ctx
 }
 
 func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "work-context.db")
 	db, source := openDatabase(t, databasePath)
+	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
