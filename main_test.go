@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,6 +65,46 @@ func TestInitCreatesUsableDatabase(t *testing.T) {
 	}
 	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "project", "info", "--format", "json"}, repoRoot, pathInputs); err != nil {
 		t.Fatalf("project info command with initialized data root failed: %v", err)
+	}
+}
+
+func TestInitRejectsInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	badDataRoot := filepath.Join(repoRoot, "data")
+	var stdout, stderr bytes.Buffer
+
+	err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", badDataRoot, "init"}, repoRoot, pathInputs)
+	if err == nil {
+		t.Fatal("expected init to fail for an in-repository data root")
+	}
+	if !strings.Contains(err.Error(), "application data root must exist outside the repository") {
+		t.Fatalf("init error = %v, want outside-repository rejection", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(repoRoot, projectconfig.IdentityFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("identity file stat error = %v, want not exist", statErr)
+	}
+	entries, err := os.ReadDir(repoRoot)
+	if err != nil {
+		t.Fatalf("read repo root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("repo root entries after rejected init = %v, want none", entries)
+	}
+
+	goodDataRoot := filepath.Join(tempDir, "data")
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", goodDataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("retry init command failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, projectconfig.IdentityFileName)); err != nil {
+		t.Fatalf("expected identity file after retry: %v", err)
 	}
 }
 

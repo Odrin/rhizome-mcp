@@ -222,6 +222,12 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 		SQLite:       sqlite.Options{},
 	})
 	if err != nil {
+		// Initialize already succeeded: without this, a later failure (for
+		// example opening or migrating the database) would leave a
+		// half-initialized identity file and data directory behind.
+		if rollbackErr := projectconfig.RollbackInitialize(proj); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
 		return err
 	}
 	defer func() {

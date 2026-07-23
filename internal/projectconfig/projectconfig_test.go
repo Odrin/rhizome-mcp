@@ -394,6 +394,166 @@ func TestInitializeFailureCleansOnlyCreatedArtifacts(t *testing.T) {
 	}
 }
 
+func TestInitializeRejectsDataRootInsideRepository(t *testing.T) {
+	tests := []struct {
+		name              string
+		preCreateDataRoot bool
+	}{
+		{name: "existing directory", preCreateDataRoot: true},
+		{name: "nonexistent path", preCreateDataRoot: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dataRoot := filepath.Join(root, "data")
+			if tt.preCreateDataRoot {
+				mustMkdirAll(t, dataRoot)
+			}
+
+			called := false
+			_, err := projectconfig.Initialize(root, generatorFunc(func() (string, error) {
+				called = true
+				return testProjectID, nil
+			}), dataRoot)
+
+			assertDomainCode(t, err, domain.CodeStorageConfiguration)
+			if !strings.Contains(err.Error(), "must exist outside the repository") {
+				t.Errorf("error message = %q, want mention of outside repository", err.Error())
+			}
+			if called {
+				t.Error("generator called despite an invalid data root")
+			}
+			assertNotExist(t, filepath.Join(root, projectconfig.IdentityFileName))
+
+			if tt.preCreateDataRoot {
+				info, statErr := os.Stat(dataRoot)
+				if statErr != nil || !info.IsDir() {
+					t.Fatalf("pre-existing data root changed: stat error = %v", statErr)
+				}
+				entries, readErr := os.ReadDir(dataRoot)
+				if readErr != nil {
+					t.Fatalf("read pre-existing data root: %v", readErr)
+				}
+				if len(entries) != 0 {
+					t.Errorf("pre-existing data root gained entries: %v", entries)
+				}
+			} else {
+				assertNotExist(t, dataRoot)
+			}
+
+			entries, err2 := os.ReadDir(root)
+			if err2 != nil {
+				t.Fatalf("read repository root: %v", err2)
+			}
+			wantEntries := 0
+			if tt.preCreateDataRoot {
+				wantEntries = 1 // only the pre-existing "data" directory remains
+			}
+			if len(entries) != wantEntries {
+				t.Errorf("repository root entries = %v, want %d entries", entries, wantEntries)
+			}
+		})
+	}
+}
+
+func TestInitializeAlreadyExistsErrorNamesPathAndDistinguishesPartialInit(t *testing.T) {
+	t.Run("no database yet", func(t *testing.T) {
+		root := t.TempDir()
+		dataRoot := filepath.Join(t.TempDir(), "data")
+		writeIdentity(t, root, validIdentityJSON())
+
+		_, err := projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
+		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
+
+		identityPath := filepath.Join(root, projectconfig.IdentityFileName)
+		message := err.Error()
+		if !strings.Contains(message, identityPath) {
+			t.Errorf("error message = %q, want identity path %q", message, identityPath)
+		}
+		if !strings.Contains(message, "no project database was found") {
+			t.Errorf("error message = %q, want partial-init guidance", message)
+		}
+		if !strings.Contains(message, "delete") {
+			t.Errorf("error message = %q, want deletion guidance", message)
+		}
+	})
+
+	t.Run("database exists", func(t *testing.T) {
+		root := t.TempDir()
+		dataRoot := filepath.Join(t.TempDir(), "data")
+		writeIdentity(t, root, validIdentityJSON())
+		databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, testProjectID)
+		if err != nil {
+			t.Fatalf("resolve database path: %v", err)
+		}
+		mustMkdirAll(t, filepath.Dir(databasePath))
+		if err := os.WriteFile(databasePath, []byte("sqlite"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
+		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
+
+		identityPath := filepath.Join(root, projectconfig.IdentityFileName)
+		message := err.Error()
+		if !strings.Contains(message, identityPath) {
+			t.Errorf("error message = %q, want identity path %q", message, identityPath)
+		}
+		if !strings.Contains(message, "already initialized") {
+			t.Errorf("error message = %q, want already-initialized guidance", message)
+		}
+	})
+
+	t.Run("unreadable identity", func(t *testing.T) {
+		root := t.TempDir()
+		dataRoot := filepath.Join(t.TempDir(), "data")
+		identityPath := filepath.Join(root, projectconfig.IdentityFileName)
+		if err := os.Mkdir(identityPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
+		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
+
+		message := err.Error()
+		if !strings.Contains(message, identityPath) {
+			t.Errorf("error message = %q, want identity path %q", message, identityPath)
+		}
+	})
+}
+
+func TestRollbackInitializeRemovesCreatedArtifacts(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := filepath.Join(t.TempDir(), "data")
+
+	project, err := projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
+	if err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if err := projectconfig.RollbackInitialize(project); err != nil {
+		t.Fatalf("RollbackInitialize() error = %v", err)
+	}
+
+	assertNotExist(t, filepath.Join(root, projectconfig.IdentityFileName))
+	assertNotExist(t, project.DataDir)
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read repository root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("repository root entries after rollback = %v, want none", entries)
+	}
+
+	// Rollback must tolerate being invoked again against already-removed
+	// artifacts without error.
+	if err := projectconfig.RollbackInitialize(project); err != nil {
+		t.Fatalf("RollbackInitialize() second call error = %v", err)
+	}
+}
+
 func fixedGenerator(value string) projectconfig.IDGenerator {
 	return generatorFunc(func() (string, error) { return value, nil })
 }

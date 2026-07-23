@@ -148,7 +148,9 @@ func ProjectDatabasePath(dataRoot, projectID string) (string, error) {
 
 // Initialize creates a new repository identity and project data directory.
 // repositoryRoot and dataRoot are explicit; existing identity destinations are
-// never overwritten, and failures remove only artifacts created by this call.
+// never overwritten. Every precondition — including that dataRoot resolves
+// outside the repository — is validated before any write, and any failure
+// removes only artifacts created by this call.
 func Initialize(repositoryRoot string, generator IDGenerator, dataRoot string) (Project, error) {
 	root, err := validateRepositoryRoot(repositoryRoot)
 	if err != nil {
@@ -162,10 +164,16 @@ func Initialize(repositoryRoot string, generator IDGenerator, dataRoot string) (
 	}
 
 	identityPath := filepath.Join(root, IdentityFileName)
-	if _, err := os.Lstat(identityPath); err == nil {
-		return Project{}, domain.NewError(CodeProjectAlreadyInitialized, "project identity already exists", false)
+	if info, err := os.Lstat(identityPath); err == nil {
+		return Project{}, existingIdentityError(identityPath, info, dataRoot)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Project{}, domain.WrapError(err, CodeInitializationFailed, "cannot inspect identity destination", false)
+	}
+
+	// This must run before any write below: a rejected init must leave the
+	// repository, and any not-yet-created data root, exactly as they were.
+	if err := validateNewDataRootLocation(root, dataRoot); err != nil {
+		return Project{}, domain.WrapError(err, domain.CodeStorageConfiguration, "application data root must exist outside the repository", false)
 	}
 
 	generated, err := generator.New()
@@ -187,6 +195,9 @@ func Initialize(repositoryRoot string, generator IDGenerator, dataRoot string) (
 	if err := createIdentityAtomically(root, identity); err != nil {
 		cleanupDirectories(createdDirs)
 		if errors.Is(err, fs.ErrExist) {
+			if info, statErr := os.Lstat(identityPath); statErr == nil {
+				return Project{}, existingIdentityError(identityPath, info, dataRoot)
+			}
 			return Project{}, domain.WrapError(err, CodeProjectAlreadyInitialized, "project identity already exists", false)
 		}
 		return Project{}, domain.WrapError(err, CodeInitializationFailed, "cannot create project identity", false)
@@ -198,6 +209,167 @@ func Initialize(repositoryRoot string, generator IDGenerator, dataRoot string) (
 		DataDir:      dataDir,
 		DatabasePath: filepath.Join(dataDir, "tasks.db"),
 	}, nil
+}
+
+// RollbackInitialize removes the identity file and project data directory
+// that a prior successful Initialize call created. Callers use it when a
+// later step in the init sequence (such as opening the database) fails after
+// Initialize itself already succeeded, so that a failed init still leaves no
+// trace. It never removes anything Initialize did not create: Initialize
+// always refuses to reuse an existing data directory or identity
+// destination, so both paths are guaranteed to have been created by the same
+// call that returned project.
+func RollbackInitialize(project Project) error {
+	var errs []error
+	if project.DataDir != "" {
+		if err := os.RemoveAll(project.DataDir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if project.Root != "" {
+		identityPath := filepath.Join(project.Root, IdentityFileName)
+		if err := os.Remove(identityPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// existingIdentityError builds an actionable CodeProjectAlreadyInitialized
+// error that names the identity file blocking initialization. When the
+// existing entry is a readable identity, the message also reports whether
+// its project database exists under the supplied data root, so a partial
+// identity left behind by an aborted or interrupted init is distinguishable
+// from an already-initialized project.
+func existingIdentityError(identityPath string, info os.FileInfo, dataRoot string) *domain.Error {
+	if !info.Mode().IsRegular() {
+		return domain.NewError(CodeProjectAlreadyInitialized, fmt.Sprintf(
+			"project identity already exists at %s; remove or repair it before running init again",
+			identityPath,
+		), false)
+	}
+	identity, err := readIdentity(identityPath)
+	if err != nil {
+		return domain.NewError(CodeProjectAlreadyInitialized, fmt.Sprintf(
+			"project identity already exists at %s but could not be read (%v); remove or repair it before running init again",
+			identityPath, err,
+		), false)
+	}
+	databasePath, err := ProjectDatabasePath(dataRoot, identity.ProjectID)
+	if err != nil {
+		return domain.NewError(CodeProjectAlreadyInitialized, fmt.Sprintf(
+			"project identity already exists at %s for project %s; re-run the command that opened it instead of init",
+			identityPath, identity.ProjectID,
+		), false)
+	}
+	if _, statErr := os.Stat(databasePath); errors.Is(statErr, fs.ErrNotExist) {
+		return domain.NewError(CodeProjectAlreadyInitialized, fmt.Sprintf(
+			"project identity already exists at %s, but no project database was found at %s; if this is left over from an aborted or unfinished init, delete %s and re-run init; if you previously initialized with a different --data-root, re-run your command with that same data root instead",
+			identityPath, databasePath, identityPath,
+		), false)
+	}
+	return domain.NewError(CodeProjectAlreadyInitialized, fmt.Sprintf(
+		"project identity already exists at %s; this repository is already initialized (project %s, data at %s) — run other commands (for example doctor or serve) instead of init, or delete %s and its project data directory to start over",
+		identityPath, identity.ProjectID, filepath.Dir(databasePath), identityPath,
+	), false)
+}
+
+// ValidateExternalDataRoot resolves dataRoot to its canonical, symlink-
+// resolved location and confirms it lies outside repositoryRoot. dataRoot
+// must already exist; use validateNewDataRootLocation when the caller may
+// still need to create it.
+func ValidateExternalDataRoot(repositoryRoot, dataRoot string) (string, error) {
+	if dataRoot == "" {
+		return "", errors.New("application data root is required")
+	}
+	absolute, err := filepath.Abs(dataRoot)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("application data root is not a directory")
+	}
+	if err := requireOutsideRepository(repositoryRoot, resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// validateNewDataRootLocation confirms that dataRoot — which Initialize may
+// still need to create — will resolve to a location outside repositoryRoot.
+// Only dataRoot's nearest existing ancestor is inspected and symlink-
+// resolved; any remaining, not-yet-created trailing path components are
+// appended without requiring them to exist, so a fresh, never-used data root
+// can still be validated before Initialize creates it.
+func validateNewDataRootLocation(repositoryRoot, dataRoot string) error {
+	absolute, err := filepath.Abs(dataRoot)
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveNearestExistingAncestor(absolute)
+	if err != nil {
+		return err
+	}
+	return requireOutsideRepository(repositoryRoot, resolved)
+}
+
+// resolveNearestExistingAncestor resolves symlinks in the deepest existing
+// ancestor of absolute and rejoins any not-yet-created trailing path
+// components, producing the location absolute would resolve to once created.
+func resolveNearestExistingAncestor(absolute string) (string, error) {
+	cursor := filepath.Clean(absolute)
+	var missing []string
+	for {
+		info, err := os.Stat(cursor)
+		if err == nil {
+			if !info.IsDir() {
+				return "", errors.New("application data root is not a directory")
+			}
+			resolved, evalErr := filepath.EvalSymlinks(cursor)
+			if evalErr != nil {
+				return "", evalErr
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(cursor)
+		if parent == cursor {
+			return "", errors.New("application data root has no existing ancestor")
+		}
+		missing = append(missing, filepath.Base(cursor))
+		cursor = parent
+	}
+}
+
+// requireOutsideRepository reports an error when resolved names or is nested
+// inside repositoryRoot. Both must already be absolute and, to the extent
+// they exist, symlink-resolved.
+func requireOutsideRepository(repositoryRoot, resolved string) error {
+	relative, err := filepath.Rel(repositoryRoot, resolved)
+	if err != nil {
+		return err
+	}
+	if relative == "." || (relative != ".." && !filepath.IsAbs(relative) && !dataRootStartsWithParent(relative)) {
+		return errors.New("application data root is inside the repository")
+	}
+	return nil
+}
+
+func dataRootStartsWithParent(path string) bool {
+	return path == ".." || len(path) > 3 && path[:3] == ".."+string(filepath.Separator)
 }
 
 func discoveryStart(start string) (string, error) {

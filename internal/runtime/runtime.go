@@ -83,7 +83,7 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 			return nil, err
 		}
 	}
-	dataRoot, err = validateExternalDataRoot(discovered.Root, dataRoot)
+	dataRoot, err = projectconfig.ValidateExternalDataRoot(discovered.Root, dataRoot)
 	if err != nil {
 		return nil, lifecycleError(err, domain.CodeStorageConfiguration, "application data root must exist outside the repository")
 	}
@@ -134,39 +134,6 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 		SQLite:        options.SQLite,
 		clock:         options.Clock,
 	}, nil
-}
-
-func validateExternalDataRoot(projectRoot, dataRoot string) (string, error) {
-	if dataRoot == "" {
-		return "", errors.New("application data root is required")
-	}
-	absolute, err := filepath.Abs(dataRoot)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", errors.New("application data root is not a directory")
-	}
-	relative, err := filepath.Rel(projectRoot, resolved)
-	if err != nil {
-		return "", err
-	}
-	if relative == "." || (relative != ".." && !filepath.IsAbs(relative) && !startsWithParent(relative)) {
-		return "", errors.New("application data root is inside the repository")
-	}
-	return resolved, nil
-}
-
-func startsWithParent(path string) bool {
-	return path == ".." || len(path) > 3 && path[:3] == ".."+string(filepath.Separator)
 }
 
 func prepareDatabaseDestination(path string) (bool, error) {

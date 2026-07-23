@@ -101,6 +101,64 @@ func TestIntegrationSmoke(t *testing.T) {
 	}
 }
 
+func TestIntegrationInitRejectsExistingInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
+	tempDir := t.TempDir()
+	repository := filepath.Join(tempDir, "repository")
+	if err := os.Mkdir(repository, 0o755); err != nil {
+		t.Fatalf("create test repository: %v", err)
+	}
+	badDataRoot := filepath.Join(repository, "data")
+	if err := os.Mkdir(badDataRoot, 0o755); err != nil {
+		t.Fatalf("create in-repository data root: %v", err)
+	}
+
+	_, stderr, runErr := runIntegrationCommandExpectingFailure(t, repository, "--data-root", badDataRoot, "init")
+	if runErr == nil {
+		t.Fatal("expected init to fail for an existing in-repository data root")
+	}
+	if !strings.Contains(stderr, "application data root must exist outside the repository") {
+		t.Fatalf("stderr = %q, want outside-repository rejection", stderr)
+	}
+	assertDirectoryEntryNames(t, repository, []string{"data"})
+	assertDirectoryEntryNames(t, badDataRoot, nil)
+
+	goodDataRoot := filepath.Join(tempDir, "data")
+	env := integrationEnvironment{repository: repository, dataRoot: goodDataRoot}
+	runIntegrationCommand(t, env, "--data-root", goodDataRoot, "init")
+
+	if _, err := os.Stat(filepath.Join(repository, projectconfig.IdentityFileName)); err != nil {
+		t.Fatalf("expected identity file after retry: %v", err)
+	}
+	runIntegrationCommand(t, env, "--data-root", goodDataRoot, "doctor", "--format", "json")
+}
+
+func TestIntegrationInitRejectsNonexistentInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
+	tempDir := t.TempDir()
+	repository := filepath.Join(tempDir, "repository")
+	if err := os.Mkdir(repository, 0o755); err != nil {
+		t.Fatalf("create test repository: %v", err)
+	}
+	badDataRoot := filepath.Join(repository, "data")
+
+	_, stderr, runErr := runIntegrationCommandExpectingFailure(t, repository, "--data-root", badDataRoot, "init")
+	if runErr == nil {
+		t.Fatal("expected init to fail for a nonexistent in-repository data root")
+	}
+	if !strings.Contains(stderr, "application data root must exist outside the repository") {
+		t.Fatalf("stderr = %q, want outside-repository rejection", stderr)
+	}
+	assertDirectoryEntryNames(t, repository, nil)
+
+	goodDataRoot := filepath.Join(tempDir, "data")
+	env := integrationEnvironment{repository: repository, dataRoot: goodDataRoot}
+	runIntegrationCommand(t, env, "--data-root", goodDataRoot, "init")
+
+	if _, err := os.Stat(filepath.Join(repository, projectconfig.IdentityFileName)); err != nil {
+		t.Fatalf("expected identity file after retry: %v", err)
+	}
+	runIntegrationCommand(t, env, "--data-root", goodDataRoot, "doctor", "--format", "json")
+}
+
 func TestIntegrationIssueWorkflow(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
@@ -1627,6 +1685,46 @@ func runIntegrationCommand(t *testing.T, env integrationEnvironment, args ...str
 		t.Fatalf("%s failed: %v\nstdout:\n%s\nstderr:\n%s", command.String(), err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes()
+}
+
+func runIntegrationCommandExpectingFailure(t *testing.T, repository string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, integrationBinary, args...)
+	command.Dir = repository
+	var stdoutBuf, stderrBuf bytes.Buffer
+	command.Stdout = &stdoutBuf
+	command.Stderr = &stderrBuf
+	err = command.Run()
+	if err == nil {
+		t.Fatalf("%s unexpectedly succeeded: stdout=%s", command.String(), stdoutBuf.String())
+	}
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
+func assertDirectoryEntryNames(t *testing.T, path string, want []string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatalf("read directory %s: %v", path, err)
+	}
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	sort.Strings(got)
+	wantSorted := append([]string(nil), want...)
+	sort.Strings(wantSorted)
+	if len(got) != len(wantSorted) {
+		t.Fatalf("directory %s entries = %v, want %v", path, got, wantSorted)
+	}
+	for i := range got {
+		if got[i] != wantSorted[i] {
+			t.Fatalf("directory %s entries = %v, want %v", path, got, wantSorted)
+		}
+	}
 }
 
 func callIntegrationTool(t *testing.T, session *mcp.ClientSession, name string, arguments map[string]any) *mcp.CallToolResult {
