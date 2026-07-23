@@ -36,6 +36,10 @@ fresh repository and SQLite data root for each test, and communicate with
 go test -tags=integration .
 ```
 
+Continuous integration tests run on every push and pull request targeting `main`.
+The CI workflow (`.github/workflows/ci.yml`) runs `go vet`, the unit test suite,
+and integration tests across ubuntu, macos, and windows platforms.
+
 Run commands from the repository to be tracked. `init` writes only
 `.agent-tracker.json` to that repository; the SQLite database is stored in the
 platform application-data directory. Use `--data-root PATH` to select an
