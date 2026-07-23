@@ -56,6 +56,18 @@ See [AGENTS.md](AGENTS.md) for the full workflow.
 4. Open a pull request with a clear summary of changes and testing performed
 5. Link to the related MCP issue(s) in the PR description
 
+## VS Code extension
+
+The VS Code extension lives in `editors/vscode/` as a self-contained npm project.
+
+```bash
+cd editors/vscode
+npm install
+npm run watch      # esbuild in watch mode
+```
+
+Press F5 from that folder to launch an Extension Development Host. Run `npm run lint`, `npm run typecheck`, and `npm test` before submitting changes; `npm run package` produces an installable `.vsix`.
+
 ## Documentation
 
 - Specification changes go in the modular docs/ files (01-09), not README.md
