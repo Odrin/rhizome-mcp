@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
@@ -237,8 +239,19 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		report, err := project.Doctor(ctx, full)
 		return doctorReportFromRuntime(report, cfg.Version), err
 	}
+	connectHandler := func(ctx context.Context, target string, printOnly bool) error {
+		exePath, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("determine binary path: %w", err)
+		}
+		realPath, err := filepath.EvalSymlinks(exePath)
+		if err != nil {
+			return fmt.Errorf("resolve binary path: %w", err)
+		}
+		return runConnect(ctx, startingPath, target, realPath, printOnly, stdout, stderr)
+	}
 
-	if len(args) > 0 && args[0] != "init" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor") {
+	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -268,6 +281,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
 	adapter.SetBackupHandler(backupHandler)
 	adapter.SetDoctorHandler(doctorHandler)
+	adapter.SetConnectHandler(connectHandler)
 	adapter.SetAppVersion(cfg.Version)
 	return adapter.Run(ctx, args)
 }
@@ -338,7 +352,14 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 		_ = project.Close(closeCtx)
 	}()
 
-	response := cliadapter.InitResponse{Root: proj.Root, ProjectID: proj.Identity.ProjectID, DatabasePath: proj.DatabasePath}
+	response := cliadapter.InitResponse{
+		Root:         proj.Root,
+		ProjectID:    proj.Identity.ProjectID,
+		DatabasePath: proj.DatabasePath,
+		NextActions: []string{
+			"Run 'rhizome-mcp connect claude' (or codex/vscode/json) to register this server with your MCP client.",
+		},
+	}
 	return writeJSON(stdout, response)
 }
 
@@ -446,6 +467,158 @@ func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler,
 	mux.Handle("/mcp", handler)
 	mux.Handle("/mcp/", handler)
 	return mux, nil
+}
+
+func runConnect(ctx context.Context, startingPath string, target string, binaryPath string, printOnly bool, stdout, stderr io.Writer) error {
+	switch target {
+	case "claude":
+		return connectClaude(ctx, startingPath, binaryPath, printOnly, stdout)
+	case "vscode":
+		return connectVSCode(ctx, startingPath, binaryPath, printOnly, stdout)
+	case "codex":
+		return connectCodex(ctx, binaryPath, printOnly, stdout, stderr)
+	case "json":
+		return connectJSON(binaryPath, stdout)
+	default:
+		return fmt.Errorf("unsupported target %q", target)
+	}
+}
+
+func connectClaude(ctx context.Context, startingPath string, binaryPath string, printOnly bool, stdout io.Writer) error {
+	mcpJSONPath := filepath.Join(startingPath, ".mcp.json")
+
+	config := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"rhizome-mcp": map[string]interface{}{
+				"type":    "stdio",
+				"command": binaryPath,
+				"args":    []string{"serve"},
+			},
+		},
+	}
+
+	if printOnly {
+		return writeJSONToWriter(stdout, config)
+	}
+
+	return mergeAndWriteJSONConfig(mcpJSONPath, config, "mcpServers", "rhizome-mcp")
+}
+
+func connectVSCode(ctx context.Context, startingPath string, binaryPath string, printOnly bool, stdout io.Writer) error {
+	vscodeDir := filepath.Join(startingPath, ".vscode")
+	mcpJSONPath := filepath.Join(vscodeDir, "mcp.json")
+
+	config := map[string]interface{}{
+		"servers": map[string]interface{}{
+			"rhizome-mcp": map[string]interface{}{
+				"type":    "stdio",
+				"command": binaryPath,
+				"args":    []string{"serve"},
+			},
+		},
+	}
+
+	if printOnly {
+		return writeJSONToWriter(stdout, config)
+	}
+
+	if err := os.MkdirAll(vscodeDir, 0o755); err != nil {
+		return fmt.Errorf("create .vscode directory: %w", err)
+	}
+
+	return mergeAndWriteJSONConfig(mcpJSONPath, config, "servers", "rhizome-mcp")
+}
+
+func connectCodex(ctx context.Context, binaryPath string, printOnly bool, stdout, stderr io.Writer) error {
+	tomlSnippet := fmt.Sprintf(`[mcp_servers.rhizome-mcp]
+command = "%s"
+args = ["serve"]
+`, binaryPath)
+
+	if printOnly || !canExecuteCodex() {
+		if printOnly {
+			fmt.Fprint(stdout, "Add the following to your Codex configuration:\n\n")
+		} else {
+			fmt.Fprint(stdout, "Codex not found on PATH. Add the following to your Codex configuration:\n\n")
+		}
+		fmt.Fprint(stdout, tomlSnippet)
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "codex", "mcp", "add", "rhizome-mcp", "--", binaryPath, "serve")
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+func connectJSON(binaryPath string, stdout io.Writer) error {
+	config := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"rhizome-mcp": map[string]interface{}{
+				"command": binaryPath,
+				"args":    []string{"serve"},
+			},
+		},
+	}
+	return writeJSONToWriter(stdout, config)
+}
+
+func canExecuteCodex() bool {
+	_, err := exec.LookPath("codex")
+	return err == nil
+}
+
+func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, configKey string, serverKey string) error {
+	var existingConfig map[string]interface{}
+
+	if _, err := os.Stat(filePath); err == nil {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("read config file: %w", err)
+		}
+		if err := json.Unmarshal(data, &existingConfig); err != nil {
+			return fmt.Errorf("parse config file: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat config file: %w", err)
+	}
+
+	if existingConfig == nil {
+		existingConfig = make(map[string]interface{})
+	}
+
+	if _, exists := existingConfig[configKey]; !exists {
+		existingConfig[configKey] = make(map[string]interface{})
+	}
+
+	servers, ok := existingConfig[configKey].(map[string]interface{})
+	if !ok {
+		servers = make(map[string]interface{})
+		existingConfig[configKey] = servers
+	}
+
+	newServer := newConfig[configKey].(map[string]interface{})[serverKey]
+	servers[serverKey] = newServer
+
+	data, err := json.MarshalIndent(existingConfig, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return fmt.Errorf("write config file: %w", err)
+	}
+
+	return nil
+}
+
+func writeJSONToWriter(w io.Writer, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal json: %w", err)
+	}
+	_, err = fmt.Fprintln(w, string(data))
+	return err
 }
 
 func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {

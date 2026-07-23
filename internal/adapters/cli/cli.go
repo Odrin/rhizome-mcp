@@ -116,16 +116,20 @@ func (report DoctorReport) Healthy() bool {
 // DoctorHandler runs a project doctor check after the adapter parses the command.
 type DoctorHandler func(context.Context, bool) (DoctorReport, error)
 
+// ConnectHandler sets up MCP client configuration after the adapter parses the command.
+type ConnectHandler func(context.Context, string, bool) error
+
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
-	services      Services
-	stdout        io.Writer
-	stderr        io.Writer
-	initHandler   InitHandler
-	serveHandler  ServeHandler
-	backupHandler BackupHandler
-	doctorHandler DoctorHandler
-	appVersion    string
+	services       Services
+	stdout         io.Writer
+	stderr         io.Writer
+	initHandler    InitHandler
+	serveHandler   ServeHandler
+	backupHandler  BackupHandler
+	doctorHandler  DoctorHandler
+	connectHandler ConnectHandler
+	appVersion     string
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -141,6 +145,11 @@ func (c *CLI) SetBackupHandler(handler BackupHandler) {
 // SetDoctorHandler installs a handler for the doctor command.
 func (c *CLI) SetDoctorHandler(handler DoctorHandler) {
 	c.doctorHandler = handler
+}
+
+// SetConnectHandler installs a handler for the connect command.
+func (c *CLI) SetConnectHandler(handler ConnectHandler) {
+	c.connectHandler = handler
 }
 
 // SetAppVersion sets the application version string for display in CLI outputs.
@@ -163,6 +172,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runBackup(ctx, args[1:])
 	case "doctor":
 		return c.runDoctor(ctx, args[1:])
+	case "connect":
+		return c.runConnect(ctx, args[1:])
 	case "project":
 		return c.runProject(ctx, args[1:])
 	case "issue":
@@ -275,6 +286,36 @@ func (c *CLI) runDoctor(ctx context.Context, args []string) error {
 		return writeJSON(c.stdoutWriter(), report)
 	}
 	return c.writeDoctorTable(report)
+}
+
+func (c *CLI) runConnect(ctx context.Context, args []string) error {
+	if c.connectHandler == nil {
+		return fmt.Errorf("connect handler is not configured")
+	}
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	printFlag := fs.Bool("print", false, "print configuration instead of writing")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 1 {
+		return c.usageError()
+	}
+
+	target := positionals[0]
+	validTargets := []string{"claude", "codex", "vscode", "json"}
+	isValid := false
+	for _, valid := range validTargets {
+		if target == valid {
+			isValid = true
+			break
+		}
+	}
+	if !isValid {
+		return fmt.Errorf("unsupported target %q (valid targets: %s)", target, strings.Join(validTargets, ", "))
+	}
+
+	return c.connectHandler(ctx, target, *printFlag)
 }
 
 func (c *CLI) runProject(ctx context.Context, args []string) error {
@@ -924,6 +965,7 @@ func (c *CLI) usage() string {
 	return `Usage:
   rhizome-mcp [--data-root PATH] init
   rhizome-mcp [--data-root PATH] serve
+  rhizome-mcp [--data-root PATH] connect TARGET [--print]
   rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
   rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]
   rhizome-mcp [--data-root PATH] project info [--format table|json]
@@ -963,9 +1005,10 @@ type MaintenanceRebuildResponse struct {
 
 // InitResponse is the JSON payload emitted by the init command.
 type InitResponse struct {
-	Root         string `json:"root"`
-	ProjectID    string `json:"project_id"`
-	DatabasePath string `json:"database_path"`
+	Root         string   `json:"root"`
+	ProjectID    string   `json:"project_id"`
+	DatabasePath string   `json:"database_path"`
+	NextActions  []string `json:"next_actions,omitempty"`
 }
 
 // ProjectInfoResponse is the JSON payload emitted by project info.

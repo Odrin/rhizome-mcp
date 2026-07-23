@@ -77,9 +77,41 @@ The process logs the bound endpoint to stderr. Configure local MCP clients to us
 
 ## Connect common clients
 
+### Claude Code
+
+Use the automated setup command:
+
+```bash
+rhizome-mcp connect claude
+```
+
+This merges the configuration into a project-local `.mcp.json` file with `mcpServers.rhizome-mcp`. For a dry run, add `--print`:
+
+```bash
+rhizome-mcp connect claude --print
+```
+
+Alternatively, manually run:
+
+```bash
+claude mcp add --transport stdio rhizome-mcp -- rhizome-mcp serve
+```
+
 ### VS Code
 
-The workspace configuration already uses the standard stdio contract:
+Use the automated setup command:
+
+```bash
+rhizome-mcp connect vscode
+```
+
+This merges the configuration into `.vscode/mcp.json` with `servers.rhizome-mcp`. For a dry run, add `--print`:
+
+```bash
+rhizome-mcp connect vscode --print
+```
+
+Alternatively, manually add this to `.vscode/mcp.json`:
 
 ```json
 {
@@ -94,38 +126,37 @@ The workspace configuration already uses the standard stdio contract:
 }
 ```
 
-### Claude Code
+### Codex
+
+Use the automated setup command:
 
 ```bash
-claude mcp add --transport stdio rhizome-mcp -- rhizome-mcp serve
+rhizome-mcp connect codex
 ```
 
-The Claude client uses an `.mcp.json` file with `mcpServers`.
+If `codex` is not found on PATH, or you prefer a dry run, add `--print`:
 
-### Codex
+```bash
+rhizome-mcp connect codex --print
+```
+
+This prints a TOML snippet for manual addition to the Codex config. Alternatively, manually run:
 
 ```bash
 codex mcp add rhizome-mcp -- rhizome-mcp serve
 ```
 
-The Codex config uses TOML with `[mcp_servers.rhizome-mcp]`.
+### Other MCP clients
+
+Use the generic JSON target to see a template:
+
+```bash
+rhizome-mcp connect json
+```
 
 ### Antigravity
 
-Open the MCP Servers area in the Antigravity product UI and use the raw configuration view if your release exposes it. The UI labels and location vary by release, so use the product-specific path that appears in your version. The standard JSON entry is:
-
-```json
-{
-  "mcpServers": {
-    "rhizome-mcp": {
-      "command": "rhizome-mcp",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-Use the in-product flow for Antigravity rather than assuming a fixed filesystem location.
+Open the MCP Servers area in the Antigravity product UI and use the raw configuration view if your release exposes it. The UI labels and location vary by release, so use the product-specific path that appears in your version. Use the in-product flow for Antigravity rather than assuming a fixed filesystem location.
 
 ## Verify the setup
 
