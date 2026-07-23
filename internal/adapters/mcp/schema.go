@@ -219,7 +219,7 @@ func schemaListIssues() *jsonschema.Schema {
 		"priorities": stringsSchema(), "labels": stringsSchema(), "parent_issue_id": nullableIssueIdentifierSchema(),
 		"is_blocked":       &jsonschema.Schema{Types: []string{"boolean", "null"}},
 		"is_claimable":     &jsonschema.Schema{Types: []string{"boolean", "null"}},
-		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": enumSchema("compact"),
+		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": enumSchema("compact", "full"),
 	})
 }
 
@@ -441,7 +441,58 @@ func schemaRecordDecisionOutput() *jsonschema.Schema {
 func schemaDecisionListOutput() *jsonschema.Schema   { return typedSchema[decisionListOutput]() }
 func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
 func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
-func schemaIssueListOutput() *jsonschema.Schema      { return typedSchema[issueListOutput]() }
+
+// schemaIssueListItem describes one list_issues item. list_issues returns one
+// of two item shapes depending on the request's view (compact, the default,
+// or full), so this schema is hand-built rather than derived from a single Go
+// type via typedSchema: its required fields are exactly the compact
+// projection (identifiers, title, type, status, effective_status, priority,
+// claimability, blocker count, labels, updated_at), and every full-only field
+// (description, acceptance_criteria, parent_issue_id, blocked_reason,
+// version, created_at, closed_at, archived_at, active_attempt_id) is declared
+// as an optional property. A compact item satisfies this schema by omitting
+// the optional properties; a full item satisfies it by including them all.
+func schemaIssueListItem() *jsonschema.Schema {
+	properties := map[string]*jsonschema.Schema{
+		"id":                       stringSchema(),
+		"display_id":               stringSchema(),
+		"sequence_no":              integerSchema(),
+		"type":                     stringSchema(),
+		"title":                    stringSchema(),
+		"status":                   stringSchema(),
+		"priority":                 stringSchema(),
+		"effective_status":         stringSchema(),
+		"unresolved_blocker_count": integerSchema(),
+		"is_blocked":               booleanSchema(),
+		"is_claimable":             booleanSchema(),
+		"labels":                   &jsonschema.Schema{Type: "array", Items: typedSchema[labelDTO]()},
+		"updated_at":               stringSchema(),
+		// Present only when view: "full" is requested.
+		"description":         nullableStringSchema(),
+		"acceptance_criteria": nullableStringSchema(),
+		"parent_issue_id":     nullableStringSchema(),
+		"blocked_reason":      nullableStringSchema(),
+		"version":             integerSchema(),
+		"created_at":          stringSchema(),
+		"closed_at":           nullableStringSchema(),
+		"archived_at":         nullableStringSchema(),
+		"active_attempt_id":   nullableStringSchema(),
+	}
+	return object(properties,
+		"id", "display_id", "sequence_no", "type", "title", "status", "priority",
+		"effective_status", "unresolved_blocker_count", "is_blocked", "is_claimable",
+		"labels", "updated_at",
+	)
+}
+
+func schemaIssueListOutput() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"items":        &jsonschema.Schema{Type: "array", Items: schemaIssueListItem()},
+		"next_cursor":  nullableStringSchema(),
+		"has_more":     booleanSchema(),
+		"next_actions": stringsSchema(),
+	}, "items", "next_cursor", "has_more", "next_actions")
+}
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
 	return typedSchema[manageIssueRelationOutput]()
 }

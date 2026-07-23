@@ -276,7 +276,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
-	assertStringPropertyEnum(t, toolNamed(t, tools.Tools, "list_issues"), "view", "compact")
+	assertStringPropertyEnum(t, toolNamed(t, tools.Tools, "list_issues"), "view", "compact", "full")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_labels"), "limit", 0, 100)
 	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
 	assertRequired(t, toolNamed(t, tools.Tools, "finish_attempt"), "attempt_id", "lease_token", "outcome", "result_summary")
@@ -754,6 +754,120 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	if err := db.Close(ctx); err != nil {
 		t.Fatalf("close after restart: %v", err)
 	}
+}
+
+// TestListIssuesViewProjections is the ISSUE-63 contract test: the default
+// (and explicit "compact") view returns only the documented minimal field
+// set with no unbounded free-text fields, "full" reproduces the complete
+// pre-ISSUE-63 projection unchanged, and an unsupported view value still
+// fails with a structured validation error.
+func TestListIssuesViewProjections(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "list-issues-view.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	epic := call(t, client, "create_issue", map[string]any{"type": "epic", "title": "Parent epic"})
+	var epicOut struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, epic, &epicOut)
+	if epic.IsError || epicOut.ID == "" {
+		t.Fatalf("create epic = %#v", epic)
+	}
+
+	created := call(t, client, "create_issue", map[string]any{
+		"type": "task", "title": "Full projection subject", "status": "ready",
+		"description":           "Full description body for the projection test.",
+		"acceptance_criteria":   "Acceptance criteria body for the projection test.",
+		"parent_issue_id":       epicOut.ID,
+		"labels":                []string{"projection"},
+		"create_missing_labels": true,
+	})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue = %#v", created)
+	}
+
+	compactFields := []string{
+		"id", "display_id", "sequence_no", "type", "title", "status",
+		"effective_status", "priority", "is_blocked", "is_claimable",
+		"unresolved_blocker_count", "labels", "updated_at",
+	}
+	fullOnlyFields := []string{
+		"description", "acceptance_criteria", "parent_issue_id", "blocked_reason",
+		"version", "created_at", "closed_at", "archived_at", "active_attempt_id",
+	}
+
+	for _, request := range []map[string]any{
+		{"labels": []string{"projection"}},
+		{"labels": []string{"projection"}, "view": "compact"},
+	} {
+		item := singleListedItemFields(t, call(t, client, "list_issues", request), issue.ID)
+		for _, field := range compactFields {
+			if _, ok := item[field]; !ok {
+				t.Fatalf("compact view (%v) missing field %q: %v", request, field, item)
+			}
+		}
+		for _, field := range fullOnlyFields {
+			if _, present := item[field]; present {
+				t.Fatalf("compact view (%v) unexpectedly includes field %q: %v", request, field, item)
+			}
+		}
+	}
+
+	full := call(t, client, "list_issues", map[string]any{"labels": []string{"projection"}, "view": "full"})
+	fullItem := singleListedItemFields(t, full, issue.ID)
+	for _, field := range append(append([]string{}, compactFields...), fullOnlyFields...) {
+		if _, ok := fullItem[field]; !ok {
+			t.Fatalf("full view missing field %q: %v", field, fullItem)
+		}
+	}
+	var description, acceptanceCriteria, parentIssueID string
+	if err := json.Unmarshal(fullItem["description"], &description); err != nil {
+		t.Fatalf("decode description: %v", err)
+	}
+	if err := json.Unmarshal(fullItem["acceptance_criteria"], &acceptanceCriteria); err != nil {
+		t.Fatalf("decode acceptance_criteria: %v", err)
+	}
+	if err := json.Unmarshal(fullItem["parent_issue_id"], &parentIssueID); err != nil {
+		t.Fatalf("decode parent_issue_id: %v", err)
+	}
+	if description != "Full description body for the projection test." ||
+		acceptanceCriteria != "Acceptance criteria body for the projection test." || parentIssueID != epicOut.ID {
+		t.Fatalf("full view body mismatch: description=%q acceptance_criteria=%q parent_issue_id=%q", description, acceptanceCriteria, parentIssueID)
+	}
+
+	invalidView := call(t, client, "list_issues", map[string]any{"view": "detailed"})
+	if !invalidView.IsError || invalidView.StructuredContent != nil {
+		t.Fatalf("list_issues detailed view should be rejected by the advertised schema: %#v", invalidView)
+	}
+}
+
+func singleListedItemFields(t *testing.T, result *sdkmcp.CallToolResult, wantID string) map[string]json.RawMessage {
+	t.Helper()
+	var page struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	decodeStructured(t, result, &page)
+	if result.IsError {
+		t.Fatalf("list_issues result = %#v", result)
+	}
+	for _, item := range page.Items {
+		var id string
+		if err := json.Unmarshal(item["id"], &id); err != nil {
+			continue
+		}
+		if id == wantID {
+			return item
+		}
+	}
+	t.Fatalf("list_issues items did not include %q: %#v", wantID, page.Items)
+	return nil
 }
 
 func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
@@ -1978,7 +2092,7 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		"content": "different content", "idempotency_key": "note-key",
 	})
 	assertDomainError(t, conflictingNote, "IDEMPOTENCY_CONFLICT", false)
-	listed := call(t, client, "list_issues", map[string]any{"effective_statuses": []string{"in_progress"}})
+	listed := call(t, client, "list_issues", map[string]any{"effective_statuses": []string{"in_progress"}, "view": "full"})
 	var listedOutput struct {
 		Items []struct {
 			EffectiveStatus string  `json:"effective_status"`

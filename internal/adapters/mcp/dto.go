@@ -664,6 +664,10 @@ type updateIssueOutput struct {
 	ChangedFields []string `json:"changed_fields"`
 }
 
+// issueListItemDTO is the list_issues "full" projection: the complete issue
+// record plus every computed field. It is returned unchanged from today's
+// behavior when a caller passes view: "full", and is also reused (unchanged)
+// by claim_issue, manage_issue_relation, and the graph tools.
 type issueListItemDTO struct {
 	issueDTO
 	EffectiveStatus        string  `json:"effective_status"`
@@ -671,6 +675,58 @@ type issueListItemDTO struct {
 	IsBlocked              bool    `json:"is_blocked"`
 	IsClaimable            bool    `json:"is_claimable"`
 	ActiveAttemptID        *string `json:"active_attempt_id"`
+}
+
+// issueListItemCompactDTO is the list_issues "compact" projection: the
+// default, and the projection returned when view is omitted entirely. It
+// intentionally contains only identifiers, title, type, status, effective
+// status, priority, claimability, blocker count, labels, and the update
+// timestamp, per ISSUE-63's minimal field contract. Description and
+// acceptance_criteria (unbounded free text) are never present in this shape,
+// which is what keeps list_issues response size predictable regardless of
+// backlog size or issue body length.
+//
+// parent_issue_id, blocked_reason, created_at, closed_at, archived_at,
+// version, and active_attempt_id are deliberately excluded too: none of them
+// are in ISSUE-63's minimal field list, and none are needed to decide what to
+// work on next from a list view (get_work_context or view: "full" cover
+// them). Callers that need any of these fields pass view: "full".
+type issueListItemCompactDTO struct {
+	ID                     string     `json:"id"`
+	DisplayID              string     `json:"display_id"`
+	SequenceNo             int64      `json:"sequence_no"`
+	Type                   string     `json:"type"`
+	Title                  string     `json:"title"`
+	Status                 string     `json:"status"`
+	EffectiveStatus        string     `json:"effective_status"`
+	Priority               string     `json:"priority"`
+	IsBlocked              bool       `json:"is_blocked"`
+	IsClaimable            bool       `json:"is_claimable"`
+	UnresolvedBlockerCount int64      `json:"unresolved_blocker_count"`
+	Labels                 []labelDTO `json:"labels"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+}
+
+func issueListItemCompactDTOFromDomain(item domain.IssueProjection) issueListItemCompactDTO {
+	labels := make([]labelDTO, len(item.Issue.Labels))
+	for i, label := range item.Issue.Labels {
+		labels[i] = labelDTOFromDomain(label)
+	}
+	return issueListItemCompactDTO{
+		ID:                     item.Issue.ID,
+		DisplayID:              item.Issue.DisplayID,
+		SequenceNo:             item.Issue.SequenceNo,
+		Type:                   string(item.Issue.Type),
+		Title:                  item.Issue.Title,
+		Status:                 string(item.Issue.Status),
+		EffectiveStatus:        string(item.EffectiveStatus),
+		Priority:               string(item.Issue.Priority),
+		IsBlocked:              item.IsBlocked,
+		IsClaimable:            item.IsClaimable,
+		UnresolvedBlockerCount: item.UnresolvedBlockerCount,
+		Labels:                 labels,
+		UpdatedAt:              item.Issue.UpdatedAt,
+	}
 }
 
 type attemptDTO struct {
@@ -820,11 +876,23 @@ type saveAttemptNoteOutput struct {
 	NextActions []string       `json:"next_actions"`
 }
 
+// issueListOutput is the list_issues response shape for view: "full" —
+// byte-identical to the pre-ISSUE-63 default response shape.
 type issueListOutput struct {
 	Items       []issueListItemDTO `json:"items"`
 	NextCursor  *string            `json:"next_cursor"`
 	HasMore     bool               `json:"has_more"`
 	NextActions []string           `json:"next_actions"`
+}
+
+// issueListCompactOutput is the list_issues response shape for the default
+// (and view: "compact") projection. Same envelope as issueListOutput; only
+// the item shape differs.
+type issueListCompactOutput struct {
+	Items       []issueListItemCompactDTO `json:"items"`
+	NextCursor  *string                   `json:"next_cursor"`
+	HasMore     bool                      `json:"has_more"`
+	NextActions []string                  `json:"next_actions"`
 }
 
 type relationDTO struct {

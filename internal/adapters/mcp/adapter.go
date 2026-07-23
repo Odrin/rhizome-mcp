@@ -849,7 +849,11 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 
 func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.View != "" && input.View != "compact" {
+	view := input.View
+	if view == "" {
+		view = "compact"
+	}
+	if view != "compact" && view != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
 	result, err := adapter.issues.ListIssues(ctx, domain.ListIssuesInput{
@@ -868,22 +872,31 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 	if err != nil {
 		return adapter.failure(err)
 	}
-	items := make([]issueListItemDTO, len(result.Items))
-	for i, item := range result.Items {
-		items[i] = issueListItemDTO{
-			issueDTO:               issueDTOFromDomain(item.Issue),
-			EffectiveStatus:        string(item.EffectiveStatus),
-			UnresolvedBlockerCount: item.UnresolvedBlockerCount,
-			IsBlocked:              item.IsBlocked,
-			IsClaimable:            item.IsClaimable,
-			ActiveAttemptID:        item.ActiveAttemptID,
-		}
-	}
 	nextActions := []string{"Inspect a claimable issue with get_work_context."}
 	if result.HasMore {
 		nextActions = append(nextActions, "Continue with next_cursor.")
 	}
-	return success(issueListOutput{
+	if view == "full" {
+		items := make([]issueListItemDTO, len(result.Items))
+		for i, item := range result.Items {
+			items[i] = issueListItemDTO{
+				issueDTO:               issueDTOFromDomain(item.Issue),
+				EffectiveStatus:        string(item.EffectiveStatus),
+				UnresolvedBlockerCount: item.UnresolvedBlockerCount,
+				IsBlocked:              item.IsBlocked,
+				IsClaimable:            item.IsClaimable,
+				ActiveAttemptID:        item.ActiveAttemptID,
+			}
+		}
+		return success(issueListOutput{
+			Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore, NextActions: nextActions,
+		}, "issues listed")
+	}
+	items := make([]issueListItemCompactDTO, len(result.Items))
+	for i, item := range result.Items {
+		items[i] = issueListItemCompactDTOFromDomain(item)
+	}
+	return success(issueListCompactOutput{
 		Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore, NextActions: nextActions,
 	}, "issues listed")
 }

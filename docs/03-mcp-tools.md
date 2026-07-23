@@ -364,8 +364,87 @@ is_claimable DESC
 sequence_no ASC
 ```
 
-`view` defaults to `compact`, which is currently the only supported list
-projection.
+`view` accepts exactly two values, `compact` and `full`. `view` defaults to
+`compact` (including when the field is omitted entirely). Unknown values
+(anything other than `compact` or `full`) are rejected as an unsupported
+field with a structured validation error. `full` still honors the same
+`limit`/cursor pagination bounds as `compact` — it is not a way to bypass
+paging.
+
+**`compact` (default) field set** — identifiers, title, classification, and
+computed status/claimability fields only. No free-text issue bodies:
+
+```text
+id
+display_id
+sequence_no
+type
+title
+status
+effective_status
+priority
+is_blocked
+is_claimable
+unresolved_blocker_count
+labels
+updated_at
+```
+
+**`full` field set** — the complete issue record plus every computed field,
+byte-identical to the pre-1.0 default response shape:
+
+```text
+id
+display_id
+sequence_no
+type
+title
+description
+acceptance_criteria
+status
+priority
+parent_issue_id
+blocked_reason
+version
+created_at
+updated_at
+closed_at
+archived_at
+labels
+effective_status
+unresolved_blocker_count
+is_blocked
+is_claimable
+active_attempt_id
+```
+
+`full` adds `description`, `acceptance_criteria`, `parent_issue_id`,
+`blocked_reason`, `version`, `created_at`, `closed_at`, `archived_at`, and
+`active_attempt_id` on top of every `compact` field; nothing in `compact` is
+ever different from its `full` value, and `full` is never missing a field
+`compact` has.
+
+**Migration note.** Before this change, `compact` was the only projection and
+it silently returned every field listed above (including full `description`
+and `acceptance_criteria` bodies) for every item — a project with a real
+backlog could produce a response of tens to hundreds of kilobytes from a
+single default `list_issues` call. If an existing client relied on full issue
+bodies (or on `parent_issue_id`, `blocked_reason`, `version`, `created_at`,
+`closed_at`, `archived_at`, or `active_attempt_id`) being present in
+`list_issues` items, pass `view: "full"` to get that exact shape back
+unchanged; no other input changes are required. Clients that only ever used
+the fields now in the `compact` set need no changes at all.
+
+**Response budget.** A 100-issue `list_issues` call in the default (`compact`)
+view stays under **64 KB** of structured-content JSON regardless of how large
+each issue's `description`/`acceptance_criteria` bodies are, because those
+bodies are never present in the compact projection. This is enforced by an
+integration test (`TestIntegrationListIssuesCompactViewStaysWithinByteBudget`
+in `integration_test.go`) that creates 100 issues with multi-kilobyte
+description and acceptance-criteria bodies and asserts the default response
+stays within budget; measured response size for that fixture is approximately
+46 KB. The equivalent `view: "full"` call over the same 100 issues measures
+approximately 582 KB in the same test — illustrating why `full` is opt-in.
 
 ### 5.5. `archive_issue`
 
@@ -588,6 +667,18 @@ Graph format uses normalized `nodes` and `edges`, not recursive trees.
 
 Epic hierarchy is represented as a derived `contains` edge.
 
+**Response budget.** Each node carries the same enriched issue fields as
+`list_issues`' `view: "full"` item shape (identifiers, classification,
+`parent_issue_id`, `blocked_reason`, timestamps, labels, and the computed
+status/claimability fields) — but `description` and `acceptance_criteria` are
+always `null` on every node: the repository query that loads graph snapshots
+selects `NULL AS description, NULL AS acceptance_criteria` at the SQL layer,
+so the two unbounded free-text fields are excluded before the request even
+reaches the graph traversal engine, not merely omitted by convention. Node
+count is bounded by `max_nodes` (default 100, maximum 500), so response size
+scales predictably with a config knob the caller controls, not with issue
+body length.
+
 ### 6.3. `get_planning_graph`
 
 Input:
@@ -622,6 +713,11 @@ summary
 warnings
 truncated
 ```
+
+**Response budget.** Shares the same node projection, storage-level
+`description`/`acceptance_criteria` exclusion, and `max_nodes` bound (default
+100, maximum 500) documented in section 6.2 for `get_issue_graph` — see that
+section's response budget note.
 
 ---
 
@@ -837,6 +933,16 @@ returned from one consistent read snapshot and are ordered deterministically by
 `occurred_at` descending, then a fixed category rank, then source ID. Global or
 null-scope decisions and events are excluded from issue activity; full
 issue-owned event history, including issue creation, remains included.
+
+**Response budget.** Item count is bounded by `limit` (default `20`, maximum
+`100`); this bound is enforced, not just documented. Each item's own
+free-text field is bounded at write time, not by activity itself: comment
+content up to 50,000 runes (`add_comment`), decision content up to 100,000
+runes (`record_decision`), and attempt/attempt-note content up to 50,000
+runes each (`finish_attempt` / `save_attempt_note`). A page of `limit` items
+that are all near their per-item maximum is a real, if unusual, worst case —
+for size-sensitive callers, narrow `types` to the categories you need and
+prefer the default `limit` over the maximum.
 
 ---
 
@@ -1069,6 +1175,26 @@ truncated_sections
 next_actions
 ```
 
+**Response budget.** `get_work_context` is scoped to one issue, so its full
+`description`/`acceptance_criteria` bodies (needed to actually work the
+issue) are an intentional, expected part of the default response — this is
+unlike `list_issues`, where the same fields were being repeated once per
+backlog item for no benefit. Every optional list section (`related_issue_summaries`,
+`recent_comments`, `recent_attempt_notes`, `decision_content`,
+`attempt_history`, `artifacts`, `changes_since_previous_attempt`) is capped at
+1–20 items via `limits` (default varies per section; see the audited request
+schema), and at most 10 sections can be requested at once
+(`MaxWorkContextIncludes`), so optional-section growth is bounded. `blockers`
+and `parent_epic` reuse the same per-issue projection as the primary `issue`
+field (including full `description`/`acceptance_criteria`), and `blockers` in
+particular has no configurable cap — it is bounded only by how many issues
+directly block the requested one, which is normally small for a real
+dependency graph. `related_issue_summaries` is named "summaries" but, like
+`blockers`, currently returns the full per-issue projection rather than a
+truncated preview; this is a known imprecision worth tightening in a future
+change but is not addressed here, since (unlike the `list_issues` default) it
+requires an explicit `include` entry and is capped at 20 items.
+
 ---
 
 ## 10. Search and synchronization
@@ -1118,6 +1244,15 @@ has_more
 ```
 
 Full source documents are never returned by search.
+
+**Response budget.** `snippet_length` truncation is enforced at the storage
+layer (a SQL `substr` over the FTS5 snippet, re-validated against
+`MaxSearchSnippetRunes` on the way out), not merely documented. Combined with
+the `limit` cap, a `search` response is bounded by at most `limit` (maximum
+`100`) results, each with a `title` and a `snippet` of at most
+`snippet_length` runes (maximum `1000`, default `300`); the worst case is
+therefore on the order of 100 KB, and the default (`limit` `20`,
+`snippet_length` `300`) is on the order of 10 KB.
 
 ### 10.2. `get_changes`
 
