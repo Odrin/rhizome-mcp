@@ -109,6 +109,25 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 		return ports.SaveAttemptNoteResult{}, err
 	}
 
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalSaveAttemptNoteRequest(normalized)
+		if err != nil {
+			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode save attempt note request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupSaveAttemptNote(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ports.SaveAttemptNoteResult{}, err
+		}
+		if found {
+			return result, nil
+		}
+	}
+
 	id, err := service.ids.New()
 	if err != nil {
 		return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
@@ -134,11 +153,11 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 			CreatedAt: now,
 		}
 	}
-	hash := sha256.Sum256([]byte(normalized.LeaseToken))
+	tokenHash := sha256.Sum256([]byte(normalized.LeaseToken))
 	result, err := service.repository.SaveAttemptNote(ctx, ports.SaveAttemptNoteCommand{
-		NoteID: id, AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Kind: normalized.Kind,
+		NoteID: id, AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: tokenHash[:], Kind: normalized.Kind,
 		Content: normalized.Content, NextSteps: normalized.NextSteps, Important: normalized.Important,
-		Artifacts: artifacts, OccurredAt: now,
+		Artifacts: artifacts, OccurredAt: now, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 	if err != nil {
 		return ports.SaveAttemptNoteResult{}, err

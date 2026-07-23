@@ -129,13 +129,13 @@ func schemaUpdateIssue() *jsonschema.Schema {
 	})
 	return object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "changes": changes,
-		"create_missing_labels": booleanSchema(), "idempotency_key": nullableStringSchema(),
+		"create_missing_labels": booleanSchema(), "idempotency_key": nullableBoundedStringSchema(128),
 	}, "issue_id", "expected_version", "changes")
 }
 
 func schemaGetIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": issueIdentifierSchema(), "view": stringSchema(),
+		"issue_id": issueIdentifierSchema(), "view": enumSchema("compact", "standard", "full"),
 	}, "issue_id")
 }
 
@@ -225,7 +225,7 @@ func schemaListIssues() *jsonschema.Schema {
 
 func schemaArchiveIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableStringSchema(),
+		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableBoundedStringSchema(128),
 	}, "issue_id", "expected_version")
 }
 
@@ -277,13 +277,12 @@ func schemaAddComment() *jsonschema.Schema {
 
 func schemaRecordDecision() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"issue_id":        nullableBoundedStringSchema(64),
-		"title":           boundedStringSchema(300),
-		"summary":         boundedStringSchema(2_000),
-		"content":         boundedStringSchema(100_000),
-		"status":          enumSchema("active", "superseded", "rejected"),
-		"supersedes_id":   nullableBoundedStringSchema(26),
-		"idempotency_key": nullableBoundedStringSchema(128),
+		"issue_id":      nullableBoundedStringSchema(64),
+		"title":         boundedStringSchema(300),
+		"summary":       boundedStringSchema(2_000),
+		"content":       boundedStringSchema(100_000),
+		"status":        enumSchema("active", "superseded", "rejected"),
+		"supersedes_id": nullableBoundedStringSchema(26),
 	}, "title", "summary", "content")
 }
 
@@ -303,7 +302,7 @@ func schemaManageIssueRelation() *jsonschema.Schema {
 		"source_issue_id": issueIdentifierSchema(),
 		"target_issue_id": issueIdentifierSchema(),
 		"relation_type":   enumSchema("blocks", "related_to", "duplicates"),
-		"idempotency_key": nullableStringSchema(),
+		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "action", "source_issue_id", "target_issue_id", "relation_type")
 }
 

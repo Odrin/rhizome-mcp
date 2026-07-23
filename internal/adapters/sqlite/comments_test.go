@@ -299,6 +299,59 @@ func TestCommentRepositoryRejectsArchivedMissingAndEventFailureWithoutWrites(t *
 	}
 }
 
+func TestCommentServiceIdempotencyReplayAndConflict(t *testing.T) {
+	issues, db, now := openIssueService(t)
+	repository, err := sqlite.NewCommentRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := application.NewCommentService(repository, clock.NewFakeClock(now), generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := issues.CreateIssue(context.Background(), domain.CreateIssueInput{Type: domain.TypeTask, Title: "Commented"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "comment-retry"
+	input := domain.AddCommentInput{IssueID: issue.ID, Content: "retried comment", IdempotencyKey: &key}
+	first, err := comments.AddComment(context.Background(), input)
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	if first.ID == "" || first.Content != "retried comment" {
+		t.Fatalf("first add result = %#v", first)
+	}
+	second, err := comments.AddComment(context.Background(), input)
+	if err != nil {
+		t.Fatalf("replay add: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("replay mismatch: %#v != %#v", first, second)
+	}
+	changed := input
+	changed.Content = "different content"
+	if _, err := comments.AddComment(context.Background(), changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var commentCount, records int64
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM comments").Scan(&commentCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'add_comment' AND idempotency_key = ?", key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if commentCount != 1 || records != 1 {
+		t.Fatalf("durable state = comments %d records %d", commentCount, records)
+	}
+}
+
 func seedCommentSession(t *testing.T, db *sqlite.DB, id string, now time.Time) {
 	t.Helper()
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {

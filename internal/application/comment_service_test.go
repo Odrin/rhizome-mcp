@@ -23,6 +23,10 @@ func (repository *recordingCommentRepository) AddComment(_ context.Context, comm
 	return domain.Comment{ID: command.ID, IssueID: command.Input.IssueID, Content: command.Input.Content, CreatedAt: command.OccurredAt}, nil
 }
 
+func (repository *recordingCommentRepository) LookupAddComment(context.Context, string, []byte) (domain.Comment, bool, error) {
+	return domain.Comment{}, false, nil
+}
+
 func TestCommentServiceValidatesAndBuildsCommand(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 9, 10, 0, time.FixedZone("test", 2*60*60))
 	repository := &recordingCommentRepository{}

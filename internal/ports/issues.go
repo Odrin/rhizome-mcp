@@ -28,6 +28,8 @@ type UpdateIssueCommand struct {
 	LabelIDs            []string // Corresponds to Changes.Labels when missing creation is enabled.
 	CreateMissingLabels bool
 	UpdatedAt           time.Time
+	IdempotencyKey      string
+	RequestHash         []byte
 }
 
 // UpdateIssueResult is the persisted projection and sorted names of fields
@@ -43,6 +45,8 @@ type ArchiveIssueCommand struct {
 	Identifier      domain.IssueIdentifier
 	ExpectedVersion int64
 	ArchivedAt      time.Time
+	IdempotencyKey  string
+	RequestHash     []byte
 }
 
 // ArchiveIssueResult is the full persisted projection after archiving.
@@ -66,7 +70,9 @@ type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
 	LookupCreateIssue(context.Context, string, []byte) (domain.Issue, bool, error)
 	UpdateIssue(context.Context, UpdateIssueCommand) (UpdateIssueResult, error)
+	LookupUpdateIssue(context.Context, string, []byte) (UpdateIssueResult, bool, error)
 	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
+	LookupArchiveIssue(context.Context, string, []byte) (ArchiveIssueResult, bool, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
 	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)
 	ListIssues(context.Context, ListIssuesCommand) (domain.IssueList, error)

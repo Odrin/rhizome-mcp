@@ -39,16 +39,18 @@ type RenewAttemptResult struct {
 }
 
 type SaveAttemptNoteCommand struct {
-	NoteID     string
-	AttemptID  string
-	SessionID  *string
-	TokenHash  []byte
-	Kind       domain.AttemptNoteKind
-	Content    string
-	NextSteps  []string
-	Important  bool
-	Artifacts  []domain.Artifact
-	OccurredAt time.Time
+	NoteID         string
+	AttemptID      string
+	SessionID      *string
+	TokenHash      []byte
+	Kind           domain.AttemptNoteKind
+	Content        string
+	NextSteps      []string
+	Important      bool
+	Artifacts      []domain.Artifact
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
 }
 
 type SaveAttemptNoteResult struct {
@@ -99,6 +101,7 @@ type AttemptRepository interface {
 	LookupClaimIssue(context.Context, string, []byte) (ClaimIssueResult, bool, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
+	LookupSaveAttemptNote(context.Context, string, []byte) (SaveAttemptNoteResult, bool, error)
 	LookupFinishedAttempt(context.Context, string, []byte) (FinishAttemptResult, bool, error)
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
 	ForceReleaseAttempt(context.Context, ForceReleaseAttemptCommand) (ForceReleaseAttemptResult, error)

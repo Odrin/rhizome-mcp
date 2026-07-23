@@ -124,6 +124,24 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 	if err != nil {
 		return UpdateIssueResult{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalUpdateIssueRequest(normalized)
+		if err != nil {
+			return UpdateIssueResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode update issue request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupUpdateIssue(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return UpdateIssueResult{}, err
+		}
+		if found {
+			return UpdateIssueResult{Issue: result.Issue, ChangedFields: append([]string(nil), result.ChangedFields...)}, nil
+		}
+	}
 	labelIDs, err := service.newLabelIDs(normalized.Changes.Labels.Value, normalized.Changes.Labels.Set && normalized.CreateMissingLabels)
 	if err != nil {
 		return UpdateIssueResult{}, err
@@ -135,6 +153,8 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 		LabelIDs:            labelIDs,
 		CreateMissingLabels: normalized.CreateMissingLabels,
 		UpdatedAt:           service.clock.Now().UTC(),
+		IdempotencyKey:      idempotencyKey,
+		RequestHash:         requestHash,
 	})
 	if err != nil {
 		return UpdateIssueResult{}, err
@@ -192,10 +212,30 @@ func (service *IssueService) ArchiveIssue(ctx context.Context, input domain.Arch
 	if err != nil {
 		return ArchiveIssueResult{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalArchiveIssueRequest(normalized)
+		if err != nil {
+			return ArchiveIssueResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode archive issue request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupArchiveIssue(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ArchiveIssueResult{}, err
+		}
+		if found {
+			return ArchiveIssueResult{Issue: result.Issue}, nil
+		}
+	}
 	result, err := service.repository.ArchiveIssue(ctx, ports.ArchiveIssueCommand{
 		Identifier:      identifier,
 		ExpectedVersion: normalized.ExpectedVersion,
 		ArchivedAt:      service.clock.Now().UTC(),
+		IdempotencyKey:  idempotencyKey,
+		RequestHash:     requestHash,
 	})
 	if err != nil {
 		return ArchiveIssueResult{}, err

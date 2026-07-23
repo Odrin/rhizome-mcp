@@ -100,8 +100,16 @@ func (stub *issueRepositoryStub) UpdateIssue(context.Context, ports.UpdateIssueC
 	return ports.UpdateIssueResult{}, nil
 }
 
+func (stub *issueRepositoryStub) LookupUpdateIssue(context.Context, string, []byte) (ports.UpdateIssueResult, bool, error) {
+	return ports.UpdateIssueResult{}, false, nil
+}
+
 func (stub *issueRepositoryStub) ArchiveIssue(context.Context, ports.ArchiveIssueCommand) (ports.ArchiveIssueResult, error) {
 	return ports.ArchiveIssueResult{}, nil
+}
+
+func (stub *issueRepositoryStub) LookupArchiveIssue(context.Context, string, []byte) (ports.ArchiveIssueResult, bool, error) {
+	return ports.ArchiveIssueResult{}, false, nil
 }
 
 func (stub *issueRepositoryStub) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {

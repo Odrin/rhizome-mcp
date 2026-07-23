@@ -488,9 +488,6 @@ func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallTo
 func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
 	for index, artifact := range input.Artifacts {
 		artifacts[index] = domain.ArtifactInput{
@@ -501,6 +498,7 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 	result, err := adapter.attempts.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: domain.AttemptNoteKind(input.Kind),
 		SessionID: sessionID, Content: input.Content, NextSteps: input.NextSteps, Important: input.Important, Artifacts: artifacts,
+		IdempotencyKey: input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -606,11 +604,9 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 
 func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	comment, err := adapter.comments.AddComment(ctx, domain.AddCommentInput{
 		IssueID: input.IssueID, Content: input.Content, SessionID: adapter.sessionIDFor(request.Session),
+		IdempotencyKey: input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -620,9 +616,6 @@ func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallTool
 
 func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.CallToolRequest, input recordDecisionInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	result, err := adapter.decisions.RecordDecision(ctx, domain.RecordDecisionInput{
 		IssueID: input.IssueID, Title: input.Title, Summary: input.Summary, Content: input.Content,
 		Status: domain.DecisionStatus(input.Status), SupersedesID: input.SupersedesID,
@@ -747,14 +740,12 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 
 func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	result, err := adapter.relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
-		Action:        domain.RelationAction(input.Action),
-		SourceIssueID: input.SourceIssueID,
-		TargetIssueID: input.TargetIssueID,
-		RelationType:  domain.RelationType(input.RelationType),
+		Action:         domain.RelationAction(input.Action),
+		SourceIssueID:  input.SourceIssueID,
+		TargetIssueID:  input.TargetIssueID,
+		RelationType:   domain.RelationType(input.RelationType),
+		IdempotencyKey: input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -825,14 +816,12 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 
 func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	result, err := adapter.issues.UpdateIssue(ctx, domain.UpdateIssueInput{
 		IssueID:             input.IssueID,
 		ExpectedVersion:     input.ExpectedVersion,
 		Changes:             input.Changes.domainPatch(),
 		CreateMissingLabels: input.CreateMissingLabels,
+		IdempotencyKey:      input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -901,12 +890,10 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
 	adapter.touchSession(ctx, request.Session)
-	if input.IdempotencyKey != nil {
-		return adapter.failure(unsupportedField("idempotency_key"))
-	}
 	result, err := adapter.issues.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
+		IdempotencyKey:  input.IdempotencyKey,
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -1004,7 +991,7 @@ func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) 
 }
 
 func unsupportedField(field string) *domain.Error {
-	return domain.NewError(domain.CodeInvalidArgument, "field is not supported", false,
+	return domain.NewError(domain.CodeInvalidArgument, fmt.Sprintf("field %q is not supported", field), false,
 		domain.Detail{Field: field, Code: "UNSUPPORTED"})
 }
 

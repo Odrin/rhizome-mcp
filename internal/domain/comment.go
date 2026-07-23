@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -18,9 +19,10 @@ type Comment struct {
 
 // AddCommentInput contains the caller-owned values for one new comment.
 type AddCommentInput struct {
-	IssueID   string
-	Content   string
-	SessionID *string
+	IssueID        string
+	Content        string
+	SessionID      *string
+	IdempotencyKey *string
 }
 
 // Validate checks and normalizes one comment request. Content is validated
@@ -40,7 +42,29 @@ func (input AddCommentInput) Validate() (AddCommentInput, error) {
 	if err != nil {
 		return AddCommentInput{}, err
 	}
-	return AddCommentInput{IssueID: identifier.Value, Content: input.Content, SessionID: sessionID}, nil
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return AddCommentInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return AddCommentInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
+	return AddCommentInput{IssueID: identifier.Value, Content: input.Content, SessionID: sessionID, IdempotencyKey: idempotencyKey}, nil
+}
+
+// CanonicalAddCommentRequest returns deterministic JSON for a normalized
+// add-comment request. The idempotency key and transient session identity are
+// intentionally excluded.
+func CanonicalAddCommentRequest(input AddCommentInput) ([]byte, error) {
+	request := struct {
+		IssueID string `json:"issue_id"`
+		Content string `json:"content"`
+	}{IssueID: input.IssueID, Content: input.Content}
+	return json.Marshal(request)
 }
 
 // CloneComment returns a comment whose pointer fields do not share storage

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -16,12 +17,44 @@ type RelationRepository struct {
 	db *DB
 }
 
+const manageIssueRelationOperation = "manage_issue_relation"
+
 // NewRelationRepository returns a relation repository backed by database.
 func NewRelationRepository(database *DB) (*RelationRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "relation database is required", false)
 	}
 	return &RelationRepository{db: database}, nil
+}
+
+// LookupManageIssueRelation serves a replay before a relation ID is
+// allocated. ManageIssueRelation still repeats this check in its writer
+// transaction to close the lookup/write race.
+func (repository *RelationRepository) LookupManageIssueRelation(ctx context.Context, key string, hash []byte) (ports.ManageIssueRelationResult, bool, error) {
+	var result ports.ManageIssueRelationResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, manageIssueRelationOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
 }
 
 // ManageIssueRelation atomically resolves endpoints, canonicalizes related_to,
@@ -44,6 +77,26 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 	timestamp := now.Format(time.RFC3339Nano)
 	var result ports.ManageIssueRelationResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, manageIssueRelationOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		source, err := loadIssueForMutation(ctx, tx, command.SourceIdentifier)
 		if err != nil {
 			return err
@@ -120,6 +173,18 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 		result.AffectedIssues, err = loadRelationAffectedIssues(ctx, tx, relation.SourceIssueID, relation.TargetIssueID, now)
 		if err != nil {
 			return err
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode relation response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, manageIssueRelationOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})

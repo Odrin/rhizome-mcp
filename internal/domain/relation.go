@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -58,10 +59,11 @@ type IssueRelation struct {
 // ManageIssueRelationInput is a caller-owned request for one relation mutation.
 // SourceIssueID and TargetIssueID accept a canonical ULID or ISSUE-N.
 type ManageIssueRelationInput struct {
-	Action        RelationAction
-	SourceIssueID string
-	TargetIssueID string
-	RelationType  RelationType
+	Action         RelationAction
+	SourceIssueID  string
+	TargetIssueID  string
+	RelationType   RelationType
+	IdempotencyKey *string
 }
 
 // Validate checks request-local relation rules and normalizes display IDs.
@@ -84,12 +86,40 @@ func (input ManageIssueRelationInput) Validate() (ManageIssueRelationInput, erro
 	if source.Kind == target.Kind && source.Value == target.Value {
 		return ManageIssueRelationInput{}, selfRelationError()
 	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return ManageIssueRelationInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return ManageIssueRelationInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
 	return ManageIssueRelationInput{
-		Action:        input.Action,
-		SourceIssueID: source.Value,
-		TargetIssueID: target.Value,
-		RelationType:  input.RelationType,
+		Action:         input.Action,
+		SourceIssueID:  source.Value,
+		TargetIssueID:  target.Value,
+		RelationType:   input.RelationType,
+		IdempotencyKey: idempotencyKey,
 	}, nil
+}
+
+// CanonicalManageIssueRelationRequest returns deterministic JSON for a
+// normalized relation mutation request. The idempotency key is intentionally
+// excluded.
+func CanonicalManageIssueRelationRequest(input ManageIssueRelationInput) ([]byte, error) {
+	request := struct {
+		Action        RelationAction `json:"action"`
+		SourceIssueID string         `json:"source_issue_id"`
+		TargetIssueID string         `json:"target_issue_id"`
+		RelationType  RelationType   `json:"relation_type"`
+	}{
+		Action: input.Action, SourceIssueID: input.SourceIssueID,
+		TargetIssueID: input.TargetIssueID, RelationType: input.RelationType,
+	}
+	return json.Marshal(request)
 }
 
 // CanonicalRelationEndpoints returns the persisted endpoint order. related_to is

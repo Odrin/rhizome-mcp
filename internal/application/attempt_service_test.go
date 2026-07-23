@@ -346,6 +346,10 @@ func (repository *recordingAttemptRepository) SaveAttemptNote(_ context.Context,
 	return ports.SaveAttemptNoteResult{Note: domain.AttemptNote{ID: command.NoteID}}, nil
 }
 
+func (repository *recordingAttemptRepository) LookupSaveAttemptNote(context.Context, string, []byte) (ports.SaveAttemptNoteResult, bool, error) {
+	return ports.SaveAttemptNoteResult{}, false, nil
+}
+
 func (repository *recordingAttemptRepository) FinishAttempt(_ context.Context, command ports.FinishAttemptCommand) (ports.FinishAttemptResult, error) {
 	repository.finishCalled = true
 	repository.finishCommand = command

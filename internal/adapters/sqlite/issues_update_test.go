@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -237,6 +238,54 @@ func TestIssueUpdateRejectsInvalidParentsWithoutMutation(t *testing.T) {
 	}
 	if version != 1 || events != 1 {
 		t.Fatalf("version=%d events=%d", version, events)
+	}
+}
+
+func TestIssueUpdateIdempotencyReplayAndConflict(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Update retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "update-retry"
+	input := domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: 1,
+		Changes:        domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "Updated once"}},
+		IdempotencyKey: &key,
+	}
+	first, err := service.UpdateIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	if first.Issue.Title != "Updated once" || first.Issue.Version != 2 {
+		t.Fatalf("first update result = %#v", first)
+	}
+	second, err := service.UpdateIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("replay update: %v", err)
+	}
+	if !reflect.DeepEqual(first.Issue, second.Issue) || !equalStrings(first.ChangedFields, second.ChangedFields) {
+		t.Fatalf("replay mismatch: %#v != %#v", first, second)
+	}
+	changed := input
+	changed.Changes.Title.Value = "Different title"
+	if _, err := service.UpdateIssue(ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var version int64
+	var title string
+	var records int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT version, title FROM issues WHERE id = ?", issue.ID).Scan(&version, &title); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'update_issue' AND idempotency_key = ?", key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 || title != "Updated once" || records != 1 {
+		t.Fatalf("durable state = version %d title %q records %d", version, title, records)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -339,6 +340,52 @@ func TestIssueArchiveRollsBackProjectionWhenEventAppendFails(t *testing.T) {
 	}
 	if version != 1 || archivedAt != nil || events != 1 {
 		t.Fatalf("archive rollback state: version=%d archived_at=%v events=%d", version, archivedAt, events)
+	}
+}
+
+func TestIssueArchiveIdempotencyReplayAndConflict(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Archive retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "archive-retry"
+	input := domain.ArchiveIssueInput{IssueID: issue.ID, ExpectedVersion: 1, IdempotencyKey: &key}
+	first, err := service.ArchiveIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("first archive: %v", err)
+	}
+	if first.Issue.ArchivedAt == nil {
+		t.Fatalf("first archive result = %#v", first)
+	}
+	second, err := service.ArchiveIssue(ctx, input)
+	if err != nil {
+		t.Fatalf("replay archive: %v", err)
+	}
+	if !reflect.DeepEqual(first.Issue, second.Issue) {
+		t.Fatalf("replay mismatch: %#v != %#v", first.Issue, second.Issue)
+	}
+	otherIssue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Other archive target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := input
+	changed.IssueID = otherIssue.ID
+	if _, err := service.ArchiveIssue(ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var archivedCount, records int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issues WHERE archived_at IS NOT NULL").Scan(&archivedCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'archive_issue' AND idempotency_key = ?", key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if archivedCount != 1 || records != 1 {
+		t.Fatalf("durable state = archived %d records %d", archivedCount, records)
 	}
 }
 

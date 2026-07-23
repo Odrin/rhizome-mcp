@@ -441,6 +441,52 @@ func TestRelationRepositoryConcurrentReverseBlocksAllowsOnlyOne(t *testing.T) {
 	}
 }
 
+func TestRelationRepositoryIdempotencyReplayAndConflict(t *testing.T) {
+	issues, db, now := openIssueService(t)
+	relations := openRelationService(t, db, now)
+	ctx := context.Background()
+	first := createRelationTestIssue(t, issues, "First")
+	second := createRelationTestIssue(t, issues, "Second")
+	third := createRelationTestIssue(t, issues, "Third")
+
+	key := "relation-retry"
+	input := domain.ManageIssueRelationInput{
+		Action: domain.RelationActionAdd, SourceIssueID: first.ID, TargetIssueID: second.ID,
+		RelationType: domain.RelationTypeBlocks, IdempotencyKey: &key,
+	}
+	added, err := relations.ManageIssueRelation(ctx, input)
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	if !added.Changed || added.Relation.ID == "" {
+		t.Fatalf("first add result = %#v", added)
+	}
+	replayed, err := relations.ManageIssueRelation(ctx, input)
+	if err != nil {
+		t.Fatalf("replay add: %v", err)
+	}
+	if !reflect.DeepEqual(added, replayed) {
+		t.Fatalf("replay mismatch: %#v != %#v", added, replayed)
+	}
+	changed := input
+	changed.TargetIssueID = third.ID
+	if _, err := relations.ManageIssueRelation(ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var relationCount, records int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issue_relations").Scan(&relationCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'manage_issue_relation' AND idempotency_key = ?", key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if relationCount != 1 || records != 1 {
+		t.Fatalf("durable state = relations %d records %d", relationCount, records)
+	}
+}
+
 func openRelationService(t *testing.T, db *sqlite.DB, now time.Time) *application.RelationService {
 	t.Helper()
 	repository, err := sqlite.NewRelationRepository(db)

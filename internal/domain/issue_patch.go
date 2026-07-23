@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -46,6 +47,7 @@ type UpdateIssueInput struct {
 	ExpectedVersion     int64
 	Changes             IssuePatch
 	CreateMissingLabels bool
+	IdempotencyKey      *string
 }
 
 // Validate checks request-local patch rules and normalizes issue references.
@@ -118,12 +120,41 @@ func (input UpdateIssueInput) Validate() (normalized UpdateIssueInput, err error
 		}
 		patch.Labels.Value = labels
 	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return UpdateIssueInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return UpdateIssueInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
 	return UpdateIssueInput{
 		IssueID:             identifier.Value,
 		ExpectedVersion:     input.ExpectedVersion,
 		Changes:             copyIssuePatch(patch),
 		CreateMissingLabels: input.CreateMissingLabels,
+		IdempotencyKey:      idempotencyKey,
 	}, nil
+}
+
+// CanonicalUpdateIssueRequest returns deterministic JSON for a normalized
+// update request. The idempotency key is intentionally excluded.
+func CanonicalUpdateIssueRequest(input UpdateIssueInput) ([]byte, error) {
+	request := struct {
+		IssueID             string     `json:"issue_id"`
+		ExpectedVersion     int64      `json:"expected_version"`
+		Changes             IssuePatch `json:"changes"`
+		CreateMissingLabels bool       `json:"create_missing_labels"`
+	}{
+		IssueID:             input.IssueID,
+		ExpectedVersion:     input.ExpectedVersion,
+		Changes:             input.Changes,
+		CreateMissingLabels: input.CreateMissingLabels,
+	}
+	return json.Marshal(request)
 }
 
 func normalizeUpdateValidationError(err error) error {

@@ -131,13 +131,12 @@ type addCommentInput struct {
 }
 
 type recordDecisionInput struct {
-	IssueID        *string `json:"issue_id,omitempty"`
-	Title          string  `json:"title"`
-	Summary        string  `json:"summary"`
-	Content        string  `json:"content"`
-	Status         string  `json:"status,omitempty"`
-	SupersedesID   *string `json:"supersedes_id,omitempty"`
-	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	IssueID      *string `json:"issue_id,omitempty"`
+	Title        string  `json:"title"`
+	Summary      string  `json:"summary"`
+	Content      string  `json:"content"`
+	Status       string  `json:"status,omitempty"`
+	SupersedesID *string `json:"supersedes_id,omitempty"`
 }
 
 type listDecisionsInput struct {

@@ -58,6 +58,10 @@ func (stub *relationRepositoryStub) ManageIssueRelation(_ context.Context, comma
 	return stub.result, nil
 }
 
+func (stub *relationRepositoryStub) LookupManageIssueRelation(context.Context, string, []byte) (ports.ManageIssueRelationResult, bool, error) {
+	return ports.ManageIssueRelationResult{}, false, nil
+}
+
 type fixedRelationIDGenerator string
 
 func (generator fixedRelationIDGenerator) New() (string, error) {

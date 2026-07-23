@@ -1233,6 +1233,90 @@ func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.
 	}
 }
 
+func TestSaveAttemptNoteIdempotencyReplayAndConflict(t *testing.T) {
+	ctx := context.Background()
+	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "note-idempotency.db"), sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close(ctx) }()
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueService, err := application.NewIssueService(issues, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "note retry", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewAttemptService(repository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := service.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "note-retry"
+	input := domain.SaveAttemptNoteInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Kind: domain.AttemptNoteKindProgress,
+		Content: "retried note", IdempotencyKey: &key,
+	}
+	first, err := service.SaveAttemptNote(ctx, input)
+	if err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	if first.Note.ID == "" || first.Note.Content != "retried note" {
+		t.Fatalf("first save result = %#v", first)
+	}
+	second, err := service.SaveAttemptNote(ctx, input)
+	if err != nil {
+		t.Fatalf("replay save: %v", err)
+	}
+	if second.Note.ID != first.Note.ID {
+		t.Fatalf("replay mismatch: %#v != %#v", first, second)
+	}
+	changed := input
+	changed.Content = "different content"
+	if _, err := service.SaveAttemptNote(ctx, changed); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflict = %v", err)
+	}
+	var noteCount, records int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM attempt_notes").Scan(&noteCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records WHERE operation = 'save_attempt_note' AND idempotency_key = ?", key).Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if noteCount != 1 || records != 1 {
+		t.Fatalf("durable state = notes %d records %d", noteCount, records)
+	}
+}
+
 func TestSaveAttemptNotePersistsArtifactsAtomicallyAndSafely(t *testing.T) {
 	ctx := context.Background()
 	source := clock.NewFakeClock(time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))

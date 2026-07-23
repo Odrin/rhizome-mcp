@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -49,12 +50,33 @@ func (service *RelationService) ManageIssueRelation(ctx context.Context, input d
 		return ManageIssueRelationResult{}, err
 	}
 
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalManageIssueRelationRequest(normalized)
+		if err != nil {
+			return ManageIssueRelationResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode relation request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupManageIssueRelation(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ManageIssueRelationResult{}, err
+		}
+		if found {
+			return result, nil
+		}
+	}
+
 	command := ports.ManageIssueRelationCommand{
 		Action:           normalized.Action,
 		SourceIdentifier: source,
 		TargetIdentifier: target,
 		RelationType:     normalized.RelationType,
 		OccurredAt:       service.clock.Now().UTC(),
+		IdempotencyKey:   idempotencyKey,
+		RequestHash:      requestHash,
 	}
 	if normalized.Action == domain.RelationActionAdd {
 		command.RelationID, err = service.ids.New()

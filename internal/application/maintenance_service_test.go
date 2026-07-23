@@ -85,6 +85,10 @@ func (repository *recordingMaintenanceAttemptRepository) SaveAttemptNote(context
 	return ports.SaveAttemptNoteResult{}, nil
 }
 
+func (repository *recordingMaintenanceAttemptRepository) LookupSaveAttemptNote(context.Context, string, []byte) (ports.SaveAttemptNoteResult, bool, error) {
+	return ports.SaveAttemptNoteResult{}, false, nil
+}
+
 func (repository *recordingMaintenanceAttemptRepository) LookupFinishedAttempt(context.Context, string, []byte) (ports.FinishAttemptResult, bool, error) {
 	return ports.FinishAttemptResult{}, false, nil
 }

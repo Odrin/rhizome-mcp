@@ -22,8 +22,9 @@ import (
 type AttemptRepository struct{ db *DB }
 
 const (
-	claimIssueOperation    = "claim_issue"
-	finishAttemptOperation = "finish_attempt"
+	claimIssueOperation      = "claim_issue"
+	finishAttemptOperation   = "finish_attempt"
+	saveAttemptNoteOperation = "save_attempt_note"
 )
 
 func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
@@ -299,6 +300,36 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 	return result, nil
 }
 
+// LookupSaveAttemptNote serves a replay before the note ID and artifact IDs
+// are allocated. SaveAttemptNote still repeats this check in its writer
+// transaction to close the lookup/write race.
+func (repository *AttemptRepository) LookupSaveAttemptNote(ctx context.Context, key string, hash []byte) (ports.SaveAttemptNoteResult, bool, error) {
+	var result ports.SaveAttemptNoteResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, saveAttemptNoteOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
 func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, command ports.SaveAttemptNoteCommand) (ports.SaveAttemptNoteResult, error) {
 	if !validAttemptSessionID(command.SessionID) {
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt note command is invalid", false)
@@ -319,6 +350,26 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 	var result ports.SaveAttemptNoteResult
 	var leaseExpired bool
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, saveAttemptNoteOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		var issueID, status, leaseExpiresAt string
 		var tokenHash []byte
 		err := tx.QueryRowContext(ctx, `SELECT issue_id, status, lease_token_hash, lease_expires_at
@@ -403,6 +454,18 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 		result.Note = domain.AttemptNote{
 			ID: command.NoteID, AttemptID: command.AttemptID, Kind: command.Kind, Content: command.Content,
 			NextSteps: append([]string(nil), command.NextSteps...), Important: command.Important, CreatedAt: now,
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt note response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, saveAttemptNoteOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})

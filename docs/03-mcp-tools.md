@@ -282,6 +282,13 @@ Input:
 
 Only changed fields should be present.
 
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (`issue_id`,
+`expected_version`, `changes`, and `create_missing_labels`) replays the original
+patch response, including after `expected_version` has since moved on from a
+later, unrelated update. Reusing the key with a different normalized request
+returns `IDEMPOTENCY_CONFLICT`.
+
 Output:
 
 ```text
@@ -377,6 +384,12 @@ Rules:
 - active attempts prevent archiving;
 - related data remains intact;
 - archived issues are hidden by default.
+
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (`issue_id`
+and `expected_version`) replays the original archive response, including after
+the issue has already been archived by that same call. Reusing the key with a
+different normalized request returns `IDEMPOTENCY_CONFLICT`.
 
 Output:
 
@@ -521,6 +534,12 @@ Rules:
 - no relation ID is required for removal;
 - cycles in `blocks` are rejected;
 - symmetric `related_to` is canonicalized.
+
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (`action`,
+`source_issue_id`, `target_issue_id`, and `relation_type`) replays the original
+mutation response. Reusing the key with a different normalized request returns
+`IDEMPOTENCY_CONFLICT`.
 
 Output:
 
@@ -723,8 +742,10 @@ Output:
 comment
 ```
 
-Only a null `idempotency_key` is currently accepted. No duplicate-retry
-semantics are promised.
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (`issue_id`
+and `content`) replays the original comment response. Reusing the key with a
+different normalized request returns `IDEMPOTENCY_CONFLICT`.
 
 ### 8.2. `record_decision`
 
@@ -737,8 +758,7 @@ Input:
   "summary": "Active attempts use short renewable leases.",
   "content": "Full reasoning in Markdown.",
   "status": "active",
-  "supersedes_id": null,
-  "idempotency_key": null
+  "supersedes_id": null
 }
 ```
 
@@ -753,8 +773,16 @@ Decisions are append-only records and may be project-level or issue-level.
 Supplying `supersedes_id` atomically creates an active replacement and marks
 one active predecessor superseded; the predecessor must have the same scope.
 The standalone operation writes one compact, session-attributed
-`decision_recorded` event. Only a null `idempotency_key` is accepted; replay
-semantics are not provided.
+`decision_recorded` event.
+
+`record_decision` does not accept `idempotency_key`: the field is not part of
+its published input schema. Unlike the other mutations in this catalog,
+`supersedes_id` makes one call responsible for two conditional writes (marking
+a predecessor superseded and inserting its replacement); replaying that
+combination safely would require storing and re-validating the predecessor's
+state as part of the cached response, which is disproportionate to the value
+for an append-only decision log. Retry `record_decision` by first checking
+`list_decisions` for a decision already recorded with the intended content.
 
 ### 8.3. `list_decisions`
 
@@ -897,6 +925,13 @@ finding
 warning
 checkpoint
 ```
+
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (the
+lease-token proof, `kind`, `content`, `next_steps`, `important`, and
+`artifacts`) replays the original note response without creating another note,
+event, or artifact set. Reusing the key with a different normalized request
+returns `IDEMPOTENCY_CONFLICT`.
 
 Output:
 

@@ -343,12 +343,6 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		commentOutput.Comment.AuthorLabel != nil {
 		t.Fatalf("comment result = %#v", commentOutput)
 	}
-	unsupportedComment := call(t, client, "add_comment", map[string]any{
-		"issue_id": issue.ID, "content": "not stored", "idempotency_key": "unsupported",
-	})
-	if !unsupportedComment.IsError {
-		t.Fatal("add_comment accepted unsupported idempotency key")
-	}
 	invalidComment := call(t, client, "add_comment", map[string]any{"issue_id": "bad", "content": "not stored"})
 	if !invalidComment.IsError {
 		t.Fatal("add_comment accepted invalid issue identifier")
@@ -568,7 +562,9 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	unsupportedDecision := call(t, client, "record_decision", map[string]any{
 		"title": "Unsupported retry", "summary": "No replay", "content": "", "idempotency_key": "decision-key",
 	})
-	assertDomainError(t, unsupportedDecision, "INVALID_ARGUMENT", false)
+	if !unsupportedDecision.IsError || unsupportedDecision.StructuredContent != nil {
+		t.Fatalf("record_decision idempotency_key should be rejected by the advertised schema: %#v", unsupportedDecision)
+	}
 
 	labels := call(t, client, "list_labels", map[string]any{})
 	var labelPage struct {
@@ -797,6 +793,189 @@ func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
 	if replayed.IsError || replayOutput.Attempt.ID != firstOutput.Attempt.ID || replayOutput.LeaseToken != firstOutput.LeaseToken {
 		t.Fatalf("claim replay = %#v", replayed)
 	}
+}
+
+func TestUpdateIssueAcceptsIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "update-idempotency.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "original"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create issue = %#v", created)
+	}
+	args := map[string]any{
+		"issue_id": issue.ID, "expected_version": int64(1),
+		"changes": map[string]any{"title": "updated"}, "idempotency_key": "update-key",
+	}
+	first := call(t, client, "update_issue", args)
+	var firstOutput struct {
+		Issue struct {
+			Version int64  `json:"version"`
+			Title   string `json:"title"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, first, &firstOutput)
+	if first.IsError || firstOutput.Issue.Version != 2 || firstOutput.Issue.Title != "updated" {
+		t.Fatalf("update output = %#v", first)
+	}
+	replayed := call(t, client, "update_issue", args)
+	var replayOutput struct {
+		Issue struct {
+			Version int64  `json:"version"`
+			Title   string `json:"title"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Issue.Version != firstOutput.Issue.Version || replayOutput.Issue.Title != firstOutput.Issue.Title {
+		t.Fatalf("update replay = %#v, want version %d title %q", replayed, firstOutput.Issue.Version, firstOutput.Issue.Title)
+	}
+	conflicting := call(t, client, "update_issue", map[string]any{
+		"issue_id": issue.ID, "expected_version": int64(1),
+		"changes": map[string]any{"title": "different"}, "idempotency_key": "update-key",
+	})
+	assertDomainError(t, conflicting, "IDEMPOTENCY_CONFLICT", false)
+}
+
+func TestArchiveIssueAcceptsIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "archive-idempotency.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "archivable"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create issue = %#v", created)
+	}
+	args := map[string]any{"issue_id": issue.ID, "expected_version": int64(1), "idempotency_key": "archive-key"}
+	first := call(t, client, "archive_issue", args)
+	var firstOutput struct {
+		Version    int64      `json:"version"`
+		ArchivedAt *time.Time `json:"archived_at"`
+	}
+	decodeStructured(t, first, &firstOutput)
+	if first.IsError || firstOutput.Version != 2 || firstOutput.ArchivedAt == nil {
+		t.Fatalf("archive output = %#v", first)
+	}
+	replayed := call(t, client, "archive_issue", args)
+	var replayOutput struct {
+		Version    int64      `json:"version"`
+		ArchivedAt *time.Time `json:"archived_at"`
+	}
+	decodeStructured(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Version != firstOutput.Version {
+		t.Fatalf("archive replay = %#v, want version %d", replayed, firstOutput.Version)
+	}
+	conflicting := call(t, client, "archive_issue", map[string]any{
+		"issue_id": issue.ID, "expected_version": int64(2), "idempotency_key": "archive-key",
+	})
+	assertDomainError(t, conflicting, "IDEMPOTENCY_CONFLICT", false)
+}
+
+func TestManageIssueRelationAcceptsIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "relation-idempotency.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	source1 := call(t, client, "create_issue", map[string]any{"type": "task", "title": "source"})
+	var sourceIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, source1, &sourceIssue)
+	target := call(t, client, "create_issue", map[string]any{"type": "task", "title": "target"})
+	var targetIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, target, &targetIssue)
+	if source1.IsError || target.IsError || sourceIssue.ID == "" || targetIssue.ID == "" {
+		t.Fatalf("create issues = %#v, %#v", source1, target)
+	}
+	args := map[string]any{
+		"action": "add", "source_issue_id": sourceIssue.ID, "target_issue_id": targetIssue.ID,
+		"relation_type": "blocks", "idempotency_key": "relation-key",
+	}
+	first := call(t, client, "manage_issue_relation", args)
+	var firstOutput struct {
+		Relation struct {
+			ID string `json:"id"`
+		} `json:"relation"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, first, &firstOutput)
+	if first.IsError || firstOutput.Relation.ID == "" || !firstOutput.Changed {
+		t.Fatalf("manage relation output = %#v", first)
+	}
+	replayed := call(t, client, "manage_issue_relation", args)
+	var replayOutput struct {
+		Relation struct {
+			ID string `json:"id"`
+		} `json:"relation"`
+		Changed bool `json:"changed"`
+	}
+	decodeStructured(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Relation.ID != firstOutput.Relation.ID || replayOutput.Changed != firstOutput.Changed {
+		t.Fatalf("manage relation replay = %#v, want relation ID %q", replayed, firstOutput.Relation.ID)
+	}
+	conflicting := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": sourceIssue.ID, "target_issue_id": targetIssue.ID,
+		"relation_type": "related_to", "idempotency_key": "relation-key",
+	})
+	assertDomainError(t, conflicting, "IDEMPOTENCY_CONFLICT", false)
+}
+
+func TestAddCommentAcceptsIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "comment-idempotency.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "commented"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create issue = %#v", created)
+	}
+	args := map[string]any{"issue_id": issue.ID, "content": "idempotent comment", "idempotency_key": "comment-key"}
+	first := call(t, client, "add_comment", args)
+	var firstOutput struct {
+		Comment struct {
+			ID string `json:"id"`
+		} `json:"comment"`
+	}
+	decodeStructured(t, first, &firstOutput)
+	if first.IsError || firstOutput.Comment.ID == "" {
+		t.Fatalf("add_comment output = %#v", first)
+	}
+	replayed := call(t, client, "add_comment", args)
+	var replayOutput struct {
+		Comment struct {
+			ID string `json:"id"`
+		} `json:"comment"`
+	}
+	decodeStructured(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Comment.ID != firstOutput.Comment.ID {
+		t.Fatalf("add_comment replay = %#v, want comment ID %q", replayed, firstOutput.Comment.ID)
+	}
+	conflicting := call(t, client, "add_comment", map[string]any{
+		"issue_id": issue.ID, "content": "different content", "idempotency_key": "comment-key",
+	})
+	assertDomainError(t, conflicting, "IDEMPOTENCY_CONFLICT", false)
 }
 
 func TestReviewRequestToolsLifecycle(t *testing.T) {
@@ -1768,11 +1947,37 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		"content": "note", "artifacts": []any{map[string]any{"type": "file", "uri": "../outside"}},
 	})
 	assertDomainError(t, unsafeArtifacts, "INVALID_ARGUMENT", false)
-	unsupportedIdempotency := call(t, client, "save_attempt_note", map[string]any{
+	idempotentNote := call(t, client, "save_attempt_note", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
-		"content": "note", "idempotency_key": "unsupported",
+		"content": "idempotent note", "idempotency_key": "note-key",
 	})
-	assertDomainError(t, unsupportedIdempotency, "INVALID_ARGUMENT", false)
+	var idempotentOutput struct {
+		AttemptNote struct {
+			ID string `json:"id"`
+		} `json:"attempt_note"`
+	}
+	decodeStructured(t, idempotentNote, &idempotentOutput)
+	if idempotentNote.IsError || idempotentOutput.AttemptNote.ID == "" {
+		t.Fatalf("idempotent save_attempt_note result = %#v", idempotentNote)
+	}
+	replayedNote := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
+		"content": "idempotent note", "idempotency_key": "note-key",
+	})
+	var replayedNoteOutput struct {
+		AttemptNote struct {
+			ID string `json:"id"`
+		} `json:"attempt_note"`
+	}
+	decodeStructured(t, replayedNote, &replayedNoteOutput)
+	if replayedNote.IsError || replayedNoteOutput.AttemptNote.ID != idempotentOutput.AttemptNote.ID {
+		t.Fatalf("replayed save_attempt_note result = %#v, want note ID %q", replayedNote, idempotentOutput.AttemptNote.ID)
+	}
+	conflictingNote := call(t, client, "save_attempt_note", map[string]any{
+		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "progress",
+		"content": "different content", "idempotency_key": "note-key",
+	})
+	assertDomainError(t, conflictingNote, "IDEMPOTENCY_CONFLICT", false)
 	listed := call(t, client, "list_issues", map[string]any{"effective_statuses": []string{"in_progress"}})
 	var listedOutput struct {
 		Items []struct {

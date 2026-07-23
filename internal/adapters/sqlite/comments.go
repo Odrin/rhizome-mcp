@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -17,12 +18,44 @@ type CommentRepository struct {
 	db *DB
 }
 
+const addCommentOperation = "add_comment"
+
 // NewCommentRepository returns a comment repository backed by database.
 func NewCommentRepository(database *DB) (*CommentRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "comment database is required", false)
 	}
 	return &CommentRepository{db: database}, nil
+}
+
+// LookupAddComment serves a replay before the comment ID is allocated.
+// AddComment still repeats this check in its writer transaction to close the
+// lookup/write race.
+func (repository *CommentRepository) LookupAddComment(ctx context.Context, key string, hash []byte) (domain.Comment, bool, error) {
+	var result domain.Comment
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, addCommentOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
 }
 
 // AddComment atomically inserts one comment and its compact issue event.
@@ -46,6 +79,26 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 	timestamp := now.Format(time.RFC3339Nano)
 	var comment domain.Comment
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, addCommentOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &comment); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		issue, err := loadIssueForMutation(ctx, tx, identifier)
 		if err != nil {
 			return err
@@ -76,7 +129,22 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 		}
 
 		comment, err = loadComment(ctx, tx, command.ID)
-		return err
+		if err != nil {
+			return err
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(comment)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode comment response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, addCommentOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return domain.Comment{}, err

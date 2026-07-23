@@ -16,6 +16,8 @@ type ManageIssueRelationCommand struct {
 	RelationType     domain.RelationType
 	RelationID       string // Required for add; empty for remove.
 	OccurredAt       time.Time
+	IdempotencyKey   string
+	RequestHash      []byte
 }
 
 // ManageIssueRelationResult is the canonical relation and its two current
@@ -29,4 +31,5 @@ type ManageIssueRelationResult struct {
 // RelationRepository persists one relation mutation atomically with its event.
 type RelationRepository interface {
 	ManageIssueRelation(context.Context, ManageIssueRelationCommand) (ManageIssueRelationResult, error)
+	LookupManageIssueRelation(context.Context, string, []byte) (ManageIssueRelationResult, bool, error)
 }

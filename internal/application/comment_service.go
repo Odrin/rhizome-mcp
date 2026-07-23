@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -37,6 +38,24 @@ func (service *CommentService) AddComment(ctx context.Context, input domain.AddC
 	if err != nil {
 		return domain.Comment{}, err
 	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalAddCommentRequest(normalized)
+		if err != nil {
+			return domain.Comment{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode add comment request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		comment, found, err := service.repository.LookupAddComment(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return domain.Comment{}, err
+		}
+		if found {
+			return comment, nil
+		}
+	}
 	id, err := service.ids.New()
 	if err != nil {
 		return domain.Comment{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate comment identifier", false)
@@ -46,5 +65,6 @@ func (service *CommentService) AddComment(ctx context.Context, input domain.AddC
 	}
 	return service.repository.AddComment(ctx, ports.AddCommentCommand{
 		ID: id, Input: normalized, OccurredAt: service.clock.Now().UTC(),
+		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 }

@@ -19,7 +19,11 @@ type IssueRepository struct {
 	afterGetIssueProjectionReadForTest func()
 }
 
-const createIssueOperation = "create_issue"
+const (
+	createIssueOperation  = "create_issue"
+	updateIssueOperation  = "update_issue"
+	archiveIssueOperation = "archive_issue"
+)
 
 // NewIssueRepository returns an issue repository backed by database.
 func NewIssueRepository(database *DB) (*IssueRepository, error) {
@@ -229,6 +233,35 @@ func (repository *IssueRepository) GetIssue(ctx context.Context, identifier doma
 	return issue, nil
 }
 
+// LookupUpdateIssue serves a replay before label IDs are allocated. Update
+// still repeats this check in its writer transaction to close the lookup/write race.
+func (repository *IssueRepository) LookupUpdateIssue(ctx context.Context, key string, hash []byte) (ports.UpdateIssueResult, bool, error) {
+	var result ports.UpdateIssueResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, updateIssueOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
 // UpdateIssue atomically validates the current projection, conditionally
 // persists an optimistic patch, and appends its one corresponding event.
 func (repository *IssueRepository) UpdateIssue(ctx context.Context, command ports.UpdateIssueCommand) (ports.UpdateIssueResult, error) {
@@ -236,6 +269,26 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 	now := command.UpdatedAt.UTC()
 	timestamp := now.Format(time.RFC3339Nano)
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, updateIssueOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		current, err := loadIssueForMutation(ctx, tx, command.Identifier)
 		if err != nil {
 			return err
@@ -319,12 +372,54 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 			return err
 		}
 		result = ports.UpdateIssueResult{Issue: next, ChangedFields: append([]string(nil), changedFields...)}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue update response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, updateIssueOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return ports.UpdateIssueResult{}, err
 	}
 	return result, nil
+}
+
+// LookupArchiveIssue serves a replay before the writer transaction begins.
+// Archive still repeats this check in its writer transaction to close the
+// lookup/write race.
+func (repository *IssueRepository) LookupArchiveIssue(ctx context.Context, key string, hash []byte) (ports.ArchiveIssueResult, bool, error) {
+	var result ports.ArchiveIssueResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, archiveIssueOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
 }
 
 // ArchiveIssue atomically protects against active attempts, conditionally
@@ -334,6 +429,26 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 	now := command.ArchivedAt.UTC()
 	timestamp := now.Format(time.RFC3339Nano)
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, archiveIssueOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
 		current, err := loadIssueForMutation(ctx, tx, command.Identifier)
 		if err != nil {
 			return err
@@ -395,7 +510,22 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 			Kind:  domain.IssueIdentifierInternalID,
 			Value: current.ID,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue archive response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, archiveIssueOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return ports.ArchiveIssueResult{}, err

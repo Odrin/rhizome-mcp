@@ -543,14 +543,15 @@ func (input RenewAttemptInput) Validate() (RenewAttemptInput, error) {
 }
 
 type SaveAttemptNoteInput struct {
-	AttemptID  string
-	LeaseToken string
-	SessionID  *string
-	Kind       AttemptNoteKind
-	Content    string
-	NextSteps  []string
-	Important  bool
-	Artifacts  []ArtifactInput
+	AttemptID      string
+	LeaseToken     string
+	SessionID      *string
+	Kind           AttemptNoteKind
+	Content        string
+	NextSteps      []string
+	Important      bool
+	Artifacts      []ArtifactInput
+	IdempotencyKey *string
 }
 
 func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
@@ -594,10 +595,56 @@ func (input SaveAttemptNoteInput) Validate() (SaveAttemptNoteInput, error) {
 	if err != nil {
 		return SaveAttemptNoteInput{}, err
 	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return SaveAttemptNoteInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return SaveAttemptNoteInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
 	return SaveAttemptNoteInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID, Kind: input.Kind, Content: input.Content,
-		NextSteps: nextSteps, Important: input.Important, Artifacts: artifacts,
+		NextSteps: nextSteps, Important: input.Important, Artifacts: artifacts, IdempotencyKey: idempotencyKey,
 	}, nil
+}
+
+// CanonicalSaveAttemptNoteRequest returns deterministic JSON for a normalized
+// save-attempt-note request. The lease-token proof and caller artifact fields
+// are included; the idempotency key and transient session identity are
+// intentionally excluded.
+func CanonicalSaveAttemptNoteRequest(input SaveAttemptNoteInput) ([]byte, error) {
+	type canonicalArtifact struct {
+		Type     ArtifactType    `json:"type"`
+		URI      string          `json:"uri"`
+		Title    *string         `json:"title"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	request := struct {
+		AttemptID  string              `json:"attempt_id"`
+		LeaseToken string              `json:"lease_token"`
+		Kind       AttemptNoteKind     `json:"kind"`
+		Content    string              `json:"content"`
+		NextSteps  []string            `json:"next_steps"`
+		Important  bool                `json:"important"`
+		Artifacts  []canonicalArtifact `json:"artifacts"`
+	}{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: input.Kind,
+		Content: input.Content, NextSteps: input.NextSteps, Important: input.Important,
+	}
+	if input.Artifacts != nil {
+		request.Artifacts = make([]canonicalArtifact, len(input.Artifacts))
+		for index, artifact := range input.Artifacts {
+			request.Artifacts[index] = canonicalArtifact{
+				Type: artifact.Type, URI: artifact.URI, Title: copyFinishString(artifact.Title),
+				Metadata: append(json.RawMessage(nil), artifact.Metadata...),
+			}
+		}
+	}
+	return json.Marshal(request)
 }
 
 func copyOptionalSessionID(value *string) (*string, error) {

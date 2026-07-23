@@ -47,10 +47,18 @@ func (repository *recordingIssueRepository) UpdateIssue(_ context.Context, comma
 	return ports.UpdateIssueResult{Issue: repository.issue, ChangedFields: []string{"title"}}, nil
 }
 
+func (repository *recordingIssueRepository) LookupUpdateIssue(context.Context, string, []byte) (ports.UpdateIssueResult, bool, error) {
+	return ports.UpdateIssueResult{}, false, nil
+}
+
 func (repository *recordingIssueRepository) ArchiveIssue(_ context.Context, command ports.ArchiveIssueCommand) (ports.ArchiveIssueResult, error) {
 	repository.archiveCalled = true
 	repository.archiveCommand = command
 	return ports.ArchiveIssueResult{Issue: repository.issue}, nil
+}
+
+func (repository *recordingIssueRepository) LookupArchiveIssue(context.Context, string, []byte) (ports.ArchiveIssueResult, bool, error) {
+	return ports.ArchiveIssueResult{}, false, nil
 }
 
 func (repository *recordingIssueRepository) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
@@ -85,6 +93,10 @@ func (repository *recordingRelationRepository) ManageIssueRelation(_ context.Con
 	repository.called = true
 	repository.command = command
 	return ports.ManageIssueRelationResult{}, nil
+}
+
+func (repository *recordingRelationRepository) LookupManageIssueRelation(context.Context, string, []byte) (ports.ManageIssueRelationResult, bool, error) {
+	return ports.ManageIssueRelationResult{}, false, nil
 }
 
 func TestIssueServiceCreateIssueValidatesGeneratesAndDelegates(t *testing.T) {
