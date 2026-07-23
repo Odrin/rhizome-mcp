@@ -157,6 +157,11 @@ func TestResolveDataRoot(t *testing.T) {
 			want:  "/home/tester/.local/share/rhizome-mcp",
 		},
 		{
+			name:  "Linux cleans redundant separators",
+			input: projectconfig.PathInputs{GOOS: "linux", XDGDataHome: "/data//shared/"},
+			want:  "/data/shared/rhizome-mcp",
+		},
+		{
 			name:  "Windows",
 			input: projectconfig.PathInputs{GOOS: "windows", LocalAppData: `C:\Users\tester\AppData\Local`},
 			want:  `C:\Users\tester\AppData\Local\rhizome-mcp`,

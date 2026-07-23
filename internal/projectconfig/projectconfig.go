@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -111,15 +112,15 @@ func ResolveDataRoot(input PathInputs) (string, error) {
 		if input.HomeDir == "" {
 			return "", pathError("home directory is required on macOS")
 		}
-		return filepath.Join(input.HomeDir, "Library", "Application Support", "rhizome-mcp"), nil
+		return path.Join(input.HomeDir, "Library", "Application Support", "rhizome-mcp"), nil
 	case "linux":
 		if input.XDGDataHome != "" {
-			return filepath.Join(input.XDGDataHome, "rhizome-mcp"), nil
+			return path.Join(input.XDGDataHome, "rhizome-mcp"), nil
 		}
 		if input.HomeDir == "" {
 			return "", pathError("home directory is required when XDG_DATA_HOME is unset")
 		}
-		return filepath.Join(input.HomeDir, ".local", "share", "rhizome-mcp"), nil
+		return path.Join(input.HomeDir, ".local", "share", "rhizome-mcp"), nil
 	case "windows":
 		if input.LocalAppData == "" {
 			return "", pathError("LOCALAPPDATA is required on Windows")
@@ -143,7 +144,7 @@ func ProjectDatabasePath(dataRoot, projectID string) (string, error) {
 	if strings.Contains(dataRoot, `\`) {
 		return joinWindows(dataRoot, "projects", canonical, "tasks.db"), nil
 	}
-	return filepath.Join(dataRoot, "projects", canonical, "tasks.db"), nil
+	return path.Join(dataRoot, "projects", canonical, "tasks.db"), nil
 }
 
 // Initialize creates a new repository identity and project data directory.
