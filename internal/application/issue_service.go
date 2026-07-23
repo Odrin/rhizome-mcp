@@ -183,6 +183,12 @@ func (service *IssueService) ListIssues(ctx context.Context, input domain.ListIs
 	return service.repository.ListIssues(ctx, ports.ListIssuesCommand{Input: normalized, Now: service.clock.Now().UTC()})
 }
 
+// CountIssuesByEffectiveStatus returns one bounded aggregate row per effective
+// status present among non-archived issues.
+func (service *IssueService) CountIssuesByEffectiveStatus(ctx context.Context) ([]domain.EffectiveStatusCount, error) {
+	return service.repository.CountIssuesByEffectiveStatus(ctx, ports.CountIssuesByEffectiveStatusCommand{Now: service.clock.Now().UTC()})
+}
+
 func (service *IssueService) newLabelIDs(labels []string, enabled bool) ([]string, error) {
 	if !enabled {
 		return nil, nil

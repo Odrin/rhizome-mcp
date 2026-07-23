@@ -170,3 +170,12 @@ If you want a deeper health check:
 ```bash
 rhizome-mcp doctor --full
 ```
+
+To see a local, read-only status board (issue counts, leased attempts, blocked issues, open review requests, and the planning graph), including a self-contained HTML version you can open in a browser:
+
+```bash
+rhizome-mcp board
+rhizome-mcp board --output board.html
+```
+
+See [`board`](./cli.md#board) in the CLI reference for details.

@@ -181,6 +181,23 @@ Supported flags:
 - `--include-hierarchy`
 - `--include-terminal`
 
+### `board`
+
+Show a local, read-only status board: issue counts by effective status, currently leased attempts, blocked issues with their reasons, open review requests, and the project's planning graph.
+
+```bash
+rhizome-mcp board
+rhizome-mcp board --format json
+rhizome-mcp board --output board.html
+```
+
+Supported flags:
+
+- `--format table|json`
+- `--output PATH` (also write a fully self-contained HTML board to this path)
+
+`--format table|json` controls the terminal summary, which is always printed. Adding `--output PATH` additionally writes a static HTML file with the same summary rendered as tables, an inline SVG rendering of the planning graph (plain rectangles and lines, no JavaScript), and the graph's Mermaid source in a collapsible section for pasting into any Mermaid renderer. The HTML file has no external stylesheets, scripts, fonts, or other network dependencies, so it opens correctly straight from `file://` with no network access.
+
 ### `maintenance release-attempt`
 
 Force-release an active attempt for recovery or maintenance.

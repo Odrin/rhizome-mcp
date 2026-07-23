@@ -140,6 +140,7 @@ type composedServices struct {
 	maintenanceService *application.MaintenanceService
 	workContextService *application.WorkContextService
 	sessionService     *application.AgentSessionService
+	boardService       *application.BoardService
 }
 
 func main() {
@@ -251,7 +252,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return runConnect(ctx, startingPath, target, realPath, printOnly, stdout, stderr)
 	}
 
-	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor") {
+	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -275,6 +276,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 			SearchService:      bundle.searchService,
 			GraphService:       bundle.graphService,
 			MaintenanceService: bundle.maintenanceService,
+			BoardService:       bundle.boardService,
 		}
 	}
 
@@ -756,6 +758,10 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
+	boardService, err := application.NewBoardService(issueService, attemptService, reviewService, graphService, source)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	bundle = &composedServices{
 		project:            project,
@@ -773,6 +779,7 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		maintenanceService: maintenanceService,
 		workContextService: workContextService,
 		sessionService:     sessionService,
+		boardService:       boardService,
 	}
 	keepProject = true
 	return bundle, project, nil

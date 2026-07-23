@@ -124,6 +124,10 @@ func (stub *issueRepositoryStub) ListIssues(context.Context, ports.ListIssuesCom
 	return domain.IssueList{}, nil
 }
 
+func (stub *issueRepositoryStub) CountIssuesByEffectiveStatus(context.Context, ports.CountIssuesByEffectiveStatusCommand) ([]domain.EffectiveStatusCount, error) {
+	return nil, nil
+}
+
 type reviewRepositoryStub struct {
 	createCommand ports.CreateReviewRequestCommand
 	request       domain.ReviewRequest

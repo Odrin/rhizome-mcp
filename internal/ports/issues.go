@@ -65,6 +65,12 @@ type ListIssuesCommand struct {
 	Now   time.Time
 }
 
+// CountIssuesByEffectiveStatusCommand carries the current time used to derive
+// each issue's effective status for the aggregate count.
+type CountIssuesByEffectiveStatusCommand struct {
+	Now time.Time
+}
+
 // IssueRepository reads issue projections and persists issue mutations.
 type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
@@ -76,4 +82,5 @@ type IssueRepository interface {
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
 	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)
 	ListIssues(context.Context, ListIssuesCommand) (domain.IssueList, error)
+	CountIssuesByEffectiveStatus(context.Context, CountIssuesByEffectiveStatusCommand) ([]domain.EffectiveStatusCount, error)
 }

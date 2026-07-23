@@ -54,6 +54,12 @@ type MaintenanceService interface {
 	RebuildSearchIndex(context.Context) error
 }
 
+// BoardService exposes the bounded, read-only project status board for CLI
+// commands.
+type BoardService interface {
+	GetBoard(context.Context) (domain.BoardResult, error)
+}
+
 // Services packages the application-layer services used by the CLI adapter.
 type Services struct {
 	ProjectService     ProjectService
@@ -61,6 +67,7 @@ type Services struct {
 	SearchService      SearchService
 	GraphService       GraphService
 	MaintenanceService MaintenanceService
+	BoardService       BoardService
 }
 
 // InitHandler runs CLI init logic after the adapter parses the command.
@@ -182,6 +189,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runSearch(ctx, args[1:])
 	case "graph":
 		return c.runGraph(ctx, args[1:])
+	case "board":
+		return c.runBoard(ctx, args[1:])
 	case "maintenance":
 		return c.runMaintenance(ctx, args[1:])
 	default:
@@ -703,6 +712,43 @@ func (c *CLI) runGraph(ctx context.Context, args []string) error {
 	return c.writeGraphTable(result)
 }
 
+func (c *CLI) runBoard(ctx context.Context, args []string) error {
+	if c.services.BoardService == nil {
+		return fmt.Errorf("board service is not configured")
+	}
+	fs := flag.NewFlagSet("board", flag.ContinueOnError)
+	format := fs.String("format", "table", "output format")
+	output := fs.String("output", "", "write a fully self-contained HTML status board to this path")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return fmt.Errorf("unsupported format %q", *format)
+	}
+
+	result, err := c.services.BoardService.GetBoard(ctx)
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		if err := writeJSON(c.stdoutWriter(), boardResponseFromDomain(result)); err != nil {
+			return err
+		}
+	} else if err := c.writeBoardTable(result); err != nil {
+		return err
+	}
+	if *output != "" {
+		if err := os.WriteFile(*output, []byte(renderBoardHTML(result)), 0o644); err != nil {
+			return fmt.Errorf("write board HTML: %w", err)
+		}
+	}
+	return nil
+}
+
 func (c *CLI) runMaintenance(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return c.usageError()
@@ -891,6 +937,53 @@ func (c *CLI) writeGraphTable(result domain.GraphResult) error {
 	return err
 }
 
+func (c *CLI) writeBoardTable(result domain.BoardResult) error {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("generated_at\t%s\n", result.GeneratedAt.Format(time.RFC3339Nano)))
+
+	builder.WriteString("\nstatus_counts\n")
+	builder.WriteString("effective_status\tcount\n")
+	for _, count := range result.StatusCounts {
+		builder.WriteString(fmt.Sprintf("%s\t%d\n", count.EffectiveStatus, count.Count))
+	}
+
+	builder.WriteString("\nactive_attempts\n")
+	builder.WriteString("attempt_id\tissue\tkind\tsession_label\tlease_expires_at\n")
+	for _, attempt := range result.ActiveAttempts {
+		label := ""
+		if attempt.SessionLabel != nil {
+			label = *attempt.SessionLabel
+		}
+		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n",
+			attempt.AttemptID, attempt.IssueDisplayID, attempt.Kind, escapeTableValue(label), attempt.LeaseExpiresAt.Format(time.RFC3339Nano)))
+	}
+
+	builder.WriteString("\nblocked_issues\n")
+	builder.WriteString("display_id\ttitle\tblocked_reason\n")
+	for _, issue := range result.BlockedIssues {
+		reason := ""
+		if issue.BlockedReason != nil {
+			reason = *issue.BlockedReason
+		}
+		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\n", issue.DisplayID, escapeTableValue(issue.Title), escapeTableValue(reason)))
+	}
+
+	builder.WriteString("\nreview_requests\n")
+	builder.WriteString("id\tissue_id\tstatus\tcreated_at\n")
+	for _, request := range result.ReviewRequests {
+		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\n", request.ID, request.IssueID, request.Status, request.CreatedAt.Format(time.RFC3339Nano)))
+	}
+
+	builder.WriteString("\nplanning_graph\n")
+	builder.WriteString(fmt.Sprintf("nodes\t%d\n", result.PlanningGraph.Summary.NodeCount))
+	builder.WriteString(fmt.Sprintf("edges\t%d\n", result.PlanningGraph.Summary.EdgeCount))
+	builder.WriteString(fmt.Sprintf("entry_points\t%d\n", result.PlanningGraph.Summary.EntryPointCount))
+	builder.WriteString(fmt.Sprintf("blocking_nodes\t%d\n", result.PlanningGraph.Summary.BlockingNodeCount))
+
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
+}
+
 func (c *CLI) parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	flagArgs, positionals := splitFlagArgs(fs, args)
 	fs.SetOutput(c.stderrWriter())
@@ -974,6 +1067,7 @@ func (c *CLI) usage() string {
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
   rhizome-mcp [--data-root PATH] search QUERY [--format table|json] [--limit N] [--cursor CURSOR] [--entity-type TYPE ...] [--issue ISSUE-ID] [--epic EPIC-ID] [--status STATUS ...] [--label LABEL ...] [--include-archived] [--snippet-length N]
   rhizome-mcp [--data-root PATH] graph ISSUE-ID [--format table|json|mermaid] [--depth N] [--max-nodes N] [--direction outgoing|incoming|both] [--relation-type TYPE ...] [--include-hierarchy] [--include-terminal]
+  rhizome-mcp [--data-root PATH] board [--format table|json] [--output PATH]
   rhizome-mcp [--data-root PATH] maintenance release-attempt ATTEMPT-ID [--format table|json]
   rhizome-mcp [--data-root PATH] maintenance rebuild-search-index [--format table|json]
 `
@@ -1169,6 +1263,97 @@ func searchResponseFromDomain(page domain.SearchPage) SearchResponse {
 		nextCursor = &value
 	}
 	return SearchResponse{Results: results, NextCursor: nextCursor, HasMore: page.HasMore}
+}
+
+// BoardResponse is a stable CLI projection of the board's aggregate status
+// summary.
+type BoardResponse struct {
+	GeneratedAt    time.Time            `json:"generated_at"`
+	StatusCounts   []BoardStatusCount   `json:"status_counts"`
+	ActiveAttempts []BoardActiveAttempt `json:"active_attempts"`
+	BlockedIssues  []IssueSummary       `json:"blocked_issues"`
+	ReviewRequests []BoardReviewRequest `json:"review_requests"`
+	PlanningGraph  BoardGraph           `json:"planning_graph"`
+}
+
+// BoardStatusCount is one bounded aggregate count of issues in a single
+// effective status.
+type BoardStatusCount struct {
+	EffectiveStatus string `json:"effective_status"`
+	Count           int64  `json:"count"`
+}
+
+// BoardActiveAttempt is a stable CLI projection of one currently leased attempt.
+type BoardActiveAttempt struct {
+	AttemptID      string    `json:"attempt_id"`
+	IssueID        string    `json:"issue_id"`
+	IssueDisplayID string    `json:"issue_display_id"`
+	IssueTitle     string    `json:"issue_title"`
+	Kind           string    `json:"kind"`
+	SessionID      *string   `json:"session_id,omitempty"`
+	SessionLabel   *string   `json:"session_label,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+// BoardReviewRequest is a stable CLI projection of one open review request.
+type BoardReviewRequest struct {
+	ID                 string    `json:"id"`
+	IssueID            string    `json:"issue_id"`
+	Status             string    `json:"status"`
+	TargetIssueVersion int64     `json:"target_issue_version"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+// BoardGraph is a stable CLI projection of the board's planning graph.
+type BoardGraph struct {
+	Nodes         []IssueSummary      `json:"nodes"`
+	Edges         []domain.GraphEdge  `json:"edges"`
+	EntryPoints   []string            `json:"entry_points"`
+	BlockingNodes []string            `json:"blocking_nodes"`
+	Summary       domain.GraphSummary `json:"summary"`
+	Truncated     bool                `json:"truncated"`
+}
+
+func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
+	counts := make([]BoardStatusCount, len(result.StatusCounts))
+	for index, item := range result.StatusCounts {
+		counts[index] = BoardStatusCount{EffectiveStatus: string(item.EffectiveStatus), Count: item.Count}
+	}
+	attempts := make([]BoardActiveAttempt, len(result.ActiveAttempts))
+	for index, item := range result.ActiveAttempts {
+		attempts[index] = BoardActiveAttempt{
+			AttemptID: item.AttemptID, IssueID: item.IssueID, IssueDisplayID: item.IssueDisplayID, IssueTitle: item.IssueTitle,
+			Kind: string(item.Kind), SessionID: copyOptionalString(item.SessionID), SessionLabel: copyOptionalString(item.SessionLabel),
+			StartedAt: item.StartedAt.UTC(), LeaseExpiresAt: item.LeaseExpiresAt.UTC(),
+		}
+	}
+	blocked := make([]IssueSummary, len(result.BlockedIssues))
+	for index, item := range result.BlockedIssues {
+		blocked[index] = issueFromDomainProjection(item)
+	}
+	reviews := make([]BoardReviewRequest, len(result.ReviewRequests))
+	for index, item := range result.ReviewRequests {
+		reviews[index] = BoardReviewRequest{
+			ID: item.ID, IssueID: item.IssueID, Status: string(item.Status),
+			TargetIssueVersion: item.TargetIssueVersion, CreatedAt: item.CreatedAt.UTC(),
+		}
+	}
+	nodes := make([]IssueSummary, len(result.PlanningGraph.Nodes))
+	for index, item := range result.PlanningGraph.Nodes {
+		nodes[index] = issueFromDomainProjection(item)
+	}
+	return BoardResponse{
+		GeneratedAt:    result.GeneratedAt.UTC(),
+		StatusCounts:   counts,
+		ActiveAttempts: attempts,
+		BlockedIssues:  blocked,
+		ReviewRequests: reviews,
+		PlanningGraph: BoardGraph{
+			Nodes: nodes, Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints,
+			BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated,
+		},
+	}
 }
 
 func writeJSON(w io.Writer, value any) error {

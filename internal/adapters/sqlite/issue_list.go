@@ -195,6 +195,41 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	return result, nil
 }
 
+// CountIssuesByEffectiveStatus returns one row per effective status present
+// among non-archived issues. The result set is bounded by the fixed number of
+// possible effective statuses regardless of backlog size.
+func (repository *IssueRepository) CountIssuesByEffectiveStatus(ctx context.Context, command ports.CountIssuesByEffectiveStatusCommand) ([]domain.EffectiveStatusCount, error) {
+	now := command.Now.UTC()
+	var result []domain.EffectiveStatusCount
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		effectiveStatusSQL := issueEffectiveStatusSQL(now)
+		rows, err := query.QueryContext(ctx, `SELECT `+effectiveStatusSQL+` AS effective_status, COUNT(*)
+			FROM issues WHERE archived_at IS NULL
+			GROUP BY effective_status
+			ORDER BY effective_status ASC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var effectiveStatus string
+			var count int64
+			if err := rows.Scan(&effectiveStatus, &count); err != nil {
+				return domain.WrapError(err, domain.CodeStorageCorrupt, "stored effective status count is invalid", false)
+			}
+			result = append(result, domain.EffectiveStatusCount{EffectiveStatus: domain.EffectiveStatus(effectiveStatus), Count: count})
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []domain.EffectiveStatusCount{}
+	}
+	return result, nil
+}
+
 func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, error) {
 	var (
 		id, issueType, title, status, priority, createdAt, updatedAt                      string

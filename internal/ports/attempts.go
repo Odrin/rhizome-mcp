@@ -95,6 +95,13 @@ type ExpireAttemptsResult struct {
 	ExpiredAttemptCount int
 }
 
+// ListActiveAttemptsCommand bounds a project-wide read of currently active
+// (leased, unexpired) attempts.
+type ListActiveAttemptsCommand struct {
+	Limit int
+	Now   time.Time
+}
+
 // AttemptRepository executes all attempt lifecycle mutations atomically.
 type AttemptRepository interface {
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
@@ -106,4 +113,5 @@ type AttemptRepository interface {
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
 	ForceReleaseAttempt(context.Context, ForceReleaseAttemptCommand) (ForceReleaseAttemptResult, error)
 	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
+	ListActiveAttempts(context.Context, ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error)
 }

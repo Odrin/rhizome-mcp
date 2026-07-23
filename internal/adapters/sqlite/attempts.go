@@ -300,6 +300,70 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 	return result, nil
 }
 
+// ListActiveAttempts returns a bounded, project-wide projection of currently
+// active (leased, unexpired) attempts joined with their issue and, when
+// present, the claiming session's label. The result is capped at command.Limit
+// regardless of how many issues or attempts exist.
+func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, command ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
+	limit := command.Limit
+	if limit <= 0 || limit > domain.MaxBoardCollectionLimit {
+		limit = domain.MaxBoardCollectionLimit
+	}
+	now := command.Now.UTC()
+	var result []domain.ActiveAttemptSummary
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		rows, err := query.QueryContext(ctx, `SELECT wa.id, wa.issue_id, i.sequence_no, i.title, wa.kind,
+				wa.session_id, s.agent_label, wa.started_at, wa.lease_expires_at
+			FROM work_attempts AS wa
+			JOIN issues AS i ON i.id = wa.issue_id
+			LEFT JOIN agent_sessions AS s ON s.id = wa.session_id
+			WHERE wa.status = 'active' AND wa.lease_expires_at > ?
+			ORDER BY wa.lease_expires_at ASC, wa.id ASC
+			LIMIT ?`, now.Format(time.RFC3339Nano), limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				id, issueID, title, kindText, startedAt, leaseExpiresAt string
+				sequenceNo                                              int64
+				sessionID, agentLabel                                   sql.NullString
+			)
+			if err := rows.Scan(&id, &issueID, &sequenceNo, &title, &kindText, &sessionID, &agentLabel, &startedAt, &leaseExpiresAt); err != nil {
+				return domain.WrapError(err, domain.CodeStorageCorrupt, "stored active attempt projection is invalid", false)
+			}
+			started, err := parseIssueTimestamp("started_at", startedAt)
+			if err != nil {
+				return err
+			}
+			leaseExpires, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
+			if err != nil {
+				return err
+			}
+			result = append(result, domain.ActiveAttemptSummary{
+				AttemptID:      id,
+				IssueID:        issueID,
+				IssueDisplayID: fmt.Sprintf("ISSUE-%d", sequenceNo),
+				IssueTitle:     title,
+				Kind:           domain.AttemptKind(kindText),
+				SessionID:      nullableStringScan(sessionID),
+				SessionLabel:   nullableStringScan(agentLabel),
+				StartedAt:      started,
+				LeaseExpiresAt: leaseExpires,
+			})
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []domain.ActiveAttemptSummary{}
+	}
+	return result, nil
+}
+
 // LookupSaveAttemptNote serves a replay before the note ID and artifact IDs
 // are allocated. SaveAttemptNote still repeats this check in its writer
 // transaction to close the lookup/write race.

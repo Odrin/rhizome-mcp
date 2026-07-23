@@ -107,6 +107,10 @@ func (repository *recordingMaintenanceAttemptRepository) ExpireAttempts(context.
 	return ports.ExpireAttemptsResult{}, nil
 }
 
+func (repository *recordingMaintenanceAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
+	return nil, nil
+}
+
 type recordingMaintenanceSearchIndexRepository struct {
 	rebuildCalled bool
 	err           error

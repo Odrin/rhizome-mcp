@@ -46,6 +46,10 @@ const (
 	MaxSearchResults = 100
 	// MaxSearchSnippetRunes is the maximum search snippet length.
 	MaxSearchSnippetRunes = 1_000
+	// MaxBoardCollectionLimit bounds the board's blocked-issue and
+	// active-attempt collections, matching the codebase's other bounded
+	// collection limits.
+	MaxBoardCollectionLimit = 100
 )
 
 // ValidateText rejects invalid UTF-8, NUL characters, invalid limits, and text

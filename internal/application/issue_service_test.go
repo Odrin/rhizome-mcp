@@ -77,6 +77,10 @@ func (repository *recordingIssueRepository) ListIssues(_ context.Context, comman
 	return domain.IssueList{}, nil
 }
 
+func (repository *recordingIssueRepository) CountIssuesByEffectiveStatus(context.Context, ports.CountIssuesByEffectiveStatusCommand) ([]domain.EffectiveStatusCount, error) {
+	return nil, nil
+}
+
 type fixedIDGenerator struct {
 	id  string
 	err error

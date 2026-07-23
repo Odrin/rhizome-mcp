@@ -103,6 +103,14 @@ func (service *AttemptService) ExpireAttempts(ctx context.Context) (ports.Expire
 	return service.repository.ExpireAttempts(ctx, ports.ExpireAttemptsCommand{OccurredAt: now})
 }
 
+// ListActiveAttempts returns a bounded, project-wide projection of currently
+// active (leased) attempts. A non-positive or over-limit value defaults to the
+// standard bounded collection limit.
+func (service *AttemptService) ListActiveAttempts(ctx context.Context, limit int) ([]domain.ActiveAttemptSummary, error) {
+	now := service.clock.Now().UTC()
+	return service.repository.ListActiveAttempts(ctx, ports.ListActiveAttemptsCommand{Limit: limit, Now: now})
+}
+
 func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (ports.SaveAttemptNoteResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
