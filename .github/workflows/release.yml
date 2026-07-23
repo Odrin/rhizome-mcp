@@ -141,3 +141,90 @@ jobs:
 
           gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
 
+  publish-npm:
+    name: Publish npm packages
+    needs:
+      - build-release-assets
+    runs-on: ubuntu-latest
+    # This job's success/failure must not affect upload-release-assets (no
+    # needs: publish-npm anywhere) and must not fail the overall release.
+    continue-on-error: true
+    permissions:
+      contents: read
+      # Required for npm's OIDC Trusted Publishing (`npm publish
+      # --provenance` with no NODE_AUTH_TOKEN/NPM_TOKEN secret at all).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure npm supports OIDC trusted publishing
+        # Trusted Publishing via OIDC requires a recent npm CLI (>= 11.5.1).
+        # Don't rely on whatever ships with actions/setup-node's Node build.
+        run: npm install -g npm@latest
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Extract binaries for npm packages
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          mkdir -p npm-binaries
+
+          # goos/goarch/ext triples, matching build-release-assets' matrix.
+          triples=(
+            "linux amd64 tar.gz"
+            "linux arm64 tar.gz"
+            "darwin amd64 tar.gz"
+            "darwin arm64 tar.gz"
+            "windows amd64 zip"
+            "windows arm64 zip"
+          )
+
+          for triple in "${triples[@]}"; do
+            read -r goos goarch ext <<< "$triple"
+            archive="dist/rhizome-mcp_${VERSION}_${goos}_${goarch}.${ext}"
+            if [ ! -f "$archive" ]; then
+              echo "Missing expected archive: $archive" >&2
+              exit 1
+            fi
+
+            bin_name="rhizome-mcp"
+            [ "$goos" = "windows" ] && bin_name="rhizome-mcp.exe"
+
+            extract_dir=$(mktemp -d)
+            if [ "$ext" = "zip" ]; then
+              unzip -q "$archive" -d "$extract_dir"
+            else
+              tar -xzf "$archive" -C "$extract_dir"
+            fi
+
+            dest="npm-binaries/rhizome-mcp_${goos}_${goarch}"
+            [ "$goos" = "windows" ] && dest="${dest}.exe"
+            cp "$extract_dir/$bin_name" "$dest"
+            rm -rf "$extract_dir"
+          done
+
+          echo "Extracted binaries:"
+          ls -la npm-binaries
+
+      - name: Publish npm packages
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node packages/npm/scripts/publish.mjs \
+            --binaries-dir "$(pwd)/npm-binaries" \
+            --tag "$TAG"
+
