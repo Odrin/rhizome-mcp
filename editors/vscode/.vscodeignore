@@ -3,6 +3,7 @@
 .vscode-test.mjs
 scripts/**
 src/**
+test/**
 out/**
 node_modules/**
 *.ts

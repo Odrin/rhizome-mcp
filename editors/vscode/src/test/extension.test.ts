@@ -8,4 +8,13 @@ suite('Extension activation', () => {
     await ext?.activate();
     assert.ok(ext?.isActive);
   });
+
+  test('registers the rhizome-mcp.init and rhizome-mcp.showBoard commands', async () => {
+    const ext = vscode.extensions.getExtension('odrin.rhizome-mcp');
+    await ext?.activate();
+
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes('rhizome-mcp.init'), 'expected rhizome-mcp.init to be registered');
+    assert.ok(commands.includes('rhizome-mcp.showBoard'), 'expected rhizome-mcp.showBoard to be registered');
+  });
 });

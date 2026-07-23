@@ -32,6 +32,16 @@
   "main": "./dist/extension.js",
   "activationEvents": [],
   "contributes": {
+    "commands": [
+      {
+        "command": "rhizome-mcp.init",
+        "title": "Rhizome: Initialize Project"
+      },
+      {
+        "command": "rhizome-mcp.showBoard",
+        "title": "Rhizome: Open Status Board"
+      }
+    ],
     "mcpServerDefinitionProviders": [
       {
         "id": "rhizome-mcp.servers",

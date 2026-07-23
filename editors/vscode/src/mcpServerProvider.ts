@@ -33,6 +33,16 @@ export interface RhizomeBinaryInfo {
 export interface RhizomeMcpServerProvider
   extends vscode.McpServerDefinitionProvider<vscode.McpStdioServerDefinition> {
   dispose(): void;
+
+  /**
+   * Fires `onDidChangeMcpServerDefinitions` immediately. VS Code's own
+   * `.agent-tracker.json` file watcher (wired up below) will eventually
+   * notice a freshly-`init`'d project on its own, but can lag; commands
+   * that just ran `rhizome-mcp init` successfully call this so the newly
+   * initialized project's server shows up right away instead of waiting
+   * on the filesystem watcher.
+   */
+  refresh(): void;
 }
 
 function mcpJsonPath(folder: vscode.WorkspaceFolder): string {
@@ -147,6 +157,9 @@ export function createRhizomeMcpServerProvider(
       // resolved and version-validated at activation time, so the
       // definition can be used as-is.
       return definition;
+    },
+    refresh(): void {
+      changeEmitter.fire();
     },
     dispose(): void {
       disposeTrackerWatchers();

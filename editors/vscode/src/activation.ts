@@ -50,7 +50,14 @@ function spawnVersionCheck(binaryPath: string, args: string[]): Promise<SpawnRes
   });
 }
 
-async function showResolutionFailure(): Promise<void> {
+/**
+ * Shows the standard "binary not found" notification with its Open
+ * Settings / Install Instructions actions. Exported so commands that need
+ * a resolved binary at invocation time (e.g. `rhizome-mcp.init`,
+ * `rhizome-mcp.showBoard`) can surface the exact same remediation UX
+ * rather than duplicating similar-but-slightly-different wording.
+ */
+export async function showResolutionFailure(): Promise<void> {
   const selection = await vscode.window.showErrorMessage(
     'Rhizome MCP could not locate the rhizome-mcp server binary. Configure rhizome.serverPath, ' +
       'reinstall the extension so its bundled binary is present, or install rhizome-mcp on your PATH.',

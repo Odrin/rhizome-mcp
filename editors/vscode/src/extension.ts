@@ -1,8 +1,27 @@
 import * as vscode from 'vscode';
 import { activateRhizome, getOutputChannel } from './activation';
-import { registerRhizomeMcpServerProvider } from './mcpServerProvider';
+import { registerInitCommand } from './initCommand';
+import { registerShowBoardCommand } from './boardCommand';
+import { registerRhizomeMcpServerProvider, type RhizomeMcpServerProvider } from './mcpServerProvider';
+
+// Module-level reference to the registered MCP server definition provider
+// (if any), so the `rhizome-mcp.init` command can call its `refresh()`
+// after a successful init without extension.ts needing to pass a live
+// provider reference around before one necessarily exists. Commands are
+// registered unconditionally at activation, before resolution is known to
+// have succeeded, so they read this indirectly via a getter instead.
+let mcpServerProvider: RhizomeMcpServerProvider | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // Registered unconditionally (independent of whether binary resolution
+  // below succeeds) so the commands always exist in the Command Palette;
+  // each command re-checks `getLastResolution()` itself at invocation time
+  // and shows the standard failure UX if there's still no binary.
+  context.subscriptions.push(
+    registerInitCommand(() => mcpServerProvider),
+    registerShowBoardCommand(),
+  );
+
   try {
     // Resolves and validates the rhizome-mcp binary, logging the outcome and
     // showing the standard failure notification if nothing resolves.
@@ -15,7 +34,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // didn't parse) — that's not a reason to skip registering a working
     // server, so it's only gated on `binaryPath`, not on `version` too.
     if (resolution.binaryPath !== null) {
-      registerRhizomeMcpServerProvider(
+      mcpServerProvider = registerRhizomeMcpServerProvider(
         context,
         { binaryPath: resolution.binaryPath, version: resolution.version },
         getOutputChannel(),
@@ -30,4 +49,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  mcpServerProvider = undefined;
+}
