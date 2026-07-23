@@ -1,0 +1,44 @@
+{
+  "name": "rhizome-mcp",
+  "version": "0.0.1",
+  "description": "Local-first MCP server for task tracking and coordination of autonomous AI coding agents. This package is a thin npm launcher around the platform-specific rhizome-mcp binary.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/Odrin/rhizome-mcp#readme",
+  "bugs": "https://github.com/Odrin/rhizome-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Odrin/rhizome-mcp.git",
+    "directory": "packages/npm/rhizome-mcp"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "task-tracker",
+    "rhizome-mcp"
+  ],
+  "mcpName": "io.github.Odrin/rhizome-mcp",
+  "bin": {
+    "rhizome-mcp": "bin/launcher.js"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "optionalDependencies": {
+    "@rhizome-mcp/darwin-x64": "0.0.1",
+    "@rhizome-mcp/darwin-arm64": "0.0.1",
+    "@rhizome-mcp/linux-x64": "0.0.1",
+    "@rhizome-mcp/linux-arm64": "0.0.1",
+    "@rhizome-mcp/win32-x64": "0.0.1",
+    "@rhizome-mcp/win32-arm64": "0.0.1"
+  }
+}
