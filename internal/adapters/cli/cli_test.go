@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -234,8 +235,17 @@ func TestRunProjectExport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat exported file: %v", err)
 		}
-		if info.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Fatalf("mode = %o, want 0600", info.Mode().Perm())
+		}
+		if runtime.GOOS == "windows" {
+			file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatalf("open exported file for writing: %v", err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatalf("close writable export file: %v", err)
+			}
 		}
 	})
 
