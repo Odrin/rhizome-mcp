@@ -471,7 +471,7 @@ func TestInitializeAlreadyExistsErrorNamesPathAndDistinguishesPartialInit(t *tes
 		_, err := projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
 		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
 
-		identityPath := filepath.Join(root, projectconfig.IdentityFileName)
+		identityPath := filepath.Join(canonicalTestPath(t, root), projectconfig.IdentityFileName)
 		message := err.Error()
 		if !strings.Contains(message, identityPath) {
 			t.Errorf("error message = %q, want identity path %q", message, identityPath)
@@ -500,7 +500,7 @@ func TestInitializeAlreadyExistsErrorNamesPathAndDistinguishesPartialInit(t *tes
 		_, err = projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
 		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
 
-		identityPath := filepath.Join(root, projectconfig.IdentityFileName)
+		identityPath := filepath.Join(canonicalTestPath(t, root), projectconfig.IdentityFileName)
 		message := err.Error()
 		if !strings.Contains(message, identityPath) {
 			t.Errorf("error message = %q, want identity path %q", message, identityPath)
@@ -521,6 +521,7 @@ func TestInitializeAlreadyExistsErrorNamesPathAndDistinguishesPartialInit(t *tes
 		_, err := projectconfig.Initialize(root, fixedGenerator(testProjectID), dataRoot)
 		assertDomainCode(t, err, projectconfig.CodeProjectAlreadyInitialized)
 
+		identityPath = filepath.Join(canonicalTestPath(t, root), projectconfig.IdentityFileName)
 		message := err.Error()
 		if !strings.Contains(message, identityPath) {
 			t.Errorf("error message = %q, want identity path %q", message, identityPath)
@@ -586,6 +587,20 @@ func resolvedPath(t *testing.T, path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return resolved
+}
+
+func canonicalTestPath(t *testing.T, value string) string {
+	t.Helper()
+
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", value, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks(%q): %v", absolute, err)
 	}
 	return resolved
 }
