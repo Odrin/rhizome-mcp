@@ -57,6 +57,27 @@ CGO_ENABLED=0 go build -o rhizome-mcp .
 
 This keeps the installation path explicit without relying on unsupported `go install` instructions or mirrored shell scripts.
 
+## npx, no install needed
+
+For any MCP client (not only VS Code), the [`rhizome-mcp` npm package](https://www.npmjs.com/package/rhizome-mcp) runs the correct platform binary with no separate download and no Go toolchain:
+
+```bash
+npx -y rhizome-mcp serve
+```
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "npx",
+      "args": ["-y", "rhizome-mcp", "serve"]
+    }
+  }
+}
+```
+
+See [packages/npm/README.md](https://github.com/Odrin/rhizome-mcp/blob/main/packages/npm/README.md) for platform coverage.
+
 ## Initialize the project
 
 Run the binary from the repository that should be tracked. `init` writes `.agent-tracker.json` into that repository and leaves the SQLite database outside the repo.

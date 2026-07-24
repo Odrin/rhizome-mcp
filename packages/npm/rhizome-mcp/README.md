@@ -27,6 +27,21 @@ npm install --global rhizome-mcp
 rhizome-mcp serve
 ```
 
+## Use with an MCP client
+
+Works with any MCP client — VS Code, Claude Code, Claude Desktop, Cursor, or a plain `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "npx",
+      "args": ["-y", "rhizome-mcp", "serve"]
+    }
+  }
+}
+```
+
 ## Supported platforms
 
 `darwin-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`, `win32-x64`,

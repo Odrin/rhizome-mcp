@@ -34,6 +34,21 @@ The extension looks for a `.agent-tracker.json` file at each workspace folder's 
 
 If you already set up rhizome via `rhizome-mcp connect vscode` (the CLI command that writes to `.vscode/mcp.json`), this extension detects that and doesn't contribute a duplicate server. Both can coexist safely.
 
+## Using another editor or MCP client
+
+This extension is the zero-config path for VS Code specifically. For Claude Code, Claude Desktop, Cursor, or any other MCP client, use the [`rhizome-mcp` npm package](https://www.npmjs.com/package/rhizome-mcp) instead — no VS Code, no separate binary download:
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "npx",
+      "args": ["-y", "rhizome-mcp", "serve"]
+    }
+  }
+}
+```
+
 ## Privacy and local-first
 
 Everything runs locally. The SQLite database lives outside your repository, and the extension makes no network calls. No accounts, no authentication, no telemetry. Rhizome is self-contained and portable — you can move your database around, back it up, or share it between machines as-is.
