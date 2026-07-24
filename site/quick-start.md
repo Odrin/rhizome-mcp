@@ -99,7 +99,9 @@ claude mcp add --transport stdio rhizome-mcp -- rhizome-mcp serve
 
 ### VS Code
 
-Use the automated setup command:
+The easiest path is the [Rhizome MCP extension](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) on the Marketplace: it bundles the platform binary and registers the MCP server automatically, so none of the steps below are needed. Run `Rhizome: Initialize Project` from the Command Palette after installing it. See [docs/10-vscode-extension.md](https://github.com/Odrin/rhizome-mcp/blob/main/docs/10-vscode-extension.md) for how it works (workspace detection, `serverPath` override, duplicate guard).
+
+If you'd rather use a standalone binary with a plain `mcp.json` entry, use the automated setup command:
 
 ```bash
 rhizome-mcp connect vscode

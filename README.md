@@ -7,6 +7,8 @@
   <a href="https://github.com/Odrin/rhizome-mcp/releases"><img src="https://img.shields.io/github/v/release/Odrin/rhizome-mcp?sort=semver" alt="Latest release"></a>
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Odrin/rhizome-mcp" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Odrin/rhizome-mcp" alt="License"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp"><img src="https://img.shields.io/visual-studio-marketplace/v/odrin.rhizome-mcp?label=VS%20Code%20Marketplace" alt="VS Code Marketplace"></a>
+  <a href="https://www.npmjs.com/package/rhizome-mcp"><img src="https://img.shields.io/npm/v/rhizome-mcp" alt="npm"></a>
 </p>
 
 **rhizome-mcp** is a local-first MCP server for task tracking and coordination of autonomous AI coding agents. It gives agents from different products — Claude Code, Codex, GitHub Copilot, VS Code, and any other MCP-compatible client — a shared, durable view of project work: one static Go binary, one SQLite database per project, no accounts, no Docker, no network dependency.
@@ -29,7 +31,23 @@ AI coding agents are concurrent, context-limited, and interruptible. A `TODO.md`
 
 ## Quick start
 
-Install a release binary (verifies checksums, installs to `~/.local/bin` by default):
+### VS Code
+
+Install [Rhizome MCP](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) from the Marketplace — it bundles the platform binary and registers the MCP server automatically. Run `Rhizome: Initialize Project` from the Command Palette, then use Copilot's agent mode. No terminal, no `mcp.json` editing. Details: [docs/10-vscode-extension.md](docs/10-vscode-extension.md).
+
+Prefer a plain `mcp.json` entry with a standalone binary instead of the extension? Install the binary below, then use this one-click link: [Add to VS Code](vscode:mcp/install?%7B%22name%22%3A%22rhizome-mcp%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22rhizome-mcp%22%2C%22args%22%3A%5B%22serve%22%5D%7D).
+
+### Any other MCP client
+
+```bash
+npx -y rhizome-mcp serve
+```
+
+Works everywhere Node.js does, no separate binary install. See [packages/npm/README.md](packages/npm/README.md) for platform coverage and package layout.
+
+### Install a release binary
+
+Verifies checksums, installs to `~/.local/bin` by default:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.sh | sh
@@ -54,6 +72,19 @@ rhizome-mcp connect claude
     "rhizome": {
       "command": "/absolute/path/to/rhizome-mcp",
       "args": ["serve"]
+    }
+  }
+}
+```
+
+or, via `npx`, without installing a binary at all:
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "npx",
+      "args": ["-y", "rhizome-mcp", "serve"]
     }
   }
 }
@@ -128,7 +159,7 @@ The server exposes 31 tools covering the full lifecycle: project discovery, issu
 
 ## Documentation
 
-The nine modular files under `docs/` are the canonical specification; [SPEC.md](SPEC.md) is the index. Agents should load only the sections relevant to their current task ([AGENT_BRIEF.md](AGENT_BRIEF.md) explains how).
+The modular files under `docs/` are the canonical specification; [SPEC.md](SPEC.md) is the index. Agents should load only the sections relevant to their current task ([AGENT_BRIEF.md](AGENT_BRIEF.md) explains how).
 
 1. [Product goals and scope](docs/01-product-scope.md)
 2. [Domain model](docs/02-domain-model.md)
@@ -139,6 +170,7 @@ The nine modular files under `docs/` are the canonical specification; [SPEC.md](
 7. [Logical interchange format](docs/07-logical-interchange.md)
 8. [Local HTTP transport contract](docs/08-local-http-transport.md)
 9. [Review workflow contract](docs/09-review-workflow.md)
+10. [VS Code extension](docs/10-vscode-extension.md)
 
 Guides for humans (quick start, workflow, CLI) live in [site/](site/) and are published via GitHub Pages. Release history is in the [CHANGELOG](CHANGELOG.md).
 

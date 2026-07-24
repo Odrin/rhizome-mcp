@@ -11,6 +11,7 @@ The canonical specification is split into focused documents so agents can load o
 7. [Logical project interchange format](docs/07-logical-interchange.md)
 8. [Local HTTP transport contract](docs/08-local-http-transport.md)
 9. [Review workflow contract](docs/09-review-workflow.md)
+10. [VS Code extension](docs/10-vscode-extension.md)
 
 Use the configured `rhizome-mcp` project for current status, dependency order, implementation history, and accepted decisions.
 

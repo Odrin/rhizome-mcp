@@ -528,7 +528,15 @@ func connectVSCode(ctx context.Context, startingPath string, binaryPath string, 
 		return fmt.Errorf("create .vscode directory: %w", err)
 	}
 
-	return mergeAndWriteJSONConfig(mcpJSONPath, config, "servers", "rhizome-mcp")
+	if err := mergeAndWriteJSONConfig(mcpJSONPath, config, "servers", "rhizome-mcp"); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(stdout, "Wrote .vscode/mcp.json.")
+	fmt.Fprintln(stdout, "Tip: the Rhizome MCP extension on the VS Code Marketplace bundles this binary and")
+	fmt.Fprintln(stdout, "registers the server automatically, so most users won't need `connect vscode` at all:")
+	fmt.Fprintln(stdout, "https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp")
+	return nil
 }
 
 func connectCodex(ctx context.Context, binaryPath string, printOnly bool, stdout, stderr io.Writer) error {
