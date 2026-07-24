@@ -143,6 +143,16 @@ or, via `npx`, without installing a binary at all:
 }
 ```
 
+### Install the agent workflow skill
+
+For agents that support the open [Agent Skills](https://agentskills.io/) format, install `rhizome-task-workflow` with the npm-distributed [`skills`](https://skills.sh/) CLI:
+
+```bash
+npx skills add Odrin/rhizome-mcp --skill rhizome-task-workflow
+```
+
+Run the command in a project for a project-scoped installation, or add `--global` to make the skill available across projects. The skill teaches compatible agents how to select, claim, checkpoint, hand off, and finish Rhizome work. It complements the MCP server; it does not install the `rhizome-mcp` binary or configure an MCP connection.
+
 ## Verify the setup
 
 ```bash

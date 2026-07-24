@@ -114,6 +114,16 @@ Run `serve` with the repository as its working directory. Stdio is the default t
 
 That's it — connected agents discover the workflow through the server itself: `get_project` links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
 
+#### Install the agent workflow skill
+
+For agents that support the open [Agent Skills](https://agentskills.io/) format, install `rhizome-task-workflow` with the npm-distributed [`skills`](https://skills.sh/) CLI:
+
+```bash
+npx skills add Odrin/rhizome-mcp --skill rhizome-task-workflow
+```
+
+Run the command in a project for a project-scoped installation, or add `--global` to make the skill available across projects. The skill teaches compatible agents how to select, claim, checkpoint, hand off, and finish Rhizome work. It complements the MCP server; it does not install the `rhizome-mcp` binary or configure an MCP connection.
+
 ### Monitor your project
 
 ```bash
