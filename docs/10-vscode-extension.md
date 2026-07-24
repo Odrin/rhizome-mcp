@@ -50,4 +50,4 @@ Every tagged release publishes/updates all 8 targets automatically via the `publ
 
 ## Open VSX
 
-VSCodium, Gitpod, Eclipse Theia, and other VS Code forks install extensions from [Open VSX](https://open-vsx.org/) instead of the Microsoft Marketplace. The `publish-open-vsx` job in `.github/workflows/release.yml` republishes the same 8 VSIXes there (`ovsx publish --skip-duplicate`), isolated the same way as the other `publish-*` jobs. It requires the `odrin` namespace and an `OVSX_PAT` secret to exist first — not yet set up, so this job currently fails harmlessly (isolated by `continue-on-error`, same as the other `publish-*` jobs) on every release until that maintainer action is done.
+VSCodium, Gitpod, Eclipse Theia, and other VS Code forks install extensions from [Open VSX](https://open-vsx.org/) instead of the Microsoft Marketplace. The `publish-open-vsx` job in `.github/workflows/release.yml` republishes the same 8 VSIXes there (`ovsx publish --skip-duplicate`), isolated the same way as the other `publish-*` jobs. Requires the `odrin` namespace and an `OVSX_PAT` secret (ISSUE-97), both set up and verified against a real release.
