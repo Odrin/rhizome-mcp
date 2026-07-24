@@ -32,7 +32,7 @@ export interface ResolveSuccess {
 
 export interface ResolveFailure {
   ok: false;
-  reason: 'invalid-override' | 'not-found';
+  reason: 'invalid-override' | 'not-found' | 'exec-failed';
   message: string;
 }
 
@@ -72,6 +72,13 @@ export interface VersionInfo {
   raw: string;
   /** Parsed version token, or null if the output could not be parsed. */
   version: string | null;
+  /**
+   * Set when `spawnFn` itself rejected (the OS refused to exec the binary at
+   * all, e.g. ENOEXEC for a wrong-architecture or corrupted file) rather
+   * than the process running and producing unparseable output. Null in
+   * every other case, including a successful spawn with garbage stdout.
+   */
+  execError: string | null;
 }
 
 export interface Logger {
@@ -278,13 +285,13 @@ export async function getBinaryVersion(
   try {
     const result = await spawnFn(binaryPath, ['--version']);
     stdout = result.stdout;
-  } catch {
-    const info: VersionInfo = { raw: '', version: null };
+  } catch (err) {
+    const info: VersionInfo = { raw: '', version: null, execError: errorMessage(err) };
     cache.set(binaryPath, info);
     return info;
   }
 
-  const info: VersionInfo = { raw: stdout, version: parseVersionOutput(stdout) };
+  const info: VersionInfo = { raw: stdout, version: parseVersionOutput(stdout), execError: null };
   cache.set(binaryPath, info);
   return info;
 }
@@ -332,6 +339,25 @@ export async function resolveAndValidateBinary(
   deps.logger.info(`Resolved rhizome-mcp binary from ${resolved.source}: ${resolved.binaryPath}`);
 
   const versionInfo = await getBinaryVersion(resolved.binaryPath, deps.spawnFn, deps.versionCache);
+  if (versionInfo.execError !== null && resolved.source === 'bundled') {
+    // The bundled binary is the one case where the user made no choice of
+    // their own — a wrong-architecture or corrupted bundled binary can never
+    // run, so this is a real resolution failure, not a soft warning. An
+    // override or PATH binary that fails to exec still gets the soft
+    // warning below: the user picked that binary deliberately, and it may
+    // simply be transiently unavailable rather than fundamentally broken.
+    const failure: ResolveFailure = {
+      ok: false,
+      reason: 'exec-failed',
+      message:
+        `The bundled rhizome-mcp binary at "${resolved.binaryPath}" could not be executed ` +
+        `(${versionInfo.execError}). This usually means the wrong platform's binary was packaged ` +
+        `for this machine, or the file is corrupted.`,
+    };
+    deps.logger.warn(failure.message);
+    return { binaryPath: null, source: null, version: null, failure };
+  }
+
   if (versionInfo.version === null) {
     deps.logger.warn(
       `Could not determine the rhizome-mcp binary's version from its --version output ` +

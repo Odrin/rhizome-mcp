@@ -425,6 +425,26 @@ test('getBinaryVersion treats a spawn failure as unknown version rather than thr
   assert.equal(info.version, null);
 });
 
+test('getBinaryVersion records execError when spawnFn itself rejects, distinct from unparseable output', async () => {
+  const spawnFn = async () => {
+    throw new Error('ENOEXEC');
+  };
+  const cache = new Map();
+
+  const info = await getBinaryVersion('/bin/rhizome-mcp', spawnFn, cache);
+
+  assert.equal(info.execError, 'ENOEXEC');
+});
+
+test('getBinaryVersion leaves execError null when spawnFn resolves, even with unparseable output', async () => {
+  const spawnFn = async () => ({ stdout: 'garbage output', code: 0 });
+  const cache = new Map();
+
+  const info = await getBinaryVersion('/bin/rhizome-mcp', spawnFn, cache);
+
+  assert.equal(info.execError, null);
+});
+
 // ---------------------------------------------------------------------------
 // checkVersionMismatch
 // ---------------------------------------------------------------------------
@@ -540,6 +560,58 @@ test('resolveAndValidateBinary: does not warn on version mismatch for the bundle
 
   assert.equal(result.failure, null);
   assert.deepEqual(deps.logger.warns, []);
+});
+
+test('resolveAndValidateBinary: a bundled binary that fails to exec is a hard resolution failure, not "resolved, unknown version"', async () => {
+  const bundledPath = getBundledBinaryPath('/ext', 'linux');
+  const deps = baseAndValidateDeps({
+    fs: makeFakeFs({ [bundledPath]: { mode: EXEC_MODE } }),
+    spawnFn: async () => {
+      throw new Error('ENOEXEC');
+    },
+  });
+
+  const result = await resolveAndValidateBinary(undefined, deps);
+
+  assert.equal(result.binaryPath, null, 'a binary that cannot execute must not be reported as usable');
+  assert.equal(result.source, null);
+  assert.equal(result.version, null);
+  assert.ok(result.failure);
+  assert.equal(result.failure.reason, 'exec-failed');
+  assert.match(result.failure.message, /ENOEXEC/);
+  assert.equal(deps.logger.warns.length, 1);
+});
+
+test('resolveAndValidateBinary: an override binary that fails to exec keeps the soft-warning behavior (user chose it deliberately)', async () => {
+  const deps = baseAndValidateDeps({
+    fs: makeFakeFs({ '/custom/rhizome-mcp': { mode: EXEC_MODE } }),
+    spawnFn: async () => {
+      throw new Error('ENOEXEC');
+    },
+  });
+
+  const result = await resolveAndValidateBinary('/custom/rhizome-mcp', deps);
+
+  assert.equal(result.failure, null, 'an override binary must not be turned into a hard failure on exec error');
+  assert.equal(result.binaryPath, '/custom/rhizome-mcp');
+  assert.equal(result.source, 'override');
+  assert.equal(result.version, null);
+});
+
+test('resolveAndValidateBinary: a PATH-resolved binary that fails to exec keeps the soft-warning behavior', async () => {
+  const deps = baseAndValidateDeps({
+    fs: makeFakeFs({ '/usr/bin/rhizome-mcp': { mode: EXEC_MODE } }),
+    env: { PATH: '/usr/bin' },
+    spawnFn: async () => {
+      throw new Error('ENOEXEC');
+    },
+  });
+
+  const result = await resolveAndValidateBinary(undefined, deps);
+
+  assert.equal(result.failure, null);
+  assert.equal(result.source, 'path');
+  assert.equal(result.version, null);
 });
 
 test('resolveAndValidateBinary only spawns --version once across repeated calls sharing a versionCache', async () => {
