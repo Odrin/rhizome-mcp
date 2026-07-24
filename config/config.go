@@ -13,6 +13,11 @@ type Config struct {
 	VersionDate   string
 	LogLevel      slog.Level
 	HTTPAddress   string
+	// ToolProfile selects which capability groups of the MCP tool catalog
+	// this server instance advertises (full, agent, read-only, migration).
+	// Defaults to "full" so an unconfigured server keeps the complete
+	// existing tool catalog.
+	ToolProfile string
 }
 
 func Load() *Config {
@@ -23,6 +28,7 @@ func Load() *Config {
 		VersionDate:   "",
 		LogLevel:      parseLevel(getEnv("LOG_LEVEL", "info")),
 		HTTPAddress:   getEnv("HTTP_ADDRESS", ""),
+		ToolProfile:   getEnv("TOOL_PROFILE", "full"),
 	}
 }
 

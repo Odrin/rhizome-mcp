@@ -176,9 +176,10 @@ func (output *capturedOutput) String() string {
 	return output.buf.String()
 }
 
-func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpAddress string) *integrationHTTPServer {
+func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpAddress string, extraServeArgs ...string) *integrationHTTPServer {
 	t.Helper()
-	cmd := exec.Command(integrationBinary, "--data-root", env.dataRoot, "serve", "--http-address", httpAddress)
+	args := append([]string{"--data-root", env.dataRoot, "serve", "--http-address", httpAddress}, extraServeArgs...)
+	cmd := exec.Command(integrationBinary, args...)
 	cmd.Dir = env.repository
 
 	stderrReader, stderrWriter := io.Pipe()

@@ -74,7 +74,10 @@ type Services struct {
 type InitHandler func(context.Context, string) error
 
 // ServeHandler runs CLI serve logic after the adapter parses the command.
-type ServeHandler func(context.Context, string) error
+// The second parameter is the requested HTTP address (blank for stdio); the
+// third is the requested tool exposure profile (blank keeps the caller's
+// configured default).
+type ServeHandler func(context.Context, string, string) error
 
 // BackupReport summarizes a validated backup database artifact for CLI output.
 type BackupReport struct {
@@ -220,6 +223,7 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	httpAddress := fs.String("http-address", "", "serve over loopback HTTP instead of stdio")
+	profile := fs.String("profile", "", "tool exposure profile: full, agent, read-only, or migration (default full)")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -227,7 +231,10 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	if len(positionals) != 0 {
 		return c.usageError()
 	}
-	return c.serveHandler(ctx, *httpAddress)
+	if _, err := domain.ParseToolProfile(*profile); err != nil {
+		return err
+	}
+	return c.serveHandler(ctx, *httpAddress, *profile)
 }
 
 func (c *CLI) runBackup(ctx context.Context, args []string) error {
@@ -1057,7 +1064,7 @@ func (c *CLI) stdoutWriter() io.Writer {
 func (c *CLI) usage() string {
 	return `Usage:
   rhizome-mcp [--data-root PATH] init
-  rhizome-mcp [--data-root PATH] serve
+  rhizome-mcp [--data-root PATH] serve [--http-address ADDR] [--profile full|agent|read-only|migration]
   rhizome-mcp [--data-root PATH] connect TARGET [--print]
   rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
   rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]

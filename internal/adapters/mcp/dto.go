@@ -488,11 +488,16 @@ type sessionDTO struct {
 }
 
 type projectOutput struct {
-	Project                projectDTO     `json:"project"`
-	Session                *sessionDTO    `json:"session"`
-	AppVersion             string         `json:"app_version"`
-	SchemaVersion          int            `json:"schema_version"`
-	ConfigVersion          int            `json:"config_version"`
+	Project       projectDTO  `json:"project"`
+	Session       *sessionDTO `json:"session"`
+	AppVersion    string      `json:"app_version"`
+	SchemaVersion int         `json:"schema_version"`
+	ConfigVersion int         `json:"config_version"`
+	// ToolProfile is the active MCP tool exposure profile (full, agent,
+	// read-only, or migration). It is client-facing diagnostic metadata,
+	// not an authorization boundary: every tool still enforces its own
+	// domain-level validation regardless of what a client can see here.
+	ToolProfile            string         `json:"tool_profile"`
 	Limits                 limitsDTO      `json:"limits"`
 	SupportedIssueTypes    []string       `json:"supported_issue_types"`
 	SupportedStatuses      []string       `json:"supported_statuses"`

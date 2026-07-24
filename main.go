@@ -211,9 +211,12 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return initRunner(ctx, startingPath, pathInputs, dataRoot, stdout)
 	}
-	serveHandler := func(ctx context.Context, httpAddress string) error {
+	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) error {
 		if httpAddress != "" {
 			cfg.HTTPAddress = httpAddress
+		}
+		if toolProfile != "" {
+			cfg.ToolProfile = toolProfile
 		}
 		if bundle == nil {
 			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
@@ -420,6 +423,7 @@ func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Ser
 		ServerName:         cfg.ServerName,
 		ServerVersion:      cfg.Version,
 		ConfigVersion:      projectconfig.CurrentIdentityVersion,
+		ToolProfile:        cfg.ToolProfile,
 	})
 }
 

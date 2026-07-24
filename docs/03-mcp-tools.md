@@ -69,11 +69,11 @@ The catalog exposes 32 tools:
 8. `get_issue`
 9. `list_issues`
 10. `archive_issue`
-11. `create_review_request` (deprecated — see section 6.6)
+11. `create_review_request` (deprecated — see section 7.6)
 12. `get_review_request`
 13. `list_review_requests`
 14. `cancel_review_request`
-15. `supersede_review_request` (deprecated — see section 6.6)
+15. `supersede_review_request` (deprecated — see section 7.6)
 16. `replace_review_request`
 17. `manage_issue_relation`
 18. `get_issue_graph`
@@ -167,7 +167,7 @@ rather than the tool's read/write split alone:
 - `create_review_request` is **not** destructive: it only records a
   `supersedes_id` link and never closes the predecessor itself — that split
   responsibility is exactly what `replace_review_request` replaces (see
-  section 6.6 for the deprecation policy).
+  section 7.6 for the deprecation policy).
 - `replace_review_request` is destructive: a successful call ends the
   predecessor's lifecycle (superseded) as part of creating its successor,
   in the same transaction.
@@ -214,9 +214,110 @@ tool, per the local-first rationale above.
 
 ---
 
-## 5. Project and discovery
+## 5. Tool exposure profiles
 
-### 5.1. `get_project`
+A server instance can advertise a reduced tool catalog by selecting a
+**tool profile** at startup — an exposure and prompt-size control for
+narrowing what a given deployment shows a client. It is not an
+authorization boundary: every tool that is advertised still enforces its
+own domain-level validation exactly as if every tool were advertised.
+Nothing about profile filtering weakens optimistic concurrency, lease
+checks, or any other server-side rule.
+
+### 5.1. Selecting a profile
+
+Configure the profile before starting the server, through either path:
+
+```bash
+rhizome-mcp serve --profile agent
+rhizome-mcp serve --http-address 127.0.0.1:0 --profile read-only
+```
+
+```bash
+TOOL_PROFILE=migration rhizome-mcp serve
+```
+
+The `--profile` CLI flag takes precedence over the `TOOL_PROFILE`
+environment variable, matching the existing `--http-address` /
+`HTTP_ADDRESS` precedence. Leaving both unset keeps the default, `full`,
+so an unconfigured server is unchanged from every prior release: the
+complete existing tool catalog remains backward compatible.
+
+An unrecognized profile name fails server startup immediately, before any
+transport opens, with a structured error naming the invalid value and
+every valid name:
+
+```json
+{
+  "code": "INVALID_ARGUMENT",
+  "message": "unsupported tool profile \"read-write\" (valid profiles: full, agent, read-only, migration)",
+  "details": [{"field": "tool_profile", "code": "INVALID_ENUM"}],
+  "retryable": false
+}
+```
+
+`get_project`'s `tool_profile` field always reports the profile actually
+in effect, so a client that expects a tool and doesn't see it in
+`tools/list` can immediately tell whether a profile — not a bug — is the
+reason.
+
+### 5.2. Profile membership matrix
+
+Every registered tool declares exactly one capability group in
+`internal/adapters/mcp/adapter.go` (`registerTool(server, group, ...)`);
+this is a required argument, so a newly added tool cannot be registered
+without an explicit group decision. `full`, `agent`, and `migration` are
+defined as which groups they include. `read-only` is defined differently
+and deliberately: it is derived directly from each tool's own
+`readOnlyHint` (section 4.1), not from a separately maintained list, so it
+can never drift from the annotation matrix.
+
+| Group | Tools | In `agent`? | In `migration`? |
+| --- | --- | --- | --- |
+| core | `get_project` | always | always |
+| migration | `export_project`, `validate_import`, `apply_import` | no | yes |
+| sync | `get_changes` | no | no |
+| issues | `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
+| planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
+| review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `supersede_review_request`, `replace_review_request` | yes | no |
+| knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
+| lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context` | yes | no |
+
+- **`full`** (default): every group, all 32 tools.
+- **`agent`** (28 tools): every group except `migration` and `sync` — the
+  complete ordinary issue discovery, planning, review, knowledge, and
+  leased work lifecycle workflow, without bulk project transfer or
+  incremental synchronization.
+- **`read-only`**: exactly the tools with `readOnlyHint: true` in the
+  section 4.1 matrix, spanning every group (including read operations
+  inside `migration` and `sync`, e.g. `export_project`, `validate_import`,
+  `get_changes` — reading is safe regardless of which group a tool
+  otherwise belongs to). No tool this profile advertises can be
+  classified as mutating; that invariant is enforced by
+  `TestToolProfileReadOnlyContainsOnlyReadOnlyHintedTools`.
+- **`migration`** (4 tools): `core` + `migration` —
+  `get_project`, `export_project`, `validate_import`, `apply_import`. The
+  minimal metadata/export/validate/apply transfer workflow, nothing else.
+
+`tools/list` output is lexically ordered by the SDK regardless of profile
+or registration order, so it stays deterministic across all four
+profiles.
+
+### 5.3. Disabled tools are absent and uncallable
+
+A tool excluded by the active profile is never registered with the
+underlying MCP server at all: it is both absent from `tools/list` and
+fails as an unknown tool if a client calls it directly by name — there is
+no hidden registration path that leaves it reachable. Stdio and local
+HTTP transports are filtered identically, since both are built from the
+same server composition and the same active profile
+(`internal/adapters/mcp.Options.ToolProfile`).
+
+---
+
+## 6. Project and discovery
+
+### 6.1. `get_project`
 
 Purpose:
 
@@ -251,7 +352,7 @@ next_actions
 The project instructions are returned only when requested. `guides` links the
 three workflow resources advertised by the server.
 
-### 5.2. `export_project`
+### 6.2. `export_project`
 
 Purpose:
 
@@ -270,7 +371,7 @@ The structured content is the full logical project document with the required
 returns the document directly as structured content and does not duplicate it as
 text.
 
-### 5.3. `validate_import`
+### 6.3. `validate_import`
 
 Purpose:
 
@@ -288,7 +389,7 @@ Output:
 
 The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
 
-### 5.4. `apply_import`
+### 6.4. `apply_import`
 
 Purpose:
 
@@ -306,7 +407,7 @@ Output:
 
 The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
 
-### 5.5. `list_labels`
+### 6.5. `list_labels`
 
 Input:
 
@@ -334,9 +435,9 @@ normalized_name ASC
 
 ---
 
-## 6. Issue operations
+## 7. Issue operations
 
-### 6.1. `create_issue`
+### 7.1. `create_issue`
 
 Input:
 
@@ -371,7 +472,7 @@ Output:
 issue compact projection
 ```
 
-### 6.2. `update_issue`
+### 7.2. `update_issue`
 
 Patch semantics:
 
@@ -417,7 +518,7 @@ issue standard projection
 changed_fields
 ```
 
-### 6.3. `get_issue`
+### 7.3. `get_issue`
 
 Input:
 
@@ -448,7 +549,7 @@ Output:
 issue projection
 ```
 
-### 6.4. `list_issues`
+### 7.4. `list_issues`
 
 Input filters:
 
@@ -567,7 +668,7 @@ stays within budget; measured response size for that fixture is approximately
 46 KB. The equivalent `view: "full"` call over the same 100 issues measures
 approximately 582 KB in the same test — illustrating why `full` is opt-in.
 
-### 6.5. `archive_issue`
+### 7.5. `archive_issue`
 
 Input:
 
@@ -597,7 +698,7 @@ Output:
 issue compact projection
 ```
 
-### 6.6. Review requests
+### 7.6. Review requests
 
 Review requests bind review work to an issue version, event position, and
 optional artifact set. A review request is claimable only while its status is
@@ -770,9 +871,9 @@ resolved_at
 
 ---
 
-## 7. Relations and graphs
+## 8. Relations and graphs
 
-### 7.1. `manage_issue_relation`
+### 8.1. `manage_issue_relation`
 
 Input:
 
@@ -821,7 +922,7 @@ relation
 affected_issues
 ```
 
-### 7.2. `get_issue_graph`
+### 8.2. `get_issue_graph`
 
 Input:
 
@@ -873,7 +974,7 @@ count is bounded by `max_nodes` (default 100, maximum 500), so response size
 scales predictably with a config knob the caller controls, not with issue
 body length.
 
-### 7.3. `get_planning_graph`
+### 8.3. `get_planning_graph`
 
 Input:
 
@@ -910,14 +1011,14 @@ truncated
 
 **Response budget.** Shares the same node projection, storage-level
 `description`/`acceptance_criteria` exclusion, and `max_nodes` bound (default
-100, maximum 500) documented in section 7.2 for `get_issue_graph` — see that
+100, maximum 500) documented in section 8.2 for `get_issue_graph` — see that
 section's response budget note.
 
 ---
 
-## 8. Batch planning
+## 9. Batch planning
 
-### 8.1. `validate_issue_plan`
+### 9.1. `validate_issue_plan`
 
 Dry-run only.
 
@@ -969,7 +1070,7 @@ field path
 error code
 ```
 
-### 8.2. `apply_issue_plan`
+### 9.2. `apply_issue_plan`
 
 Input is the validated plan plus:
 
@@ -1006,9 +1107,9 @@ latest_event_id
 
 ---
 
-## 9. Communication and durable knowledge
+## 10. Communication and durable knowledge
 
-### 9.1. `add_comment`
+### 10.1. `add_comment`
 
 Implemented as append-only issue communication. The issue must exist and must
 not be archived. When the MCP connection has a durable session, the created
@@ -1037,7 +1138,7 @@ to 128 runes. Reusing the same key with the same normalized request (`issue_id`
 and `content`) replays the original comment response. Reusing the key with a
 different normalized request returns `IDEMPOTENCY_CONFLICT`.
 
-### 9.2. `record_decision`
+### 10.2. `record_decision`
 
 Input:
 
@@ -1074,12 +1175,12 @@ state as part of the cached response, which is disproportionate to the value
 for an append-only decision log. Retry `record_decision` by first checking
 `list_decisions` for a decision already recorded with the intended content.
 
-### 9.3. `list_decisions`
+### 10.3. `list_decisions`
 
 Lists project-level decisions when `issue_id` is omitted, or decisions scoped
 to one issue when it is supplied. Results use deterministic cursor pagination.
 
-### 9.4. `get_issue_activity`
+### 10.4. `get_issue_activity`
 
 Input:
 
@@ -1140,9 +1241,9 @@ prefer the default `limit` over the maximum.
 
 ---
 
-## 10. Agent work lifecycle
+## 11. Agent work lifecycle
 
-### 10.1. `claim_issue`
+### 11.1. `claim_issue`
 
 Input:
 
@@ -1176,7 +1277,7 @@ warnings
 
 The raw lease token is returned once.
 
-### 10.2. `renew_attempt`
+### 11.2. `renew_attempt`
 
 Input:
 
@@ -1197,7 +1298,7 @@ server_time
 
 No content-heavy audit event is written for every heartbeat.
 
-### 10.3. `save_attempt_note`
+### 11.3. `save_attempt_note`
 
 Input:
 
@@ -1240,7 +1341,7 @@ attempt_note
 artifacts
 ```
 
-### 10.4. `finish_attempt`
+### 11.4. `finish_attempt`
 
 Common input:
 
@@ -1311,7 +1412,7 @@ Completion checks:
 - issue changes since claim;
 - required acknowledgments.
 
-### 10.5. `get_work_context`
+### 11.5. `get_work_context`
 
 Input:
 
@@ -1391,9 +1492,9 @@ requires an explicit `include` entry and is capped at 20 items.
 
 ---
 
-## 11. Search and synchronization
+## 12. Search and synchronization
 
-### 11.1. `search`
+### 12.1. `search`
 
 Input:
 
@@ -1448,7 +1549,7 @@ the `limit` cap, a `search` response is bounded by at most `limit` (maximum
 therefore on the order of 100 KB, and the default (`limit` `20`,
 `snippet_length` `300`) is on the order of 10 KB.
 
-### 11.2. `get_changes`
+### 12.2. `get_changes`
 
 Input:
 
@@ -1474,7 +1575,7 @@ next_event_id
 
 This tool supports incremental refresh instead of repeatedly reading full state.
 
-## 12. Error codes
+## 13. Error codes
 
 Required domain error codes:
 

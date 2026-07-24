@@ -85,10 +85,21 @@ func newIntegrationEnvironment(t *testing.T) integrationEnvironment {
 
 func (env integrationEnvironment) connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()
+	return env.connectWithServeArgs(t)
+}
+
+// connectWithServeArgs starts the stdio server with additional arguments
+// appended after "serve" (for example "--profile", "read-only"), so tool
+// exposure profile filtering can be exercised over the stdio transport the
+// same way TestIntegrationHTTPServeToolProfileFiltering exercises it over
+// HTTP.
+func (env integrationEnvironment) connectWithServeArgs(t *testing.T, extraServeArgs ...string) *mcp.ClientSession {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 	defer cancel()
 
-	command := exec.Command(integrationBinary, "--data-root", env.dataRoot, "serve")
+	args := append([]string{"--data-root", env.dataRoot, "serve"}, extraServeArgs...)
+	command := exec.Command(integrationBinary, args...)
 	command.Dir = env.repository
 	client := mcp.NewClient(&mcp.Implementation{Name: "rhizome-integration-test", Version: "test"}, nil)
 	session, err := client.Connect(ctx, &mcp.CommandTransport{

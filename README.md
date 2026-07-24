@@ -160,7 +160,7 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 | Command | Purpose |
 | --- | --- |
 | `init` | Create `.agent-tracker.json` and the project database |
-| `serve` | Run the MCP server (stdio; `--http-address` for local HTTP) |
+| `serve` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog) |
 | `connect TARGET [--print]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `json`) |
 | `board [--output PATH]` | Status board: counts, leases, blockers, review queue; optional HTML snapshot |
 | `issue list` / `issue show ISSUE-ID` | Inspect issues with filters |
@@ -175,7 +175,9 @@ Run `rhizome-mcp` without arguments for complete usage, `rhizome-mcp version` fo
 
 ## MCP surface
 
-The server exposes 31 tools covering the full lifecycle: project discovery, issue CRUD with labels and relations, planning and dependency graphs, batch plan validation/apply, comments and decisions, claim/renew/checkpoint/finish work attempts, work-context assembly, review requests, full-text search, delta changes, and logical project export/import. The complete contract is in [docs/03-mcp-tools.md](docs/03-mcp-tools.md).
+The server exposes 32 tools covering the full lifecycle: project discovery, issue CRUD with labels and relations, planning and dependency graphs, batch plan validation/apply, comments and decisions, claim/renew/checkpoint/finish work attempts, work-context assembly, review requests, full-text search, delta changes, and logical project export/import. The complete contract, including the MCP tool annotation matrix and the `full`/`agent`/`read-only`/`migration` exposure profile matrix, is in [docs/03-mcp-tools.md](docs/03-mcp-tools.md).
+
+By default `serve` advertises the complete `full` catalog. Pass `--profile agent|read-only|migration` (or set `TOOL_PROFILE`) to narrow it — for example `serve --profile read-only` for a client that should never see a mutating tool. Profiles are an exposure and prompt-size control, not an authorization boundary: every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`.
 
 ## Documentation
 

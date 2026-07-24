@@ -163,19 +163,53 @@ func TestRunUsageAndErrors(t *testing.T) {
 
 func TestServeCommandParsesHTTPAddress(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	var captured string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string) error {
-		captured = httpAddress
+	var capturedAddress, capturedProfile string
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string, profile string) error {
+		capturedAddress = httpAddress
+		capturedProfile = profile
 		return nil
 	})
 	if err := cli.Run(context.Background(), []string{"serve", "--http-address", "127.0.0.1:0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if captured != "127.0.0.1:0" {
-		t.Fatalf("captured HTTP address = %q, want %q", captured, "127.0.0.1:0")
+	if capturedAddress != "127.0.0.1:0" {
+		t.Fatalf("captured HTTP address = %q, want %q", capturedAddress, "127.0.0.1:0")
+	}
+	if capturedProfile != "" {
+		t.Fatalf("captured profile = %q, want blank when --profile is not passed", capturedProfile)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+}
+
+func TestServeCommandParsesToolProfile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var capturedProfile string
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string) error {
+		capturedProfile = profile
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"serve", "--profile", "agent"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedProfile != "agent" {
+		t.Fatalf("captured profile = %q, want %q", capturedProfile, "agent")
+	}
+}
+
+func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string) error {
+		t.Fatal("serve handler unexpectedly invoked for an unsupported profile")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"serve", "--profile", "read-write"})
+	if err == nil {
+		t.Fatal("expected an error for an unsupported tool profile")
+	}
+	if !strings.Contains(err.Error(), "read-write") || !strings.Contains(err.Error(), "valid profiles") {
+		t.Fatalf("error = %v, want an actionable message naming the value and valid profiles", err)
 	}
 }
 

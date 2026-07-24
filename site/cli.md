@@ -36,6 +36,15 @@ rhizome-mcp serve --http-address 127.0.0.1:0
 
 The server logs the bound endpoint to stderr. Point local MCP clients at `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The transport is loopback-only and does not use authentication. Rejects non-loopback bind addresses, hostnames such as `localhost`, and mismatched Host/Origin headers. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify that the address uses a literal loopback IP and that the client sends the expected Host and Origin values.
 
+By default `serve` advertises the complete tool catalog (`full`). Pass `--profile` (or set the `TOOL_PROFILE` environment variable) to narrow it for stdio or HTTP alike:
+
+```bash
+rhizome-mcp serve --profile agent
+rhizome-mcp serve --http-address 127.0.0.1:0 --profile read-only
+```
+
+Supported profiles are `full` (default), `agent` (ordinary issue/planning/review/knowledge/lifecycle work, excluding bulk project transfer and incremental sync), `read-only` (only operations guaranteed not to write durable state), and `migration` (the minimal project metadata/export/validate/apply transfer workflow). An unrecognized profile name fails startup immediately with the list of valid names. `get_project`'s `tool_profile` field reports the active profile so a client can diagnose a missing tool. **Profiles are an exposure and prompt-size control, not an authorization boundary** — every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. The full membership matrix is documented in [docs/03-mcp-tools.md](../docs/03-mcp-tools.md).
+
 ### `backup`
 
 Create a safe backup of the project database.
