@@ -3,6 +3,12 @@ name: Release binaries
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)publish the VS Code extension for (e.g. v1.0.0-beta.3). Only re-runs the Marketplace publish, not the binary build/upload path.'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,6 +16,11 @@ permissions:
 jobs:
   build-release-assets:
     name: Build release assets
+    # workflow_dispatch is a fallback to (re)publish the VS Code extension
+    # only (see publish-vscode-extension below) — it must not rebuild or
+    # re-upload binaries. Everything else in this file depends on this job
+    # (directly or transitively) and cascades to "skipped" automatically.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -274,4 +285,146 @@ jobs:
 
       - name: Publish to MCP Registry
         run: mcp-publisher publish
+
+  publish-vscode-extension:
+    name: Publish VS Code extension
+    # Depends on upload-release-assets (not build-release-assets) because it
+    # fetches binaries via `gh release download` from the tag's own permanent
+    # release assets, not this run's ephemeral build-release-assets workflow
+    # artifacts (1-day retention — long gone by the time a workflow_dispatch
+    # re-publish might run). needs: upload-release-assets skips by default on
+    # workflow_dispatch (it cascades from build-release-assets' `if` above),
+    # so this job's own `if` explicitly allows that "skipped" case through.
+    needs:
+      - upload-release-assets
+    if: always() && (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped')
+    runs-on: ubuntu-latest
+    # Same isolation rule as publish-npm/publish-mcp-registry: a Marketplace
+    # publishing hiccup must never fail the overall release.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-$DISPATCH_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "No tag resolved from either the release event or a workflow_dispatch 'tag' input." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'rhizome-mcp_*' --dir dist
+
+      - name: Extract binaries for packaging
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          mkdir -p vscode-binaries
+
+          # goos/goarch/ext triples, matching build-release-assets' matrix.
+          triples=(
+            "linux amd64 tar.gz"
+            "linux arm64 tar.gz"
+            "darwin amd64 tar.gz"
+            "darwin arm64 tar.gz"
+            "windows amd64 zip"
+            "windows arm64 zip"
+          )
+
+          for triple in "${triples[@]}"; do
+            read -r goos goarch ext <<< "$triple"
+            archive="dist/rhizome-mcp_${VERSION}_${goos}_${goarch}.${ext}"
+            if [ ! -f "$archive" ]; then
+              echo "Missing expected archive: $archive" >&2
+              exit 1
+            fi
+
+            bin_name="rhizome-mcp"
+            [ "$goos" = "windows" ] && bin_name="rhizome-mcp.exe"
+
+            extract_dir=$(mktemp -d)
+            if [ "$ext" = "zip" ]; then
+              unzip -q "$archive" -d "$extract_dir"
+            else
+              tar -xzf "$archive" -C "$extract_dir"
+            fi
+
+            dest="vscode-binaries/rhizome-mcp_${goos}_${goarch}"
+            [ "$goos" = "windows" ] && dest="${dest}.exe"
+            cp "$extract_dir/$bin_name" "$dest"
+            rm -rf "$extract_dir"
+          done
+
+          echo "Extracted binaries:"
+          ls -la vscode-binaries
+
+      - name: Package all platform VSIXes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          node editors/vscode/scripts/package-platforms.mjs \
+            --binaries-dir "$GITHUB_WORKSPACE/vscode-binaries" \
+            --out "$GITHUB_WORKSPACE/vsix-dist" \
+            --tag "$TAG"
+
+      - name: Checksum VSIXes
+        run: |
+          set -euo pipefail
+          for f in vsix-dist/*.vsix; do
+            shasum -a 256 "$f" | awk '{print $1}' > "${f}.sha256"
+          done
+          ls -la vsix-dist
+
+      - name: Publish to the Marketplace
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          vsixes=("$GITHUB_WORKSPACE"/vsix-dist/*.vsix)
+          if [ "${#vsixes[@]}" -eq 0 ]; then
+            echo "No VSIXes were built." >&2
+            exit 1
+          fi
+          # --skip-duplicate makes a re-run over an already-published
+          # version/target a no-op instead of a failure, per-target.
+          npx vsce publish --packagePath "${vsixes[@]}" --skip-duplicate
+
+      - name: Attach VSIXes to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" vsix-dist/*.vsix vsix-dist/*.vsix.sha256 --clobber --repo "$GITHUB_REPOSITORY"
 
