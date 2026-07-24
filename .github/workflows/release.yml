@@ -303,7 +303,9 @@ jobs:
     # publishing hiccup must never fail the overall release.
     continue-on-error: true
     permissions:
-      contents: read
+      # write, unlike publish-npm/publish-mcp-registry: this job's last step
+      # attaches VSIX assets to the GitHub release via `gh release upload`.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
