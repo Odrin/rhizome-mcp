@@ -57,6 +57,12 @@ Only the latest minor release (1.0.x) receives security updates. Users are encou
 - Publishing uses a PAT scoped to **Marketplace → Manage**, stored as the `VSCE_PAT` GitHub Actions secret.
 - Rotation: generate a new PAT with the same scope from the Azure DevOps organization's user settings, verify it locally with `npx @vscode/vsce verify-pat odrin`, then update the `VSCE_PAT` repository secret. Revoke the old PAT afterward. There is no fixed rotation schedule; rotate immediately if the token is suspected leaked, and otherwise before its configured expiry.
 
+### Open VSX
+
+- Namespace: `odrin` on [open-vsx.org](https://open-vsx.org/), linked via GitHub sign-in.
+- Publishing uses an Open VSX access token, stored as the `OVSX_PAT` GitHub Actions secret.
+- Rotation: generate a new token from the open-vsx.org user settings, verify it locally with `npx ovsx verify-pat odrin`, then update the `OVSX_PAT` repository secret. Revoke the old token afterward. Same policy as `VSCE_PAT`: no fixed schedule, rotate immediately if suspected leaked, otherwise before expiry.
+
 ### npm (`rhizome-mcp` and `@rhizome-mcp/*`)
 
 - All 7 packages (`rhizome-mcp` plus the six `@rhizome-mcp/<os>-<cpu>` platform packages) are published under the `odrin` npm account, which also owns the `@rhizome-mcp` org/scope.
