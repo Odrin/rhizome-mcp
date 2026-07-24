@@ -106,7 +106,12 @@ export async function activateRhizome(context: vscode.ExtensionContext): Promise
     lastResolution = result;
 
     if (result.failure) {
-      await showResolutionFailure();
+      // Deliberately not awaited: activation must resolve promptly and
+      // never block on the user dismissing a notification. In a headless
+      // test/CI context nobody ever interacts with it, so awaiting here
+      // would hang activate() indefinitely (confirmed: this caused a real
+      // CI timeout on macOS/Linux before this fix).
+      void showResolutionFailure();
     }
 
     return result;
@@ -123,7 +128,8 @@ export async function activateRhizome(context: vscode.ExtensionContext): Promise
     };
     lastResolution = failureResult;
 
-    await showResolutionFailure().catch((notifyErr: unknown) => {
+    // Not awaited, same reasoning as above.
+    void showResolutionFailure().catch((notifyErr: unknown) => {
       console.error('rhizome-mcp: failed to show the resolution-failure notification', notifyErr);
     });
 

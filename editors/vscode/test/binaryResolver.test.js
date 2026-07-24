@@ -165,7 +165,10 @@ test('resolveBinary falls back to PATH when there is no override and no bundled 
 
   const result = resolveBinary(undefined, {
     platform: 'linux',
-    env: { PATH: `/usr/bin${path.delimiter}/usr/local/bin` },
+    // path.posix.delimiter (always ':'), not the native path.delimiter —
+    // this simulates 'linux' regardless of the host OS actually running
+    // the test (matters on Windows, where path.delimiter is ';').
+    env: { PATH: `/usr/bin${path.posix.delimiter}/usr/local/bin` },
     extensionPath: '/ext', // bundled binary does not exist under this path
     fs: fakeFs,
   });
@@ -185,7 +188,8 @@ test('resolveBinary searches PATH directories in order and returns the first mat
 
   const result = resolveBinary(undefined, {
     platform: 'linux',
-    env: { PATH: ['/first', '/second', '/third'].join(path.delimiter) },
+    // path.posix.delimiter, same reasoning as the test above.
+    env: { PATH: ['/first', '/second', '/third'].join(path.posix.delimiter) },
     extensionPath: '/ext',
     fs: fakeFs,
   });
