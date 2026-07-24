@@ -31,23 +31,29 @@ AI coding agents are concurrent, context-limited, and interruptible. A `TODO.md`
 
 ## Quick start
 
-### VS Code
+### Install and run
 
-Install [Rhizome MCP](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) from the Marketplace — it bundles the platform binary and registers the MCP server automatically. Run `Rhizome: Initialize Project` from the Command Palette, then use Copilot's agent mode. No terminal, no `mcp.json` editing. Details: [docs/10-vscode-extension.md](docs/10-vscode-extension.md).
+Choose the approach that matches your workflow:
 
-Prefer a plain `mcp.json` entry with a standalone binary instead of the extension? Install the binary below, then use this one-click link: [Add to VS Code](vscode:mcp/install?%7B%22name%22%3A%22rhizome-mcp%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22rhizome-mcp%22%2C%22args%22%3A%5B%22serve%22%5D%7D).
+#### Zero-install trial via npm
 
-### Any other MCP client
+Try `rhizome-mcp` immediately with no separate binary install, no Go toolchain:
 
 ```bash
-npx -y rhizome-mcp serve
+npx rhizome-mcp serve
 ```
 
-Works everywhere Node.js does, no separate binary install. See [packages/npm/README.md](packages/npm/README.md) for platform coverage and package layout.
+Works with any MCP client. See [packages/npm/README.md](packages/npm/README.md) for platform coverage. Great for quick evaluation.
 
-### Install a release binary
+#### VS Code
 
-Verifies checksums, installs to `~/.local/bin` by default:
+Install [Rhizome MCP](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) (`odrin.rhizome-mcp`) from the Marketplace or [Open VSX](https://open-vsx.org/extension/odrin/rhizome-mcp). The extension bundles the platform binary, registers the MCP server automatically, and adds `Rhizome: Initialize Project` to the Command Palette. No terminal, no `mcp.json` editing. Details: [docs/10-vscode-extension.md](docs/10-vscode-extension.md).
+
+Prefer a standalone binary with a plain `mcp.json` entry instead? Install the binary below and use this one-click link: [Add to VS Code](vscode:mcp/install?%7B%22name%22%3A%22rhizome-mcp%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22rhizome-mcp%22%2C%22args%22%3A%5B%22serve%22%5D%7D).
+
+#### Native binary installer
+
+Download and install a release binary for your platform. Verifies checksums, installs to `~/.local/bin` by default:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.sh | sh
@@ -57,14 +63,28 @@ curl -fsSL https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/inst
 irm https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scripts/install.ps1 | iex
 ```
 
-Initialize tracking inside your repository, then register the server with your MCP client:
+#### Official MCP Registry
+
+Use `rhizome-mcp` via the official MCP Registry, available in the [Model Context Protocol registry](https://registry.modelcontextprotocol.io) as `io.github.Odrin/rhizome-mcp` for clients that consume the registry.
+
+### Initialize and connect
+
+Initialize tracking inside your repository:
 
 ```bash
 rhizome-mcp init
-rhizome-mcp connect claude
 ```
 
-`connect` supports `claude`, `codex`, `vscode`, and `json` (generic config for any other client). Use `--print` for a dry run. The manual equivalent for any MCP client:
+Then register the server with your MCP client. Automated setup for common clients:
+
+```bash
+rhizome-mcp connect claude    # Claude Code
+rhizome-mcp connect codex     # Codex
+rhizome-mcp connect vscode    # VS Code (if using standalone binary instead of extension)
+rhizome-mcp connect json      # Template for any other client
+```
+
+Use `--print` for a dry run. The manual equivalent for any MCP client:
 
 ```json
 {
@@ -94,7 +114,7 @@ Run `serve` with the repository as its working directory. Stdio is the default t
 
 That's it — connected agents discover the workflow through the server itself: `get_project` links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
 
-### Watch what your agents are doing
+### Monitor your project
 
 ```bash
 rhizome-mcp board                        # status counts, active leases, blockers, review queue

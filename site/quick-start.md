@@ -2,9 +2,42 @@
 
 Use the steps below to install, initialize, and connect clients to `rhizome-mcp`.
 
-## Install from the repository scripts
+## Install and run
 
-Choose the installer for your platform:
+Choose the approach that matches your workflow:
+
+### Zero-install trial via npm
+
+Try `rhizome-mcp` immediately with no separate binary install, no Go toolchain. For any MCP client, the [`rhizome-mcp` npm package](https://www.npmjs.com/package/rhizome-mcp) runs the correct platform binary with no separate download:
+
+```bash
+npx rhizome-mcp serve
+```
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "npx",
+      "args": ["-y", "rhizome-mcp", "serve"]
+    }
+  }
+}
+```
+
+See [packages/npm/README.md](https://github.com/Odrin/rhizome-mcp/blob/main/packages/npm/README.md) for platform coverage. Great for quick evaluation.
+
+### VS Code
+
+Install [Rhizome MCP](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) (`odrin.rhizome-mcp`) from the Marketplace or [Open VSX](https://open-vsx.org/extension/odrin/rhizome-mcp). The extension bundles the platform binary, registers the MCP server automatically, and adds `Rhizome: Initialize Project` to the Command Palette. No terminal, no `mcp.json` editing needed.
+
+Prefer a standalone binary with a plain `mcp.json` entry? Install the native binary below, then use the one-click link in that section.
+
+### Native binary installer
+
+Download and install a release binary for your platform. The installers verify checksums and install to `~/.local/bin` by default.
+
+On Linux or macOS, choose the installer for your platform:
 
 - [install.sh](https://github.com/Odrin/rhizome-mcp/blob/main/scripts/install.sh)
 - [install.ps1](https://github.com/Odrin/rhizome-mcp/blob/main/scripts/install.ps1)
@@ -25,9 +58,9 @@ Invoke-RestMethod https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/scrip
 
 Set `RHIZOME_VERSION` to install a specific release or `RHIZOME_INSTALL_DIR` to choose a different installation directory before running the installer.
 
-## Manual installation from release assets or source
+#### Manual installation from release assets
 
-For a manual install, open the GitHub Releases page at https://github.com/Odrin/rhizome-mcp/releases and choose the archive that matches your OS and CPU architecture (for example `rhizome-mcp_*_linux_amd64.tar.gz`, `rhizome-mcp_*_darwin_arm64.tar.gz`, or `rhizome-mcp_*_windows_amd64.zip`). Download the archive and the adjacent `.sha256` file with the same base name.
+Open the GitHub Releases page at https://github.com/Odrin/rhizome-mcp/releases and choose the archive that matches your OS and CPU architecture (for example `rhizome-mcp_*_linux_amd64.tar.gz`, `rhizome-mcp_*_darwin_arm64.tar.gz`, or `rhizome-mcp_*_windows_amd64.zip`). Download the archive and the adjacent `.sha256` file with the same base name.
 
 Verify the archive before extracting it:
 
@@ -49,6 +82,8 @@ After the checksum matches, extract the archive and place the resulting `rhizome
 rhizome-mcp doctor
 ```
 
+#### Build from source
+
 As an alternative to the release archive, build from source in the repository:
 
 ```bash
@@ -57,13 +92,45 @@ CGO_ENABLED=0 go build -o rhizome-mcp .
 
 This keeps the installation path explicit without relying on unsupported `go install` instructions or mirrored shell scripts.
 
-## npx, no install needed
+### Official MCP Registry
 
-For any MCP client (not only VS Code), the [`rhizome-mcp` npm package](https://www.npmjs.com/package/rhizome-mcp) runs the correct platform binary with no separate download and no Go toolchain:
+Use `rhizome-mcp` via the official MCP Registry, available in the [Model Context Protocol registry](https://registry.modelcontextprotocol.io) as `io.github.Odrin/rhizome-mcp` for clients that consume the registry.
+
+## Initialize and connect
+
+### Initialize the project
+
+Run the binary from the repository that should be tracked. `init` writes `.agent-tracker.json` into that repository and leaves the SQLite database outside the repo.
 
 ```bash
-npx -y rhizome-mcp serve
+rhizome-mcp init
 ```
+
+### Connect common clients
+
+Register the server with your MCP client. Automated setup for common clients:
+
+```bash
+rhizome-mcp connect claude    # Claude Code
+rhizome-mcp connect codex     # Codex
+rhizome-mcp connect vscode    # VS Code (if using standalone binary instead of extension)
+rhizome-mcp connect json      # Template for any other client
+```
+
+Use `--print` for a dry run. The manual equivalent for any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "rhizome": {
+      "command": "/absolute/path/to/rhizome-mcp",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+or, via `npx`, without installing a binary at all:
 
 ```json
 {
@@ -75,111 +142,6 @@ npx -y rhizome-mcp serve
   }
 }
 ```
-
-See [packages/npm/README.md](https://github.com/Odrin/rhizome-mcp/blob/main/packages/npm/README.md) for platform coverage.
-
-## Initialize the project
-
-Run the binary from the repository that should be tracked. `init` writes `.agent-tracker.json` into that repository and leaves the SQLite database outside the repo.
-
-```bash
-rhizome-mcp init
-```
-
-## Optional loopback HTTP transport
-
-The default transport is stdio. For a local HTTP endpoint instead, start the server with a literal loopback IP address:
-
-```bash
-rhizome-mcp serve --http-address 127.0.0.1:0
-```
-
-The process logs the bound endpoint to stderr. Configure local MCP clients to use `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The HTTP transport is loopback-only, has no authentication, and rejects unexpected Host or Origin values. Hostnames such as `localhost` are not supported by the current implementation, so use literal loopback IPs such as `127.0.0.1` or `[::1]`. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify the configured address, Host header, and Origin header before retrying.
-
-## Connect common clients
-
-### Claude Code
-
-Use the automated setup command:
-
-```bash
-rhizome-mcp connect claude
-```
-
-This merges the configuration into a project-local `.mcp.json` file with `mcpServers.rhizome-mcp`. For a dry run, add `--print`:
-
-```bash
-rhizome-mcp connect claude --print
-```
-
-Alternatively, manually run:
-
-```bash
-claude mcp add --transport stdio rhizome-mcp -- rhizome-mcp serve
-```
-
-### VS Code
-
-The easiest path is the [Rhizome MCP extension](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) on the Marketplace: it bundles the platform binary and registers the MCP server automatically, so none of the steps below are needed. Run `Rhizome: Initialize Project` from the Command Palette after installing it. See [docs/10-vscode-extension.md](https://github.com/Odrin/rhizome-mcp/blob/main/docs/10-vscode-extension.md) for how it works (workspace detection, `serverPath` override, duplicate guard).
-
-If you'd rather use a standalone binary with a plain `mcp.json` entry, use the automated setup command:
-
-```bash
-rhizome-mcp connect vscode
-```
-
-This merges the configuration into `.vscode/mcp.json` with `servers.rhizome-mcp`. For a dry run, add `--print`:
-
-```bash
-rhizome-mcp connect vscode --print
-```
-
-Alternatively, manually add this to `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "rhizome-mcp": {
-      "type": "stdio",
-      "command": "rhizome-mcp",
-      "args": ["serve"]
-    }
-  },
-  "inputs": []
-}
-```
-
-### Codex
-
-Use the automated setup command:
-
-```bash
-rhizome-mcp connect codex
-```
-
-If `codex` is not found on PATH, or you prefer a dry run, add `--print`:
-
-```bash
-rhizome-mcp connect codex --print
-```
-
-This prints a TOML snippet for manual addition to the Codex config. Alternatively, manually run:
-
-```bash
-codex mcp add rhizome-mcp -- rhizome-mcp serve
-```
-
-### Other MCP clients
-
-Use the generic JSON target to see a template:
-
-```bash
-rhizome-mcp connect json
-```
-
-### Antigravity
-
-Open the MCP Servers area in the Antigravity product UI and use the raw configuration view if your release exposes it. The UI labels and location vary by release, so use the product-specific path that appears in your version. Use the in-product flow for Antigravity rather than assuming a fixed filesystem location.
 
 ## Verify the setup
 
@@ -202,3 +164,13 @@ rhizome-mcp board --output board.html
 ```
 
 See [`board`](./cli.md#board) in the CLI reference for details.
+
+## Optional loopback HTTP transport
+
+The default transport is stdio. For a local HTTP endpoint instead, start the server with a literal loopback IP address:
+
+```bash
+rhizome-mcp serve --http-address 127.0.0.1:0
+```
+
+The process logs the bound endpoint to stderr. Configure local MCP clients to use `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The HTTP transport is loopback-only, has no authentication, and rejects unexpected Host or Origin values. Hostnames such as `localhost` are not supported by the current implementation, so use literal loopback IPs such as `127.0.0.1` or `[::1]`. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify the configured address, Host header, and Origin header before retrying.
