@@ -252,16 +252,34 @@ func (input FinishAttemptInput) Validate() (FinishAttemptInput, error) {
 		if input.FailureReasonCode == nil {
 			return FinishAttemptInput{}, validationError("failure_reason_code", "REQUIRED", "is required")
 		}
-		if input.TargetIssueStatus != nil || input.ReviewOutcome != nil || input.BlockedReason != nil || input.InterruptionReasonCode != nil {
-			return FinishAttemptInput{}, validationError("outcome", "INVALID_SHAPE", "failed attempts cannot include completion fields")
+		if input.TargetIssueStatus != nil {
+			return FinishAttemptInput{}, validationError("target_issue_status", "FORBIDDEN", "is not allowed for failed attempts")
+		}
+		if input.ReviewOutcome != nil {
+			return FinishAttemptInput{}, validationError("review_outcome", "FORBIDDEN", "is not allowed for failed attempts")
+		}
+		if input.BlockedReason != nil {
+			return FinishAttemptInput{}, validationError("blocked_reason", "FORBIDDEN", "is not allowed for failed attempts")
+		}
+		if input.InterruptionReasonCode != nil {
+			return FinishAttemptInput{}, validationError("interruption_reason_code", "FORBIDDEN", "is not allowed for failed attempts")
 		}
 	}
 	if input.Outcome == AttemptOutcomeInterrupted {
 		if input.InterruptionReasonCode == nil {
 			return FinishAttemptInput{}, validationError("interruption_reason_code", "REQUIRED", "is required")
 		}
-		if input.TargetIssueStatus != nil || input.ReviewOutcome != nil || input.BlockedReason != nil || input.FailureReasonCode != nil {
-			return FinishAttemptInput{}, validationError("outcome", "INVALID_SHAPE", "interrupted attempts cannot include completion fields")
+		if input.TargetIssueStatus != nil {
+			return FinishAttemptInput{}, validationError("target_issue_status", "FORBIDDEN", "is not allowed for interrupted attempts")
+		}
+		if input.ReviewOutcome != nil {
+			return FinishAttemptInput{}, validationError("review_outcome", "FORBIDDEN", "is not allowed for interrupted attempts")
+		}
+		if input.BlockedReason != nil {
+			return FinishAttemptInput{}, validationError("blocked_reason", "FORBIDDEN", "is not allowed for interrupted attempts")
+		}
+		if input.FailureReasonCode != nil {
+			return FinishAttemptInput{}, validationError("failure_reason_code", "FORBIDDEN", "is not allowed for interrupted attempts")
 		}
 	}
 	if input.AcknowledgedChanges != nil && (input.AcknowledgedChanges.IssueVersion < 1 || input.AcknowledgedChanges.LatestEventID < 0) {
@@ -367,8 +385,14 @@ func ValidateFinishAttemptForKind(input FinishAttemptInput, kind AttemptKind) er
 		if input.TargetIssueStatus == nil {
 			return validationError("target_issue_status", "REQUIRED", "is required for work completion")
 		}
-		if input.ReviewOutcome != nil || input.FailureReasonCode != nil || input.InterruptionReasonCode != nil {
-			return validationError("outcome", "INVALID_SHAPE", "work completion has invalid fields")
+		if input.ReviewOutcome != nil {
+			return validationError("review_outcome", "FORBIDDEN", "is not allowed for work completion")
+		}
+		if input.FailureReasonCode != nil {
+			return validationError("failure_reason_code", "FORBIDDEN", "is not allowed for work completion")
+		}
+		if input.InterruptionReasonCode != nil {
+			return validationError("interruption_reason_code", "FORBIDDEN", "is not allowed for work completion")
 		}
 		if *input.TargetIssueStatus == StatusBlocked {
 			if input.BlockedReason == nil || strings.TrimSpace(*input.BlockedReason) == "" {
@@ -385,8 +409,14 @@ func ValidateFinishAttemptForKind(input FinishAttemptInput, kind AttemptKind) er
 	if input.ReviewOutcome == nil {
 		return validationError("review_outcome", "REQUIRED", "is required for review completion")
 	}
-	if input.TargetIssueStatus != nil || input.FailureReasonCode != nil || input.InterruptionReasonCode != nil {
-		return validationError("outcome", "INVALID_SHAPE", "review completion has invalid fields")
+	if input.TargetIssueStatus != nil {
+		return validationError("target_issue_status", "FORBIDDEN", "is not allowed for review completion")
+	}
+	if input.FailureReasonCode != nil {
+		return validationError("failure_reason_code", "FORBIDDEN", "is not allowed for review completion")
+	}
+	if input.InterruptionReasonCode != nil {
+		return validationError("interruption_reason_code", "FORBIDDEN", "is not allowed for review completion")
 	}
 	if *input.ReviewOutcome == ReviewOutcomeBlocked {
 		if input.BlockedReason == nil || strings.TrimSpace(*input.BlockedReason) == "" {

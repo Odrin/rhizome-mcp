@@ -135,6 +135,70 @@ func TestFinishAttemptInputValidationAndKindRules(t *testing.T) {
 	}
 }
 
+func TestFinishAttemptShapeViolationsNameTheOffendingField(t *testing.T) {
+	failureCode := domain.FailureReasonOther
+	interruptionCode := domain.InterruptionReasonOther
+	reviewOutcome := domain.ReviewOutcomeApproved
+	target := domain.StatusDone
+
+	assertField := func(t *testing.T, err error, wantField string) {
+		t.Helper()
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) {
+			t.Fatalf("error = %v, want *domain.Error", err)
+		}
+		if len(domainErr.Details) == 0 || domainErr.Details[0].Field != wantField {
+			t.Fatalf("details = %#v, want field %q", domainErr.Details, wantField)
+		}
+	}
+
+	t.Run("failed outcome carrying target_issue_status", func(t *testing.T) {
+		bad := domain.FinishAttemptInput{
+			AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+			Outcome: domain.AttemptOutcomeFailed, ResultSummary: "summary",
+			FailureReasonCode: &failureCode, TargetIssueStatus: &target,
+		}
+		_, err := bad.Validate()
+		assertField(t, err, "target_issue_status")
+	})
+
+	t.Run("interrupted outcome carrying review_outcome", func(t *testing.T) {
+		bad := domain.FinishAttemptInput{
+			AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+			Outcome: domain.AttemptOutcomeInterrupted, ResultSummary: "summary",
+			InterruptionReasonCode: &interruptionCode, ReviewOutcome: &reviewOutcome,
+		}
+		_, err := bad.Validate()
+		assertField(t, err, "review_outcome")
+	})
+
+	t.Run("work completion carrying review_outcome", func(t *testing.T) {
+		work := domain.FinishAttemptInput{
+			AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+			Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
+			TargetIssueStatus: &target, ReviewOutcome: &reviewOutcome,
+		}
+		normalized, err := work.Validate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertField(t, domain.ValidateFinishAttemptForKind(normalized, domain.AttemptKindWork), "review_outcome")
+	})
+
+	t.Run("review completion carrying target_issue_status", func(t *testing.T) {
+		review := domain.FinishAttemptInput{
+			AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", LeaseToken: "token",
+			Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "summary",
+			TargetIssueStatus: &target, ReviewOutcome: &reviewOutcome,
+		}
+		normalized, err := review.Validate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertField(t, domain.ValidateFinishAttemptForKind(normalized, domain.AttemptKindReview), "target_issue_status")
+	})
+}
+
 func TestAttemptInputsNormalizeOptionalSessionIDs(t *testing.T) {
 	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
 	claim, err := (domain.ClaimIssueInput{IssueID: "ISSUE-1", SessionID: &sessionID}).Validate()
