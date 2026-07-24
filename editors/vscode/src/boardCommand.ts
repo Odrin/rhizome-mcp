@@ -3,9 +3,15 @@
  * ("Rhizome: Open Status Board" in the Command Palette): resolves the
  * target workspace folder (see `./workspaceTarget.ts`), spawns
  * `<binary> board --output <tempFile>` with `cwd` set to that folder, and
- * on success opens the generated HTML — preferring VS Code's built-in
- * Simple Browser, falling back to the OS default browser if that built-in
- * isn't available in this VS Code distribution.
+ * on success opens the generated HTML in the OS default browser.
+ *
+ * Deliberately not VS Code's built-in Simple Browser: it only loads local
+ * files that live inside a trusted workspace root, and the board's HTML is
+ * written to the OS temp directory, so Simple Browser always rejects it
+ * with "Forbidden. File does not reside within a trusted folder." — a
+ * webview-rendered error our extension has no way to detect (the
+ * `simpleBrowser.show` command itself resolves successfully before that
+ * error ever renders), so a try/catch fallback around it can never fire.
  */
 
 import { spawn } from 'node:child_process';
@@ -34,13 +40,9 @@ function runBoardProcess(
   });
 }
 
-/** Opens the generated board HTML for the user: Simple Browser first (keeps the view inside the editor), falling back to the OS default browser if the Simple Browser built-in isn't available in this VS Code distribution. */
+/** Opens the generated board HTML for the user in the OS default browser. */
 async function openBoard(fileUri: vscode.Uri): Promise<void> {
-  try {
-    await vscode.commands.executeCommand('simpleBrowser.show', fileUri.toString());
-  } catch {
-    await vscode.env.openExternal(fileUri);
-  }
+  await vscode.env.openExternal(fileUri);
 }
 
 /** Registers the `rhizome-mcp.showBoard` command. */
