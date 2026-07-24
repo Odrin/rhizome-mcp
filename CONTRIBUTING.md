@@ -56,6 +56,44 @@ See [AGENTS.md](AGENTS.md) for the full workflow.
 4. Open a pull request with a clear summary of changes and testing performed
 5. Link to the related MCP issue(s) in the PR description
 
+## VS Code extension
+
+The VS Code extension lives in `editors/vscode/` as a self-contained npm project.
+
+```bash
+cd editors/vscode
+npm install
+npm run watch      # esbuild in watch mode
+```
+
+Press F5 from that folder to launch an Extension Development Host. Run `npm run lint`, `npm run typecheck`, and `npm test` before submitting changes; `npm run package` produces an installable `.vsix`.
+
+### Platform packaging
+
+Published VSIXes bundle a platform-specific `rhizome-mcp` Go binary; see
+`editors/vscode/scripts/package-platforms.mjs`'s header comment for the exact
+input contract (binary naming) and the Go-binary-to-Marketplace-target
+mapping. Run `npm run package:local` from `editors/vscode/` to cross-compile
+the current platform's binary and produce one installable `.vsix` for manual
+testing.
+
+### Version policy
+
+The Marketplace requires a plain `major.minor.patch`
+version, but this project's git tags carry a prerelease suffix
+(`v1.0.0-beta.N`). The packaging script derives the extension's version from
+the git tag:
+
+- Beta tag `vMAJOR.MINOR.PATCH-beta.N` -> extension version
+  `MAJOR.(MINOR*2+1).(PATCH*1000+N)`, published with `vsce package
+  --pre-release`. Forcing the minor odd follows the Marketplace's documented
+  convention for distinguishing its pre-release channel from stable.
+- Stable tag `vMAJOR.MINOR.PATCH` (no `-beta.N`) -> extension version
+  `MAJOR.MINOR.PATCH` verbatim, published without `--pre-release`. Once the
+  server reaches a stable release, the extension's version locks step with
+  the server's own version from then on; there is no more odd/even
+  remapping after that point.
+
 ## Documentation
 
 - Specification changes go in the modular docs/ files (01-09), not README.md

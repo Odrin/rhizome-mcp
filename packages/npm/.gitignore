@@ -1,0 +1,4 @@
+# Platform packages ship a prebuilt Go binary at build/publish time (CI, or
+# a local smoke-test build) - never commit the binary itself.
+*/bin/rhizome-mcp
+*/bin/rhizome-mcp.exe
