@@ -57,7 +57,7 @@ Errors use:
 
 ## 3. Tool inventory
 
-The first version exposes 31 tools:
+The catalog exposes 32 tools:
 
 1. `get_project`
 2. `export_project`
@@ -69,27 +69,28 @@ The first version exposes 31 tools:
 8. `get_issue`
 9. `list_issues`
 10. `archive_issue`
-11. `create_review_request`
+11. `create_review_request` (deprecated — see section 6.6)
 12. `get_review_request`
 13. `list_review_requests`
 14. `cancel_review_request`
-15. `supersede_review_request`
-16. `manage_issue_relation`
-17. `get_issue_graph`
-18. `get_planning_graph`
-19. `validate_issue_plan`
-20. `apply_issue_plan`
-21. `add_comment`
-22. `record_decision`
-23. `list_decisions`
-24. `get_issue_activity`
-25. `claim_issue`
-26. `renew_attempt`
-27. `save_attempt_note`
-28. `finish_attempt`
-29. `get_work_context`
-30. `search`
-31. `get_changes`
+15. `supersede_review_request` (deprecated — see section 6.6)
+16. `replace_review_request`
+17. `manage_issue_relation`
+18. `get_issue_graph`
+19. `get_planning_graph`
+20. `validate_issue_plan`
+21. `apply_issue_plan`
+22. `add_comment`
+23. `record_decision`
+24. `list_decisions`
+25. `get_issue_activity`
+26. `claim_issue`
+27. `renew_attempt`
+28. `save_attempt_note`
+29. `finish_attempt`
+30. `get_work_context`
+31. `search`
+32. `get_changes`
 
 ---
 
@@ -119,20 +120,25 @@ is *guaranteed* to produce no additional effect beyond the first call — not
 merely because a tool happens to accept an optional `idempotency_key`. Two
 independent patterns earn a `true` here:
 
-- **Mandatory-key replay** — `apply_issue_plan` requires `idempotency_key` on
-  every call (it is a required schema field, not optional) and the
-  repository replays the original result for a repeated key. Same arguments
-  necessarily means the same key, so the guarantee holds unconditionally.
+- **Mandatory-key replay** — `apply_issue_plan` and `replace_review_request`
+  require `idempotency_key` on every call (it is a required schema field,
+  not optional) and the repository replays the original result for a
+  repeated key. Same arguments necessarily means the same key, so the
+  guarantee holds unconditionally.
 - **Fail-safe-on-retry gating** — a mutation guarded by a precondition that
   the first successful call itself invalidates: optimistic-concurrency
   `expected_version` (`update_issue`, `archive_issue`,
-  `cancel_review_request`, `supersede_review_request`), a claimability check
+  `cancel_review_request`, `supersede_review_request`,
+  `replace_review_request`'s predecessor), a claimability check
   (`claim_issue`), an active-lease check (`finish_attempt`), or a storage
   constraint (`manage_issue_relation`'s unique `(source, target, type)` index
   on add, not-found on remove; `apply_import`'s empty-destination
   requirement). After the first call, the precondition no longer holds, so a
   bare repeat with identical arguments fails without any further write —
   analogous to the MCP specification's own `delete_file` example.
+  `replace_review_request` satisfies both patterns at once: the mandatory
+  key gives replay, and the predecessor's `expected_version` additionally
+  fails safe if a caller races without noticing the key collision.
 
 Tools that only ever append or insert with no such gate and no mandatory key
 (`create_issue`, `create_review_request`, `add_comment`, `record_decision`,
@@ -160,8 +166,11 @@ rather than the tool's read/write split alone:
   in the same transaction when `supersedes_id` is supplied.
 - `create_review_request` is **not** destructive: it only records a
   `supersedes_id` link and never closes the predecessor itself — that split
-  responsibility is exactly what ISSUE-55's `replace_review_request`
-  operation replaces.
+  responsibility is exactly what `replace_review_request` replaces (see
+  section 6.6 for the deprecation policy).
+- `replace_review_request` is destructive: a successful call ends the
+  predecessor's lifecycle (superseded) as part of creating its successor,
+  in the same transaction.
 
 ### 4.1. Annotation matrix
 
@@ -182,6 +191,7 @@ rather than the tool's read/write split alone:
 | `list_review_requests` | ✓ | | ✓ | |
 | `cancel_review_request` | | ✓ | ✓ | |
 | `supersede_review_request` | | ✓ | ✓ | |
+| `replace_review_request` | | ✓ | ✓ | |
 | `manage_issue_relation` | | ✓ | ✓ | |
 | `get_issue_graph` | ✓ | | ✓ | |
 | `get_planning_graph` | ✓ | | ✓ | |
@@ -595,6 +605,14 @@ optional artifact set. A review request is claimable only while its status is
 
 #### `create_review_request`
 
+**Deprecated.** `supersedes_id` only records a predecessor link; it never
+closes that predecessor. Coordinating creation with a separate
+`supersede_review_request` call leaves the review lifecycle in a partial
+state after a failure or concurrency conflict between the two calls. Prefer
+`replace_review_request` (below), which does both atomically. Retained as a
+compatibility alias for one release; `supersedes_id` retains its current
+(non-closing) semantics for as long as the alias exists.
+
 Input:
 
 ```json
@@ -610,6 +628,63 @@ Input:
 `issue_id`, `target_issue_version`, and `target_event_id` are required.
 `artifact_ids` may contain at most 20 IDs. Creating another review request for
 the same target returns `REVIEW_ALREADY_EXISTS`.
+
+#### `replace_review_request`
+
+Atomically supersedes a predecessor review request and creates its open
+successor in one SQLite transaction: no partial state is observable between
+"predecessor closed" and "successor created." The predecessor determines the
+issue scope, so there is no separate `issue_id` field.
+
+Input:
+
+```json
+{
+  "predecessor_request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "predecessor_expected_version": 1,
+  "target_issue_version": 10,
+  "target_event_id": 1900,
+  "artifact_ids": [],
+  "idempotency_key": "replace-2026-07-24-01"
+}
+```
+
+`predecessor_request_id`, `predecessor_expected_version`, `target_issue_version`,
+`target_event_id`, and `idempotency_key` are required. Unlike every other
+review-request tool, `idempotency_key` here is mandatory, not optional: this
+operation does not hold the predecessor's attempt lease token, so replaying a
+retried call safely (rather than risking a second successor from a client-side
+retry) depends on the key.
+
+Output:
+
+```text
+predecessor
+successor
+latest_event_id
+```
+
+`predecessor` and `successor` are each a full review request record (see the
+shared field list below). `successor.supersedes_id` always points back to
+`predecessor.id`, and `predecessor.status` is always `superseded`.
+
+Failure modes, all structured and side-effect-free (zero writes):
+
+- Stale `predecessor_expected_version` → `VERSION_CONFLICT` (retryable).
+- Predecessor is currently `claimed` → `REVIEW_REQUEST_CLAIMED`. This
+  operation does not carry the attempt's lease token, so it cannot detach or
+  orphan an active review attempt; the lease holder must `finish_attempt` or
+  otherwise interrupt its attempt first, which naturally returns the
+  predecessor to `open` for the review requester to try again — or a client
+  can resolve the review outcome and create a fresh request instead.
+- Predecessor is any other terminal status (`approved`, `changes_requested`,
+  `blocked`, `cancelled`, `superseded`) → `REVIEW_REQUEST_NOT_REPLACEABLE`.
+- The successor's target already has an unrelated active request →
+  `REVIEW_ALREADY_EXISTS`.
+- Reusing `idempotency_key` with a different normalized request →
+  `IDEMPOTENCY_CONFLICT`. Reusing it with the same request replays the
+  original `predecessor`/`successor`/`latest_event_id` without any new
+  writes or events.
 
 #### `get_review_request`
 
@@ -656,6 +731,13 @@ has_more
 
 #### `cancel_review_request` and `supersede_review_request`
 
+**`supersede_review_request` is deprecated** for the same reason as
+`create_review_request.supersedes_id` above: it closes a request without
+creating or identifying a replacement, so a client must coordinate a second
+`create_review_request` call itself. Prefer `replace_review_request`.
+`cancel_review_request` is not deprecated — cancelling with no successor
+remains a distinct, legitimate operation with no atomicity problem to fix.
+
 Both operations require the request ID and its current version:
 
 ```json
@@ -668,7 +750,8 @@ Both operations require the request ID and its current version:
 They apply only to open or claimed review requests and return the updated
 review request.
 
-Every review-request tool returns a review request with:
+Every review-request tool — including each of `replace_review_request`'s
+`predecessor` and `successor` fields — returns a review request with:
 
 ```text
 id

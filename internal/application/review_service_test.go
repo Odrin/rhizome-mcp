@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -68,6 +69,65 @@ func TestReviewServiceCreatesAndMutatesRequests(t *testing.T) {
 	}
 }
 
+func TestReviewServiceReplaceReviewRequestDelegatesAndValidates(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	issueRepository := &issueRepositoryStub{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
+	reviewRepository := &reviewRepositoryStub{request: domain.ReviewRequest{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", IssueID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.ReviewRequestStatusOpen, Version: 3}}
+	service, err := NewReviewService(reviewRepository, issueRepository, clock.NewFakeClock(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.ReplaceReviewRequest(context.Background(), ReplaceReviewRequestInput{
+		PredecessorRequestID:       "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		PredecessorExpectedVersion: 3,
+		TargetIssueVersion:         4,
+		TargetEventID:              12,
+		ArtifactIDs:                []string{"artifact-2"},
+		IdempotencyKey:             "replace-key-1",
+	})
+	if err != nil {
+		t.Fatalf("ReplaceReviewRequest() error = %v", err)
+	}
+	if result.Predecessor.Status != domain.ReviewRequestStatusSuperseded {
+		t.Fatalf("predecessor status = %q, want superseded", result.Predecessor.Status)
+	}
+	if result.Successor.Status != domain.ReviewRequestStatusOpen || result.Successor.SupersedesID == nil || *result.Successor.SupersedesID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+		t.Fatalf("successor = %+v", result.Successor)
+	}
+	if result.LatestEventID != 42 {
+		t.Fatalf("latest_event_id = %d, want 42", result.LatestEventID)
+	}
+	if reviewRepository.replaceCommand.PredecessorRequestID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" || reviewRepository.replaceCommand.IdempotencyKey != "replace-key-1" {
+		t.Fatalf("replace command = %+v", reviewRepository.replaceCommand)
+	}
+
+	// A reused idempotency key must replay without invoking the writer again.
+	reviewRepository.replaceReplay = reviewRepository.replaceResult
+	reviewRepository.replaceCommand = ports.ReplaceReviewRequestCommand{}
+	replayed, err := service.ReplaceReviewRequest(context.Background(), ReplaceReviewRequestInput{
+		PredecessorRequestID:       "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		PredecessorExpectedVersion: 3,
+		TargetIssueVersion:         4,
+		TargetEventID:              12,
+		ArtifactIDs:                []string{"artifact-2"},
+		IdempotencyKey:             "replace-key-1",
+	})
+	if err != nil {
+		t.Fatalf("replayed ReplaceReviewRequest() error = %v", err)
+	}
+	if replayed.Successor.ID != result.Successor.ID || reviewRepository.replaceCommand.PredecessorRequestID != "" {
+		t.Fatalf("replay unexpectedly invoked the writer: command = %+v", reviewRepository.replaceCommand)
+	}
+
+	if _, err := service.ReplaceReviewRequest(context.Background(), ReplaceReviewRequestInput{PredecessorRequestID: "", PredecessorExpectedVersion: 1, TargetIssueVersion: 1, IdempotencyKey: "k"}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("blank predecessor_request_id error = %v, want INVALID_ARGUMENT", err)
+	}
+	if _, err := service.ReplaceReviewRequest(context.Background(), ReplaceReviewRequestInput{PredecessorRequestID: "req", PredecessorExpectedVersion: 1, TargetIssueVersion: 1, IdempotencyKey: ""}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("blank idempotency_key error = %v, want INVALID_ARGUMENT", err)
+	}
+}
+
 func TestReviewServiceListFiltersByStatusAndClaimability(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	service, err := NewReviewService(&reviewRepositoryStub{request: domain.ReviewRequest{ID: "req-1", Status: domain.ReviewRequestStatusApproved}}, &issueRepositoryStub{}, clock.NewFakeClock(now))
@@ -129,8 +189,12 @@ func (stub *issueRepositoryStub) CountIssuesByEffectiveStatus(context.Context, p
 }
 
 type reviewRepositoryStub struct {
-	createCommand ports.CreateReviewRequestCommand
-	request       domain.ReviewRequest
+	createCommand  ports.CreateReviewRequestCommand
+	request        domain.ReviewRequest
+	replaceCommand ports.ReplaceReviewRequestCommand
+	replaceResult  *ports.ReplaceReviewRequestResult
+	replaceReplay  *ports.ReplaceReviewRequestResult
+	replaceErr     error
 }
 
 func (stub *reviewRepositoryStub) CreateReviewRequest(_ context.Context, command ports.CreateReviewRequestCommand) (ports.CreateReviewRequestResult, error) {
@@ -165,6 +229,33 @@ func (stub *reviewRepositoryStub) ClaimReviewRequest(context.Context, ports.Revi
 
 func (stub *reviewRepositoryStub) ResolveReviewRequest(context.Context, ports.ResolveReviewRequestCommand) (ports.ResolveReviewRequestResult, error) {
 	return ports.ResolveReviewRequestResult{}, nil
+}
+
+func (stub *reviewRepositoryStub) LookupReplaceReviewRequest(context.Context, string, []byte) (ports.ReplaceReviewRequestResult, bool, error) {
+	if stub.replaceReplay != nil {
+		return *stub.replaceReplay, true, nil
+	}
+	return ports.ReplaceReviewRequestResult{}, false, nil
+}
+
+func (stub *reviewRepositoryStub) ReplaceReviewRequest(_ context.Context, command ports.ReplaceReviewRequestCommand) (ports.ReplaceReviewRequestResult, error) {
+	stub.replaceCommand = command
+	if stub.replaceErr != nil {
+		return ports.ReplaceReviewRequestResult{}, stub.replaceErr
+	}
+	predecessor := stub.request
+	predecessor.Status = domain.ReviewRequestStatusSuperseded
+	predecessor.Version = command.PredecessorExpectedVersion + 1
+	successorID := "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	supersedesID := predecessor.ID
+	successor := domain.ReviewRequest{
+		ID: successorID, IssueID: predecessor.IssueID, TargetIssueVersion: command.TargetIssueVersion,
+		TargetEventID: command.TargetEventID, ArtifactIDs: append([]string(nil), command.ArtifactIDs...),
+		Status: domain.ReviewRequestStatusOpen, SupersedesID: &supersedesID, Version: 1,
+	}
+	result := ports.ReplaceReviewRequestResult{Predecessor: predecessor, Successor: successor, LatestEventID: 42}
+	stub.replaceResult = &result
+	return result, nil
 }
 
 func stringPointer(value string) *string { return &value }

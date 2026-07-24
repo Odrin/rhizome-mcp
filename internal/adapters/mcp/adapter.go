@@ -373,16 +373,28 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	sdkmcp.AddTool(server, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput(), toolHints(false, true, true, false)), adapter.archiveIssue)
 	sdkmcp.AddTool(server, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), adapter.cancelReviewRequest)
 	// create_review_request only records a supersedes_id link; it never
-	// closes the predecessor (that split is exactly what ISSUE-55 replaces),
-	// so it is purely additive and has no idempotency_key at all.
-	sdkmcp.AddTool(server, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), adapter.createReviewRequest)
+	// closes the predecessor (that split is exactly what replace_review_request
+	// fixes), so it is purely additive and has no idempotency_key at all.
+	// Deprecated: supersedes_id is retained as a compatibility alias for one
+	// release; prefer replace_review_request for atomic supersession.
+	sdkmcp.AddTool(server, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set. Deprecated: prefer replace_review_request.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), adapter.createReviewRequest)
 	sdkmcp.AddTool(server, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), adapter.getReviewRequest)
 	sdkmcp.AddTool(server, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput(), toolHints(true, false, true, false)), adapter.listReviewRequests)
 	// add/remove are each gated (unique constraint on add, not-found on
 	// remove), so a bare repeat has no additional effect; remove can destroy
 	// an existing relation.
 	sdkmcp.AddTool(server, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), adapter.manageIssueRelation)
-	sdkmcp.AddTool(server, tool("supersede_review_request", "Supersede an open or claimed review request using its current version.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), adapter.supersedeReviewRequest)
+	// Deprecated: retained as a compatibility alias for one release; prefer
+	// replace_review_request, which closes the predecessor and opens its
+	// successor atomically instead of leaving the review lifecycle partial
+	// between two separate calls.
+	sdkmcp.AddTool(server, tool("supersede_review_request", "Supersede an open or claimed review request using its current version. Deprecated: prefer replace_review_request.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), adapter.supersedeReviewRequest)
+	// idempotency_key is required (not optional) and the repository replays
+	// the original result for a repeated key, so idempotentHint is
+	// genuinely true. A claimed predecessor is rejected (CodeReviewRequestClaimed)
+	// rather than replaced, since this operation does not hold the attempt's
+	// lease token.
+	sdkmcp.AddTool(server, tool("replace_review_request", "Atomically supersede a predecessor review request and create its open successor in one transaction.", schemaReplaceReviewRequest(), schemaReplaceReviewRequestOutput(), toolHints(false, true, true, false)), adapter.replaceReviewRequest)
 	sdkmcp.AddTool(server, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), adapter.getIssueGraph)
 	sdkmcp.AddTool(server, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), adapter.getPlanningGraph)
 	sdkmcp.AddTool(server, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput(), toolHints(true, false, true, false)), adapter.validateIssuePlan)
@@ -1005,6 +1017,27 @@ func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdk
 		return adapter.failure(err)
 	}
 	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request superseded")
+}
+
+func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input replaceReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	adapter.touchSession(ctx, request.Session)
+	result, err := adapter.reviews.ReplaceReviewRequest(ctx, application.ReplaceReviewRequestInput{
+		PredecessorRequestID:       input.PredecessorRequestID,
+		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
+		TargetIssueVersion:         input.TargetIssueVersion,
+		TargetEventID:              input.TargetEventID,
+		ArtifactIDs:                append([]string(nil), input.ArtifactIDs...),
+		IdempotencyKey:             input.IdempotencyKey,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	output := replaceReviewRequestOutput{
+		Predecessor:   reviewRequestDTOFromDomain(result.Predecessor, false),
+		Successor:     reviewRequestDTOFromDomain(result.Successor, true),
+		LatestEventID: result.LatestEventID,
+	}
+	return success(output, "review request replaced")
 }
 
 func success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {

@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 	"strconv"
 	"strings"
 
@@ -214,6 +215,71 @@ func (service *ReviewService) SupersedeReviewRequest(ctx context.Context, input 
 		return ReviewMutationResult{}, err
 	}
 	return ReviewMutationResult{Request: result.Request, Claimable: false}, nil
+}
+
+// ReplaceReviewRequestInput captures the atomic replacement intent: close
+// predecessor, open successor, in one transaction.
+type ReplaceReviewRequestInput struct {
+	PredecessorRequestID       string
+	PredecessorExpectedVersion int64
+	TargetIssueVersion         int64
+	TargetEventID              int64
+	ArtifactIDs                []string
+	IdempotencyKey             string
+}
+
+// ReplaceReviewRequestResult contains the persisted predecessor and successor
+// requests plus the project-wide latest event ID observed in the same
+// transaction, so the caller has enough position information to continue.
+type ReplaceReviewRequestResult struct {
+	Predecessor   domain.ReviewRequest
+	Successor     domain.ReviewRequest
+	LatestEventID int64
+}
+
+// ReplaceReviewRequest validates the request, replays a matching prior
+// result for a reused idempotency key, and otherwise delegates one atomic
+// supersede-and-create transaction to storage.
+func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input ReplaceReviewRequestInput) (ReplaceReviewRequestResult, error) {
+	normalized, err := domain.ReplaceReviewRequestInput{
+		PredecessorRequestID:       input.PredecessorRequestID,
+		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
+		TargetIssueVersion:         input.TargetIssueVersion,
+		TargetEventID:              input.TargetEventID,
+		ArtifactIDs:                input.ArtifactIDs,
+		IdempotencyKey:             input.IdempotencyKey,
+	}.Validate()
+	if err != nil {
+		return ReplaceReviewRequestResult{}, err
+	}
+
+	canonical, err := domain.CanonicalReplaceReviewRequestRequest(normalized)
+	if err != nil {
+		return ReplaceReviewRequestResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode replace review request", false)
+	}
+	hash := sha256.Sum256(canonical)
+	requestHash := hash[:]
+
+	if replay, found, err := service.repository.LookupReplaceReviewRequest(ctx, normalized.IdempotencyKey, requestHash); err != nil {
+		return ReplaceReviewRequestResult{}, err
+	} else if found {
+		return ReplaceReviewRequestResult{Predecessor: replay.Predecessor, Successor: replay.Successor, LatestEventID: replay.LatestEventID}, nil
+	}
+
+	result, err := service.repository.ReplaceReviewRequest(ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID:       normalized.PredecessorRequestID,
+		PredecessorExpectedVersion: normalized.PredecessorExpectedVersion,
+		TargetIssueVersion:         normalized.TargetIssueVersion,
+		TargetEventID:              normalized.TargetEventID,
+		ArtifactIDs:                normalized.ArtifactIDs,
+		OccurredAt:                 service.clock.Now().UTC(),
+		IdempotencyKey:             normalized.IdempotencyKey,
+		RequestHash:                requestHash,
+	})
+	if err != nil {
+		return ReplaceReviewRequestResult{}, err
+	}
+	return ReplaceReviewRequestResult{Predecessor: result.Predecessor, Successor: result.Successor, LatestEventID: result.LatestEventID}, nil
 }
 
 func copyOptionalString(value *string) *string {

@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -121,4 +122,82 @@ type ReviewEvent struct {
 	EventType ReviewEventType
 	Payload   json.RawMessage
 	CreatedAt time.Time
+}
+
+// MaxReviewArtifactIDs bounds the artifact set carried by one review request
+// or replacement, matching the existing create_review_request bound.
+const MaxReviewArtifactIDs = 20
+
+// ReplaceReviewRequestInput is a caller-owned request to atomically supersede
+// a predecessor review request and create its open successor in one
+// transaction. The predecessor determines the issue scope: there is no
+// separate issue_id, since the successor always belongs to the predecessor's
+// issue. idempotency_key is mandatory (not optional) because a bare repeat
+// would otherwise create a second successor from the same predecessor.
+type ReplaceReviewRequestInput struct {
+	PredecessorRequestID       string
+	PredecessorExpectedVersion int64
+	TargetIssueVersion         int64
+	TargetEventID              int64
+	ArtifactIDs                []string
+	IdempotencyKey             string
+}
+
+// Validate checks request-local replacement rules and returns a normalized
+// copy. It cannot check predecessor existence, status, or target
+// consistency: those require storage and are enforced atomically by the
+// repository.
+func (input ReplaceReviewRequestInput) Validate() (ReplaceReviewRequestInput, error) {
+	requestID := strings.TrimSpace(input.PredecessorRequestID)
+	if requestID == "" {
+		return ReplaceReviewRequestInput{}, validationError("predecessor_request_id", "REQUIRED", "must not be blank")
+	}
+	if input.PredecessorExpectedVersion < 1 {
+		return ReplaceReviewRequestInput{}, validationError("predecessor_expected_version", "INVALID", "must be >= 1")
+	}
+	if input.TargetIssueVersion < 1 {
+		return ReplaceReviewRequestInput{}, validationError("target_issue_version", "INVALID", "must be >= 1")
+	}
+	if input.TargetEventID < 0 {
+		return ReplaceReviewRequestInput{}, validationError("target_event_id", "INVALID", "must be >= 0")
+	}
+	artifactIDs, err := CopyBounded("artifact_ids", input.ArtifactIDs, MaxReviewArtifactIDs)
+	if err != nil {
+		return ReplaceReviewRequestInput{}, err
+	}
+	key := strings.TrimSpace(input.IdempotencyKey)
+	if key == "" {
+		return ReplaceReviewRequestInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+	}
+	if err := ValidateText("idempotency_key", key, MaxIdempotencyKeyRunes); err != nil {
+		return ReplaceReviewRequestInput{}, err
+	}
+	return ReplaceReviewRequestInput{
+		PredecessorRequestID:       requestID,
+		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
+		TargetIssueVersion:         input.TargetIssueVersion,
+		TargetEventID:              input.TargetEventID,
+		ArtifactIDs:                artifactIDs,
+		IdempotencyKey:             key,
+	}, nil
+}
+
+// CanonicalReplaceReviewRequestRequest returns deterministic JSON for a
+// normalized replacement request. The idempotency key is intentionally
+// excluded, matching every other Canonical*Request function in this package.
+func CanonicalReplaceReviewRequestRequest(input ReplaceReviewRequestInput) ([]byte, error) {
+	request := struct {
+		PredecessorRequestID       string   `json:"predecessor_request_id"`
+		PredecessorExpectedVersion int64    `json:"predecessor_expected_version"`
+		TargetIssueVersion         int64    `json:"target_issue_version"`
+		TargetEventID              int64    `json:"target_event_id"`
+		ArtifactIDs                []string `json:"artifact_ids"`
+	}{
+		PredecessorRequestID:       input.PredecessorRequestID,
+		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
+		TargetIssueVersion:         input.TargetIssueVersion,
+		TargetEventID:              input.TargetEventID,
+		ArtifactIDs:                input.ArtifactIDs,
+	}
+	return json.Marshal(request)
 }

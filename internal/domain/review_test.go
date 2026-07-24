@@ -105,3 +105,70 @@ func TestReviewWorkflowStatusesAndEventsParse(t *testing.T) {
 		})
 	}
 }
+
+func TestReplaceReviewRequestInputValidate(t *testing.T) {
+	valid := domain.ReplaceReviewRequestInput{
+		PredecessorRequestID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", PredecessorExpectedVersion: 1,
+		TargetIssueVersion: 2, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"}, IdempotencyKey: "key-1",
+	}
+	if normalized, err := valid.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	} else if normalized.IdempotencyKey != "key-1" || len(normalized.ArtifactIDs) != 1 {
+		t.Fatalf("Validate() = %+v", normalized)
+	}
+
+	tests := []struct {
+		name  string
+		input domain.ReplaceReviewRequestInput
+		code  string
+	}{
+		{name: "blank predecessor id", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) { i.PredecessorRequestID = "  " }), code: domain.CodeInvalidArgument},
+		{name: "zero predecessor version", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) { i.PredecessorExpectedVersion = 0 }), code: domain.CodeInvalidArgument},
+		{name: "zero target issue version", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) { i.TargetIssueVersion = 0 }), code: domain.CodeInvalidArgument},
+		{name: "negative target event id", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) { i.TargetEventID = -1 }), code: domain.CodeInvalidArgument},
+		{name: "too many artifact ids", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) {
+			i.ArtifactIDs = make([]string, domain.MaxReviewArtifactIDs+1)
+		}), code: domain.CodeLimitExceeded},
+		{name: "blank idempotency key", input: setField(valid, func(i *domain.ReplaceReviewRequestInput) { i.IdempotencyKey = "  " }), code: domain.CodeInvalidArgument},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.input.Validate(); !errors.Is(err, &domain.Error{Code: tt.code}) {
+				t.Fatalf("Validate() error = %v, want %s", err, tt.code)
+			}
+		})
+	}
+}
+
+func setField(base domain.ReplaceReviewRequestInput, mutate func(*domain.ReplaceReviewRequestInput)) domain.ReplaceReviewRequestInput {
+	mutate(&base)
+	return base
+}
+
+func TestCanonicalReplaceReviewRequestRequestExcludesIdempotencyKey(t *testing.T) {
+	input := domain.ReplaceReviewRequestInput{
+		PredecessorRequestID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", PredecessorExpectedVersion: 1,
+		TargetIssueVersion: 2, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"}, IdempotencyKey: "key-1",
+	}
+	first, err := domain.CanonicalReplaceReviewRequestRequest(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.IdempotencyKey = "different-key"
+	second, err := domain.CanonicalReplaceReviewRequestRequest(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("canonical request changed with idempotency key: %s vs %s", first, second)
+	}
+
+	input.TargetIssueVersion = 3
+	third, err := domain.CanonicalReplaceReviewRequestRequest(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) == string(third) {
+		t.Fatalf("canonical request did not change with target_issue_version")
+	}
+}

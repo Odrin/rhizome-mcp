@@ -284,6 +284,17 @@ func schemaSupersedeReviewRequest() *jsonschema.Schema {
 	}, "review_request_id", "expected_version")
 }
 
+func schemaReplaceReviewRequest() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"predecessor_request_id":       reviewRequestIdentifierSchema(),
+		"predecessor_expected_version": boundedIntegerSchema(1, 9_223_372_036_854_775_807),
+		"target_issue_version":         boundedIntegerSchema(1, 9_223_372_036_854_775_807),
+		"target_event_id":              boundedIntegerSchema(0, 9_223_372_036_854_775_807),
+		"artifact_ids":                 boundedStringsSchema(domain.MaxReviewArtifactIDs, 4_096),
+		"idempotency_key":              boundedStringSchema(domain.MaxIdempotencyKeyRunes),
+	}, "predecessor_request_id", "predecessor_expected_version", "target_issue_version", "target_event_id", "idempotency_key")
+}
+
 func schemaAddComment() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(), "content": boundedStringSchema(50_000),
@@ -446,6 +457,9 @@ func schemaIssueOutput() *jsonschema.Schema         { return typedSchema[issueDT
 func schemaReviewRequestOutput() *jsonschema.Schema { return typedSchema[reviewRequestDTO]() }
 func schemaReviewRequestListOutput() *jsonschema.Schema {
 	return typedSchema[reviewRequestListOutput]()
+}
+func schemaReplaceReviewRequestOutput() *jsonschema.Schema {
+	return typedSchema[replaceReviewRequestOutput]()
 }
 func schemaGetIssueActivityOutput() *jsonschema.Schema { return typedSchema[issueActivityOutput]() }
 func schemaSearchOutput() *jsonschema.Schema           { return typedSchema[searchOutput]() }

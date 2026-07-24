@@ -67,6 +67,13 @@ const (
 	CodeReviewAlreadyExists = "REVIEW_ALREADY_EXISTS"
 	// CodeReviewTargetStale identifies a request whose target content changed since creation.
 	CodeReviewTargetStale = "STALE_REVIEW_TARGET"
+	// CodeReviewRequestClaimed identifies a claimed predecessor that cannot be
+	// replaced without first finishing or interrupting its active attempt.
+	CodeReviewRequestClaimed = "REVIEW_REQUEST_CLAIMED"
+	// CodeReviewRequestNotReplaceable identifies a predecessor whose status is
+	// terminal (approved, changes_requested, blocked, cancelled, or
+	// superseded) and therefore has nothing left to replace.
+	CodeReviewRequestNotReplaceable = "REVIEW_REQUEST_NOT_REPLACEABLE"
 )
 
 // Detail is one stable, field-oriented domain error detail. EntityIndex is nil

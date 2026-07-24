@@ -180,6 +180,15 @@ type supersedeReviewRequestInput struct {
 	ExpectedVersion int64  `json:"expected_version"`
 }
 
+type replaceReviewRequestInput struct {
+	PredecessorRequestID       string   `json:"predecessor_request_id"`
+	PredecessorExpectedVersion int64    `json:"predecessor_expected_version"`
+	TargetIssueVersion         int64    `json:"target_issue_version"`
+	TargetEventID              int64    `json:"target_event_id"`
+	ArtifactIDs                []string `json:"artifact_ids,omitempty"`
+	IdempotencyKey             string   `json:"idempotency_key"`
+}
+
 type renewAttemptInput struct {
 	AttemptID    string `json:"attempt_id"`
 	LeaseToken   string `json:"lease_token"`
@@ -588,6 +597,16 @@ type reviewRequestListOutput struct {
 	Items      []reviewRequestDTO `json:"items"`
 	NextCursor *string            `json:"next_cursor,omitempty"`
 	HasMore    bool               `json:"has_more"`
+}
+
+// replaceReviewRequestOutput exposes both sides of the atomic replacement so
+// the caller can continue safely without a follow-up get_review_request
+// call: the closed predecessor, the new open successor, and the project-wide
+// latest_event_id observed in the same transaction.
+type replaceReviewRequestOutput struct {
+	Predecessor   reviewRequestDTO `json:"predecessor"`
+	Successor     reviewRequestDTO `json:"successor"`
+	LatestEventID int64            `json:"latest_event_id"`
 }
 
 type activityItemDTO struct {

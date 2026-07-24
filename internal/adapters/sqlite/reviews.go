@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -21,6 +22,10 @@ type ReviewRepository struct {
 	db        *DB
 	generator *ids.Generator
 }
+
+const replaceReviewRequestOperation = "replace_review_request"
+
+var _ ports.ReviewRepository = (*ReviewRepository)(nil)
 
 // NewReviewRepository constructs a review repository with a ULID generator.
 func NewReviewRepository(db *DB) (*ReviewRepository, error) {
@@ -281,6 +286,181 @@ func (repository *ReviewRepository) SupersedeReviewRequest(ctx context.Context, 
 	})
 	if err != nil {
 		return ports.ReviewMutationResult{}, err
+	}
+	return result, nil
+}
+
+// LookupReplaceReviewRequest serves a replay before any write is attempted.
+// ReplaceReviewRequest still repeats this check in its writer transaction to
+// close the lookup/write race.
+func (repository *ReviewRepository) LookupReplaceReviewRequest(ctx context.Context, key string, hash []byte) (ports.ReplaceReviewRequestResult, bool, error) {
+	var result ports.ReplaceReviewRequestResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, replaceReviewRequestOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
+// ReplaceReviewRequest atomically supersedes a predecessor review request and
+// creates its open successor. Rejecting a claimed predecessor here (rather
+// than detaching its active attempt) is deliberate: this operation does not
+// hold the attempt's lease token, so the lease holder must finish or
+// interrupt its own attempt first.
+func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, command ports.ReplaceReviewRequestCommand) (ports.ReplaceReviewRequestResult, error) {
+	if repository == nil || repository.db == nil {
+		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
+	}
+	var result ports.ReplaceReviewRequestResult
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, replaceReviewRequestOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				return json.Unmarshal([]byte(savedResponse), &result)
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
+
+		predecessor, _, err := repository.loadRequestForMutation(ctx, tx, command.PredecessorRequestID)
+		if err != nil {
+			return err
+		}
+		if predecessor.Version != command.PredecessorExpectedVersion {
+			return domain.NewError(domain.CodeVersionConflict, "review request version conflict", true)
+		}
+		switch predecessor.Status {
+		case domain.ReviewRequestStatusOpen:
+			// only a currently open predecessor can be replaced.
+		case domain.ReviewRequestStatusClaimed:
+			return domain.NewError(domain.CodeReviewRequestClaimed,
+				"review request is claimed; finish or interrupt the active attempt before replacing it", false)
+		default:
+			return domain.NewError(domain.CodeReviewRequestNotReplaceable, "review request cannot be replaced", false)
+		}
+
+		target, err := repository.ensureTarget(ctx, tx, ports.CreateReviewRequestCommand{
+			IssueID:            predecessor.IssueID,
+			TargetIssueVersion: command.TargetIssueVersion,
+			TargetEventID:      command.TargetEventID,
+			ArtifactIDs:        command.ArtifactIDs,
+			OccurredAt:         command.OccurredAt,
+		})
+		if err != nil {
+			return err
+		}
+		activeForTarget, err := repository.loadActiveRequestForTarget(ctx, tx, target.ID)
+		if err != nil {
+			return err
+		}
+		if activeForTarget != nil && activeForTarget.ID != predecessor.ID {
+			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
+		}
+
+		occurredAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
+			domain.ReviewRequestStatusSuperseded, occurredAt, predecessor.ID, predecessor.Version); err != nil {
+			return err
+		}
+
+		successorID, err := repository.newID()
+		if err != nil {
+			return err
+		}
+		artifactIDsJSON, err := jsonMarshalArtifacts(command.ArtifactIDs)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
+            id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json,
+            status, supersedes_id, active_attempt_id, version, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, 1, ?, NULL)`,
+			successorID, target.ID, predecessor.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON),
+			predecessor.ID, occurredAt,
+		); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at) VALUES (?, ?, NULL, 'review_superseded', ?, ?)`,
+			predecessor.ID, predecessor.TargetID, string(payloadForReplaceReviewEvent(predecessor.ID, predecessor.TargetID, successorID, "")), occurredAt); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at) VALUES (?, ?, NULL, 'review_requested', ?, ?)`,
+			successorID, target.ID, string(payloadForReplaceReviewEvent(successorID, target.ID, "", predecessor.ID)), occurredAt); err != nil {
+			return err
+		}
+
+		latestEventID, err := latestIssueEventIDInTransaction(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		predecessor.Status = domain.ReviewRequestStatusSuperseded
+		predecessor.ActiveAttemptID = nil
+		predecessor.ResolvedAt = pointerTime(parseTimestamp(occurredAt))
+		predecessor.Version++
+
+		supersedesID := predecessor.ID
+		result = ports.ReplaceReviewRequestResult{
+			Predecessor: predecessor,
+			Successor: domain.ReviewRequest{
+				ID:                 successorID,
+				IssueID:            predecessor.IssueID,
+				TargetID:           target.ID,
+				TargetIssueVersion: command.TargetIssueVersion,
+				TargetEventID:      command.TargetEventID,
+				ArtifactIDs:        append([]string(nil), command.ArtifactIDs...),
+				Status:             domain.ReviewRequestStatusOpen,
+				SupersedesID:       &supersedesID,
+				Version:            1,
+				CreatedAt:          parseTimestamp(occurredAt),
+			},
+			SuccessorTarget: target,
+			LatestEventID:   latestEventID,
+		}
+
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode replace review request response", false)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, replaceReviewRequestOperation, command.RequestHash, string(response), occurredAt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return ports.ReplaceReviewRequestResult{}, err
 	}
 	return result, nil
 }
@@ -623,6 +803,27 @@ func payloadForReviewEvent(requestID, targetID string, attemptID *string, outcom
 	}
 	if reason != nil {
 		payload.Reason = copyReviewOptionalString(reason)
+	}
+	data, _ := json.Marshal(payload)
+	return data
+}
+
+// payloadForReplaceReviewEvent builds the review_events payload for one side
+// of an atomic replacement, cross-referencing the other request so the event
+// stream alone shows which request replaced (or was replaced by) which.
+// Exactly one of successorID/predecessorID is set per call.
+func payloadForReplaceReviewEvent(requestID, targetID, successorID, predecessorID string) []byte {
+	payload := struct {
+		RequestID     string  `json:"request_id"`
+		TargetID      string  `json:"target_id"`
+		SuccessorID   *string `json:"successor_id,omitempty"`
+		PredecessorID *string `json:"predecessor_id,omitempty"`
+	}{RequestID: requestID, TargetID: targetID}
+	if successorID != "" {
+		payload.SuccessorID = &successorID
+	}
+	if predecessorID != "" {
+		payload.PredecessorID = &predecessorID
 	}
 	data, _ := json.Marshal(payload)
 	return data

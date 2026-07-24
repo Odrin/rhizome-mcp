@@ -124,6 +124,164 @@ func TestIntegrationReviewWorkflow(t *testing.T) {
 	}
 }
 
+func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type":                  "bug",
+		"title":                 "Replace review request integration",
+		"description":           "Exercise atomic review request replacement through the MCP transport.",
+		"status":                "review",
+		"labels":                []string{"integration"},
+		"create_missing_labels": true,
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" || issue.DisplayID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+
+	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
+		"issue_id": issue.DisplayID, "target_issue_version": 1, "target_event_id": 0,
+		"artifact_ids": []string{"artifact-1"},
+	})
+	var predecessor struct {
+		ID                 string `json:"id"`
+		Version            int64  `json:"version"`
+		Status             string `json:"status"`
+		TargetIssueVersion int64  `json:"target_issue_version"`
+	}
+	decodeIntegrationResult(t, requested, &predecessor)
+	if requested.IsError || predecessor.ID == "" || predecessor.Status != "open" {
+		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, predecessor)
+	}
+
+	replaced := callIntegrationTool(t, session, "replace_review_request", map[string]any{
+		"predecessor_request_id":       predecessor.ID,
+		"predecessor_expected_version": predecessor.Version,
+		"target_issue_version":         2,
+		"target_event_id":              0,
+		"artifact_ids":                 []string{"artifact-2"},
+		"idempotency_key":              "integration-replace-1",
+	})
+	var replaceOutput struct {
+		Predecessor struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"predecessor"`
+		Successor struct {
+			ID                 string `json:"id"`
+			Status             string `json:"status"`
+			TargetIssueVersion int64  `json:"target_issue_version"`
+			SupersedesID       string `json:"supersedes_id"`
+		} `json:"successor"`
+		LatestEventID int64 `json:"latest_event_id"`
+	}
+	decodeIntegrationResult(t, replaced, &replaceOutput)
+	if replaced.IsError || replaceOutput.Predecessor.Status != "superseded" || replaceOutput.Successor.Status != "open" ||
+		replaceOutput.Successor.TargetIssueVersion != 2 || replaceOutput.Successor.SupersedesID != predecessor.ID ||
+		replaceOutput.Successor.ID == predecessor.ID {
+		t.Fatalf("replace_review_request result = %#v, decoded = %#v", replaced, replaceOutput)
+	}
+
+	// Repeating the same idempotency key replays the original result rather
+	// than creating a second successor.
+	replayed := callIntegrationTool(t, session, "replace_review_request", map[string]any{
+		"predecessor_request_id":       predecessor.ID,
+		"predecessor_expected_version": predecessor.Version,
+		"target_issue_version":         2,
+		"target_event_id":              0,
+		"artifact_ids":                 []string{"artifact-2"},
+		"idempotency_key":              "integration-replace-1",
+	})
+	var replayOutput struct {
+		Successor struct {
+			ID string `json:"id"`
+		} `json:"successor"`
+	}
+	decodeIntegrationResult(t, replayed, &replayOutput)
+	if replayed.IsError || replayOutput.Successor.ID != replaceOutput.Successor.ID {
+		t.Fatalf("replayed replace_review_request result = %#v, decoded = %#v", replayed, replayOutput)
+	}
+
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+	var successorCount int
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE supersedes_id = ?`, predecessor.ID).Scan(&successorCount)
+	}); err != nil {
+		t.Fatalf("read successor count: %v", err)
+	}
+	if successorCount != 1 {
+		t.Fatalf("successor count = %d, want 1 (idempotency replay must not create a second successor)", successorCount)
+	}
+
+	// A claimed predecessor must be rejected without detaching its attempt.
+	claimedIssue := callIntegrationTool(t, session, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeIntegrationResult(t, claimedIssue, &claim)
+	if claimedIssue.IsError || claim.Attempt.ID == "" {
+		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimedIssue, claim)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	claimedSuccessor, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
+		RequestID: replaceOutput.Successor.ID, ExpectedVersion: 1, ActiveAttemptID: &claim.Attempt.ID,
+		OccurredAt: time.Now().UTC().Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("claim successor review request: %v", err)
+	}
+
+	rejectedReplace := callIntegrationTool(t, session, "replace_review_request", map[string]any{
+		"predecessor_request_id":       replaceOutput.Successor.ID,
+		"predecessor_expected_version": claimedSuccessor.Request.Version,
+		"target_issue_version":         3,
+		"target_event_id":              0,
+		"artifact_ids":                 []string{"artifact-4"},
+		"idempotency_key":              "integration-replace-2",
+	})
+	if !rejectedReplace.IsError {
+		t.Fatalf("replace of a claimed predecessor unexpectedly succeeded: %#v", rejectedReplace)
+	}
+	var rejection struct {
+		Code string `json:"code"`
+	}
+	decodeIntegrationResult(t, rejectedReplace, &rejection)
+	if rejection.Code != "REVIEW_REQUEST_CLAIMED" {
+		t.Fatalf("rejected replace error code = %q, want REVIEW_REQUEST_CLAIMED (full result: %#v)", rejection.Code, rejectedReplace)
+	}
+
+	reloadedSuccessor, err := reviewRepository.GetReviewRequest(context.Background(), replaceOutput.Successor.ID)
+	if err != nil {
+		t.Fatalf("get successor review request: %v", err)
+	}
+	if reloadedSuccessor.Request.Status != domain.ReviewRequestStatusClaimed || reloadedSuccessor.Request.ActiveAttemptID == nil ||
+		*reloadedSuccessor.Request.ActiveAttemptID != claim.Attempt.ID {
+		t.Fatalf("claimed successor changed after rejected replace: %+v", reloadedSuccessor.Request)
+	}
+}
+
 func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)

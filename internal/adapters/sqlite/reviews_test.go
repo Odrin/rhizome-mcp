@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -355,6 +356,344 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("claim event count = %d, want 1", count)
+	}
+}
+
+func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-success")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "replace target issue")
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 3, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replaced, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"artifact-2"},
+		OccurredAt:     time.Date(2026, 7, 24, 9, 1, 0, 0, time.UTC),
+		IdempotencyKey: "replace-once", RequestHash: []byte("hash-1"),
+	})
+	if err != nil {
+		t.Fatalf("ReplaceReviewRequest() error = %v", err)
+	}
+	if replaced.Predecessor.Status != domain.ReviewRequestStatusSuperseded {
+		t.Fatalf("predecessor status = %q, want superseded", replaced.Predecessor.Status)
+	}
+	if replaced.Successor.Status != domain.ReviewRequestStatusOpen || replaced.Successor.TargetIssueVersion != 2 ||
+		replaced.Successor.SupersedesID == nil || *replaced.Successor.SupersedesID != created.Request.ID {
+		t.Fatalf("successor = %+v", replaced.Successor)
+	}
+	if replaced.Successor.ID == created.Request.ID {
+		t.Fatalf("successor reused predecessor ID")
+	}
+
+	// Predecessor is truly closed, not left claimable.
+	predecessor, err := fixture.repository.GetReviewRequest(fixture.ctx, created.Request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predecessor.Request.Status != domain.ReviewRequestStatusSuperseded {
+		t.Fatalf("stored predecessor status = %q, want superseded", predecessor.Request.Status)
+	}
+
+	// One review_requested event from the original create, plus one
+	// review_superseded (predecessor) and one review_requested (successor)
+	// from the replace itself.
+	var eventCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 3 {
+		t.Fatalf("review event count = %d, want 3", eventCount)
+	}
+
+	// Repeating the same idempotency key replays the original result with no
+	// new writes.
+	replayed, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"artifact-2"},
+		OccurredAt:     time.Date(2026, 7, 24, 9, 2, 0, 0, time.UTC),
+		IdempotencyKey: "replace-once", RequestHash: []byte("hash-1"),
+	})
+	if err != nil {
+		t.Fatalf("replayed ReplaceReviewRequest() error = %v", err)
+	}
+	if replayed.Successor.ID != replaced.Successor.ID {
+		t.Fatalf("replay produced a different successor: %+v", replayed.Successor)
+	}
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 3 {
+		t.Fatalf("review event count after replay = %d, want 3 (unchanged)", eventCount)
+	}
+
+	// A different request under the same key is a stable conflict, not silent overwrite.
+	if _, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"different-artifact"},
+		OccurredAt:     time.Date(2026, 7, 24, 9, 3, 0, 0, time.UTC),
+		IdempotencyKey: "replace-once", RequestHash: []byte("hash-2"),
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
+		t.Fatalf("conflicting idempotency key error = %v, want IDEMPOTENCY_CONFLICT", err)
+	}
+}
+
+func TestReviewRepositoryReplaceRejectsClaimedPredecessorWithZeroWrites(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-claimed")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "claimed predecessor issue")
+	attemptID := fixture.insertReviewAttempt(t, issueID)
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := fixture.repository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: created.Request.ID, ExpectedVersion: created.Request.Version, ActiveAttemptID: &attemptID,
+		OccurredAt: time.Date(2026, 7, 24, 10, 1, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: claimed.Request.ID, PredecessorExpectedVersion: claimed.Request.Version,
+		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		OccurredAt: time.Date(2026, 7, 24, 10, 2, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeReviewRequestClaimed}) {
+		t.Fatalf("claimed predecessor replace error = %v, want REVIEW_REQUEST_CLAIMED", err)
+	}
+
+	reloaded, err := fixture.repository.GetReviewRequest(fixture.ctx, claimed.Request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Request.Status != domain.ReviewRequestStatusClaimed || reloaded.Request.Version != claimed.Request.Version ||
+		reloaded.Request.ActiveAttemptID == nil || *reloaded.Request.ActiveAttemptID != attemptID {
+		t.Fatalf("claimed predecessor changed after rejected replace: %+v", reloaded.Request)
+	}
+	var requestCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE issue_id = ?`, issueID).Scan(&requestCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("review_requests count after rejected replace = %d, want 1 (no successor written)", requestCount)
+	}
+}
+
+func TestReviewRepositoryReplaceRejectsTerminalPredecessor(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-terminal")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "terminal predecessor issue")
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 11, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := fixture.repository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: created.Request.ID, ExpectedVersion: created.Request.Version,
+		OccurredAt: time.Date(2026, 7, 24, 11, 1, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: cancelled.Request.ID, PredecessorExpectedVersion: cancelled.Request.Version,
+		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		OccurredAt: time.Date(2026, 7, 24, 11, 2, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeReviewRequestNotReplaceable}) {
+		t.Fatalf("terminal predecessor replace error = %v, want REVIEW_REQUEST_NOT_REPLACEABLE", err)
+	}
+}
+
+func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-version-conflict")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "version conflict predecessor")
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version + 1,
+		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		OccurredAt: time.Date(2026, 7, 24, 12, 1, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, &domain.Error{Code: domain.CodeVersionConflict}) {
+		t.Fatalf("stale version replace error = %v, want VERSION_CONFLICT", err)
+	}
+
+	var requestCount, eventCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE issue_id = ?`, issueID).Scan(&requestCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ?`, created.Request.ID).Scan(&eventCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("review_requests count after rolled-back replace = %d, want 1", requestCount)
+	}
+	if eventCount != 1 {
+		t.Fatalf("review_events count after rolled-back replace = %d, want 1 (only the original review_requested)", eventCount)
+	}
+
+	reloaded, err := fixture.repository.GetReviewRequest(fixture.ctx, created.Request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Request.Status != domain.ReviewRequestStatusOpen || reloaded.Request.Version != created.Request.Version {
+		t.Fatalf("predecessor changed after rolled-back replace: %+v", reloaded.Request)
+	}
+}
+
+func TestReviewRepositoryConcurrentReplaceHaveOneWinner(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-concurrency")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "concurrent replace issue")
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 13, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for i := range 2 {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			<-start
+			_, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+				PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+				TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+				OccurredAt:     time.Date(2026, 7, 24, 13, 1, 0, 0, time.UTC),
+				IdempotencyKey: "concurrent-replace", RequestHash: []byte("same-hash"),
+			})
+			_ = index
+			results <- err
+		}(i)
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var success int
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent replace error = %v", err)
+		}
+		success++
+	}
+	if success != 2 {
+		t.Fatalf("concurrent replace success count = %d, want 2 (second call replays via the shared idempotency key)", success)
+	}
+
+	var successorCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE supersedes_id = ?`, created.Request.ID).Scan(&successorCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if successorCount != 1 {
+		t.Fatalf("successor count = %d, want exactly 1 active successor despite 2 concurrent callers", successorCount)
+	}
+}
+
+// TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner
+// covers two callers who don't know about each other and use distinct
+// idempotency keys, unlike TestReviewRepositoryConcurrentReplaceHaveOneWinner
+// above where both share one key. The loser must see its own now-stale
+// PredecessorExpectedVersion rejected with VERSION_CONFLICT, not a false
+// success — mirroring TestReviewRepositoryConcurrentClaimsHaveOneWinner.
+func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *testing.T) {
+	fixture := newReviewFixture(t, "review-replace-concurrency-independent")
+	defer fixture.close()
+
+	issueID := fixture.insertIssue(t, "concurrent independent replace issue")
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		OccurredAt: time.Date(2026, 7, 24, 14, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for i := range 2 {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			<-start
+			_, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+				PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+				TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+				OccurredAt:     time.Date(2026, 7, 24, 14, 1, 0, 0, time.UTC),
+				IdempotencyKey: fmt.Sprintf("independent-caller-%d", index), RequestHash: []byte{byte(index)},
+			})
+			results <- err
+		}(i)
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var success, versionConflicts int
+	for err := range results {
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, &domain.Error{Code: domain.CodeVersionConflict}):
+			versionConflicts++
+		default:
+			t.Fatalf("concurrent independent replace error = %v", err)
+		}
+	}
+	if success != 1 || versionConflicts != 1 {
+		t.Fatalf("concurrent independent replace outcomes = success %d version_conflicts %d, want 1 and 1", success, versionConflicts)
+	}
+
+	var successorCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE supersedes_id = ?`, created.Request.ID).Scan(&successorCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if successorCount != 1 {
+		t.Fatalf("successor count = %d, want exactly 1 active successor", successorCount)
 	}
 }
 

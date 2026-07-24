@@ -77,6 +77,31 @@ type ResolveReviewRequestResult struct {
 	Outcome domain.ReviewOutcomeRecord
 }
 
+// ReplaceReviewRequestCommand captures a validated atomic replacement: close
+// the predecessor and open its successor in one transaction. IssueID is
+// resolved from the predecessor by the repository, not supplied by the
+// caller.
+type ReplaceReviewRequestCommand struct {
+	PredecessorRequestID       string
+	PredecessorExpectedVersion int64
+	TargetIssueVersion         int64
+	TargetEventID              int64
+	ArtifactIDs                []string
+	OccurredAt                 time.Time
+	IdempotencyKey             string
+	RequestHash                []byte
+}
+
+// ReplaceReviewRequestResult is the persisted predecessor and successor
+// requests, the successor's target snapshot, and the project-wide latest
+// event ID observed in the same transaction.
+type ReplaceReviewRequestResult struct {
+	Predecessor     domain.ReviewRequest
+	Successor       domain.ReviewRequest
+	SuccessorTarget domain.ReviewTarget
+	LatestEventID   int64
+}
+
 // ReviewRepository persists review workflow requests and their state transitions.
 type ReviewRepository interface {
 	CreateReviewRequest(context.Context, CreateReviewRequestCommand) (CreateReviewRequestResult, error)
@@ -86,4 +111,6 @@ type ReviewRepository interface {
 	SupersedeReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	ClaimReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	ResolveReviewRequest(context.Context, ResolveReviewRequestCommand) (ResolveReviewRequestResult, error)
+	ReplaceReviewRequest(context.Context, ReplaceReviewRequestCommand) (ReplaceReviewRequestResult, error)
+	LookupReplaceReviewRequest(context.Context, string, []byte) (ReplaceReviewRequestResult, bool, error)
 }
