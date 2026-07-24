@@ -330,6 +330,9 @@ func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[stri
 	if len(toolsResponse.Tools) == 0 {
 		return nil, "", fmt.Errorf("list_tools returned no tools")
 	}
+	if err := assertHTTPToolAnnotations(toolsResponse.Tools); err != nil {
+		return nil, "", err
+	}
 	getProjectResult, err := postJSONRPC(httpClient, endpoint, sessionID, 3, "tools/call", map[string]any{
 		"name":      "get_project",
 		"arguments": map[string]any{},
@@ -347,6 +350,27 @@ func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[stri
 		return nil, "", fmt.Errorf("get_project returned no structured content")
 	}
 	return getProjectPayload.StructuredContent, sessionID, nil
+}
+
+// assertHTTPToolAnnotations spot-checks that get_project's read-only
+// annotation survives the HTTP JSON-RPC round trip, since the raw
+// map[string]any decoding here (unlike the typed stdio client) would
+// silently accept a missing "annotations" key.
+func assertHTTPToolAnnotations(tools []map[string]any) error {
+	for _, tool := range tools {
+		if tool["name"] != "get_project" {
+			continue
+		}
+		annotations, ok := tool["annotations"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("get_project has no annotations over HTTP transport: %#v", tool)
+		}
+		if readOnly, ok := annotations["readOnlyHint"].(bool); !ok || !readOnly {
+			return fmt.Errorf("get_project readOnlyHint over HTTP = %#v, want true", annotations["readOnlyHint"])
+		}
+		return nil
+	}
+	return fmt.Errorf("get_project not found in HTTP tools/list response")
 }
 
 type jsonRPCEnvelope struct {

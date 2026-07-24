@@ -9,8 +9,24 @@ import (
 	"rhizome-mcp/internal/domain"
 )
 
-func tool(name, description string, input, output *jsonschema.Schema) *sdkmcp.Tool {
-	return &sdkmcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: output}
+func tool(name, description string, input, output *jsonschema.Schema, hints *sdkmcp.ToolAnnotations) *sdkmcp.Tool {
+	return &sdkmcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: output, Annotations: hints}
+}
+
+// toolHints is the one explicit, reviewable annotation decision required for
+// every registered tool: adding a tool without calling this (or changing
+// tool's signature) fails to compile. destructiveHint and idempotentHint
+// follow the actual write behavior of the handler, not its name or whether it
+// happens to accept an optional idempotency_key — see docs/03-mcp-tools.md
+// for the per-tool rationale, especially the non-obvious idempotent cases
+// (version- or lease-gated mutations that fail safely on exact repeat).
+func toolHints(readOnly, destructive, idempotent, openWorld bool) *sdkmcp.ToolAnnotations {
+	return &sdkmcp.ToolAnnotations{
+		ReadOnlyHint:    readOnly,
+		DestructiveHint: &destructive,
+		IdempotentHint:  idempotent,
+		OpenWorldHint:   &openWorld,
+	}
 }
 
 func object(properties map[string]*jsonschema.Schema, required ...string) *jsonschema.Schema {

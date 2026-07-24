@@ -93,9 +93,120 @@ The first version exposes 31 tools:
 
 ---
 
-## 4. Project and discovery
+## 4. Tool annotations
 
-### 4.1. `get_project`
+Every tool returned by `tools/list` carries an explicit
+[MCP tool annotation](https://modelcontextprotocol.io/specification) set:
+`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. These are
+assigned in code through one required `toolHints(...)` argument on every
+registration call in `internal/adapters/mcp/adapter.go`, so a newly added tool
+that omits this argument fails to compile — the classification cannot be
+silently skipped.
+
+**Annotations are advisory client guidance, not an authorization boundary.**
+A client may use them to decide whether to warn a user or skip a confirmation
+prompt, but the server always re-validates every request server-side
+regardless of what a client inferred from these hints. Nothing here weakens
+or replaces domain-level validation, optimistic concurrency, or lease checks.
+
+`openWorldHint` is `false` for every tool: Rhizome only reads and writes its
+own local SQLite project database. No tool fetches a URL or otherwise reaches
+into an external system on the server's behalf (artifact `uri` values are
+stored as opaque strings, never dereferenced).
+
+`idempotentHint` is `true` only where repeating the exact same call arguments
+is *guaranteed* to produce no additional effect beyond the first call — not
+merely because a tool happens to accept an optional `idempotency_key`. Two
+independent patterns earn a `true` here:
+
+- **Mandatory-key replay** — `apply_issue_plan` requires `idempotency_key` on
+  every call (it is a required schema field, not optional) and the
+  repository replays the original result for a repeated key. Same arguments
+  necessarily means the same key, so the guarantee holds unconditionally.
+- **Fail-safe-on-retry gating** — a mutation guarded by a precondition that
+  the first successful call itself invalidates: optimistic-concurrency
+  `expected_version` (`update_issue`, `archive_issue`,
+  `cancel_review_request`, `supersede_review_request`), a claimability check
+  (`claim_issue`), an active-lease check (`finish_attempt`), or a storage
+  constraint (`manage_issue_relation`'s unique `(source, target, type)` index
+  on add, not-found on remove; `apply_import`'s empty-destination
+  requirement). After the first call, the precondition no longer holds, so a
+  bare repeat with identical arguments fails without any further write —
+  analogous to the MCP specification's own `delete_file` example.
+
+Tools that only ever append or insert with no such gate and no mandatory key
+(`create_issue`, `create_review_request`, `add_comment`, `record_decision`,
+`save_attempt_note`, `renew_attempt`) are `idempotentHint: false`: a bare
+repeat creates a second issue, comment, decision, or note, or (for
+`renew_attempt`) pushes the lease expiry further out again. An optional
+`idempotency_key` on these tools changes behavior only when the caller
+actually supplies one — it is not part of the unconditional invocation
+contract, so it does not change the hint.
+
+`destructiveHint` follows the guidance's own examples — overwrite, archive,
+cancel, supersede, bulk-apply, or otherwise destroying prior effective state —
+rather than the tool's read/write split alone:
+
+- `update_issue` can overwrite title, description, status, and
+  `blocked_reason`.
+- `archive_issue`, `cancel_review_request`, and `supersede_review_request`
+  each end the prior lifecycle state of their target.
+- `manage_issue_relation` can remove an existing relation (`action: "remove"`).
+- `apply_import` and `apply_issue_plan` are bulk-apply operations with a wide
+  blast radius even though individual writes are additive.
+- `finish_attempt` can transition an issue's status (including to `blocked`,
+  overwriting a prior `blocked_reason`) as part of ending the lease.
+- `record_decision` can flip an existing decision's `status` to `superseded`
+  in the same transaction when `supersedes_id` is supplied.
+- `create_review_request` is **not** destructive: it only records a
+  `supersedes_id` link and never closes the predecessor itself — that split
+  responsibility is exactly what ISSUE-55's `replace_review_request`
+  operation replaces.
+
+### 4.1. Annotation matrix
+
+| Tool | readOnly | destructive | idempotent | openWorld |
+| --- | --- | --- | --- | --- |
+| `get_project` | ✓ | | ✓ | |
+| `export_project` | ✓ | | ✓ | |
+| `validate_import` | ✓ | | ✓ | |
+| `apply_import` | | ✓ | ✓ | |
+| `list_labels` | ✓ | | ✓ | |
+| `create_issue` | | | | |
+| `update_issue` | | ✓ | ✓ | |
+| `get_issue` | ✓ | | ✓ | |
+| `list_issues` | ✓ | | ✓ | |
+| `archive_issue` | | ✓ | ✓ | |
+| `create_review_request` | | | | |
+| `get_review_request` | ✓ | | ✓ | |
+| `list_review_requests` | ✓ | | ✓ | |
+| `cancel_review_request` | | ✓ | ✓ | |
+| `supersede_review_request` | | ✓ | ✓ | |
+| `manage_issue_relation` | | ✓ | ✓ | |
+| `get_issue_graph` | ✓ | | ✓ | |
+| `get_planning_graph` | ✓ | | ✓ | |
+| `validate_issue_plan` | ✓ | | ✓ | |
+| `apply_issue_plan` | | ✓ | ✓ | |
+| `add_comment` | | | | |
+| `record_decision` | | ✓ | | |
+| `list_decisions` | ✓ | | ✓ | |
+| `get_issue_activity` | ✓ | | ✓ | |
+| `claim_issue` | | | ✓ | |
+| `renew_attempt` | | | | |
+| `save_attempt_note` | | | | |
+| `finish_attempt` | | ✓ | ✓ | |
+| `get_work_context` | ✓ | | ✓ | |
+| `search` | ✓ | | ✓ | |
+| `get_changes` | ✓ | | ✓ | |
+
+A blank cell means the hint is `false`. `openWorldHint` is `false` for every
+tool, per the local-first rationale above.
+
+---
+
+## 5. Project and discovery
+
+### 5.1. `get_project`
 
 Purpose:
 
@@ -130,7 +241,7 @@ next_actions
 The project instructions are returned only when requested. `guides` links the
 three workflow resources advertised by the server.
 
-### 4.2. `export_project`
+### 5.2. `export_project`
 
 Purpose:
 
@@ -149,7 +260,7 @@ The structured content is the full logical project document with the required
 returns the document directly as structured content and does not duplicate it as
 text.
 
-### 4.3. `validate_import`
+### 5.3. `validate_import`
 
 Purpose:
 
@@ -167,7 +278,7 @@ Output:
 
 The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
 
-### 4.4. `apply_import`
+### 5.4. `apply_import`
 
 Purpose:
 
@@ -185,7 +296,7 @@ Output:
 
 The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
 
-### 4.5. `list_labels`
+### 5.5. `list_labels`
 
 Input:
 
@@ -213,9 +324,9 @@ normalized_name ASC
 
 ---
 
-## 5. Issue operations
+## 6. Issue operations
 
-### 5.1. `create_issue`
+### 6.1. `create_issue`
 
 Input:
 
@@ -250,7 +361,7 @@ Output:
 issue compact projection
 ```
 
-### 5.2. `update_issue`
+### 6.2. `update_issue`
 
 Patch semantics:
 
@@ -296,7 +407,7 @@ issue standard projection
 changed_fields
 ```
 
-### 5.3. `get_issue`
+### 6.3. `get_issue`
 
 Input:
 
@@ -327,7 +438,7 @@ Output:
 issue projection
 ```
 
-### 5.4. `list_issues`
+### 6.4. `list_issues`
 
 Input filters:
 
@@ -446,7 +557,7 @@ stays within budget; measured response size for that fixture is approximately
 46 KB. The equivalent `view: "full"` call over the same 100 issues measures
 approximately 582 KB in the same test — illustrating why `full` is opt-in.
 
-### 5.5. `archive_issue`
+### 6.5. `archive_issue`
 
 Input:
 
@@ -476,7 +587,7 @@ Output:
 issue compact projection
 ```
 
-### 5.6. Review requests
+### 6.6. Review requests
 
 Review requests bind review work to an issue version, event position, and
 optional artifact set. A review request is claimable only while its status is
@@ -576,9 +687,9 @@ resolved_at
 
 ---
 
-## 6. Relations and graphs
+## 7. Relations and graphs
 
-### 6.1. `manage_issue_relation`
+### 7.1. `manage_issue_relation`
 
 Input:
 
@@ -627,7 +738,7 @@ relation
 affected_issues
 ```
 
-### 6.2. `get_issue_graph`
+### 7.2. `get_issue_graph`
 
 Input:
 
@@ -679,7 +790,7 @@ count is bounded by `max_nodes` (default 100, maximum 500), so response size
 scales predictably with a config knob the caller controls, not with issue
 body length.
 
-### 6.3. `get_planning_graph`
+### 7.3. `get_planning_graph`
 
 Input:
 
@@ -716,14 +827,14 @@ truncated
 
 **Response budget.** Shares the same node projection, storage-level
 `description`/`acceptance_criteria` exclusion, and `max_nodes` bound (default
-100, maximum 500) documented in section 6.2 for `get_issue_graph` — see that
+100, maximum 500) documented in section 7.2 for `get_issue_graph` — see that
 section's response budget note.
 
 ---
 
-## 7. Batch planning
+## 8. Batch planning
 
-### 7.1. `validate_issue_plan`
+### 8.1. `validate_issue_plan`
 
 Dry-run only.
 
@@ -775,7 +886,7 @@ field path
 error code
 ```
 
-### 7.2. `apply_issue_plan`
+### 8.2. `apply_issue_plan`
 
 Input is the validated plan plus:
 
@@ -812,9 +923,9 @@ latest_event_id
 
 ---
 
-## 8. Communication and durable knowledge
+## 9. Communication and durable knowledge
 
-### 8.1. `add_comment`
+### 9.1. `add_comment`
 
 Implemented as append-only issue communication. The issue must exist and must
 not be archived. When the MCP connection has a durable session, the created
@@ -843,7 +954,7 @@ to 128 runes. Reusing the same key with the same normalized request (`issue_id`
 and `content`) replays the original comment response. Reusing the key with a
 different normalized request returns `IDEMPOTENCY_CONFLICT`.
 
-### 8.2. `record_decision`
+### 9.2. `record_decision`
 
 Input:
 
@@ -880,12 +991,12 @@ state as part of the cached response, which is disproportionate to the value
 for an append-only decision log. Retry `record_decision` by first checking
 `list_decisions` for a decision already recorded with the intended content.
 
-### 8.3. `list_decisions`
+### 9.3. `list_decisions`
 
 Lists project-level decisions when `issue_id` is omitted, or decisions scoped
 to one issue when it is supplied. Results use deterministic cursor pagination.
 
-### 8.4. `get_issue_activity`
+### 9.4. `get_issue_activity`
 
 Input:
 
@@ -946,9 +1057,9 @@ prefer the default `limit` over the maximum.
 
 ---
 
-## 9. Agent work lifecycle
+## 10. Agent work lifecycle
 
-### 9.1. `claim_issue`
+### 10.1. `claim_issue`
 
 Input:
 
@@ -982,7 +1093,7 @@ warnings
 
 The raw lease token is returned once.
 
-### 9.2. `renew_attempt`
+### 10.2. `renew_attempt`
 
 Input:
 
@@ -1003,7 +1114,7 @@ server_time
 
 No content-heavy audit event is written for every heartbeat.
 
-### 9.3. `save_attempt_note`
+### 10.3. `save_attempt_note`
 
 Input:
 
@@ -1046,7 +1157,7 @@ attempt_note
 artifacts
 ```
 
-### 9.4. `finish_attempt`
+### 10.4. `finish_attempt`
 
 Common input:
 
@@ -1117,7 +1228,7 @@ Completion checks:
 - issue changes since claim;
 - required acknowledgments.
 
-### 9.5. `get_work_context`
+### 10.5. `get_work_context`
 
 Input:
 
@@ -1197,9 +1308,9 @@ requires an explicit `include` entry and is capped at 20 items.
 
 ---
 
-## 10. Search and synchronization
+## 11. Search and synchronization
 
-### 10.1. `search`
+### 11.1. `search`
 
 Input:
 
@@ -1254,7 +1365,7 @@ the `limit` cap, a `search` response is bounded by at most `limit` (maximum
 therefore on the order of 100 KB, and the default (`limit` `20`,
 `snippet_length` `300`) is on the order of 10 KB.
 
-### 10.2. `get_changes`
+### 11.2. `get_changes`
 
 Input:
 
@@ -1280,7 +1391,7 @@ next_event_id
 
 This tool supports incremental refresh instead of repeatedly reading full state.
 
-## 11. Error codes
+## 12. Error codes
 
 Required domain error codes:
 

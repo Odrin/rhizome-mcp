@@ -27,6 +27,7 @@ func TestIntegrationSmoke(t *testing.T) {
 			t.Errorf("server did not expose required tool %q", required)
 		}
 	}
+	assertToolAnnotationsSurviveTransport(t, tools.Tools)
 
 	result := callIntegrationTool(t, session, "get_project", map[string]any{})
 	var project struct {

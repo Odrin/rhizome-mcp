@@ -193,6 +193,49 @@ func hasTool(tools []*mcp.Tool, name string) bool {
 	return false
 }
 
+// assertToolAnnotationsSurviveTransport spot-checks that a representative
+// read-only tool and a representative mutating tool both carry their MCP
+// annotations after a full stdio round trip, so the ISSUE-53 annotation
+// matrix is not just a compile-time construct.
+func assertToolAnnotationsSurviveTransport(t *testing.T, tools []*mcp.Tool) {
+	t.Helper()
+	for _, expected := range []struct {
+		name        string
+		readOnly    bool
+		destructive bool
+		idempotent  bool
+	}{
+		{name: "get_project", readOnly: true, destructive: false, idempotent: true},
+		{name: "create_issue", readOnly: false, destructive: false, idempotent: false},
+		{name: "finish_attempt", readOnly: false, destructive: true, idempotent: true},
+	} {
+		var found *mcp.Tool
+		for _, tool := range tools {
+			if tool.Name == expected.name {
+				found = tool
+				break
+			}
+		}
+		if found == nil {
+			t.Errorf("tool %q not found while checking annotation survival", expected.name)
+			continue
+		}
+		if found.Annotations == nil {
+			t.Errorf("tool %q has no annotations after stdio transport", expected.name)
+			continue
+		}
+		if found.Annotations.ReadOnlyHint != expected.readOnly {
+			t.Errorf("%s: ReadOnlyHint = %v, want %v", expected.name, found.Annotations.ReadOnlyHint, expected.readOnly)
+		}
+		if found.Annotations.DestructiveHint == nil || *found.Annotations.DestructiveHint != expected.destructive {
+			t.Errorf("%s: DestructiveHint = %v, want %v", expected.name, found.Annotations.DestructiveHint, expected.destructive)
+		}
+		if found.Annotations.IdempotentHint != expected.idempotent {
+			t.Errorf("%s: IdempotentHint = %v, want %v", expected.name, found.Annotations.IdempotentHint, expected.idempotent)
+		}
+	}
+}
+
 func mustProjectDatabasePath(t *testing.T, env integrationEnvironment) string {
 	t.Helper()
 	project, err := projectconfig.Discover(env.repository)
