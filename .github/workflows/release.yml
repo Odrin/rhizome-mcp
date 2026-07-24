@@ -430,3 +430,127 @@ jobs:
           set -euo pipefail
           gh release upload "$TAG" vsix-dist/*.vsix vsix-dist/*.vsix.sha256 --clobber --repo "$GITHUB_REPOSITORY"
 
+  publish-open-vsx:
+    name: Publish to Open VSX
+    # Same rationale as publish-vscode-extension: depends on
+    # upload-release-assets (not build-release-assets) so a workflow_dispatch
+    # re-publish can fetch binaries from the tag's own permanent release
+    # assets rather than the 1-day-retention build artifacts. Rebuilds the
+    # VSIXes independently rather than sharing publish-vscode-extension's —
+    # the two jobs run in parallel with no ordering between them.
+    needs:
+      - upload-release-assets
+    if: always() && (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped')
+    runs-on: ubuntu-latest
+    # Same isolation rule as the other publish-* jobs: an Open VSX hiccup
+    # must never fail the overall release. No release-asset writes here (the
+    # VSIXes are already attached by publish-vscode-extension), so this only
+    # needs read access.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-$DISPATCH_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "No tag resolved from either the release event or a workflow_dispatch 'tag' input." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'rhizome-mcp_*' --dir dist
+
+      - name: Extract binaries for packaging
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          mkdir -p vscode-binaries
+
+          # goos/goarch/ext triples, matching build-release-assets' matrix.
+          triples=(
+            "linux amd64 tar.gz"
+            "linux arm64 tar.gz"
+            "darwin amd64 tar.gz"
+            "darwin arm64 tar.gz"
+            "windows amd64 zip"
+            "windows arm64 zip"
+          )
+
+          for triple in "${triples[@]}"; do
+            read -r goos goarch ext <<< "$triple"
+            archive="dist/rhizome-mcp_${VERSION}_${goos}_${goarch}.${ext}"
+            if [ ! -f "$archive" ]; then
+              echo "Missing expected archive: $archive" >&2
+              exit 1
+            fi
+
+            bin_name="rhizome-mcp"
+            [ "$goos" = "windows" ] && bin_name="rhizome-mcp.exe"
+
+            extract_dir=$(mktemp -d)
+            if [ "$ext" = "zip" ]; then
+              unzip -q "$archive" -d "$extract_dir"
+            else
+              tar -xzf "$archive" -C "$extract_dir"
+            fi
+
+            dest="vscode-binaries/rhizome-mcp_${goos}_${goarch}"
+            [ "$goos" = "windows" ] && dest="${dest}.exe"
+            cp "$extract_dir/$bin_name" "$dest"
+            rm -rf "$extract_dir"
+          done
+
+      - name: Package all platform VSIXes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          node editors/vscode/scripts/package-platforms.mjs \
+            --binaries-dir "$GITHUB_WORKSPACE/vscode-binaries" \
+            --out "$GITHUB_WORKSPACE/vsix-dist" \
+            --tag "$TAG"
+
+      - name: Publish to Open VSX
+        working-directory: editors/vscode
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          vsixes=("$GITHUB_WORKSPACE"/vsix-dist/*.vsix)
+          if [ "${#vsixes[@]}" -eq 0 ]; then
+            echo "No VSIXes were built." >&2
+            exit 1
+          fi
+          # --skip-duplicate makes a re-run over an already-published
+          # version/target a no-op instead of a failure, per-target.
+          npx ovsx publish --packagePath "${vsixes[@]}" --skip-duplicate
+

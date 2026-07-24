@@ -47,3 +47,7 @@ The Marketplace requires a plain `major.minor.patch` version with no semver prer
 - **Stable tag** `vMAJOR.MINOR.PATCH` (no `-beta.N`) → Marketplace version `MAJOR.MINOR.PATCH`, published without `--pre-release`. Once a stable version ships, the extension's version locks to the server's own version verbatim.
 
 Every tagged release publishes/updates all 8 targets automatically via the `publish-vscode-extension` job in `.github/workflows/release.yml`, which is idempotent (`vsce publish --skip-duplicate`) and also exposed as a `workflow_dispatch` fallback (tag input) for a manual re-publish.
+
+## Open VSX
+
+VSCodium, Gitpod, Eclipse Theia, and other VS Code forks install extensions from [Open VSX](https://open-vsx.org/) instead of the Microsoft Marketplace. The `publish-open-vsx` job in `.github/workflows/release.yml` republishes the same 8 VSIXes there (`ovsx publish --skip-duplicate`), isolated the same way as the other `publish-*` jobs. It requires the `odrin` namespace and an `OVSX_PAT` secret to exist first — not yet set up, so this job currently fails harmlessly (isolated by `continue-on-error`, same as the other `publish-*` jobs) on every release until that maintainer action is done.
