@@ -59,8 +59,8 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	// Test mutation freshness: UPDATE issue title EARLY so all derived entities see the new title.
 	// This tests that updates are reflected in search, and that the rebuild captures the state correctly.
 	updateResult := callIntegrationTool(t, session, "update_issue", map[string]any{
-		"issue_id":           issue.DisplayID,
-		"expected_version":   1,
+		"issue_id":         issue.DisplayID,
+		"expected_version": 1,
 		"changes": map[string]any{
 			"title":       "search_issuetoken_task",
 			"description": "new_descriptiontoken",
@@ -148,9 +148,9 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 
 	// Assert search finds each entity type individually.
 	searchIssue := performSearch(t, session, map[string]any{
-		"query":            "search_issuetoken",
-		"entity_types":     []string{"issue"},
-		"snippet_length":   50,
+		"query":          "search_issuetoken",
+		"entity_types":   []string{"issue"},
+		"snippet_length": 50,
 	})
 	if len(searchIssue.Results) != 1 || searchIssue.Results[0].EntityType != "issue" {
 		t.Fatalf("search issue token failed: got %#v", searchIssue)
@@ -160,57 +160,68 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	}
 
 	searchComment := performSearch(t, session, map[string]any{
-		"query":            "search_commenttoken",
-		"entity_types":     []string{"comment"},
-		"snippet_length":   50,
+		"query":          "search_commenttoken",
+		"entity_types":   []string{"comment"},
+		"snippet_length": 50,
 	})
 	if len(searchComment.Results) != 1 || searchComment.Results[0].EntityType != "comment" {
 		t.Fatalf("search comment token failed: got %#v", searchComment)
 	}
 
 	searchDecision := performSearch(t, session, map[string]any{
-		"query":            "search_decisiontoken",
-		"entity_types":     []string{"decision"},
-		"snippet_length":   50,
+		"query":          "search_decisiontoken",
+		"entity_types":   []string{"decision"},
+		"snippet_length": 50,
 	})
 	if len(searchDecision.Results) != 1 || searchDecision.Results[0].EntityType != "decision" {
 		t.Fatalf("search decision token failed: got %#v", searchDecision)
 	}
 
 	searchReview := performSearch(t, session, map[string]any{
-		"query":            "search_reviewtoken",
-		"entity_types":     []string{"review"},
-		"snippet_length":   50,
+		"query":          "search_reviewtoken",
+		"entity_types":   []string{"review"},
+		"snippet_length": 50,
 	})
 	if len(searchReview.Results) != 1 || searchReview.Results[0].EntityType != "review" {
 		t.Fatalf("search review token failed: got %#v", searchReview)
 	}
 
 	searchAttemptNote := performSearch(t, session, map[string]any{
-		"query":            "search_attempttoken",
-		"entity_types":     []string{"attempt_note"},
-		"snippet_length":   50,
+		"query":          "search_attempttoken",
+		"entity_types":   []string{"attempt_note"},
+		"snippet_length": 50,
 	})
 	if len(searchAttemptNote.Results) != 1 || searchAttemptNote.Results[0].EntityType != "attempt_note" {
 		t.Fatalf("search attempt_note token failed: got %#v", searchAttemptNote)
 	}
 
-	// Test mutation freshness: verify old token is replaced with new (search for old title should fail).
-	// We updated the title from "search_initialtoken_task" to "search_issuetoken_task" earlier.
-	searchOldToken := performSearch(t, session, map[string]any{
-		"query":            "search_initialtoken",
-		"entity_types":     []string{"issue"},
-		"snippet_length":   50,
+	// Test mutation freshness: verify old tokens are replaced with new (search for old tokens should fail).
+	// We updated the title from "search_initialtoken_task" to "search_issuetoken_task" and
+	// description to "new_descriptiontoken" earlier.
+	searchOldTitleToken := performSearch(t, session, map[string]any{
+		"query":          "search_initialtoken",
+		"entity_types":   []string{"issue"},
+		"snippet_length": 50,
 	})
-	if len(searchOldToken.Results) != 0 {
-		t.Fatalf("old token still matches after update: got %#v", searchOldToken)
+	if len(searchOldTitleToken.Results) != 0 {
+		t.Fatalf("old title token still matches after update: got %#v", searchOldTitleToken)
+	}
+
+	// Also verify old description token no longer matches.
+	searchOldDescToken := performSearch(t, session, map[string]any{
+		"query":          "issue_descriptiontoken",
+		"entity_types":   []string{"issue"},
+		"snippet_length": 50,
+	})
+	if len(searchOldDescToken.Results) != 0 {
+		t.Fatalf("old description token still matches after update: got %#v", searchOldDescToken)
 	}
 
 	// Test ARCHIVE: archive the issue and verify it's excluded by default.
 	// After update (v2) and finish_attempt with status change (v3), archive at v3.
 	archiveResult := callIntegrationTool(t, session, "archive_issue", map[string]any{
-		"issue_id":           issue.DisplayID,
-		"expected_version":   3,
+		"issue_id":         issue.DisplayID,
+		"expected_version": 3,
 	})
 	if archiveResult.IsError {
 		t.Fatalf("archive_issue failed: %#v", archiveResult)
@@ -218,9 +229,9 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 
 	// After archiving, searching for the issue should return no results.
 	searchArchived := performSearch(t, session, map[string]any{
-		"query":            "search_issuetoken",
-		"entity_types":     []string{"issue"},
-		"snippet_length":   50,
+		"query":          "search_issuetoken",
+		"entity_types":   []string{"issue"},
+		"snippet_length": 50,
 	})
 	if len(searchArchived.Results) != 0 {
 		t.Fatalf("archived issue still appears in search: got %#v", searchArchived)
@@ -228,10 +239,10 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 
 	// With include_archived: true, the archived issue should appear.
 	searchIncludeArchived := performSearch(t, session, map[string]any{
-		"query":               "search_issuetoken",
-		"entity_types":        []string{"issue"},
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search_issuetoken",
+		"entity_types":     []string{"issue"},
+		"include_archived": true,
+		"snippet_length":   50,
 	})
 	if len(searchIncludeArchived.Results) != 1 {
 		t.Fatalf("archived issue not found with include_archived: got %#v", searchIncludeArchived)
@@ -249,6 +260,7 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 		"create_missing_labels": true,
 	})
 	var issue2 struct {
+		ID        string `json:"id"`
 		DisplayID string `json:"display_id"`
 	}
 	decodeIntegrationResult(t, issue2Created, &issue2)
@@ -258,61 +270,99 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 
 	// Test issue_id filter: search with specific issue should limit results.
 	searchByIssueID := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"issue_id":            issue2.DisplayID,
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search",
+		"issue_id":         issue2.DisplayID,
+		"include_archived": true,
+		"snippet_length":   50,
 	})
-	// Results should be entities related to issue2 (which is issue2.DisplayID in search context).
-	if len(searchByIssueID.Results) > 0 {
-		// Verify all results are for issue2.
-		for _, result := range searchByIssueID.Results {
-			if result.EntityType == "issue" && result.EntityID != issue2.DisplayID {
-				t.Logf("issue_id filter result for issue: %s (expected %s)", result.EntityID, issue2.DisplayID)
+	// Results should only include entities related to issue2.
+	// For issue type results, EntityID should match issue2's internal ID.
+	// For other entity types (comments, etc.), IssueID should match.
+	if len(searchByIssueID.Results) == 0 {
+		t.Fatalf("issue_id filter returned no results for %s", issue2.DisplayID)
+	}
+	for _, result := range searchByIssueID.Results {
+		if result.EntityType == "issue" {
+			if result.EntityID != issue2.ID {
+				t.Errorf("issue_id filter: issue entity has wrong ID: %s (expected %s)", result.EntityID, issue2.ID)
 			}
+		} else if result.IssueID != nil && *result.IssueID != issue2.ID {
+			t.Errorf("issue_id filter: entity %s:%s has IssueID %s (expected %s)", result.EntityType, result.EntityID, *result.IssueID, issue2.ID)
 		}
 	}
 
 	// Test epic_id filter (parent_issue_id): search for children of the epic.
 	searchByEpicID := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"epic_id":             epic.DisplayID,
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search",
+		"epic_id":          epic.DisplayID,
+		"include_archived": true,
+		"snippet_length":   50,
 	})
-	// Should find results for issues under the epic.
-	if len(searchByEpicID.Results) > 0 {
-		t.Logf("epic_id filter found %d results", len(searchByEpicID.Results))
+	// Should find results for issues under the epic (issue and issue2).
+	if len(searchByEpicID.Results) == 0 {
+		t.Fatalf("epic_id filter returned no results for %s", epic.DisplayID)
+	}
+	// Verify that at least some results have the epic as parent or are issues under the epic.
+	foundEpicChild := false
+	for _, result := range searchByEpicID.Results {
+		// Results should be entities that are issues under the epic, or entities within issues under the epic
+		if result.EntityType == "issue" {
+			// Issues returned should be children of the epic
+			foundEpicChild = true
+		}
+	}
+	if !foundEpicChild {
+		t.Fatalf("epic_id filter found %d results but none were issue type", len(searchByEpicID.Results))
 	}
 
-	// Test labels filter.
+	// Test labels filter: should find issues with shared-label.
 	searchByLabel := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"labels":              []string{"shared-label"},
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search",
+		"labels":           []string{"shared-label"},
+		"include_archived": true,
+		"snippet_length":   50,
 	})
-	if len(searchByLabel.Results) > 0 {
-		t.Logf("labels filter found %d results", len(searchByLabel.Results))
+	if len(searchByLabel.Results) == 0 {
+		t.Fatalf("labels filter returned no results for shared-label")
+	}
+	// Should find at least issue2 which has shared-label.
+	foundLabeled := false
+	for _, result := range searchByLabel.Results {
+		if result.EntityType == "issue" && result.EntityID == issue2.ID {
+			foundLabeled = true
+		}
+	}
+	if !foundLabeled {
+		t.Errorf("labels filter: expected to find issue2 with shared-label, but got %d results", len(searchByLabel.Results))
 	}
 
-	// Test statuses filter.
+	// Test statuses filter: should find issues with blocked status.
 	searchByStatus := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"statuses":            []string{"blocked"},
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search",
+		"statuses":         []string{"blocked"},
+		"include_archived": true,
+		"snippet_length":   50,
 	})
-	if len(searchByStatus.Results) > 0 {
-		t.Logf("statuses filter found %d results", len(searchByStatus.Results))
+	if len(searchByStatus.Results) == 0 {
+		t.Fatalf("statuses filter returned no results for blocked status")
+	}
+	// Should find issue2 which is blocked.
+	foundBlocked := false
+	for _, result := range searchByStatus.Results {
+		if result.EntityType == "issue" && result.EntityID == issue2.ID {
+			foundBlocked = true
+		}
+	}
+	if !foundBlocked {
+		t.Errorf("statuses filter: expected to find issue2 with blocked status, but got %d results", len(searchByStatus.Results))
 	}
 
 	// Test cursor pagination: request with limit 1, then use cursor for next page.
 	firstPage := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"limit":               1,
-		"include_archived":    true,
-		"snippet_length":      50,
+		"query":            "search",
+		"limit":            1,
+		"include_archived": true,
+		"snippet_length":   50,
 	})
 	if len(firstPage.Results) == 0 {
 		t.Fatalf("first page returned no results")
@@ -321,11 +371,11 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 		t.Logf("only one page of results (no pagination needed)")
 	} else if firstPage.NextCursor != nil {
 		secondPage := performSearch(t, session, map[string]any{
-			"query":               "search",
-			"cursor":              *firstPage.NextCursor,
-			"limit":               1,
-			"include_archived":    true,
-			"snippet_length":      50,
+			"query":            "search",
+			"cursor":           *firstPage.NextCursor,
+			"limit":            1,
+			"include_archived": true,
+			"snippet_length":   50,
 		})
 		if len(secondPage.Results) > 0 {
 			// Verify no duplicate results between pages.
@@ -346,10 +396,10 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	// Get the full snapshot before rebuild.
 	session = env.connect(t)
 	fullSnapshot := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"include_archived":    true,
-		"limit":               100,
-		"snippet_length":      50,
+		"query":            "search",
+		"include_archived": true,
+		"limit":            100,
+		"snippet_length":   50,
 	})
 	snapshotJSON := serializeSearchResults(t, fullSnapshot)
 
@@ -369,10 +419,10 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	}()
 
 	rebuildSnapshot := performSearch(t, session, map[string]any{
-		"query":               "search",
-		"include_archived":    true,
-		"limit":               100,
-		"snippet_length":      50,
+		"query":            "search",
+		"include_archived": true,
+		"limit":            100,
+		"snippet_length":   50,
 	})
 
 	// Assert the snapshotted result sets are IDENTICAL.
@@ -395,10 +445,12 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 		}
 	}
 
-	// Also verify byte-level snapshot for completeness (for future detection of subtle issues).
+	// Verify byte-level snapshot is identical (strict per acceptance criteria).
+	// Any difference indicates that live-write index and rebuild path produce different results,
+	// which is exactly the bug class this test is designed to catch.
 	rebuildJSON := serializeSearchResults(t, rebuildSnapshot)
 	if !bytes.Equal(snapshotJSON, rebuildJSON) {
-		t.Logf("note: byte-level comparison shows minor differences in search results (may be score-related):\nBefore:\n%s\n\nAfter:\n%s",
+		t.Fatalf("rebuild-search-index produced byte-different results (indicates live-write and rebuild paths diverge).\nBefore:\n%s\n\nAfter:\n%s",
 			snapshotJSON, rebuildJSON)
 	}
 }
@@ -411,7 +463,7 @@ func performSearch(t *testing.T, session *mcp.ClientSession, arguments map[strin
 		t.Fatalf("search tool returned error: %#v", result)
 	}
 	var response struct {
-		Results    []struct {
+		Results []struct {
 			EntityType string  `json:"entity_type"`
 			EntityID   string  `json:"entity_id"`
 			IssueID    *string `json:"issue_id"`
