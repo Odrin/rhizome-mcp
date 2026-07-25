@@ -216,7 +216,7 @@ go test ./...
 go test -tags=integration ./...
 ```
 
-The integration tag runs real-process MCP smoke and workflow tests: they build a temporary server binary, initialize a fresh repository and SQLite data root per test, and speak to `serve` over stdio. Most live in the dedicated `integration` package; one test that needs unexported package-main internals stays at the repository root.
+The integration tag runs real-process MCP smoke and workflow tests: they build a temporary server binary, initialize a fresh repository and SQLite data root per test, and speak to `serve` over stdio or HTTP. Beyond single-process smoke coverage, the suite also exercises cross-process scenarios on one shared SQLite data root — concurrent claim and update-version races, an ungraceful process kill and restart, and a backup taken while a server is writing — to catch defects a single-process test structurally cannot see. Most live in the dedicated `integration` package; tests that need unexported package-main internals stay at the repository root.
 
 CI runs `go vet`, unit, and integration tests on Ubuntu, macOS, and Windows for every push and pull request targeting `main`. Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
 
