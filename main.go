@@ -28,21 +28,26 @@ import (
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
 const attemptCleanupInterval = time.Minute
 
-func runAttemptSweeper(ctx context.Context, interval time.Duration, attemptService *application.AttemptService) <-chan struct{} {
+type attemptExpirer interface {
+	ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error)
+}
+
+func runAttemptSweeper(ctx context.Context, interval time.Duration, expirer attemptExpirer) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
-			if attemptService != nil {
-				if _, err := attemptService.ExpireAttempts(ctx); err != nil && ctx.Err() == nil {
+			if expirer != nil {
+				if _, err := expirer.ExpireAttempts(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("attempt expiry cleanup failed", "error", err)
 				}
 			}
@@ -398,11 +403,11 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 	slog.SetDefault(logger)
 
 	cleanupCtx, stopCleanup := context.WithCancel(ctx)
-	var attemptService *application.AttemptService
+	var expirer attemptExpirer
 	if bundle != nil {
-		attemptService = bundle.attemptService
+		expirer = bundle.attemptService
 	}
-	cleanupDone := runAttemptSweeper(cleanupCtx, attemptCleanupInterval, attemptService)
+	cleanupDone := runAttemptSweeper(cleanupCtx, attemptCleanupInterval, expirer)
 	defer func() {
 		stopCleanup()
 		<-cleanupDone

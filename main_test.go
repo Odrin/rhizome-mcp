@@ -20,6 +20,7 @@ import (
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
@@ -628,64 +629,37 @@ type fakeAttemptService struct {
 
 func newFakeAttemptService(errAfter int) *fakeAttemptService {
 	return &fakeAttemptService{
-		callCount: 0,
-		errAfter:  errAfter,
+		callCount:  0,
+		errAfter:   errAfter,
 		callsMutex: make(chan struct{}, 1),
 	}
 }
 
-func (s *fakeAttemptService) ExpireAttempts(ctx context.Context) (interface{}, error) {
+func (s *fakeAttemptService) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
 	s.callsMutex <- struct{}{}
 	defer func() { <-s.callsMutex }()
 	s.callCount++
 	if s.errAfter > 0 && s.callCount > s.errAfter {
-		return nil, errors.New("simulated expiry error")
+		return ports.ExpireAttemptsResult{}, errors.New("simulated expiry error")
 	}
-	return nil, nil
+	return ports.ExpireAttemptsResult{}, nil
 }
 
 func TestAttemptSweeperRunsOnStartAndOnTicker(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	fakeService := newFakeAttemptService(0)
 	interval := 3 * time.Millisecond
 
-	done := runAttemptSweeper(ctx, interval, (*application.AttemptService)(nil))
-	// Verify the function returns a channel
-	if done == nil {
-		t.Fatal("runAttemptSweeper should return a channel")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runAttemptSweeper(ctx, interval, fakeService)
+
+	// Poll for at least 2 calls instead of sleeping
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for fakeService.callCount < 2 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
 	}
 
-	// Create a real test with our fake service
-	// We'll test this by creating a wrapper that satisfies the interface
-	fakeService := newFakeAttemptService(0)
-
-	// Use a custom sweeper with our fake
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	done2 := make(chan struct{})
-	go func() {
-		defer close(done2)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if fakeService != nil {
-				_, err := fakeService.ExpireAttempts(ctx2)
-				if err != nil && ctx2.Err() == nil {
-					// Would log error
-				}
-			}
-			select {
-			case <-ctx2.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-
-	// Let it run for a few ticker cycles
-	time.Sleep(12 * time.Millisecond)
-	cancel2()
-	<-done2
+	cancel()
+	<-done
 
 	if fakeService.callCount < 2 {
 		t.Fatalf("expected at least 2 calls (start + ticker), got %d", fakeService.callCount)
@@ -697,28 +671,14 @@ func TestAttemptSweeperContinuesAfterError(t *testing.T) {
 	interval := 3 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			if fakeService != nil {
-				_, err := fakeService.ExpireAttempts(ctx)
-				if err != nil && ctx.Err() == nil {
-					// Would log error
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
+	done := runAttemptSweeper(ctx, interval, fakeService)
 
-	// Let it run long enough to see the first call succeed and second fail
-	time.Sleep(12 * time.Millisecond)
+	// Poll for at least 3 calls to ensure we see the error case
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for fakeService.callCount < 3 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+
 	cancel()
 	<-done
 
