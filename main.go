@@ -34,6 +34,28 @@ import (
 
 const attemptCleanupInterval = time.Minute
 
+func runAttemptSweeper(ctx context.Context, interval time.Duration, attemptService *application.AttemptService) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			if attemptService != nil {
+				if _, err := attemptService.ExpireAttempts(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("attempt expiry cleanup failed", "error", err)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return done
+}
+
 // Version information is injected at build time via ldflags.
 // If not injected (e.g., in local builds), fallback values are used.
 var (
@@ -376,24 +398,11 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 	slog.SetDefault(logger)
 
 	cleanupCtx, stopCleanup := context.WithCancel(ctx)
-	cleanupDone := make(chan struct{})
-	go func() {
-		defer close(cleanupDone)
-		ticker := time.NewTicker(attemptCleanupInterval)
-		defer ticker.Stop()
-		for {
-			if bundle != nil && bundle.attemptService != nil {
-				if _, err := bundle.attemptService.ExpireAttempts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-					slog.Error("attempt expiry cleanup failed", "error", err)
-				}
-			}
-			select {
-			case <-cleanupCtx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
+	var attemptService *application.AttemptService
+	if bundle != nil {
+		attemptService = bundle.attemptService
+	}
+	cleanupDone := runAttemptSweeper(cleanupCtx, attemptCleanupInterval, attemptService)
 	defer func() {
 		stopCleanup()
 		<-cleanupDone
