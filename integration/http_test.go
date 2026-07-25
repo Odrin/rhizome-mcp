@@ -197,6 +197,16 @@ func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpA
 	}
 
 	go func() {
+		// Keep scanning for the process's full lifetime rather than
+		// returning once the endpoint line is found: cmd.Wait() (below)
+		// blocks until its internal stderr-copying goroutine finishes, and
+		// that goroutine's Write into stderrWriter blocks forever once
+		// nobody is left reading stderrReader. Every later request logs an
+		// "http request completed" line (see WrapHTTPHandler), so an early
+		// return here deadlocks cmd.Wait() as soon as the server handles a
+		// request after startup — invisible under stopIntegrationHTTPServer's
+		// silent timeout fallback, but fatal for killIntegrationHTTPServer's
+		// waitForExit.
 		scanner := bufio.NewScanner(stderrReader)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -206,7 +216,6 @@ func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpA
 				case server.endpointC <- endpoint:
 				default:
 				}
-				return
 			}
 		}
 		_ = scanner.Err()

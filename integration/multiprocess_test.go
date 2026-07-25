@@ -40,7 +40,9 @@ func killIntegrationHTTPServer(t *testing.T, server *integrationHTTPServer) {
 // TestIntegrationMultiProcessServersShareDataRoot is the ISSUE-102 proof
 // test: two independently launched HTTP server processes, attached to one
 // shared repository and data root, observe the same project state. An issue
-// created through server A must be readable through server B.
+// created through server A must be readable through server B. Server B is
+// torn down via killIntegrationHTTPServer so that helper is exercised by a
+// committed test rather than only compiled.
 func TestIntegrationMultiProcessServersShareDataRoot(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	attached := env.attach()
@@ -51,7 +53,7 @@ func TestIntegrationMultiProcessServersShareDataRoot(t *testing.T) {
 	serverA := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
 	t.Cleanup(func() { stopIntegrationHTTPServer(t, serverA) })
 	serverB := launchIntegrationHTTPServer(t, attached, "127.0.0.1:0")
-	t.Cleanup(func() { stopIntegrationHTTPServer(t, serverB) })
+	t.Cleanup(func() { killIntegrationHTTPServer(t, serverB) })
 
 	endpointA := "http://" + serverA.waitForEndpoint(t) + "/mcp"
 	endpointB := "http://" + serverB.waitForEndpoint(t) + "/mcp"
