@@ -207,8 +207,17 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 	// 7. Assert filtering: issue_id scoped to one issue returns only that
 	// issue's events, and event_types filtering returns only the requested types.
 
-	// Count events for issue1
+	// Filter by issue_id for issue1.
+	// Fixture operations on issue1: create, comment, decision, claim, note, finish.
+	// Expected events for issue1: issue_created, comment_added, decision_recorded,
+	// attempt_started, checkpoint_saved, attempt_completed = 6 events minimum.
 	issue1Events := drainGetChanges(t, session, baselineSinceEventID, largeLimit, issue1.ID, nil)
+	if len(issue1Events) == 0 {
+		t.Fatalf("issue_id filter returned no events for issue1, want at least 6 (issue_created, comment_added, decision_recorded, attempt_started, checkpoint_saved, attempt_completed)")
+	}
+	if len(issue1Events) < 6 {
+		t.Errorf("issue_id filter returned %d events for issue1, want at least 6", len(issue1Events))
+	}
 	for _, evt := range issue1Events {
 		if evt.IssueID == nil || *evt.IssueID != issue1.ID {
 			t.Errorf("issue_id filter returned event for wrong issue: got %v, want %s",
@@ -216,20 +225,42 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 		}
 	}
 
-	// Filter by event_types
-	eventTypes := []string{"issue_created", "issue_updated", "comment_added"}
+	// Filter by event_types.
+	// Fixture produces issue_created (2), comment_added (1), decision_recorded (1).
+	// So filtering for these 3 types should return at least 4 events.
+	eventTypes := []string{"issue_created", "comment_added", "decision_recorded"}
 	filteredEvents := drainGetChanges(t, session, baselineSinceEventID, largeLimit, "", eventTypes)
+	if len(filteredEvents) == 0 {
+		t.Fatalf("event_types filter returned no events, want at least 4 (2x issue_created, 1x comment_added, 1x decision_recorded)")
+	}
+	if len(filteredEvents) < 4 {
+		t.Errorf("event_types filter returned %d events, want at least 4", len(filteredEvents))
+	}
+
+	// Verify each filtered event matches one of the requested types.
+	typeCounters := make(map[string]int)
 	for _, evt := range filteredEvents {
 		found := false
 		for _, wantType := range eventTypes {
 			if evt.EventType == wantType {
 				found = true
+				typeCounters[evt.EventType]++
 				break
 			}
 		}
 		if !found {
 			t.Errorf("event_types filter returned unexpected event type: %s", evt.EventType)
 		}
+	}
+	// Verify we got at least one event of each requested type that exists in the fixture.
+	if typeCounters["issue_created"] < 2 {
+		t.Errorf("event_types filter returned %d issue_created events, want >= 2", typeCounters["issue_created"])
+	}
+	if typeCounters["comment_added"] < 1 {
+		t.Errorf("event_types filter returned %d comment_added events, want >= 1", typeCounters["comment_added"])
+	}
+	if typeCounters["decision_recorded"] < 1 {
+		t.Errorf("event_types filter returned %d decision_recorded events, want >= 1", typeCounters["decision_recorded"])
 	}
 
 	// 8. Assert a poll from latest_event_id returns an empty event set
