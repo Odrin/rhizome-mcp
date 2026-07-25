@@ -83,10 +83,11 @@ func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
 	}
 
 	finishWithInvalidToken := callIntegrationTool(t, session, "finish_attempt", map[string]any{
-		"attempt_id":     attemptID,
-		"lease_token":    originalLeaseToken,
-		"outcome":        "failed",
-		"result_summary": "Should fail with invalid lease token",
+		"attempt_id":          attemptID,
+		"lease_token":         originalLeaseToken,
+		"outcome":             "completed",
+		"result_summary":      "Should fail with invalid lease token",
+		"target_issue_status": "done",
 	})
 	if !finishWithInvalidToken.IsError {
 		t.Fatalf("finish_attempt with old lease_token should have failed but succeeded: %#v", finishWithInvalidToken)
@@ -99,8 +100,8 @@ func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
 	if !ok || finishCode == "" {
 		t.Fatalf("finish_attempt error should include a non-empty 'code' field, got %#v", finishErrorMap)
 	}
-	if !(finishCode == "ATTEMPT_NOT_ACTIVE" || finishCode == "INVALID_ARGUMENT") {
-		t.Fatalf("finish_attempt structured domain error code = %q, want ATTEMPT_NOT_ACTIVE or INVALID_ARGUMENT", finishCode)
+	if finishCode != "ATTEMPT_NOT_ACTIVE" {
+		t.Fatalf("finish_attempt structured domain error code = %q, want ATTEMPT_NOT_ACTIVE", finishCode)
 	}
 
 	reClaimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
