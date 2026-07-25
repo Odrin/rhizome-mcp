@@ -172,6 +172,26 @@ func TestToolProfileRejectsUnknownName(t *testing.T) {
 	}
 }
 
+// TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool is the
+// ISSUE-99 regression test for toolProfileIncludes itself: groupCore's
+// "always advertised" rule (so get_project is never excluded, letting a
+// client always diagnose a missing tool) must not let a hypothetical
+// future mutating core tool into the read-only profile. Every other
+// profile still treats groupCore as unconditional.
+func TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool(t *testing.T) {
+	if mcpadapter.ToolProfileIncludesCoreToolForTest("read-only", false) {
+		t.Fatal("read-only profile included a mutating (readOnlyHint: false) core tool")
+	}
+	if !mcpadapter.ToolProfileIncludesCoreToolForTest("read-only", true) {
+		t.Fatal("read-only profile excluded a read-only core tool")
+	}
+	for _, profile := range []string{"full", "agent", "migration"} {
+		if !mcpadapter.ToolProfileIncludesCoreToolForTest(profile, false) {
+			t.Errorf("%s profile excluded a mutating core tool, want groupCore's unconditional inclusion preserved", profile)
+		}
+	}
+}
+
 // TestToolProfileReportedByGetProject asserts get_project exposes the
 // active profile so a client can diagnose a missing tool.
 func TestToolProfileReportedByGetProject(t *testing.T) {

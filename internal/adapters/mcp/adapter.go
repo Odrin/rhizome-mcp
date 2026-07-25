@@ -370,45 +370,45 @@ func isContextCancellation(err error) bool {
 // sdkmcp.AddTool that skips this decision.
 func (adapter *adapter) register(server *sdkmcp.Server) {
 	adapter.registerTool(server, groupCore, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getProject)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getProject))
 	})
 	adapter.registerTool(server, groupMigration, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.exportProject)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.exportProject))
 	})
 	adapter.registerTool(server, groupMigration, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.validateImport)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.validateImport))
 	})
 	// apply_import requires an empty destination, so a bare repeat with the
 	// same document fails safely once the destination is non-empty: no
 	// additional effect on retry, hence idempotentHint true despite no
 	// idempotency_key support.
 	adapter.registerTool(server, groupMigration, tool("apply_import", "Apply a validated logical project import document into an empty destination.", schemaApplyImport(), schemaApplyImportOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.applyImport)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.applyImport))
 	})
 	adapter.registerTool(server, groupIssues, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.listLabels)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listLabels))
 	})
 	// create_issue's idempotency_key is optional: a bare repeat without it
 	// creates a second issue, so idempotentHint is false.
 	adapter.registerTool(server, groupIssues, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.createIssue)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.createIssue))
 	})
 	// expected_version gates every write: a bare repeat with the same
 	// (now-stale) version conflict-fails with no further mutation.
 	adapter.registerTool(server, groupIssues, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.updateIssue)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.updateIssue))
 	})
 	adapter.registerTool(server, groupIssues, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getIssue)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssue))
 	})
 	adapter.registerTool(server, groupIssues, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.listIssues)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listIssues))
 	})
 	adapter.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.archiveIssue)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.archiveIssue))
 	})
 	adapter.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.cancelReviewRequest)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.cancelReviewRequest))
 	})
 	// create_review_request only records a supersedes_id link; it never
 	// closes the predecessor (that split is exactly what replace_review_request
@@ -416,26 +416,26 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	// Deprecated: supersedes_id is retained as a compatibility alias for one
 	// release; prefer replace_review_request for atomic supersession.
 	adapter.registerTool(server, groupReview, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set. Deprecated: prefer replace_review_request.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.createReviewRequest)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.createReviewRequest))
 	})
 	adapter.registerTool(server, groupReview, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getReviewRequest)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getReviewRequest))
 	})
 	adapter.registerTool(server, groupReview, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.listReviewRequests)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listReviewRequests))
 	})
 	// add/remove are each gated (unique constraint on add, not-found on
 	// remove), so a bare repeat has no additional effect; remove can destroy
 	// an existing relation.
 	adapter.registerTool(server, groupIssues, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.manageIssueRelation)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.manageIssueRelation))
 	})
 	// Deprecated: retained as a compatibility alias for one release; prefer
 	// replace_review_request, which closes the predecessor and opens its
 	// successor atomically instead of leaving the review lifecycle partial
 	// between two separate calls.
 	adapter.registerTool(server, groupReview, tool("supersede_review_request", "Supersede an open or claimed review request using its current version. Deprecated: prefer replace_review_request.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.supersedeReviewRequest)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.supersedeReviewRequest))
 	})
 	// idempotency_key is required (not optional) and the repository replays
 	// the original result for a repeated key, so idempotentHint is
@@ -443,72 +443,71 @@ func (adapter *adapter) register(server *sdkmcp.Server) {
 	// rather than replaced, since this operation does not hold the attempt's
 	// lease token.
 	adapter.registerTool(server, groupReview, tool("replace_review_request", "Atomically supersede a predecessor review request and create its open successor in one transaction.", schemaReplaceReviewRequest(), schemaReplaceReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.replaceReviewRequest)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.replaceReviewRequest))
 	})
 	adapter.registerTool(server, groupIssues, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getIssueGraph)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssueGraph))
 	})
 	adapter.registerTool(server, groupIssues, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getPlanningGraph)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getPlanningGraph))
 	})
 	adapter.registerTool(server, groupPlanning, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.validateIssuePlan)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.validateIssuePlan))
 	})
 	// idempotency_key is required (not optional) for apply_issue_plan and
 	// the repository replays the original result for a repeated key, so
 	// idempotentHint is genuinely true for the advertised contract.
 	adapter.registerTool(server, groupPlanning, tool("apply_issue_plan", "Atomically create issues, relations, and decisions from a valid plan.", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.applyIssuePlan)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.applyIssuePlan))
 	})
 	// add_comment's idempotency_key is optional: a bare repeat without it
 	// appends a second comment.
 	adapter.registerTool(server, groupKnowledge, tool("add_comment", "Append collaboration context to an issue without rewriting history.", schemaAddComment(), schemaAddCommentOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.addComment)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.addComment))
 	})
 	// record_decision has no idempotency_key at all (a bare repeat always
 	// appends a new decision), and an optional supersedes_id overwrites the
 	// predecessor decision's status in the same transaction.
 	adapter.registerTool(server, groupKnowledge, tool("record_decision", "Append a durable project or issue decision, optionally superseding one.", schemaRecordDecision(), schemaRecordDecisionOutput(), toolHints(false, true, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.recordDecision)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.recordDecision))
 	})
 	adapter.registerTool(server, groupKnowledge, tool("list_decisions", "List project-wide or issue-scoped decisions with cursor pagination.", schemaListDecisions(), schemaDecisionListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.listDecisions)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listDecisions))
 	})
 	adapter.registerTool(server, groupKnowledge, tool("get_issue_activity", "Get a unified newest-first timeline of issue work and artifacts.", schemaGetIssueActivity(), schemaGetIssueActivityOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getIssueActivity)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssueActivity))
 	})
 	// claimability gates every claim: once claimed, a bare repeat fails with
 	// no further effect. Claiming does not destroy prior state.
 	adapter.registerTool(server, groupLifecycle, tool("claim_issue", "Claim claimable ready or review work and receive a renewable lease token.", schemaClaimIssue(), schemaClaimIssueOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.claimIssue)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.claimIssue))
 	})
 	// unlike claim/finish, renew_attempt has no gate: each repeat pushes the
 	// lease expiry further out, a genuine additional effect every call.
 	adapter.registerTool(server, groupLifecycle, tool("renew_attempt", "Extend an active work or review lease before it expires.", schemaRenewAttempt(), schemaRenewAttemptOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.renewAttempt)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.renewAttempt))
 	})
 	adapter.registerTool(server, groupLifecycle, tool("save_attempt_note", "Append a restartable checkpoint, finding, warning, or progress note.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.saveAttemptNote)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.saveAttemptNote))
 	})
 	// finish_attempt is lease-gated (repository requires status = 'active'),
 	// so a bare repeat after the first success fails with no further
 	// mutation; it can overwrite the issue's status/blocked_reason.
 	adapter.registerTool(server, groupLifecycle, tool("finish_attempt", "End a leased attempt with outcome, verification, artifacts, and status.", schemaFinishAttempt(), schemaFinishAttemptOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.finishAttempt)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.finishAttempt))
 	})
 	adapter.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getWorkContext)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getWorkContext))
 	})
 	adapter.registerTool(server, groupKnowledge, tool("search", "Full-text search issues, comments, decisions, and attempt notes.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.search)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.search))
 	})
 	adapter.registerTool(server, groupSync, tool("get_changes", "Get ordered issue events after an event ID for incremental synchronization.", schemaGetChanges(), schemaChangesOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.getChanges)
+		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getChanges))
 	})
 }
 
 func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequest, input searchInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	entityTypes := make([]domain.SearchEntityType, len(input.EntityTypes))
 	for index, value := range input.EntityTypes {
 		entityTypes[index] = domain.SearchEntityType(value)
@@ -525,7 +524,6 @@ func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequ
 }
 
 func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallToolRequest, input getChangesInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.searches.GetChanges(ctx, domain.GetChangesInput{
 		SinceEventID: input.SinceEventID, IssueID: input.IssueID, EventTypes: input.EventTypes, Limit: input.Limit,
 	})
@@ -536,7 +534,6 @@ func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.CallToolRequest, input getWorkContextInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	include := make([]domain.WorkContextInclude, len(input.Include))
 	for index, value := range input.Include {
 		include[index] = domain.WorkContextInclude(value)
@@ -575,7 +572,6 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
 	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID, IdempotencyKey: input.IdempotencyKey})
 	if err != nil {
@@ -592,7 +588,6 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
 	result, err := adapter.attempts.RenewAttempt(ctx, domain.RenewAttemptInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID,
@@ -607,7 +602,6 @@ func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallTo
 }
 
 func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
 	for index, artifact := range input.Artifacts {
@@ -635,7 +629,6 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	sessionID := adapter.sessionIDFor(request.Session)
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
 	for index, artifact := range input.Artifacts {
@@ -698,7 +691,6 @@ func interruptionPointer(value *string) *domain.InterruptionReasonCode {
 }
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	validation, err := adapter.plans.ValidateIssuePlan(ctx, input.domainPlan())
 	if err != nil {
 		return adapter.failure(err)
@@ -713,7 +705,6 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.C
 }
 
 func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.plans.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
 	if err != nil {
 		return adapter.failure(err)
@@ -724,7 +715,6 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	comment, err := adapter.comments.AddComment(ctx, domain.AddCommentInput{
 		IssueID: input.IssueID, Content: input.Content, SessionID: adapter.sessionIDFor(request.Session),
 		IdempotencyKey: input.IdempotencyKey,
@@ -736,7 +726,6 @@ func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.CallToolRequest, input recordDecisionInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.decisions.RecordDecision(ctx, domain.RecordDecisionInput{
 		IssueID: input.IssueID, Title: input.Title, Summary: input.Summary, Content: input.Content,
 		Status: domain.DecisionStatus(input.Status), SupersedesID: input.SupersedesID,
@@ -752,7 +741,6 @@ func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallToolRequest, input listDecisionsInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.decisions.ListDecisions(ctx, domain.ListDecisionsInput{
 		IssueID: input.IssueID, Limit: input.Limit, Cursor: stringValue(input.Cursor),
 	})
@@ -763,7 +751,6 @@ func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallT
 }
 
 func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueActivityInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	activity, err := adapter.activities.GetIssueActivity(ctx, getIssueActivityInputToDomain(input))
 	if err != nil {
 		return adapter.failure(err)
@@ -772,7 +759,6 @@ func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.Ca
 }
 
 func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	relationTypes := make([]domain.RelationType, len(input.RelationTypes))
 	for index, relationType := range input.RelationTypes {
 		relationTypes[index] = domain.RelationType(relationType)
@@ -791,7 +777,6 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallT
 }
 
 func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	graph, err := adapter.graphs.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
 		RootIssueID: input.RootIssueID, Depth: input.Depth, MaxNodes: input.MaxNodes,
 		IncludeReview: input.IncludeReview, IncludeRelated: input.IncludeRelated,
@@ -805,7 +790,6 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 }
 
 func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallToolRequest, input exportProjectInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	data, err := adapter.projects.ExportLogicalProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
@@ -818,7 +802,6 @@ func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallT
 }
 
 func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.CallToolRequest, input validateImportInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, []byte(input.Document))
 	if err != nil {
 		return adapter.failure(err)
@@ -827,7 +810,6 @@ func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToolRequest, input applyImportInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.projects.ApplyLogicalProjectImport(ctx, []byte(input.Document))
 	if err != nil {
 		return adapter.failure(err)
@@ -836,7 +818,6 @@ func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	project, err := adapter.projects.GetProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
@@ -861,7 +842,6 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
 		Action:         domain.RelationAction(input.Action),
 		SourceIssueID:  input.SourceIssueID,
@@ -899,7 +879,6 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp
 }
 
 func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallToolRequest, input listLabelsInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.issues.ListLabels(ctx, domain.ListLabelsInput{
 		Query:  stringValue(input.Query),
 		Limit:  input.Limit,
@@ -916,7 +895,6 @@ func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.issues.CreateIssue(ctx, domain.CreateIssueInput{
 		Type:                domain.Type(input.Type),
 		Title:               input.Title,
@@ -937,7 +915,6 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.issues.UpdateIssue(ctx, domain.UpdateIssueInput{
 		IssueID:             input.IssueID,
 		ExpectedVersion:     input.ExpectedVersion,
@@ -952,7 +929,6 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	if input.View != "" && input.View != "compact" && input.View != "standard" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
@@ -970,7 +946,6 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 }
 
 func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	view := input.View
 	if view == "" {
 		view = "compact"
@@ -1024,7 +999,6 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.issues.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
@@ -1037,7 +1011,6 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 }
 
 func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
 		IssueID:            input.IssueID,
 		TargetIssueVersion: input.TargetIssueVersion,
@@ -1052,7 +1025,6 @@ func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp
 }
 
 func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.GetReviewRequest(ctx, input.ReviewRequestID)
 	if err != nil {
 		return adapter.failure(err)
@@ -1061,7 +1033,6 @@ func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.Ca
 }
 
 func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.CallToolRequest, input listReviewRequestsInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.ListReviewRequests(ctx, application.ListReviewRequestsInput{
 		Status:    input.Status,
 		Claimable: input.Claimable,
@@ -1083,7 +1054,6 @@ func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.
 }
 
 func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
 	if err != nil {
 		return adapter.failure(err)
@@ -1092,7 +1062,6 @@ func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp
 }
 
 func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input supersedeReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.SupersedeReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
 	if err != nil {
 		return adapter.failure(err)
@@ -1101,7 +1070,6 @@ func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdk
 }
 
 func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input replaceReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	adapter.touchSession(ctx, request.Session)
 	result, err := adapter.reviews.ReplaceReviewRequest(ctx, application.ReplaceReviewRequestInput{
 		PredecessorRequestID:       input.PredecessorRequestID,
 		PredecessorExpectedVersion: input.PredecessorExpectedVersion,

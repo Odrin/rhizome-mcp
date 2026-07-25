@@ -1513,9 +1513,24 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("get_project result = %#v", result)
 	}
+	// get_project is readOnlyHint: true (ISSUE-53) and must not durably
+	// write agent_sessions.last_seen_at as part of its invocation
+	// (ISSUE-99): LastSeenAt stays at its creation-time value, not the
+	// advanced clock the call itself observed.
+	session = readAgentSession(t, db)
+	if !session.LastSeenAt.Equal(session.StartedAt) {
+		t.Fatalf("get_project (read-only) touched LastSeenAt = %v, want unchanged at %v", session.LastSeenAt, session.StartedAt)
+	}
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "touch control"})
+	if created.IsError {
+		t.Fatalf("create_issue result = %#v", created)
+	}
+	// create_issue is mutating and must still touch the session on every
+	// call, so activity tracking remains correlated with actual writes.
 	session = readAgentSession(t, db)
 	if !session.LastSeenAt.Equal(source.Now()) {
-		t.Fatalf("touched LastSeenAt = %v, want %v", session.LastSeenAt, source.Now())
+		t.Fatalf("create_issue (mutating) did not touch LastSeenAt = %v, want %v", session.LastSeenAt, source.Now())
 	}
 
 	stop()
@@ -1529,6 +1544,55 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 	session = readAgentSession(t, db)
 	if session.Count != 1 || session.EndedAt == nil || !session.EndedAt.Equal(endedAt) {
 		t.Fatalf("repeated shutdown changed agent session = %#v", session)
+	}
+}
+
+// TestReadOnlyToolsDoNotDurablyTouchAgentSession is the ISSUE-99 regression
+// test: readOnlyHint: true tools (get_project, the always-present core
+// tool, and list_issues, a non-core read-only tool) must not write
+// agent_sessions.last_seen_at as part of their invocation. create_issue is
+// a mutating control: it must still touch the session, proving the two
+// assertions above would actually catch a regression (a broken test
+// fixture, or Touch becoming a structural no-op) rather than passing
+// vacuously.
+func TestReadOnlyToolsDoNotDurablyTouchAgentSession(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "read-only-no-touch.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	waitForAgentSession(t, db)
+	initial := readAgentSession(t, db)
+	if initial.Count != 1 {
+		t.Fatalf("initial agent session = %#v", initial)
+	}
+
+	source.Advance(time.Minute)
+
+	if result := call(t, client, "get_project", map[string]any{}); result.IsError {
+		t.Fatalf("get_project result = %#v", result)
+	}
+	afterGetProject := readAgentSession(t, db)
+	if afterGetProject.Count != initial.Count || !afterGetProject.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("get_project (read-only, core) mutated agent session: before = %#v, after = %#v", initial, afterGetProject)
+	}
+
+	if result := call(t, client, "list_issues", map[string]any{}); result.IsError {
+		t.Fatalf("list_issues result = %#v", result)
+	}
+	afterListIssues := readAgentSession(t, db)
+	if afterListIssues.Count != initial.Count || !afterListIssues.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("list_issues (read-only, non-core) mutated agent session: before = %#v, after = %#v", initial, afterListIssues)
+	}
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "touch control"})
+	if created.IsError {
+		t.Fatalf("create_issue result = %#v", created)
+	}
+	afterCreateIssue := readAgentSession(t, db)
+	if !afterCreateIssue.LastSeenAt.Equal(source.Now()) {
+		t.Fatalf("create_issue (mutating) did not touch LastSeenAt = %v, want %v (control assertion would not have caught a regression above)", afterCreateIssue.LastSeenAt, source.Now())
 	}
 }
 

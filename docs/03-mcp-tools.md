@@ -110,6 +110,22 @@ prompt, but the server always re-validates every request server-side
 regardless of what a client inferred from these hints. Nothing here weakens
 or replaces domain-level validation, optimistic concurrency, or lease checks.
 
+**`readOnlyHint: true` means the invocation performs no durable write at
+all, including transport-level bookkeeping.** Every tool call also carries
+MCP session lifecycle tracking (`agent_sessions.last_seen_at`), which is
+itself a durable SQLite write. Rather than special-case that write per
+tool, `internal/adapters/mcp/adapter.go`'s registration wrapper
+(`touchSessionForMutatingTool`) derives the decision from the same
+`readOnlyHint` used everywhere else in this section: a tool registered as
+read-only never touches `last_seen_at` as a side effect of being called; a
+mutating tool still touches it on every call, so session activity tracking
+stays correlated with actual writes rather than with every call including
+reads. This is enforced structurally for every tool, not only for `get_project` —
+see `TestReadOnlyToolsDoNotDurablyTouchAgentSession` in the adapter test
+suite and its stdio/HTTP counterparts,
+`TestIntegrationStdioReadOnlyToolsDoNotTouchAgentSession` and
+`TestIntegrationHTTPReadOnlyToolsDoNotTouchAgentSession`, in `integration/`.
+
 `openWorldHint` is `false` for every tool: Rhizome only reads and writes its
 own local SQLite project database. No tool fetches a URL or otherwise reaches
 into an external system on the server's behalf (artifact `uri` values are
@@ -268,9 +284,13 @@ Every registered tool declares exactly one capability group in
 this is a required argument, so a newly added tool cannot be registered
 without an explicit group decision. `full`, `agent`, and `migration` are
 defined as which groups they include. `read-only` is defined differently
-and deliberately: it is derived directly from each tool's own
-`readOnlyHint` (section 4.1), not from a separately maintained list, so it
-can never drift from the annotation matrix.
+and deliberately: `toolProfileIncludes` checks `readOnlyHint` *before* any
+group-based rule, including the `core` group's own "always advertised"
+bypass — so a hypothetical future mutating core tool could never enter
+the read-only profile just by being core. `read-only` membership is
+derived directly from each tool's own `readOnlyHint` (section 4.1), not
+from a separately maintained list, so it can never drift from the
+annotation matrix.
 
 | Group | Tools | In `agent`? | In `migration`? |
 | --- | --- | --- | --- |
@@ -294,7 +314,11 @@ can never drift from the annotation matrix.
   `get_changes` — reading is safe regardless of which group a tool
   otherwise belongs to). No tool this profile advertises can be
   classified as mutating; that invariant is enforced by
-  `TestToolProfileReadOnlyContainsOnlyReadOnlyHintedTools`.
+  `TestToolProfileReadOnlyContainsOnlyReadOnlyHintedTools` and
+  `TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool`. Every
+  tool this profile advertises is also verified to perform zero durable
+  writes, including MCP session bookkeeping — see section 4's
+  `readOnlyHint` note above.
 - **`migration`** (4 tools): `core` + `migration` —
   `get_project`, `export_project`, `validate_import`, `apply_import`. The
   minimal metadata/export/validate/apply transfer workflow, nothing else.

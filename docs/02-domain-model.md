@@ -204,6 +204,11 @@ Rules:
 - Neither field is used for ownership or security.
 - Old sessions are retained.
 - `active`, `stale` and `ended` are computed states.
+- `last_seen_at` advances only on a tool call classified as mutating
+  (`readOnlyHint: false` in `docs/03-mcp-tools.md` section 4). A read-only
+  tool call never durably writes `last_seen_at`, so it stays true to its
+  advertised no-write contract; activity tracking is therefore correlated
+  with actual project mutations, not with every call including reads.
 
 There is no permanent `Agent` entity in the first version.
 
