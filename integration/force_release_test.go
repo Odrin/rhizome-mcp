@@ -70,6 +70,17 @@ func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
 	if !saveNoteWithInvalidToken.IsError {
 		t.Fatalf("save_attempt_note with old lease_token should have failed but succeeded: %#v", saveNoteWithInvalidToken)
 	}
+	saveErrorMap, ok := saveNoteWithInvalidToken.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("save_attempt_note error structured content should be a map, got %T", saveNoteWithInvalidToken.StructuredContent)
+	}
+	saveCode, ok := saveErrorMap["code"].(string)
+	if !ok || saveCode == "" {
+		t.Fatalf("save_attempt_note error should include a non-empty 'code' field, got %#v", saveErrorMap)
+	}
+	if saveCode != "ATTEMPT_NOT_ACTIVE" {
+		t.Fatalf("save_attempt_note structured domain error code = %q, want ATTEMPT_NOT_ACTIVE", saveCode)
+	}
 
 	finishWithInvalidToken := callIntegrationTool(t, session, "finish_attempt", map[string]any{
 		"attempt_id":     attemptID,
@@ -79,6 +90,17 @@ func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
 	})
 	if !finishWithInvalidToken.IsError {
 		t.Fatalf("finish_attempt with old lease_token should have failed but succeeded: %#v", finishWithInvalidToken)
+	}
+	finishErrorMap, ok := finishWithInvalidToken.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("finish_attempt error structured content should be a map, got %T", finishWithInvalidToken.StructuredContent)
+	}
+	finishCode, ok := finishErrorMap["code"].(string)
+	if !ok || finishCode == "" {
+		t.Fatalf("finish_attempt error should include a non-empty 'code' field, got %#v", finishErrorMap)
+	}
+	if !(finishCode == "ATTEMPT_NOT_ACTIVE" || finishCode == "INVALID_ARGUMENT") {
+		t.Fatalf("finish_attempt structured domain error code = %q, want ATTEMPT_NOT_ACTIVE or INVALID_ARGUMENT", finishCode)
 	}
 
 	reClaimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
