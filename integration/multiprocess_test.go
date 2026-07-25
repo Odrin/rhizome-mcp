@@ -28,7 +28,7 @@ func killIntegrationHTTPServer(t *testing.T, server *integrationHTTPServer) {
 	if server == nil || server.cmd == nil || server.cmd.Process == nil {
 		return
 	}
-	if server.cmd.ProcessState != nil {
+	if server.hasExited() {
 		return
 	}
 	if err := server.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {

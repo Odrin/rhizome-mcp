@@ -151,6 +151,23 @@ type integrationHTTPServer struct {
 	endpoint  string
 	endpointC chan string
 	doneC     chan error
+
+	exitedMu sync.Mutex
+	exited   bool
+}
+
+// hasExited reports whether cmd.Wait has already returned, without reading
+// cmd.ProcessState directly: that field is written by the goroutine running
+// cmd.Wait in launchIntegrationHTTPServer, so reading it from another
+// goroutine without synchronization is a data race under -race, even though
+// it is benign in practice. exited is set under exitedMu by that same
+// goroutine immediately after cmd.Wait returns, giving callers here a
+// synchronized way to check "has this process already been reaped" before
+// deciding whether to signal/kill it or wait on doneC again.
+func (server *integrationHTTPServer) hasExited() bool {
+	server.exitedMu.Lock()
+	defer server.exitedMu.Unlock()
+	return server.exited
 }
 
 type capturedOutput struct {
@@ -224,6 +241,9 @@ func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpA
 	go func() {
 		err := cmd.Wait()
 		_ = stderrWriter.Close()
+		server.exitedMu.Lock()
+		server.exited = true
+		server.exitedMu.Unlock()
 		server.doneC <- err
 	}()
 	return server
@@ -262,7 +282,7 @@ func stopIntegrationHTTPServer(t *testing.T, server *integrationHTTPServer) {
 	if server == nil || server.cmd == nil || server.cmd.Process == nil {
 		return
 	}
-	if server.cmd.ProcessState != nil {
+	if server.hasExited() {
 		return
 	}
 	if err := server.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
