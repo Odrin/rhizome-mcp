@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.Odrin%2Frhizome-mcp.svg)](https://mcptoplist.com/server/io.github.Odrin%2Frhizome-mcp)
+
 <p align="center">
   <img src="site/assets/rhizome-mcp-logo.png" alt="rhizome-mcp logo" width="420">
 </p>
