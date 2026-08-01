@@ -2,13 +2,68 @@
 
 ## Transport
 
-Rhizome uses the pinned `github.com/modelcontextprotocol/go-sdk` v1.6.1
-Streamable HTTP transport at `POST /mcp`. The server also accepts the
-transport's `GET /mcp` SSE stream and `DELETE /mcp` session termination
-requests as defined by the SDK. Legacy MCP SSE endpoints are not supported.
+Rhizome uses the pinned `github.com/modelcontextprotocol/go-sdk` v1.7.0
+Streamable HTTP transport at `POST /mcp`. The server supports both MCP
+protocol eras over that endpoint:
 
-Stdio remains the default and is unchanged. HTTP tool results and structured
-domain errors must be identical to stdio.
+- Modern `2026-07-28` is stateless. A client calls `server/discover` first and
+  then sends direct requests with the requested protocol metadata. No
+  `initialize`/`initialized` exchange and no `Mcp-Session-Id` header are
+  required.
+- Legacy `2025-11-25` remains accepted. A client can still send
+  `initialize` followed by `notifications/initialized` and then ordinary calls
+  without relying on a persistent transport session.
+
+`GET /mcp` and `DELETE /mcp` are SDK/protocol transport operations only. They
+are not durable Rhizome agent-session lifecycle APIs.
+
+### Compact request-flow examples
+
+Modern `2026-07-28` flow:
+
+```bash
+curl -X POST http://127.0.0.1:PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Mcp-Protocol-Version: 2026-07-28' \
+  -d '{"jsonrpc":"2.0","id":"1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+```
+
+Then send ordinary requests to the same endpoint with the same protocol metadata.
+
+Legacy `2025-11-25` flow:
+
+```bash
+curl -X POST http://127.0.0.1:PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Mcp-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0.0"}}}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Mcp-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+```
+
+After that, ordinary tool calls continue without any persistent transport
+session header.
+
+## Explicit agent-session handles
+
+Durable audit attribution is separate from MCP transport lifecycle. Create an
+explicit handle with `create_agent_session`, pass `agent_session_handle` on the
+relevant mutating calls, and end it later with `end_agent_session` when the
+work is complete. Omitting the handle remains supported and yields `NULL`
+attribution.
+
+A handle is an opaque bearer string, not a transport credential. Connection
+IDs, HTTP `DELETE`, process shutdown, and transport closure never end a
+Rhizome agent-session handle. If a client loses the handle, it must create a
+fresh one; the transport does not recover or replay that value for the server.
 
 ## Binding and configuration
 
@@ -18,10 +73,9 @@ port and the selected endpoint is logged on stderr. Explicit configuration
 takes precedence over defaults. Stdio has no HTTP listener unless this option
 is present.
 
-Only literal loopback addresses are valid: `127.0.0.0/8`, `::1`, and
-`localhost` after resolution exclusively to those addresses. Wildcards,
-unspecified addresses, non-loopback IPs, hostnames resolving to any
-non-loopback address, and Unix proxy targets are rejected before listening.
+Only literal loopback addresses are valid: `127.0.0.1` and `[::1]`. Wildcards,
+unspecified addresses, non-loopback IPs, hostnames, and Unix proxy targets are
+rejected before listening.
 
 ## Local trust boundary
 
@@ -40,12 +94,10 @@ on a LAN, through a reverse proxy, or through a tunnel.
 
 ## Operational limits
 
-The initial implementation uses a 10 second read-header timeout, 30 second
-read/write request timeouts, 60 second idle timeout, a 1 MiB request body
-limit, and an 8 KiB combined header limit. Limits are configuration values
-only when constrained to equal-or-safer bounds. Access logs include request
-and session correlation IDs but never request payloads, lease tokens, or
-artifact metadata.
+The implementation uses a 1 MiB outer request body limit and an 8 KiB combined
+header limit. Logs record request method, path, status, and duration along with
+safe MCP protocol/method/tool fields; they never log handles, lease tokens, or
+parameter values.
 
 Shutdown stops new accepts, cancels/drains requests within the configured
 timeout, and closes listener resources. Startup and bind failures are fatal

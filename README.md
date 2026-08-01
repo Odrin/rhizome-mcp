@@ -140,7 +140,7 @@ rhizome-mcp doctor --full
 rhizome-mcp serve --http-address 127.0.0.1:0
 ```
 
-The bound endpoint is logged to stderr; the Streamable HTTP endpoint is `http://127.0.0.1:<port>/mcp`. Loopback-only, no authentication, strict Host/Origin validation — use literal loopback IPs (`127.0.0.1`, `[::1]`), not hostname binds. Not safe to expose beyond the local machine.
+The bound endpoint is logged to stderr; the Streamable HTTP endpoint is `http://127.0.0.1:<port>/mcp`. The transport is loopback-only, unauthenticated, and enforces strict Host/Origin validation plus a 1 MiB outer request body limit. Modern MCP `2026-07-28` clients call `server/discover` and then send direct requests with protocol metadata; legacy `2025-11-25` clients can still use `initialize` and `notifications/initialized` without relying on a persistent transport session. If you want durable audit attribution, create an explicit `agent_session_handle` with `create_agent_session`, pass it to the relevant mutating tools, and end it later with `end_agent_session`; transport closure never ends it.
 
 ## How it works
 

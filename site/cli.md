@@ -34,7 +34,7 @@ To opt into loopback HTTP instead, use a literal loopback IP address and an expl
 rhizome-mcp serve --http-address 127.0.0.1:0
 ```
 
-The server logs the bound endpoint to stderr. Point local MCP clients at `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. The transport is loopback-only and does not use authentication. Rejects non-loopback bind addresses, hostnames such as `localhost`, and mismatched Host/Origin headers. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify that the address uses a literal loopback IP and that the client sends the expected Host and Origin values.
+The server logs the bound endpoint to stderr. Point local MCP clients at `http://127.0.0.1:<port>/mcp` for the Streamable HTTP endpoint. Modern `2026-07-28` clients call `server/discover` and then send direct requests with protocol metadata; legacy `2025-11-25` clients can still use `initialize` and `notifications/initialized` without relying on a persistent transport session. The transport is loopback-only and does not use authentication. It rejects non-loopback bind addresses, hostnames, and mismatched Host/Origin headers, and it enforces the 1 MiB outer request body limit. Durable audit attribution is explicit via `create_agent_session` and `end_agent_session` handles; HTTP `DELETE` or connection shutdown does not end those handles. Use Ctrl+C or SIGTERM to stop the server. If startup fails or requests return 400/403, verify that the address uses a literal loopback IP and that the client sends the expected Host and Origin values.
 
 By default `serve` advertises the complete tool catalog (`full`). Pass `--profile` (or set the `TOOL_PROFILE` environment variable) to narrow it for stdio or HTTP alike:
 
