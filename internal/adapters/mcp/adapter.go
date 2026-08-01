@@ -156,6 +156,7 @@ func NewServer(options Options) (*Server, error) {
 			InitializedHandler: adapter.startSession,
 		},
 	)
+	server.AddReceivingMiddleware(adapter.rejectDiscoverUntilStateless)
 	adapter.register(server)
 	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
@@ -209,8 +210,24 @@ func (adapter *adapter) startSession(ctx context.Context, request *sdkmcp.Initia
 	if request == nil || request.Session == nil {
 		return
 	}
-	sdkSession := request.Session
+	adapter.startSessionFor(ctx, request.Session)
+}
 
+// rejectDiscoverUntilStateless preserves the existing stateful connection
+// lifecycle until the stateless HTTP migration adopts server/discover.
+func (adapter *adapter) rejectDiscoverUntilStateless(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+	return func(ctx context.Context, method string, request sdkmcp.Request) (sdkmcp.Result, error) {
+		if method == "server/discover" {
+			return nil, fmt.Errorf("server/discover is unavailable until stateless HTTP is enabled")
+		}
+		return next(ctx, method, request)
+	}
+}
+
+func (adapter *adapter) startSessionFor(ctx context.Context, sdkSession *sdkmcp.ServerSession) {
+	if sdkSession == nil {
+		return
+	}
 	adapter.sessionMu.Lock()
 	if _, started := adapter.sessionStarted[sdkSession]; started {
 		adapter.sessionMu.Unlock()
