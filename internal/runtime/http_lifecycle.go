@@ -130,15 +130,22 @@ func wrapHTTPHandler(handler http.Handler, authority string, logger *slog.Logger
 			if bodyReader != nil && bodyReader.exceeded && !recorder.wroteHeader {
 				recorder.WriteHeader(http.StatusRequestEntityTooLarge)
 			}
-			method := ""
-			var sessionID string
+			method, protocolVersion, mcpMethod, toolName := "", "", "", ""
 			if request != nil {
 				method = request.Method
-				sessionID = strings.TrimSpace(request.Header.Get("Mcp-Session-Id"))
+				protocolVersion = strings.TrimSpace(request.Header.Get("Mcp-Protocol-Version"))
+				mcpMethod = strings.TrimSpace(request.Header.Get("Mcp-Method"))
+				toolName = strings.TrimSpace(request.Header.Get("Mcp-Name"))
 			}
 			attrs := []any{"method", method, "path", requestPath(request), "status", recorder.statusCode, "duration", time.Since(startedAt)}
-			if sessionID != "" {
-				attrs = append(attrs, "mcp_session_id", sessionID)
+			if protocolVersion != "" {
+				attrs = append(attrs, "mcp_protocol_version", protocolVersion)
+			}
+			if mcpMethod != "" {
+				attrs = append(attrs, "mcp_method", mcpMethod)
+			}
+			if toolName != "" {
+				attrs = append(attrs, "mcp_tool", toolName)
 			}
 			logger.Info("http request completed", attrs...)
 		}()

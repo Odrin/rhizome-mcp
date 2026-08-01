@@ -161,6 +161,35 @@ func TestWrapHTTPHandlerRejectsHostAndOrigin(t *testing.T) {
 	})
 }
 
+func TestWrapHTTPHandlerLogsSafeMCPIdentity(t *testing.T) {
+	var logs bytes.Buffer
+	handler := WrapHTTPHandler(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}), "127.0.0.1:8080", slog.New(slog.NewTextHandler(&logs, nil)))
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/mcp", strings.NewReader(`{"agent_session_handle":"secret-handle","lease_token":"secret-token"}`))
+	request.Host = "127.0.0.1:8080"
+	request.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	request.Header.Set("Mcp-Method", "tools/call")
+	request.Header.Set("Mcp-Name", "create_issue")
+	request.Header.Set("Mcp-Session-Id", "legacy-session")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	output := logs.String()
+	for _, expected := range []string{"mcp_protocol_version=2026-07-28", "mcp_method=tools/call", "mcp_tool=create_issue"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("log %q does not contain %q", output, expected)
+		}
+	}
+	for _, secret := range []string{"legacy-session", "secret-handle", "secret-token"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("log leaked %q: %q", secret, output)
+		}
+	}
+}
+
 func TestWrapHTTPHandlerRecoversPanics(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
