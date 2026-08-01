@@ -111,8 +111,8 @@ func TestIntegrationHTTPServeConcurrentClientsOnEphemeralPort(t *testing.T) {
 		}
 	}
 
-	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 3); err != nil {
-		t.Fatalf("assert concurrent HTTP agent sessions: %v", err)
+	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 0); err != nil {
+		t.Fatalf("assert no automatic HTTP agent sessions: %v", err)
 	}
 }
 
@@ -341,9 +341,6 @@ func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[stri
 		return nil, "", err
 	}
 	sessionID = initializeResult.sessionID
-	if sessionID == "" {
-		return nil, "", fmt.Errorf("initialize did not return a session ID")
-	}
 	if _, err := postNotification(httpClient, endpoint, sessionID, "notifications/initialized", map[string]any{}); err != nil {
 		return nil, "", err
 	}

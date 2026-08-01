@@ -180,9 +180,6 @@ func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
 		if item.err != nil {
 			t.Fatalf("client %s failed: %v", item.clientName, item.err)
 		}
-		if item.sessionID == "" {
-			t.Fatalf("client %s did not receive a session ID", item.clientName)
-		}
 		if _, ok := item.result["project"]; !ok {
 			t.Fatalf("client %s get_project result missing project payload: %#v", item.clientName, item.result)
 		}
@@ -192,8 +189,8 @@ func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
 		t.Fatalf("later HTTP connection failed: %v", err)
 	}
 
-	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 3); err != nil {
-		t.Fatalf("assert HTTP agent sessions: %v", err)
+	if err := assertDistinctHTTPAgentSessions(t, env.repository, env.dataRoot, 0); err != nil {
+		t.Fatalf("assert no automatic HTTP agent sessions: %v", err)
 	}
 }
 
@@ -302,9 +299,6 @@ func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[stri
 		return nil, "", err
 	}
 	sessionID = initializeResult.sessionID
-	if sessionID == "" {
-		return nil, "", fmt.Errorf("initialize did not return a session ID")
-	}
 	if _, err := postNotification(httpClient, endpoint, sessionID, "notifications/initialized", map[string]any{}); err != nil {
 		return nil, "", err
 	}

@@ -139,7 +139,6 @@ func NewServer(options Options) (*Server, error) {
 			Instructions: initializeInstructions,
 		},
 	)
-	server.AddReceivingMiddleware(adapter.rejectDiscoverUntilStateless)
 	adapter.register(server)
 	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
@@ -178,17 +177,6 @@ func (server *Server) Run(ctx context.Context, transport sdkmcp.Transport) error
 		return ctx.Err()
 	case err := <-done:
 		return err
-	}
-}
-
-// rejectDiscoverUntilStateless preserves the existing stateful connection
-// lifecycle until the stateless HTTP migration adopts server/discover.
-func (adapter *adapter) rejectDiscoverUntilStateless(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
-	return func(ctx context.Context, method string, request sdkmcp.Request) (sdkmcp.Result, error) {
-		if method == "server/discover" {
-			return nil, fmt.Errorf("server/discover is unavailable until stateless HTTP is enabled")
-		}
-		return next(ctx, method, request)
 	}
 }
 

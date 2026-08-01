@@ -474,7 +474,7 @@ func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler,
 	serverFactory := func(*http.Request) *sdkmcp.Server {
 		return server.SDKServer()
 	}
-	streamableHandler := sdkmcp.NewStreamableHTTPHandler(serverFactory, &sdkmcp.StreamableHTTPOptions{JSONResponse: true})
+	streamableHandler := sdkmcp.NewStreamableHTTPHandler(serverFactory, &sdkmcp.StreamableHTTPOptions{JSONResponse: true, Stateless: true})
 	handler := http.HandlerFunc(streamableHandler.ServeHTTP)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", handler)
