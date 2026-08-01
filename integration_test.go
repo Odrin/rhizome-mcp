@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +103,164 @@ func runIntegrationCommand(t *testing.T, env integrationEnvironment, args ...str
 		t.Fatalf("%s failed: %v\nstdout:\n%s\nstderr:\n%s", command.String(), err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes()
+}
+
+func TestIntegrationHTTPMCPConformanceMatrix(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	ctx := context.Background()
+	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}
+	bundle, project, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
+	if err != nil {
+		t.Fatalf("compose services: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+		defer cancel()
+		if closeErr := project.Close(closeCtx); closeErr != nil {
+			t.Errorf("close project: %v", closeErr)
+		}
+	}()
+
+	handler, err := newHTTPHandler(&config.Config{ServerName: "rhizome-http-test", Version: "test"}, bundle)
+	if err != nil {
+		t.Fatalf("create HTTP handler: %v", err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	httpClient := &http.Client{Timeout: integrationTimeout}
+	discoverResult, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 1, "2026-07-28", "server/discover", map[string]any{})
+	if err != nil {
+		t.Fatalf("server/discover failed: %v", err)
+	}
+	if discoverResult.sessionID != "" {
+		t.Fatalf("modern discovery returned session header = %q, want empty", discoverResult.sessionID)
+	}
+	var discoverPayload map[string]any
+	if err := json.Unmarshal(discoverResult.result, &discoverPayload); err != nil {
+		t.Fatalf("decode discover result: %v", err)
+	}
+	serverInfoFound := false
+	if _, ok := discoverPayload["serverInfo"]; ok {
+		serverInfoFound = true
+	} else if meta, ok := discoverPayload["_meta"].(map[string]any); ok {
+		_, serverInfoFound = meta["io.modelcontextprotocol/serverInfo"]
+	}
+	if !serverInfoFound {
+		t.Fatalf("discover result missing serverInfo: %#v", discoverPayload)
+	}
+
+	toolsResult, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 2, "2026-07-28", "tools/list", map[string]any{})
+	if err != nil {
+		t.Fatalf("tools/list failed: %v", err)
+	}
+	if toolsResult.sessionID != "" {
+		t.Fatalf("tools/list returned session header = %q, want empty", toolsResult.sessionID)
+	}
+
+	callResult, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 3, "2026-07-28", "tools/call", map[string]any{
+		"name":      "get_project",
+		"arguments": map[string]any{},
+		"_meta":     map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+	})
+	if err != nil {
+		t.Fatalf("tools/call failed: %v", err)
+	}
+	if callResult.sessionID != "" {
+		t.Fatalf("tools/call returned session header = %q, want empty", callResult.sessionID)
+	}
+
+	legacyInitialize, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 4, "2025-11-25", "initialize", map[string]any{
+		"protocolVersion": "2025-11-25",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "in-process-client", "version": "1.0"},
+	})
+	if err != nil {
+		t.Fatalf("legacy initialize failed: %v", err)
+	}
+	if legacyInitialize.sessionID != "" {
+		t.Fatalf("legacy initialize returned session header = %q, want empty", legacyInitialize.sessionID)
+	}
+	if _, err := postNotificationWithProtocolVersion(httpClient, server.URL+"/mcp", "", "2025-11-25", "notifications/initialized", map[string]any{}); err != nil {
+		t.Fatalf("legacy initialized notification failed: %v", err)
+	}
+
+	legacyTools, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 6, "2025-11-25", "tools/list", map[string]any{})
+	if err != nil {
+		t.Fatalf("legacy tools/list failed: %v", err)
+	}
+	if legacyTools.sessionID != "" {
+		t.Fatalf("legacy tools/list returned session header = %q, want empty", legacyTools.sessionID)
+	}
+
+	createSession, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 7, "2026-07-28", "tools/call", map[string]any{
+		"name": "create_agent_session",
+		"arguments": map[string]any{
+			"client_name": "http-conformance",
+		},
+		"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+	})
+	if err != nil {
+		t.Fatalf("create_agent_session failed: %v", err)
+	}
+	var createdSession struct {
+		StructuredContent struct {
+			Handle string `json:"agent_session_handle"`
+		} `json:"structuredContent"`
+	}
+	if err := json.Unmarshal(createSession.result, &createdSession); err != nil {
+		t.Fatalf("decode create_agent_session result: %v", err)
+	}
+	if createdSession.StructuredContent.Handle == "" {
+		t.Fatal("create_agent_session returned empty handle")
+	}
+
+	omittedHandle, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 8, "2026-07-28", "tools/call", map[string]any{
+		"name":      "create_issue",
+		"arguments": map[string]any{"type": "task", "title": "omitted-handle"},
+		"_meta":     map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+	})
+	if err != nil {
+		t.Fatalf("create_issue without handle failed: %v", err)
+	}
+	if omittedHandle.sessionID != "" {
+		t.Fatalf("create_issue without handle returned session header = %q, want empty", omittedHandle.sessionID)
+	}
+
+	explicitHandle, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 9, "2026-07-28", "tools/call", map[string]any{
+		"name": "create_issue",
+		"arguments": map[string]any{
+			"type":                 "task",
+			"title":                "explicit-handle",
+			"agent_session_handle": createdSession.StructuredContent.Handle,
+		},
+		"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+	})
+	if err != nil {
+		t.Fatalf("create_issue with handle failed: %v", err)
+	}
+	if explicitHandle.sessionID != "" {
+		t.Fatalf("create_issue with handle returned session header = %q, want empty", explicitHandle.sessionID)
+	}
+
+	invalidHandle, err := postJSONRPCWithProtocolVersion(httpClient, server.URL+"/mcp", "", 10, "2026-07-28", "tools/call", map[string]any{
+		"name": "create_issue",
+		"arguments": map[string]any{
+			"type":                 "task",
+			"title":                "invalid-handle",
+			"agent_session_handle": "does-not-exist",
+		},
+		"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+	})
+	if err != nil {
+		t.Fatalf("create_issue with invalid handle failed: %v", err)
+	}
+	if invalidHandle.sessionID != "" {
+		t.Fatalf("invalid handle request returned session header = %q, want empty", invalidHandle.sessionID)
+	}
+	if invalidHandle.result == nil || len(invalidHandle.result) == 0 {
+		t.Fatal("invalid handle request did not return a JSON-RPC error envelope")
+	}
 }
 
 func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
@@ -217,7 +376,12 @@ type jsonRPCResponse struct {
 }
 
 func postJSONRPC(client *http.Client, endpoint, sessionID string, id any, method string, params any) (*jsonRPCResponse, error) {
-	payload := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
+	return postJSONRPCWithProtocolVersion(client, endpoint, sessionID, id, "2025-11-25", method, params)
+}
+
+func postJSONRPCWithProtocolVersion(client *http.Client, endpoint, sessionID string, id any, protocolVersion, method string, params any) (*jsonRPCResponse, error) {
+	payloadParams := normalizeMCPParams(protocolVersion, method, params)
+	payload := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: payloadParams}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -228,9 +392,13 @@ func postJSONRPC(client *http.Client, endpoint, sessionID string, id any, method
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+	req.Header.Set("Mcp-Method", method)
+	req.Header.Set("Mcp-Protocol-Version", protocolVersion)
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	if toolName := mcpToolName(method, payloadParams); toolName != "" {
+		req.Header.Set("Mcp-Name", toolName)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -255,7 +423,12 @@ func postJSONRPC(client *http.Client, endpoint, sessionID string, id any, method
 }
 
 func postNotification(client *http.Client, endpoint, sessionID, method string, params any) (*jsonRPCResponse, error) {
-	payload := jsonRPCRequest{JSONRPC: "2.0", Method: method, Params: params}
+	return postNotificationWithProtocolVersion(client, endpoint, sessionID, "2025-11-25", method, params)
+}
+
+func postNotificationWithProtocolVersion(client *http.Client, endpoint, sessionID, protocolVersion, method string, params any) (*jsonRPCResponse, error) {
+	payloadParams := normalizeMCPParams(protocolVersion, method, params)
+	payload := jsonRPCRequest{JSONRPC: "2.0", Method: method, Params: payloadParams}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -266,9 +439,13 @@ func postNotification(client *http.Client, endpoint, sessionID, method string, p
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+	req.Header.Set("Mcp-Method", method)
+	req.Header.Set("Mcp-Protocol-Version", protocolVersion)
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	if toolName := mcpToolName(method, payloadParams); toolName != "" {
+		req.Header.Set("Mcp-Name", toolName)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -283,6 +460,44 @@ func postNotification(client *http.Client, endpoint, sessionID, method string, p
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 	return &jsonRPCResponse{result: nil, sessionID: resp.Header.Get("Mcp-Session-Id")}, nil
+}
+
+func normalizeMCPParams(protocolVersion, method string, params any) any {
+	if protocolVersion != "2026-07-28" {
+		return params
+	}
+	paramsMap, ok := params.(map[string]any)
+	if !ok {
+		if params == nil {
+			paramsMap = map[string]any{}
+		} else {
+			return params
+		}
+	}
+	meta, ok := paramsMap["_meta"].(map[string]any)
+	if !ok {
+		meta = map[string]any{}
+	}
+	if _, ok := meta["io.modelcontextprotocol/protocolVersion"]; !ok {
+		meta["io.modelcontextprotocol/protocolVersion"] = protocolVersion
+	}
+	if _, ok := meta["io.modelcontextprotocol/clientCapabilities"]; !ok {
+		meta["io.modelcontextprotocol/clientCapabilities"] = map[string]any{}
+	}
+	paramsMap["_meta"] = meta
+	return paramsMap
+}
+
+func mcpToolName(method string, params any) string {
+	if method != "tools/call" {
+		return ""
+	}
+	paramsMap, ok := params.(map[string]any)
+	if !ok {
+		return ""
+	}
+	toolName, _ := paramsMap["name"].(string)
+	return strings.TrimSpace(toolName)
 }
 
 func communicateThroughHTTP(t *testing.T, endpoint, clientName string) (map[string]any, string, error) {
