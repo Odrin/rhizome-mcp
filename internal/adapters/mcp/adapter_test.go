@@ -2414,32 +2414,44 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 	defer db.Close(ctx)
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
+	seed := call(t, client, "create_issue", map[string]any{
+		"type": "task", "title": "Seed plan label", "labels": []string{"Plan Existing"}, "create_missing_labels": true,
+	})
+	if seed.IsError {
+		t.Fatalf("seed label = %#v", seed)
+	}
 	plan := map[string]any{
 		"issues": []any{
 			map[string]any{"ref": "epic", "type": "epic", "title": "Plan epic"},
-			map[string]any{"ref": "task", "type": "task", "title": "Plan task", "parent_ref": "epic"},
+			map[string]any{"ref": "task", "type": "task", "title": "Plan task", "parent_ref": "epic", "labels": []string{"Plan Existing"}},
 		},
 		"relations": []any{map[string]any{"source_ref": "epic", "target_ref": "task", "type": "blocks"}},
 		"decisions": []any{map[string]any{"issue_ref": "task", "title": "Choice", "summary": "short", "content": "long"}},
 	}
 	validation := call(t, client, "validate_issue_plan", plan)
 	var checked struct {
-		Valid          bool `json:"valid"`
-		NormalizedPlan struct {
-			Issues []struct {
-				Status string `json:"status"`
-			} `json:"issues"`
-		} `json:"normalized_plan"`
+		Valid          bool           `json:"valid"`
+		NormalizedPlan map[string]any `json:"normalized_plan"`
 	}
 	decodeStructured(t, validation, &checked)
-	if validation.IsError || !checked.Valid || checked.NormalizedPlan.Issues[0].Status != "open" {
+	normalizedIssues, ok := checked.NormalizedPlan["issues"].([]any)
+	if validation.IsError || !checked.Valid || !ok || len(normalizedIssues) != 2 {
 		t.Fatalf("validation = %#v, output = %#v", validation, checked)
 	}
-	plan["idempotency_key"] = "mcp-plan-key"
-	applied := call(t, client, "apply_issue_plan", plan)
+	normalizedTask, ok := normalizedIssues[1].(map[string]any)
+	if !ok || normalizedTask["status"] != "open" || !reflect.DeepEqual(normalizedTask["labels"], []any{"Plan Existing"}) {
+		t.Fatalf("normalized task = %#v", normalizedIssues[1])
+	}
+	checked.NormalizedPlan["idempotency_key"] = "mcp-plan-key"
+	applied := call(t, client, "apply_issue_plan", checked.NormalizedPlan)
 	var result struct {
 		CreatedIssues []struct {
-			Ref string `json:"ref"`
+			Ref   string `json:"ref"`
+			Issue struct {
+				Labels []struct {
+					Name string `json:"name"`
+				} `json:"labels"`
+			} `json:"issue"`
 		} `json:"created_issues"`
 		CreatedRelations []struct {
 			Type string `json:"type"`
@@ -2451,10 +2463,11 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 	}
 	decodeStructured(t, applied, &result)
 	if applied.IsError || len(result.CreatedIssues) != 2 || result.CreatedIssues[1].Ref != "task" ||
+		len(result.CreatedIssues[1].Issue.Labels) != 1 || result.CreatedIssues[1].Issue.Labels[0].Name != "Plan Existing" ||
 		len(result.CreatedRelations) != 1 || len(result.CreatedDecisions) != 1 || result.LatestEventID == 0 {
 		t.Fatalf("apply = %#v, output = %#v", applied, result)
 	}
-	replay := call(t, client, "apply_issue_plan", plan)
+	replay := call(t, client, "apply_issue_plan", checked.NormalizedPlan)
 	if replay.IsError {
 		t.Fatalf("replay = %#v", replay)
 	}

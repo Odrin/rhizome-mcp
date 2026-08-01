@@ -93,6 +93,88 @@ func TestApplyIssuePlanAtomicReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestApplyIssuePlanUsesExistingLabelsWithoutGeneratedIDs(t *testing.T) {
+	_, db, now := openIssueService(t)
+	source := clock.NewFakeClock(now)
+	repository, err := sqlite.NewPlanningRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewPlanningService(repository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	create := domain.IssuePlan{Issues: []domain.PlannedIssue{{
+		Ref: "create", Type: domain.TypeTask, Title: "Create label",
+		Labels: []string{"existing"}, CreateMissingLabels: true,
+	}}}
+	created, err := service.ApplyIssuePlan(ctx, create, "create-label")
+	if err != nil {
+		t.Fatalf("create label: %v", err)
+	}
+	if len(created.CreatedIssues) != 1 || len(created.CreatedIssues[0].Issue.Labels) != 1 {
+		t.Fatalf("create result = %#v", created)
+	}
+
+	missing := domain.IssuePlan{Issues: []domain.PlannedIssue{{
+		Ref: "missing", Type: domain.TypeTask, Title: "Missing label",
+		Labels: []string{"missing"},
+	}}}
+	if _, err := service.ApplyIssuePlan(ctx, missing, "missing-label"); !errors.Is(err, &domain.Error{Code: domain.CodeLabelNotFound}) {
+		t.Fatalf("missing label apply error = %v", err)
+	}
+
+	reuse := domain.IssuePlan{Issues: []domain.PlannedIssue{{
+		Ref: "reuse", Type: domain.TypeTask, Title: "Reuse label",
+		Labels: []string{"existing"},
+	}}}
+	first, err := service.ApplyIssuePlan(ctx, reuse, "reuse-label")
+	if err != nil {
+		t.Fatalf("reuse label: %v", err)
+	}
+	second, err := service.ApplyIssuePlan(ctx, reuse, "reuse-label")
+	if err != nil {
+		t.Fatalf("replay reuse label: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("replay = %#v, want %#v", second, first)
+	}
+	if len(first.CreatedIssues) != 1 || !reflect.DeepEqual(first.CreatedIssues[0].Issue.Labels, created.CreatedIssues[0].Issue.Labels) {
+		t.Fatalf("reuse result = %#v, created labels = %#v", first, created.CreatedIssues[0].Issue.Labels)
+	}
+
+	reuseWithCreation := domain.IssuePlan{Issues: []domain.PlannedIssue{{
+		Ref: "reuse-create", Type: domain.TypeTask, Title: "Reuse label with creation enabled",
+		Labels: []string{"existing"}, CreateMissingLabels: true,
+	}}}
+	reusedWithCreation, err := service.ApplyIssuePlan(ctx, reuseWithCreation, "reuse-label-create")
+	if err != nil {
+		t.Fatalf("reuse label with creation enabled: %v", err)
+	}
+	if len(reusedWithCreation.CreatedIssues) != 1 ||
+		!reflect.DeepEqual(reusedWithCreation.CreatedIssues[0].Issue.Labels, created.CreatedIssues[0].Issue.Labels) {
+		t.Fatalf("reuse with creation result = %#v, created labels = %#v", reusedWithCreation, created.CreatedIssues[0].Issue.Labels)
+	}
+
+	var issues, records int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issues").Scan(&issues); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records").Scan(&records)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issues != 3 || records != 3 {
+		t.Fatalf("rollback/replay state = issues=%d records=%d", issues, records)
+	}
+}
+
 func TestApplyIssuePlanRejectsCycleWithoutSequenceAllocation(t *testing.T) {
 	_, db, now := openIssueService(t)
 	source := clock.NewFakeClock(now)

@@ -52,3 +52,27 @@ func TestPlanningServiceNormalizesAndRequiresIdempotencyKey(t *testing.T) {
 		t.Fatalf("command = %#v", repository.command)
 	}
 }
+
+func TestPlanningServiceGeneratesLabelIDsOnlyWhenCreationEnabled(t *testing.T) {
+	repository := &recordingPlanningRepository{}
+	service, err := application.NewPlanningService(repository, clock.NewFakeClock(time.Unix(0, 0)),
+		fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.IssuePlan{Issues: []domain.PlannedIssue{
+		{Ref: "disabled", Type: domain.TypeTask, Title: "Disabled", Labels: []string{"existing"}, CreateMissingLabels: false},
+		{Ref: "omitted", Type: domain.TypeTask, Title: "Omitted", Labels: []string{"existing"}},
+		{Ref: "enabled", Type: domain.TypeTask, Title: "Enabled", Labels: []string{"missing-a", "missing-b"}, CreateMissingLabels: true},
+	}}
+
+	if _, err := service.ApplyIssuePlan(context.Background(), plan, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.command.LabelIDs) != 3 ||
+		len(repository.command.LabelIDs[0]) != 0 ||
+		len(repository.command.LabelIDs[1]) != 0 ||
+		len(repository.command.LabelIDs[2]) != 2 {
+		t.Fatalf("label IDs = %#v", repository.command.LabelIDs)
+	}
+}

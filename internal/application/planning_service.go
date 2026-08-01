@@ -82,13 +82,16 @@ func (service *PlanningService) ApplyIssuePlan(ctx context.Context, plan domain.
 		command.DecisionIDs = append(command.DecisionIDs, id)
 	}
 	for _, issue := range command.Plan.Issues {
-		labels := make([]string, len(issue.Labels))
-		for i := range labels {
-			id, err := service.newID()
-			if err != nil {
-				return ports.ApplyIssuePlanResult{}, err
+		var labels []string
+		if issue.CreateMissingLabels {
+			labels = make([]string, len(issue.Labels))
+			for i := range labels {
+				id, err := service.newID()
+				if err != nil {
+					return ports.ApplyIssuePlanResult{}, err
+				}
+				labels[i] = id
 			}
-			labels[i] = id
 		}
 		command.LabelIDs = append(command.LabelIDs, labels)
 	}

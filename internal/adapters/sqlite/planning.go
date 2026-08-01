@@ -127,13 +127,9 @@ func validatePlanCommand(command ports.ApplyIssuePlanCommand) error {
 		}
 	}
 	for i, labels := range command.LabelIDs {
-		if len(labels) != len(command.Plan.Issues[i].Labels) {
-			return domain.NewError(domain.CodeIDGeneration, "cannot generate label identifier", false)
-		}
-		for _, value := range labels {
-			if _, err := ids.ParseStrict(value); err != nil {
-				return domain.WrapError(err, domain.CodeIDGeneration, "cannot generate label identifier", false)
-			}
+		issue := command.Plan.Issues[i]
+		if err := validateLabelIDs(issue.Labels, issue.CreateMissingLabels, labels); err != nil {
+			return err
 		}
 	}
 	return nil
