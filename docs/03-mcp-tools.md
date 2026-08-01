@@ -55,42 +55,154 @@ Errors use:
 }
 ```
 
+### 2.1. Explicit agent-session attribution
+
+Durable attribution is opt-in and transport-neutral. It never derives from an
+SDK `ServerSession`, `Mcp-Session-Id`, HTTP connection, or `initialize` request.
+All tool input schemas except `create_agent_session` and `end_agent_session`
+include this optional property:
+
+```json
+{
+  "agent_session_handle": null
+}
+```
+
+When present, `agent_session_handle` is a non-empty opaque bearer string with a
+maximum of 256 ASCII characters. It is not an entity ID, is returned only by
+`create_agent_session`, and must not appear in tool output, events, errors, or
+logs. Supplying `null` is equivalent to omitting it.
+
+The adapter resolves a supplied handle through the application service before a
+mutating operation opens its business transaction. It passes the resolved
+durable `session_id` to the existing domain command; domain and SQLite layers
+continue to store only that nullable ULID in attempts and audit records. A
+read-only tool may validate a supplied handle but never updates
+`last_seen_at`. A mutating tool atomically validates the active session, writes
+its ordinary domain changes and audit records with the resolved `session_id`,
+and advances `last_seen_at`; an error leaves all of these writes unchanged.
+
+Handle errors are stable, non-retryable structured errors:
+
+| Condition | Error code | Detail |
+| --- | --- | --- |
+| malformed or overlong handle | `INVALID_ARGUMENT` | `field: agent_session_handle`, `code: INVALID_HANDLE` |
+| well-formed but unknown handle | `SESSION_NOT_FOUND` | `field: agent_session_handle`, `code: NOT_FOUND` |
+| ended handle | `SESSION_NOT_ACTIVE` | `field: agent_session_handle`, `code: ENDED` |
+
+Clients that omit the property remain fully functional and their resulting
+attempts, entities, and events have NULL session attribution. A handle provides
+audit attribution only; it neither authenticates the caller nor replaces an
+attempt's `lease_token`.
+
 ## 3. Tool inventory
 
-The catalog exposes 32 tools:
+The catalog exposes 34 tools:
 
-1. `get_project`
-2. `export_project`
-3. `validate_import`
-4. `apply_import`
-5. `list_labels`
-6. `create_issue`
-7. `update_issue`
-8. `get_issue`
-9. `list_issues`
-10. `archive_issue`
-11. `create_review_request` (deprecated — see section 7.6)
-12. `get_review_request`
-13. `list_review_requests`
-14. `cancel_review_request`
-15. `supersede_review_request` (deprecated — see section 7.6)
-16. `replace_review_request`
-17. `manage_issue_relation`
-18. `get_issue_graph`
-19. `get_planning_graph`
-20. `validate_issue_plan`
-21. `apply_issue_plan`
-22. `add_comment`
-23. `record_decision`
-24. `list_decisions`
-25. `get_issue_activity`
-26. `claim_issue`
-27. `renew_attempt`
-28. `save_attempt_note`
-29. `finish_attempt`
-30. `get_work_context`
-31. `search`
-32. `get_changes`
+1. `create_agent_session`
+2. `end_agent_session`
+3. `get_project`
+4. `export_project`
+5. `validate_import`
+6. `apply_import`
+7. `list_labels`
+8. `create_issue`
+9. `update_issue`
+10. `get_issue`
+11. `list_issues`
+12. `archive_issue`
+13. `create_review_request` (deprecated — see section 7.6)
+14. `get_review_request`
+15. `list_review_requests`
+16. `cancel_review_request`
+17. `supersede_review_request` (deprecated — see section 7.6)
+18. `replace_review_request`
+19. `manage_issue_relation`
+20. `get_issue_graph`
+21. `get_planning_graph`
+22. `validate_issue_plan`
+23. `apply_issue_plan`
+24. `add_comment`
+25. `record_decision`
+26. `list_decisions`
+27. `get_issue_activity`
+28. `claim_issue`
+29. `renew_attempt`
+30. `save_attempt_note`
+31. `finish_attempt`
+32. `get_work_context`
+33. `search`
+34. `get_changes`
+
+### 3.1. `create_agent_session`
+
+Creates a durable attribution session independently of MCP transport lifecycle.
+
+Input:
+
+```json
+{
+  "client_name": "GitHub Copilot",
+  "client_version": "1.2.3",
+  "agent_label": null,
+  "model": null,
+  "instance_key": null
+}
+```
+
+`client_name` is required and the remaining metadata fields are optional,
+non-blank strings of at most 256 runes. The tool is mutating,
+non-idempotent, and returns `session` metadata plus
+`agent_session_handle`. The handle is shown only in this response and must be
+retained by the client; it cannot be recovered later.
+
+### 3.2. `end_agent_session`
+
+Ends one explicitly created session.
+
+Input:
+
+```json
+{
+  "agent_session_handle": "opaque bearer handle"
+}
+```
+
+The tool validates the handle and sets `ended_at` and `last_seen_at` in one
+short write transaction. Repeating it with the same still-recognized handle is
+successful and returns the original ended session unchanged; it does not update
+timestamps. Unknown and malformed handles use the errors in section 2.1.
+Ending a session does not terminate active attempts or invalidate their lease
+tokens; later attempt operations can omit attribution or use another active
+handle.
+
+### 3.3. Required implementation boundary
+
+The implementation of this contract is bounded as follows:
+
+- **Domain:** retain `AgentSession.ID` as the internal ULID, add only
+  handle-resolution inputs and stable handle validation details; preserve the
+  nullable `session_id` fields on existing mutation commands.
+- **Application:** generate a cryptographically random handle, hash it before
+  persistence, create, resolve, touch, and end sessions through one service;
+  resolve-and-touch for a mutating call must run in the same SQLite write
+  transaction as its business mutation.
+- **MCP adapter:** add the two lifecycle tools and the optional common input
+  property to every existing tool schema; resolve the property before passing
+  command inputs. Remove `InitializedHandler`, `ServerSession.ID()`,
+  `Mcp-Session-Id`, `connectionSessions`, `sdkSessionIDs`, and HTTP/stdio close
+  lifecycle attribution.
+- **SQLite:** migrate `agent_sessions` with a non-null unique `handle_hash`,
+  use indexed hash lookup, and provide atomic active-handle resolution plus
+  touch for existing mutation transactions. Existing nullable attribution
+  foreign keys and historical rows remain unchanged.
+- **Tests:** cover creation, single-return handle redaction, omitted handles,
+  malformed/unknown/ended errors, idempotent end, read-only no-touch, atomic
+  mutation attribution, concurrent use/end races, reconnect and process-restart
+  recovery, and both MCP protocol eras over stdio and HTTP.
+- **Documentation:** update examples and operational guidance after the runtime
+  implementation lands; do not describe HTTP `DELETE` or SDK session closure as
+  durable session termination.
 
 ---
 

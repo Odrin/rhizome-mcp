@@ -180,6 +180,7 @@ Append-only operations do not require issue version:
 ```text
 AgentSession
   id                 ULID
+  handle_hash        bytes unique
   client_name        string
   client_version     string nullable
   agent_label        string nullable
@@ -194,11 +195,21 @@ Purpose:
 
 - audit which client performed an action;
 - display useful source metadata;
-- associate attempts and events with a connection.
+- associate attempts and events with an explicitly created agent session.
 
 Rules:
 
-- A new session is created for each MCP connection.
+- A client creates a session explicitly and receives an opaque bearer handle
+  once. The raw handle is never persisted; only its fixed-length hash is stored.
+- A session handle is independent of an MCP connection, `Mcp-Session-Id`, and
+  SDK session identity. It can be carried by either supported MCP protocol era
+  and can survive client reconnects or server process restarts.
+- Clients explicitly end a session. Connection close, HTTP `DELETE`, process
+  exit, and a stale session do not end it automatically. A stale active session
+  remains valid for recovery and is retained for audit history.
+- A concurrent use of one active handle is valid. SQLite write serialization and
+  monotonic timestamps make concurrent touches deterministic; ending wins for a
+  call whose session lookup observes an ended row.
 - `agent_label` is an arbitrary non-unique string.
 - `instance_key` is optional and advisory.
 - Neither field is used for ownership or security.
@@ -209,6 +220,9 @@ Rules:
   tool call never durably writes `last_seen_at`, so it stays true to its
   advertised no-write contract; activity tracking is therefore correlated
   with actual project mutations, not with every call including reads.
+- A call that omits a handle remains compatible and persists NULL attribution.
+  A supplied handle must resolve to an active session before any business write
+  starts; an invalid handle causes no partial project or audit writes.
 
 There is no permanent `Agent` entity in the first version.
 
