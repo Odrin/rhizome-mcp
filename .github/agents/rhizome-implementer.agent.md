@@ -2,7 +2,7 @@
 name: Rhizome Implementer
 description: "Use only when delegated a bounded rhizome-mcp implementation brief with exact files, contracts, acceptance criteria, and test commands."
 argument-hint: Provide Goal, Files, Existing Contracts, Required Behavior, Acceptance Criteria, and Tests and Commands.
-tools: [read, edit, execute]
+tools: [execute, read, edit, search, todo]
 agents: []
 model: MAI-Code-1-Flash (copilot)
 user-invocable: false

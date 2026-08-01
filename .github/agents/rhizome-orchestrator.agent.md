@@ -2,7 +2,7 @@
 name: Rhizome Orchestrator
 description: "Use when planning or implementing a rhizome-mcp milestone: select and claim a bounded MCP issue, implement or delegate it, review and verify it, commit it, and finish the work attempt."
 argument-hint: Describe the milestone, feature, issue, or implementation outcome to coordinate.
-tools: [vscode, execute, read, agent, edit, search, web, browser, 'io.github.upstash/context7/*', todo]
+tools: [vscode, execute, read, agent, edit, search, web, browser, 'rhizome-mcp/*', 'io.github.upstash/context7/*', todo]
 agents: [Rhizome Implementer]
 model: GPT-5.6 Terra (copilot)
 user-invocable: true
