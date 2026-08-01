@@ -14,6 +14,8 @@ import (
 // discovered at runtime. See docs/03-mcp-tools.md for the rationale behind
 // every non-obvious classification.
 var expectedToolHints = map[string]sdkmcp.ToolAnnotations{
+	"create_agent_session":     {ReadOnlyHint: false, DestructiveHint: boolPointer(false), IdempotentHint: false, OpenWorldHint: boolPointer(false)},
+	"end_agent_session":        {ReadOnlyHint: false, DestructiveHint: boolPointer(false), IdempotentHint: true, OpenWorldHint: boolPointer(false)},
 	"get_project":              {ReadOnlyHint: true, DestructiveHint: boolPointer(false), IdempotentHint: true, OpenWorldHint: boolPointer(false)},
 	"export_project":           {ReadOnlyHint: true, DestructiveHint: boolPointer(false), IdempotentHint: true, OpenWorldHint: boolPointer(false)},
 	"validate_import":          {ReadOnlyHint: true, DestructiveHint: boolPointer(false), IdempotentHint: true, OpenWorldHint: boolPointer(false)},

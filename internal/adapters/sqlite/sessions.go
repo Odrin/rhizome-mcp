@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -32,18 +33,111 @@ func (repository *AgentSessionRepository) CreateAgentSession(ctx context.Context
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(
 			id, client_name, client_version, agent_label, model, instance_key,
-			started_at, last_seen_at, ended_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, last_seen_at, ended_at, handle_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			session.ID, session.ClientName, nullableSessionString(session.ClientVersion),
 			nullableSessionString(session.AgentLabel), nullableSessionString(session.Model),
 			nullableSessionString(session.InstanceKey), formatSessionTime(session.StartedAt),
-			formatSessionTime(session.LastSeenAt), nullableSessionTime(session.EndedAt))
+			formatSessionTime(session.LastSeenAt), nullableSessionTime(session.EndedAt), nullableSessionBytes(command.HandleHash))
 		return err
 	})
 	if err != nil {
 		return domain.AgentSession{}, err
 	}
 	return session.Clone(), nil
+}
+
+func (repository *AgentSessionRepository) ResolveAgentSessionHandle(ctx context.Context, command ports.ResolveAgentSessionHandleCommand) (string, error) {
+	if err := validateHandleString(command.Handle); err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256([]byte(command.Handle))
+	var sessionID string
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT id FROM agent_sessions WHERE handle_hash = ?`, hash[:]).Scan(&sessionID)
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", domain.NewError(domain.CodeSessionNotFound, "agent session not found", false, domain.Detail{Field: "agent_session_handle", Code: "NOT_FOUND"})
+		}
+		return "", err
+	}
+	if _, err := ids.ParseStrict(sessionID); err != nil {
+		return "", corruptSessionProjection(err)
+	}
+	return sessionID, nil
+}
+
+func (repository *AgentSessionRepository) ResolveAndTouchAgentSessionHandle(ctx context.Context, command ports.ResolveAndTouchAgentSessionHandleCommand) (string, error) {
+	if err := validateHandleString(command.Handle); err != nil {
+		return "", err
+	}
+	if command.OccurredAt.IsZero() {
+		return "", invalidSessionCommand("occurred_at", "timestamp is required")
+	}
+	hash := sha256.Sum256([]byte(command.Handle))
+	occurredAt := command.OccurredAt.UTC()
+	var sessionID string
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		session, err := loadAgentSessionByHandle(ctx, tx, hash[:])
+		if err != nil {
+			return err
+		}
+		if session.EndedAt != nil {
+			return domain.NewError(domain.CodeSessionNotActive, "agent session is not active", false, domain.Detail{Field: "agent_session_handle", Code: "ENDED"})
+		}
+		if occurredAt.After(session.LastSeenAt) {
+			session.LastSeenAt = occurredAt
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_sessions SET last_seen_at = ? WHERE id = ?`,
+				formatSessionTime(occurredAt), session.ID); err != nil {
+				return err
+			}
+		}
+		sessionID = session.ID
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return sessionID, nil
+}
+
+func (repository *AgentSessionRepository) EndAgentSessionByHandle(ctx context.Context, command ports.EndAgentSessionByHandleCommand) (domain.AgentSession, error) {
+	if err := validateHandleString(command.Handle); err != nil {
+		return domain.AgentSession{}, err
+	}
+	if command.OccurredAt.IsZero() {
+		return domain.AgentSession{}, invalidSessionCommand("occurred_at", "timestamp is required")
+	}
+	hash := sha256.Sum256([]byte(command.Handle))
+	occurredAt := command.OccurredAt.UTC()
+	var result domain.AgentSession
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		session, err := loadAgentSessionByHandle(ctx, tx, hash[:])
+		if err != nil {
+			return err
+		}
+		if session.EndedAt != nil {
+			result = session.Clone()
+			return nil
+		}
+		next := session.LastSeenAt
+		if occurredAt.After(next) {
+			next = occurredAt
+		}
+		session.LastSeenAt = next
+		session.EndedAt = sessionTimePointer(next)
+		if _, err := tx.ExecContext(ctx, `UPDATE agent_sessions SET last_seen_at = ?, ended_at = ? WHERE id = ?`,
+			formatSessionTime(next), formatSessionTime(next), session.ID); err != nil {
+			return err
+		}
+		result = session.Clone()
+		return nil
+	})
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	return result, nil
 }
 
 func (repository *AgentSessionRepository) TouchAgentSession(ctx context.Context, command ports.TouchAgentSessionCommand) (domain.AgentSession, error) {
@@ -154,6 +248,23 @@ func validateSessionCommand(session domain.AgentSession) (domain.AgentSession, e
 	return result.Clone(), nil
 }
 
+func loadAgentSessionByHandle(ctx context.Context, query Queryer, handleHash []byte) (domain.AgentSession, error) {
+	var (
+		id, clientName, startedAt, lastSeenAt                  string
+		clientVersion, agentLabel, model, instanceKey, endedAt sql.NullString
+	)
+	err := query.QueryRowContext(ctx, `SELECT id, client_name, client_version, agent_label, model,
+		instance_key, started_at, last_seen_at, ended_at FROM agent_sessions WHERE handle_hash = ?`, handleHash).
+		Scan(&id, &clientName, &clientVersion, &agentLabel, &model, &instanceKey, &startedAt, &lastSeenAt, &endedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AgentSession{}, domain.NewError(domain.CodeSessionNotFound, "agent session not found", false, domain.Detail{Field: "agent_session_handle", Code: "NOT_FOUND"})
+	}
+	if err != nil {
+		return domain.AgentSession{}, corruptSessionProjection(err)
+	}
+	return loadAgentSessionFromRow(id, clientName, clientVersion, agentLabel, model, instanceKey, startedAt, lastSeenAt, endedAt)
+}
+
 func loadAgentSession(ctx context.Context, query Queryer, sessionID string) (domain.AgentSession, error) {
 	var (
 		id, clientName, startedAt, lastSeenAt                  string
@@ -168,6 +279,10 @@ func loadAgentSession(ctx context.Context, query Queryer, sessionID string) (dom
 	if err != nil {
 		return domain.AgentSession{}, corruptSessionProjection(err)
 	}
+	return loadAgentSessionFromRow(id, clientName, clientVersion, agentLabel, model, instanceKey, startedAt, lastSeenAt, endedAt)
+}
+
+func loadAgentSessionFromRow(id, clientName string, clientVersion, agentLabel, model, instanceKey sql.NullString, startedAt, lastSeenAt string, endedAt sql.NullString) (domain.AgentSession, error) {
 	if _, err := ids.ParseStrict(id); err != nil {
 		return domain.AgentSession{}, corruptSessionProjection(err)
 	}
@@ -214,6 +329,25 @@ func validateSessionIDCommand(value string) error {
 	return nil
 }
 
+func validateHandleString(value string) error {
+	trimmed := value
+	if trimmed == "" {
+		return domain.NewError(domain.CodeInvalidArgument, "agent session command is invalid", false,
+			domain.Detail{Field: "agent_session_handle", Code: "INVALID_HANDLE"})
+	}
+	if len(trimmed) > 256 {
+		return domain.NewError(domain.CodeInvalidArgument, "agent session command is invalid", false,
+			domain.Detail{Field: "agent_session_handle", Code: "INVALID_HANDLE"})
+	}
+	for _, r := range trimmed {
+		if r > 127 || (r < 32 && r != 9 && r != 10 && r != 13) {
+			return domain.NewError(domain.CodeInvalidArgument, "agent session command is invalid", false,
+				domain.Detail{Field: "agent_session_handle", Code: "INVALID_HANDLE"})
+		}
+	}
+	return nil
+}
+
 func invalidSessionID(field string) error {
 	return domain.NewError(domain.CodeInvalidArgument, "agent session command is invalid", false,
 		domain.Detail{Field: field, Code: "INVALID_ULID", Message: "must be a canonical ULID"})
@@ -237,6 +371,13 @@ func nullableSessionString(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func nullableSessionBytes(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return value
 }
 
 func nullableSessionTime(value *time.Time) any {

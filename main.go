@@ -475,14 +475,7 @@ func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler,
 		return server.SDKServer()
 	}
 	streamableHandler := sdkmcp.NewStreamableHTTPHandler(serverFactory, &sdkmcp.StreamableHTTPOptions{JSONResponse: true})
-	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method == http.MethodDelete {
-			if err := server.EndSession(request.Context(), request.Header.Get("Mcp-Session-Id")); err != nil {
-				slog.Error("http agent session end failed", "error", err)
-			}
-		}
-		streamableHandler.ServeHTTP(writer, request)
-	})
+	handler := http.HandlerFunc(streamableHandler.ServeHTTP)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", handler)
 	mux.Handle("/mcp/", handler)

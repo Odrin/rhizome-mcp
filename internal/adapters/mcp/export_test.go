@@ -6,16 +6,10 @@ import (
 	"rhizome-mcp/internal/domain"
 )
 
-// TrackedSessionCounts reports how many connections and started sessions the
-// adapter still tracks. Transports that serve many sessions from one server
-// reuse the adapter, so these counts must return to zero once sessions end.
+// TrackedSessionCounts is retained for external test compatibility. Explicit
+// handles have no connection-derived adapter state to track.
 func (server *Server) TrackedSessionCounts() (connections int, started int) {
-	if server == nil {
-		return 0, 0
-	}
-	server.adapter.sessionMu.Lock()
-	defer server.adapter.sessionMu.Unlock()
-	return len(server.adapter.connectionSessions), len(server.adapter.sessionStarted)
+	return 0, 0
 }
 
 // ToolProfileIncludesCoreToolForTest exercises toolProfileIncludes exactly

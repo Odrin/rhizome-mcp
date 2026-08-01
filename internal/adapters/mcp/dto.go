@@ -151,6 +151,18 @@ type claimIssueInput struct {
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
 }
 
+type createAgentSessionInput struct {
+	ClientName    string  `json:"client_name"`
+	ClientVersion *string `json:"client_version,omitempty"`
+	AgentLabel    *string `json:"agent_label,omitempty"`
+	Model         *string `json:"model,omitempty"`
+	InstanceKey   *string `json:"instance_key,omitempty"`
+}
+
+type endAgentSessionInput struct {
+	AgentSessionHandle string `json:"agent_session_handle"`
+}
+
 type createReviewRequestInput struct {
 	IssueID            string   `json:"issue_id"`
 	TargetIssueVersion int64    `json:"target_issue_version"`
@@ -485,6 +497,15 @@ type sessionDTO struct {
 	StartedAt     time.Time  `json:"started_at"`
 	LastSeenAt    time.Time  `json:"last_seen_at"`
 	EndedAt       *time.Time `json:"ended_at"`
+}
+
+type createAgentSessionOutput struct {
+	Session            sessionDTO `json:"session"`
+	AgentSessionHandle string     `json:"agent_session_handle"`
+}
+
+type endAgentSessionOutput struct {
+	Session sessionDTO `json:"session"`
 }
 
 type projectOutput struct {
@@ -1047,6 +1068,20 @@ func labelDTOFromDomain(label domain.Label) labelDTO {
 	return labelDTO{
 		ID: label.ID, Name: label.Name, NormalizedName: label.NormalizedName,
 		Description: label.Description, CreatedAt: label.CreatedAt,
+	}
+}
+
+func sessionDTOFromDomain(session domain.AgentSession) sessionDTO {
+	return sessionDTO{
+		ID:            session.ID,
+		ClientName:    session.ClientName,
+		ClientVersion: copyString(session.ClientVersion),
+		AgentLabel:    copyString(session.AgentLabel),
+		Model:         copyString(session.Model),
+		InstanceKey:   copyString(session.InstanceKey),
+		StartedAt:     session.StartedAt,
+		LastSeenAt:    session.LastSeenAt,
+		EndedAt:       session.EndedAt,
 	}
 }
 

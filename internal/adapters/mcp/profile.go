@@ -2,11 +2,15 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/internal/domain"
 )
+
+type agentSessionContextKey struct{}
 
 // toolCapabilityGroup is the one mandatory, explicit classification every
 // registered tool must declare through registerTool. It is reviewed
@@ -93,11 +97,32 @@ func (adapter *adapter) registerTool(server *sdkmcp.Server, group toolCapability
 // correlated with actual database writes rather than with every call
 // including reads.
 func touchSessionForMutatingTool[In, Out any](adapter *adapter, toolDef *sdkmcp.Tool, handler func(context.Context, *sdkmcp.CallToolRequest, In) (*sdkmcp.CallToolResult, Out, error)) func(context.Context, *sdkmcp.CallToolRequest, In) (*sdkmcp.CallToolResult, Out, error) {
-	if toolDef != nil && toolDef.Annotations != nil && toolDef.Annotations.ReadOnlyHint {
-		return handler
-	}
 	return func(ctx context.Context, request *sdkmcp.CallToolRequest, input In) (*sdkmcp.CallToolResult, Out, error) {
-		adapter.touchSession(ctx, request.Session)
+		var handle string
+		if request != nil && request.Params != nil && len(request.Params.Arguments) != 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
+				return nil, *new(Out), err
+			}
+			if value, ok := arguments["agent_session_handle"]; ok && string(value) != "null" {
+				if err := json.Unmarshal(value, &handle); err != nil {
+					return nil, *new(Out), fmt.Errorf("agent_session_handle must be a string")
+				}
+			}
+		}
+		if handle != "" {
+			var sessionID string
+			var err error
+			if toolDef != nil && toolDef.Annotations != nil && toolDef.Annotations.ReadOnlyHint {
+				sessionID, err = adapter.sessions.ResolveHandle(ctx, handle)
+			} else {
+				sessionID, err = adapter.sessions.ResolveAndTouch(ctx, handle)
+			}
+			if err != nil {
+				return nil, *new(Out), err
+			}
+			ctx = context.WithValue(ctx, agentSessionContextKey{}, sessionID)
+		}
 		return handler(ctx, request, input)
 	}
 }

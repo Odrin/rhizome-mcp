@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"testing"
 	"time"
@@ -25,6 +26,17 @@ func (r *recordingSessionRepository) CreateAgentSession(_ context.Context, comma
 	r.create = command
 	r.calls++
 	return command.Session, nil
+}
+func (r *recordingSessionRepository) ResolveAgentSessionHandle(_ context.Context, command ports.ResolveAgentSessionHandleCommand) (string, error) {
+	return command.Handle, nil
+}
+func (r *recordingSessionRepository) ResolveAndTouchAgentSessionHandle(_ context.Context, command ports.ResolveAndTouchAgentSessionHandleCommand) (string, error) {
+	return command.Handle, nil
+}
+func (r *recordingSessionRepository) EndAgentSessionByHandle(_ context.Context, command ports.EndAgentSessionByHandleCommand) (domain.AgentSession, error) {
+	r.end = ports.EndAgentSessionCommand{SessionID: command.Handle, OccurredAt: command.OccurredAt}
+	r.calls++
+	return domain.AgentSession{ID: command.Handle}, nil
 }
 func (r *recordingSessionRepository) TouchAgentSession(_ context.Context, command ports.TouchAgentSessionCommand) (domain.AgentSession, error) {
 	r.touch = command
@@ -136,5 +148,27 @@ func TestAgentSessionServiceTouchEndValidateIDBeforeClockOrRepository(t *testing
 	if source.calls != 2 || !repository.touch.OccurredAt.Equal(source.now.UTC()) ||
 		!repository.end.OccurredAt.Equal(source.now.UTC()) {
 		t.Fatalf("clock calls = %d, touch = %#v, end = %#v", source.calls, repository.touch, repository.end)
+	}
+}
+
+func TestAgentSessionServiceCreateWithHandleReturnsRawHandleSeparately(t *testing.T) {
+	source := &countingClock{now: time.Now()}
+	repository := &recordingSessionRepository{}
+	service, err := application.NewAgentSessionService(repository, source, sessionIDGenerator{id: testSessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.CreateWithHandle(context.Background(), domain.CreateAgentSessionInput{ClientName: "client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session.ID != testSessionID {
+		t.Fatalf("session = %#v", result.Session)
+	}
+	if result.Handle == "" || len(result.Handle) > 256 {
+		t.Fatalf("handle = %q", result.Handle)
+	}
+	if len(repository.create.HandleHash) != sha256.Size {
+		t.Fatalf("handle hash length = %d, want %d", len(repository.create.HandleHash), sha256.Size)
 	}
 }

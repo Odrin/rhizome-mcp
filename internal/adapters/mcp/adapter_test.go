@@ -237,7 +237,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_issue", "create_review_request", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "record_decision", "renew_attempt", "replace_review_request", "save_attempt_note", "search", "supersede_review_request", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "create_review_request", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "record_decision", "renew_attempt", "replace_review_request", "save_attempt_note", "search", "supersede_review_request", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -343,7 +343,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	decodeStructured(t, comment, &commentOutput)
 	if comment.IsError || commentOutput.Comment.ID == "" || commentOutput.Comment.IssueID != issue.ID ||
-		commentOutput.Comment.Content != "  preserved comment  " || commentOutput.Comment.CreatedBySessionID == nil ||
+		commentOutput.Comment.Content != "  preserved comment  " || commentOutput.Comment.CreatedBySessionID != nil ||
 		commentOutput.Comment.AuthorLabel != nil {
 		t.Fatalf("comment result = %#v", commentOutput)
 	}
@@ -365,7 +365,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	decodeStructured(t, decision, &decisionOutput)
 	if decision.IsError || decisionOutput.Decision.ID == "" || decisionOutput.Decision.IssueID != issue.ID ||
-		decisionOutput.Decision.Status != "active" || decisionOutput.Decision.CreatedBySessionID == nil {
+		decisionOutput.Decision.Status != "active" || decisionOutput.Decision.CreatedBySessionID != nil {
 		t.Fatalf("decision output = %#v", decisionOutput)
 	}
 	activity := call(t, client, "get_issue_activity", map[string]any{
@@ -1496,6 +1496,7 @@ func TestNewServerRequiresDecisionService(t *testing.T) {
 }
 
 func TestAgentSessionLifecyclePersistence(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "sessions.db"))
 	defer db.Close(ctx)
@@ -1556,6 +1557,7 @@ func TestAgentSessionLifecyclePersistence(t *testing.T) {
 // fixture, or Touch becoming a structural no-op) rather than passing
 // vacuously.
 func TestReadOnlyToolsDoNotDurablyTouchAgentSession(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "read-only-no-touch.db"))
 	defer db.Close(ctx)
@@ -1597,6 +1599,7 @@ func TestReadOnlyToolsDoNotDurablyTouchAgentSession(t *testing.T) {
 }
 
 func TestAgentSessionHTTPStreamableSessionIDMapping(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "http-sessions.db"))
 	defer db.Close(ctx)
@@ -1650,6 +1653,7 @@ func TestAgentSessionHTTPStreamableSessionIDMapping(t *testing.T) {
 }
 
 func TestAgentSessionEndSessionIgnoresUnknownOrEmptyIDs(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "unknown-session.db"))
 	defer db.Close(ctx)
@@ -1692,6 +1696,7 @@ func TestAgentSessionEndSessionIgnoresUnknownOrEmptyIDs(t *testing.T) {
 }
 
 func TestAgentSessionTrackingIsReleasedAcrossHTTPSessions(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "session-tracking.db"))
 	defer db.Close(ctx)
@@ -1741,6 +1746,7 @@ func TestAgentSessionTrackingIsReleasedAcrossHTTPSessions(t *testing.T) {
 }
 
 func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "stdio-endonce.db"))
 	defer db.Close(ctx)
@@ -1772,7 +1778,46 @@ func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
 	}
 }
 
+func TestExplicitAgentSessionHandleAttribution(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "explicit-handle.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdSession := call(t, client, "create_agent_session", map[string]any{"client_name": "test-agent"})
+	var sessionOutput struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
+		Handle string `json:"agent_session_handle"`
+	}
+	decodeStructured(t, createdSession, &sessionOutput)
+	if createdSession.IsError || sessionOutput.Session.ID == "" || sessionOutput.Handle == "" {
+		t.Fatalf("create_agent_session = %#v", sessionOutput)
+	}
+	initial := readAgentSession(t, db)
+	source.Advance(time.Minute)
+	createdIssue := call(t, client, "create_issue", map[string]any{"type": "task", "title": "attributed", "agent_session_handle": sessionOutput.Handle})
+	if createdIssue.IsError {
+		t.Fatalf("create_issue = %#v", createdIssue)
+	}
+	if touched := readAgentSession(t, db); !touched.LastSeenAt.Equal(source.Now()) || touched.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("mutating attributed call did not touch session: %#v", touched)
+	}
+
+	ended := call(t, client, "end_agent_session", map[string]any{"agent_session_handle": sessionOutput.Handle})
+	if ended.IsError {
+		t.Fatalf("end_agent_session = %#v", ended)
+	}
+	invalid := call(t, client, "create_issue", map[string]any{"type": "task", "title": "rejected", "agent_session_handle": sessionOutput.Handle})
+	if !invalid.IsError {
+		t.Fatal("ended agent session handle was accepted")
+	}
+}
+
 func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {
+	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "attempt-sessions.db"))
 	defer db.Close(ctx)
@@ -1953,6 +1998,21 @@ func (repository *countingAgentSessionRepository) CreateAgentSession(ctx context
 	repository.createCalls++
 	repository.mu.Unlock()
 	return cmd.Session, nil
+}
+
+func (repository *countingAgentSessionRepository) ResolveAgentSessionHandle(context.Context, ports.ResolveAgentSessionHandleCommand) (string, error) {
+	return projectID, nil
+}
+
+func (repository *countingAgentSessionRepository) ResolveAndTouchAgentSessionHandle(context.Context, ports.ResolveAndTouchAgentSessionHandleCommand) (string, error) {
+	return projectID, nil
+}
+
+func (repository *countingAgentSessionRepository) EndAgentSessionByHandle(context.Context, ports.EndAgentSessionByHandleCommand) (domain.AgentSession, error) {
+	repository.mu.Lock()
+	repository.endCalls++
+	repository.mu.Unlock()
+	return domain.AgentSession{ID: projectID}, nil
 }
 
 func (repository *countingAgentSessionRepository) TouchAgentSession(ctx context.Context, cmd ports.TouchAgentSessionCommand) (domain.AgentSession, error) {
