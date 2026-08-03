@@ -12,6 +12,27 @@ import (
 	"rhizome-mcp/internal/domain"
 )
 
+func TestIntegrationSearchClassifiesParserNoSuchColumnAsInvalidInput(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+	result := callIntegrationTool(t, session, "search", map[string]any{"query": "multi-project"})
+	if !result.IsError {
+		t.Fatalf("expected invalid search error, got %#v", result)
+	}
+	var output struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Details   []struct {
+			Code string `json:"code"`
+		} `json:"details"`
+		Retryable bool `json:"retryable"`
+	}
+	decodeIntegrationResult(t, result, &output)
+	if output.Code != "INVALID_ARGUMENT" || len(output.Details) == 0 || output.Details[0].Code != "INVALID_FTS_QUERY" {
+		t.Fatalf("invalid search output = %#v", output)
+	}
+}
+
 func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)

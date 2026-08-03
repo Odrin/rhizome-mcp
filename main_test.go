@@ -25,6 +25,28 @@ import (
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
+func TestSearchCommandReportsInvalidFTSQuery(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "search", "multi-project"}, repoRoot, pathInputs); err == nil {
+		t.Fatal("expected invalid search query to fail")
+	} else if !strings.Contains(err.Error(), "search query is invalid") {
+		t.Fatalf("search command error = %v, want invalid FTS query", err)
+	}
+}
+
 func TestInitCreatesUsableDatabase(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()

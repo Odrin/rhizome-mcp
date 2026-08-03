@@ -104,6 +104,56 @@ func Discover(start string) (Project, error) {
 	}
 }
 
+// LoadProjectRoot loads the project identity strictly from the supplied root
+// directory after canonicalizing it through absolute and symlink resolution.
+// It inspects only the canonical root's identity marker and never searches
+// parents or accepts file-start semantics.
+func LoadProjectRoot(root string) (Project, error) {
+	if root == "" {
+		return Project{}, domain.NewError(CodeDiscoveryFailed, "project root path is required", false)
+	}
+	if !filepath.IsAbs(root) {
+		return Project{}, domain.NewError(CodeDiscoveryFailed, "project root path must be absolute", false)
+	}
+
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return Project{}, domain.WrapError(err, CodeDiscoveryFailed, "cannot inspect project root path", false)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return Project{}, domain.WrapError(err, CodeDiscoveryFailed, "cannot inspect project root path", false)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return Project{}, domain.WrapError(err, CodeDiscoveryFailed, "cannot inspect project root path", false)
+	}
+	if !info.IsDir() {
+		return Project{}, domain.NewError(CodeDiscoveryFailed, "project root path is not a directory", false)
+	}
+
+	identityPath := filepath.Join(resolved, IdentityFileName)
+	info, err = os.Lstat(identityPath)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return Project{}, invalidIdentity(errors.New("identity path is a symlink"))
+		}
+		if !info.Mode().IsRegular() {
+			return Project{}, invalidIdentity(errors.New("identity path is not a regular file"))
+		}
+		identity, readErr := readIdentity(identityPath)
+		if readErr != nil {
+			return Project{}, readErr
+		}
+		return Project{Root: resolved, Identity: identity}, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return Project{}, domain.NewError(CodeProjectNotFound, "project identity not found", false)
+	default:
+		return Project{}, domain.WrapError(err, CodeDiscoveryFailed, "cannot inspect project identity", false)
+	}
+}
+
 // ResolveDataRoot computes the platform application-data directory solely from
 // supplied values. It does not read environment variables or the current user.
 func ResolveDataRoot(input PathInputs) (string, error) {

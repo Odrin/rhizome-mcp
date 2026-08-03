@@ -134,6 +134,132 @@ func TestDiscoverRejectsNonRegularIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadProjectRootLoadsOnlyExactRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repository")
+	child := filepath.Join(root, "one", "two")
+	mustMkdirAll(t, child)
+	writeIdentity(t, root, validIdentityJSON())
+
+	project, err := projectconfig.LoadProjectRoot(root)
+	if err != nil {
+		t.Fatalf("LoadProjectRoot() error = %v", err)
+	}
+	if project.Root != resolvedPath(t, root) {
+		t.Fatalf("Root = %q, want %q", project.Root, resolvedPath(t, root))
+	}
+	if project.Identity != (projectconfig.Identity{Version: 1, ProjectID: testProjectID}) {
+		t.Fatalf("Identity = %#v", project.Identity)
+	}
+
+	_, err = projectconfig.LoadProjectRoot(child)
+	assertDomainCode(t, err, projectconfig.CodeProjectNotFound)
+}
+
+func TestLoadProjectRootRejectsInvalidInputAndDiscoveryFailures(t *testing.T) {
+	base := t.TempDir()
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := filepath.Join(base, "linked-file")
+	if err := os.WriteFile(linkTarget, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(base, "link")
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "empty", path: ""},
+		{name: "relative", path: "."},
+		{name: "missing", path: filepath.Join(base, "missing")},
+		{name: "regular file", path: file},
+		{name: "non-directory", path: linkPath},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := projectconfig.LoadProjectRoot(tt.path)
+			assertDomainCode(t, err, projectconfig.CodeDiscoveryFailed)
+		})
+	}
+}
+
+func TestLoadProjectRootCanonicalizesSymlinkRoots(t *testing.T) {
+	realRoot := filepath.Join(t.TempDir(), "real")
+	mustMkdirAll(t, realRoot)
+	writeIdentity(t, realRoot, validIdentityJSON())
+
+	symlinkRoot := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := projectconfig.LoadProjectRoot(symlinkRoot)
+	if err != nil {
+		t.Fatalf("LoadProjectRoot() error = %v", err)
+	}
+	if project.Root != resolvedPath(t, realRoot) {
+		t.Fatalf("Root = %q, want %q", project.Root, resolvedPath(t, realRoot))
+	}
+}
+
+func TestLoadProjectRootRejectsNonRegularOrMalformedIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(*testing.T, string)
+		wantErr string
+	}{
+		{
+			name: "directory marker",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: projectconfig.CodeInvalidIdentity,
+		},
+		{
+			name: "symlink marker",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "identity-target")
+				if err := os.WriteFile(target, []byte(validIdentityJSON()), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: projectconfig.CodeInvalidIdentity,
+		},
+		{
+			name: "malformed identity",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(`{"version":2,"project_id":"`+testProjectID+`"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: projectconfig.CodeInvalidIdentity,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			tt.setup(t, filepath.Join(root, projectconfig.IdentityFileName))
+			_, err := projectconfig.LoadProjectRoot(root)
+			assertDomainCode(t, err, tt.wantErr)
+		})
+	}
+}
+
 func TestResolveDataRoot(t *testing.T) {
 	tests := []struct {
 		name  string

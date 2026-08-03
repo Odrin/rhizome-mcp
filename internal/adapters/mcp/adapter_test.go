@@ -1366,6 +1366,26 @@ func TestSearchAndGetChangesTools(t *testing.T) {
 	invalidSearch := call(t, client, "search", map[string]any{"query": `"`})
 	assertDomainError(t, invalidSearch, "INVALID_ARGUMENT", false)
 
+	for _, tc := range []struct {
+		name  string
+		query string
+		valid bool
+	}{
+		{name: "hyphenated term", query: "multi-project", valid: false},
+		{name: "unknown prefix", query: "unknown:term", valid: false},
+		{name: "reproduction query", query: "project_ref multi-project router global MCP workspace project root configured default roots stateless", valid: false},
+		{name: "quoted phrase", query: `"multi-project"`, valid: true},
+	} {
+		result := call(t, client, "search", map[string]any{"query": tc.query})
+		if tc.valid {
+			if result.IsError {
+				t.Fatalf("search %q unexpectedly errored: %#v", tc.query, result)
+			}
+			continue
+		}
+		assertDomainError(t, result, "INVALID_ARGUMENT", false)
+	}
+
 	changes := call(t, client, "get_changes", map[string]any{
 		"since_event_id": 0, "issue_id": issue.DisplayID, "event_types": []string{"comment_added"}, "limit": 10,
 	})

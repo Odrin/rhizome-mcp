@@ -118,6 +118,55 @@ func TestSearchRanksPaginatesAndFiltersIndexedEntities(t *testing.T) {
 	_ = second
 }
 
+func TestSearchClassifiesParserNoSuchColumnAsInvalidQuery(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issueTitle := "renewable lease"
+	_, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: issueTitle, Status: domain.StatusReady})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET title = ? WHERE title = ?`, "multi-project router", issueTitle)
+		return err
+	}); err != nil {
+		t.Fatalf("seed indexed title: %v", err)
+	}
+	_ = now
+
+	repository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchRepository() error = %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		query   string
+		wantErr bool
+	}{
+		{name: "hyphenated token", query: "multi-project", wantErr: true},
+		{name: "unknown prefix", query: "unknown:term", wantErr: true},
+		{name: "reproduction query", query: "project_ref multi-project router global MCP workspace project root configured default roots stateless", wantErr: true},
+		{name: "quoted phrase", query: `"multi-project"`, wantErr: false},
+		{name: "boolean syntax", query: "renewable OR lease", wantErr: false},
+		{name: "prefix syntax", query: "renewable*", wantErr: false},
+		{name: "column filter", query: "title:renewable", wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := repository.Search(ctx, portsSearch(domain.SearchInput{Query: tc.query, Limit: 10, SnippetLength: 12}))
+			if tc.wantErr {
+				var domainErr *domain.Error
+				if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument || len(domainErr.Details) != 1 || domainErr.Details[0].Code != "INVALID_FTS_QUERY" {
+					t.Fatalf("Search(%q) error = %v, want invalid FTS query", tc.query, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Search(%q) error = %v", tc.query, err)
+			}
+		})
+	}
+}
+
 func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {
 	service, db, now := openIssueService(t)
 	ctx := context.Background()

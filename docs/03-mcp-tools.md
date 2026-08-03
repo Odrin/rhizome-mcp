@@ -1658,6 +1658,10 @@ Input:
 Supported entity types are `issue`, `comment`, `decision`, `review`, and
 `attempt_note`.
 
+FTS5 syntax supports raw phrases, boolean operators, prefixes, and column
+filters. Punctuation-bearing literal terms, including hyphenated terms such as
+`multi-project`, must be quoted as FTS5 phrases (for example, `"multi-project"`).
+
 Maximum snippet length: `1000`.
 
 Output:

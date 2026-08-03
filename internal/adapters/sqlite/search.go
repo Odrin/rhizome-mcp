@@ -340,7 +340,8 @@ func isFTSQueryError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "fts5") ||
 		strings.Contains(message, "unterminated string") ||
-		strings.Contains(message, "unknown special query")
+		strings.Contains(message, "unknown special query") ||
+		strings.Contains(message, "no such column:")
 }
 
 func searchCursorError(err error) error {
