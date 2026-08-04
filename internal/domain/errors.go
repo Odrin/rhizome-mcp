@@ -47,6 +47,12 @@ const (
 	// CodeIdempotencyConflict identifies reuse of an idempotency key with a
 	// different normalized request.
 	CodeIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
+	// CodeProjectRequired identifies a request or server startup that lacks a selected project.
+	CodeProjectRequired = "PROJECT_REQUIRED"
+	// CodeProjectCapacityExceeded identifies a router capacity limit that can be retried later.
+	CodeProjectCapacityExceeded = "PROJECT_CAPACITY_EXCEEDED"
+	// CodeProjectNotFound identifies a requested project that is not available.
+	CodeProjectNotFound = "PROJECT_NOT_FOUND"
 	// CodeProjectNotInitialized identifies a database without its required project row.
 	CodeProjectNotInitialized = "PROJECT_NOT_INITIALIZED"
 	// CodeStorageBusy identifies exhausted SQLite lock-contention retries.

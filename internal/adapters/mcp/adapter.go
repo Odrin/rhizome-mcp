@@ -15,30 +15,17 @@ import (
 
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
-	IssueService       *application.IssueService
-	ProjectService     *application.ProjectService
-	RelationService    *application.RelationService
-	GraphService       *application.GraphService
-	PlanningService    *application.PlanningService
-	CommentService     *application.CommentService
-	DecisionService    *application.DecisionService
-	ActivityService    *application.ActivityService
-	SearchService      *application.SearchService
-	ReviewService      *application.ReviewService
-	AttemptService     *application.AttemptService
-	SessionService     *application.AgentSessionService
-	WorkContextService *application.WorkContextService
-	ServerName         string
-	ServerVersion      string
-	ConfigVersion      int
+	ProjectRouter ProjectRouter
+	ServerName    string
+	ServerVersion string
+	ConfigVersion int
 	// ToolProfile selects which capability groups of the tool catalog this
-	// server instance advertises. Blank defaults to domain.ToolProfileFull,
-	// preserving the complete existing catalog. Any other unsupported
-	// value fails NewServer with a structured configuration error.
+	// server instance advertises. Blank defaults to domain.ToolProfileFull.
 	ToolProfile string
 }
 
 type adapter struct {
+	router        ProjectRouter
 	issues        *application.IssueService
 	projects      *application.ProjectService
 	relations     *application.RelationService
@@ -65,44 +52,8 @@ type Server struct {
 
 // NewServer composes the MCP server without process-global dependencies.
 func NewServer(options Options) (*Server, error) {
-	if options.IssueService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "issue service is required", false)
-	}
-	if options.ProjectService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "project service is required", false)
-	}
-	if options.RelationService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "relation service is required", false)
-	}
-	if options.GraphService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "graph service is required", false)
-	}
-	if options.PlanningService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
-	}
-	if options.CommentService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "comment service is required", false)
-	}
-	if options.DecisionService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "decision service is required", false)
-	}
-	if options.ActivityService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "activity service is required", false)
-	}
-	if options.SearchService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
-	}
-	if options.ReviewService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "review service is required", false)
-	}
-	if options.AttemptService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
-	}
-	if options.SessionService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "session service is required", false)
-	}
-	if options.WorkContextService == nil {
-		return nil, domain.NewError(domain.CodeInvalidArgument, "work context service is required", false)
+	if options.ProjectRouter == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "project router is required", false)
 	}
 	if options.ServerName == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server name is required", false)
@@ -114,20 +65,52 @@ func NewServer(options Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	services := ProjectServices{}
+	if lease, err := options.ProjectRouter.Acquire(context.Background(), nil); err != nil {
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectRequired {
+			return nil, err
+		}
+	} else if lease == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false)
+	} else {
+		services = ProjectServices{
+			IssueService:       lease.IssueService(),
+			ProjectService:     lease.ProjectService(),
+			RelationService:    lease.RelationService(),
+			GraphService:       lease.GraphService(),
+			PlanningService:    lease.PlanningService(),
+			CommentService:     lease.CommentService(),
+			DecisionService:    lease.DecisionService(),
+			ActivityService:    lease.ActivityService(),
+			SearchService:      lease.SearchService(),
+			ReviewService:      lease.ReviewService(),
+			AttemptService:     lease.AttemptService(),
+			SessionService:     lease.SessionService(),
+			WorkContextService: lease.WorkContextService(),
+		}
+		if err := lease.Release(); err != nil {
+			return nil, err
+		}
+		if err := validateProjectServices(services); err != nil {
+			return nil, err
+		}
+	}
 	adapter := &adapter{
-		issues:        options.IssueService,
-		projects:      options.ProjectService,
-		relations:     options.RelationService,
-		graphs:        options.GraphService,
-		plans:         options.PlanningService,
-		comments:      options.CommentService,
-		decisions:     options.DecisionService,
-		activities:    options.ActivityService,
-		searches:      options.SearchService,
-		reviews:       options.ReviewService,
-		attempts:      options.AttemptService,
-		sessions:      options.SessionService,
-		workContexts:  options.WorkContextService,
+		router:        options.ProjectRouter,
+		issues:        services.IssueService,
+		projects:      services.ProjectService,
+		relations:     services.RelationService,
+		graphs:        services.GraphService,
+		plans:         services.PlanningService,
+		comments:      services.CommentService,
+		decisions:     services.DecisionService,
+		activities:    services.ActivityService,
+		searches:      services.SearchService,
+		reviews:       services.ReviewService,
+		attempts:      services.AttemptService,
+		sessions:      services.SessionService,
+		workContexts:  services.WorkContextService,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 		toolProfile:   toolProfile,
@@ -974,6 +957,49 @@ func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) 
 		StructuredContent: output,
 		IsError:           true,
 	}, nil, nil
+}
+
+func validateProjectServices(services ProjectServices) error {
+	if services.IssueService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "issue service is required", false)
+	}
+	if services.ProjectService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "project service is required", false)
+	}
+	if services.RelationService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "relation service is required", false)
+	}
+	if services.GraphService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "graph service is required", false)
+	}
+	if services.PlanningService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
+	}
+	if services.CommentService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "comment service is required", false)
+	}
+	if services.DecisionService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "decision service is required", false)
+	}
+	if services.ActivityService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "activity service is required", false)
+	}
+	if services.SearchService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
+	}
+	if services.ReviewService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "review service is required", false)
+	}
+	if services.AttemptService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
+	}
+	if services.SessionService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "session service is required", false)
+	}
+	if services.WorkContextService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "work context service is required", false)
+	}
+	return nil
 }
 
 func unsupportedField(field string) *domain.Error {

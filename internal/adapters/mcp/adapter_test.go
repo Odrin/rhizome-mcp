@@ -1446,6 +1446,28 @@ func TestGraphToolsLifecycleAndValidation(t *testing.T) {
 	}
 }
 
+func TestNewServerRejectsNilRouter(t *testing.T) {
+	_, err := mcpadapter.NewServer(mcpadapter.Options{ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1})
+	if err == nil {
+		t.Fatal("NewServer() accepted nil router")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("NewServer() error = %v, want *domain.Error", err)
+	}
+	if domainErr.Code != domain.CodeInvalidArgument || domainErr.Message != "project router is required" {
+		t.Fatalf("NewServer() error = %#v, want invalid argument with message %q", domainErr, "project router is required")
+	}
+}
+
+func TestNewServerAcceptsZeroProjectRouter(t *testing.T) {
+	router := mcpadapter.NewStaticProjectRouter("", "", mcpadapter.ProjectServices{})
+	_, err := mcpadapter.NewServer(mcpadapter.Options{ProjectRouter: router, ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v, want nil for zero-project router", err)
+	}
+}
+
 func TestNewServerRequiresActivityService(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "activity-required.db")
 	db, source := openDatabase(t, databasePath)
@@ -1455,7 +1477,9 @@ func TestNewServerRequiresActivityService(t *testing.T) {
 		}
 	}()
 	options := composeServices(t, db, source)
-	options.ActivityService = nil
+	services := servicesFromOptions(t, options)
+	services.ActivityService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if err == nil {
 		t.Fatal("NewServer() succeeded without activity service")
@@ -1478,7 +1502,9 @@ func TestNewServerRequiresRelationService(t *testing.T) {
 		}
 	}()
 	options := composeServices(t, db, source)
-	options.RelationService = nil
+	services := servicesFromOptions(t, options)
+	services.RelationService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing relation service error", err)
@@ -1493,7 +1519,9 @@ func TestNewServerRequiresSessionService(t *testing.T) {
 		}
 	}()
 	options := composeServices(t, db, source)
-	options.SessionService = nil
+	services := servicesFromOptions(t, options)
+	services.SessionService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing session service error", err)
@@ -1508,7 +1536,9 @@ func TestNewServerRequiresDecisionService(t *testing.T) {
 		}
 	}()
 	options := composeServices(t, db, source)
-	options.DecisionService = nil
+	services := servicesFromOptions(t, options)
+	services.DecisionService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing decision service error", err)
@@ -1776,7 +1806,9 @@ func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	options.SessionService = sessions
+	services := servicesFromOptions(t, options)
+	services.SessionService = sessions
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	client, stop := newClient(t, options)
 	if client == nil {
 		t.Fatal("newClient() returned nil client")
@@ -1959,10 +1991,13 @@ func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	options.SessionService, err = application.NewAgentSessionService(repository, source, failingSessionIDGenerator{})
+	sessions, err := application.NewAgentSessionService(repository, source, failingSessionIDGenerator{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	services := servicesFromOptions(t, options)
+	services.SessionService = sessions
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	client, stop := newClient(t, options)
 	result := call(t, client, "get_project", map[string]any{})
 	if result.IsError {
@@ -2728,12 +2763,16 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	assertDomainError(t, invalidLimit, "INVALID_ARGUMENT", false)
 
 	options := composeServices(t, db, source)
-	options.WorkContextService = nil
+	services := servicesFromOptions(t, options)
+	services.WorkContextService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil work context service")
 	}
 	options = composeServices(t, db, source)
-	options.SearchService = nil
+	services = servicesFromOptions(t, options)
+	services.SearchService = nil
+	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil search service")
 	}
@@ -2769,6 +2808,33 @@ func reopenDatabase(t *testing.T, path string, source *clock.FakeClock) (*sqlite
 		t.Fatal(err)
 	}
 	return db, source
+}
+
+func servicesFromOptions(t *testing.T, options mcpadapter.Options) mcpadapter.ProjectServices {
+	t.Helper()
+	lease, err := options.ProjectRouter.Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("acquire project lease: %v", err)
+	}
+	services := mcpadapter.ProjectServices{
+		IssueService:       lease.IssueService(),
+		ProjectService:     lease.ProjectService(),
+		RelationService:    lease.RelationService(),
+		GraphService:       lease.GraphService(),
+		PlanningService:    lease.PlanningService(),
+		CommentService:     lease.CommentService(),
+		DecisionService:    lease.DecisionService(),
+		ActivityService:    lease.ActivityService(),
+		SearchService:      lease.SearchService(),
+		ReviewService:      lease.ReviewService(),
+		AttemptService:     lease.AttemptService(),
+		SessionService:     lease.SessionService(),
+		WorkContextService: lease.WorkContextService(),
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("release project lease: %v", err)
+	}
+	return services
 }
 
 func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpadapter.Options {
@@ -2881,9 +2947,26 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	services := mcpadapter.ProjectServices{
+		IssueService:       issues,
+		ProjectService:     projects,
+		RelationService:    relations,
+		GraphService:       graphs,
+		PlanningService:    plans,
+		CommentService:     comments,
+		DecisionService:    decisions,
+		ActivityService:    activities,
+		SearchService:      searches,
+		ReviewService:      reviews,
+		AttemptService:     attempts,
+		SessionService:     sessions,
+		WorkContextService: workContexts,
+	}
 	return mcpadapter.Options{
-		IssueService: issues, ProjectService: projects, RelationService: relations, GraphService: graphs, PlanningService: plans, CommentService: comments, DecisionService: decisions, ActivityService: activities, SearchService: searches, ReviewService: reviews, AttemptService: attempts, SessionService: sessions, WorkContextService: workContexts,
-		ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1,
+		ProjectRouter: mcpadapter.NewStaticProjectRouter(projectID, "", services),
+		ServerName:    "test-server",
+		ServerVersion: "test-version",
+		ConfigVersion: 1,
 	}
 }
 

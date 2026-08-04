@@ -420,7 +420,10 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 }
 
 func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Server, error) {
-	return mcpadapter.NewServer(mcpadapter.Options{
+	if bundle == nil || bundle.project == nil {
+		return nil, errors.New("project bundle is required")
+	}
+	services := mcpadapter.ProjectServices{
 		IssueService:       bundle.issueService,
 		ProjectService:     bundle.projectService,
 		RelationService:    bundle.relationService,
@@ -434,10 +437,13 @@ func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Ser
 		AttemptService:     bundle.attemptService,
 		SessionService:     bundle.sessionService,
 		WorkContextService: bundle.workContextService,
-		ServerName:         cfg.ServerName,
-		ServerVersion:      cfg.Version,
-		ConfigVersion:      projectconfig.CurrentIdentityVersion,
-		ToolProfile:        cfg.ToolProfile,
+	}
+	return mcpadapter.NewServer(mcpadapter.Options{
+		ProjectRouter: mcpadapter.NewStaticProjectRouter(bundle.project.ProjectID, bundle.project.Root, services),
+		ServerName:    cfg.ServerName,
+		ServerVersion: cfg.Version,
+		ConfigVersion: projectconfig.CurrentIdentityVersion,
+		ToolProfile:   cfg.ToolProfile,
 	})
 }
 
