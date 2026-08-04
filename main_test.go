@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
@@ -237,6 +238,152 @@ func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
 	if count != 1 || value != "backup-data" {
 		t.Fatalf("backup rows = %d/%q, want 1/backup-data", count, value)
 	}
+}
+
+func TestComposeServicesBuildsLegacyServiceBundle(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	bundle, project, err := composeServices(ctx, repoRoot, pathInputs, dataRoot)
+	if err != nil {
+		t.Fatalf("compose services failed: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	if bundle == nil || project == nil {
+		t.Fatal("expected bundle and project to be returned")
+	}
+	if bundle.project != project {
+		t.Fatal("expected bundle to own the opened project")
+	}
+	if bundle.ProjectRef() != project.ProjectID {
+		t.Fatalf("project ref = %q, want %q", bundle.ProjectRef(), project.ProjectID)
+	}
+
+	services := bundle.ProjectServices()
+	if services.ProjectService != bundle.projectService || services.IssueService != bundle.issueService || services.AttemptService != bundle.attemptService {
+		t.Fatal("expected project services accessor to expose the bundle services")
+	}
+	if services.SessionService == nil || services.WorkContextService == nil {
+		t.Fatal("expected session/work context services to be included")
+	}
+	if bundle.maintenanceService == nil || bundle.boardService == nil {
+		t.Fatal("expected CLI-only services to be present")
+	}
+}
+
+func TestComposedServicesCloseIsIdempotentAndClosesOnFactoryFailure(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open project: %v", err)
+	}
+	bundle, err := newComposedServices(project)
+	if err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+	if err := bundle.Close(ctx); err != nil {
+		t.Fatalf("close bundle once: %v", err)
+	}
+	if err := bundle.Close(ctx); err != nil {
+		t.Fatalf("close bundle twice: %v", err)
+	}
+	if !reflectValueIsTrue(project, "closed") {
+		t.Fatal("expected bundle close to mark the project as closed")
+	}
+
+	project, err = projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("reopen project: %v", err)
+	}
+	project.Database = nil
+	bundle, err = newComposedServices(project)
+	if err == nil {
+		t.Fatal("expected factory failure when project database is unavailable")
+	}
+	if bundle != nil {
+		t.Fatal("expected no bundle on factory failure")
+	}
+	if !reflectValueIsTrue(project, "closed") {
+		t.Fatal("expected factory failure to close the passed project")
+	}
+}
+
+func TestComposeServicesFromExistingProjectUsesExistingOnlySemantics(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+
+	bundle, openedProject, err := composeServicesFromExistingProject(ctx, project.ProjectID, dataRoot, clock.RealClock{}, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("compose services from existing project failed: %v", err)
+	}
+	if bundle == nil || openedProject == nil {
+		t.Fatal("expected routed opener to return a bundle and project")
+	}
+	if bundle.ProjectRef() != project.ProjectID {
+		t.Fatalf("project ref = %q, want %q", bundle.ProjectRef(), project.ProjectID)
+	}
+	if _, _, err := composeServicesFromExistingProject(ctx, "missing-project", dataRoot, clock.RealClock{}, sqlite.Options{}); err == nil {
+		t.Fatal("expected routed opener to reject a missing existing project")
+	}
+}
+
+func reflectValueIsTrue(v interface{}, fieldName string) bool {
+	value := reflect.ValueOf(v)
+	if value.Kind() != reflect.Ptr {
+		return false
+	}
+	field := value.Elem().FieldByName(fieldName)
+	return field.IsValid() && field.Kind() == reflect.Bool && field.Bool()
 }
 
 func TestServeWithoutHTTPAddressUsesStdioTransport(t *testing.T) {
@@ -644,9 +791,9 @@ func TestComputeVersionInfoVCSWithNoRevision(t *testing.T) {
 }
 
 type fakeAttemptService struct {
-	callCount   int
-	errAfter    int
-	callsMutex  chan struct{}
+	callCount  int
+	errAfter   int
+	callsMutex chan struct{}
 }
 
 func newFakeAttemptService(errAfter int) *fakeAttemptService {

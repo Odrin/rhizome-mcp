@@ -16,6 +16,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -168,6 +169,49 @@ type composedServices struct {
 	workContextService *application.WorkContextService
 	sessionService     *application.AgentSessionService
 	boardService       *application.BoardService
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (bundle *composedServices) ProjectRef() string {
+	if bundle == nil || bundle.project == nil {
+		return ""
+	}
+	return bundle.project.ProjectID
+}
+
+func (bundle *composedServices) ProjectServices() mcpadapter.ProjectServices {
+	if bundle == nil {
+		return mcpadapter.ProjectServices{}
+	}
+	return mcpadapter.ProjectServices{
+		IssueService:       bundle.issueService,
+		ProjectService:     bundle.projectService,
+		RelationService:    bundle.relationService,
+		GraphService:       bundle.graphService,
+		PlanningService:    bundle.planningService,
+		CommentService:     bundle.commentService,
+		DecisionService:    bundle.decisionService,
+		ActivityService:    bundle.activityService,
+		SearchService:      bundle.searchService,
+		ReviewService:      bundle.reviewService,
+		AttemptService:     bundle.attemptService,
+		SessionService:     bundle.sessionService,
+		WorkContextService: bundle.workContextService,
+	}
+}
+
+func (bundle *composedServices) Close(ctx context.Context) error {
+	if bundle == nil || bundle.project == nil {
+		return nil
+	}
+	bundle.closeOnce.Do(func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		bundle.closeErr = bundle.project.Close(closeCtx)
+	})
+	return bundle.closeErr
 }
 
 func main() {
@@ -423,21 +467,7 @@ func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Ser
 	if bundle == nil || bundle.project == nil {
 		return nil, errors.New("project bundle is required")
 	}
-	services := mcpadapter.ProjectServices{
-		IssueService:       bundle.issueService,
-		ProjectService:     bundle.projectService,
-		RelationService:    bundle.relationService,
-		GraphService:       bundle.graphService,
-		PlanningService:    bundle.planningService,
-		CommentService:     bundle.commentService,
-		DecisionService:    bundle.decisionService,
-		ActivityService:    bundle.activityService,
-		SearchService:      bundle.searchService,
-		ReviewService:      bundle.reviewService,
-		AttemptService:     bundle.attemptService,
-		SessionService:     bundle.sessionService,
-		WorkContextService: bundle.workContextService,
-	}
+	services := bundle.ProjectServices()
 	return mcpadapter.NewServer(mcpadapter.Options{
 		ProjectRouter: mcpadapter.NewStaticProjectRouter(bundle.project.ProjectID, bundle.project.Root, services),
 		ServerName:    cfg.ServerName,
@@ -653,15 +683,24 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	if err != nil {
 		return nil, nil, err
 	}
-	openedProject := project
-	keepProject := false
+	bundle, err = newComposedServices(project)
+	if err != nil {
+		return nil, nil, err
+	}
+	return bundle, project, nil
+}
+
+func newComposedServices(project *projectruntime.Project) (_ *composedServices, err error) {
+	if project == nil {
+		return nil, errors.New("project is required")
+	}
 	defer func() {
-		if keepProject {
+		if err == nil {
 			return
 		}
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
 		defer cancel()
-		if closeErr := openedProject.Close(closeCtx); closeErr != nil {
+		if closeErr := project.Close(closeCtx); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
 	}()
@@ -669,126 +708,126 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 	source := clock.RealClock{}
 	issueRepository, err := sqlite.NewIssueRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	projectRepository, err := sqlite.NewProjectRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	relationRepository, err := sqlite.NewRelationRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	graphRepository, err := sqlite.NewGraphRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	planningRepository, err := sqlite.NewPlanningRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	commentRepository, err := sqlite.NewCommentRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	decisionRepository, err := sqlite.NewDecisionRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	activityRepository, err := sqlite.NewActivityRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	searchRepository, err := sqlite.NewSearchRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	reviewRepository, err := sqlite.NewReviewRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	searchIndexRepository, err := sqlite.NewSearchIndexRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	workContextRepository, err := sqlite.NewWorkContextRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	issueService, err := application.NewIssueService(issueRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	projectService, err := application.NewProjectService(projectRepository)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	relationService, err := application.NewRelationService(relationRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	graphService, err := application.NewGraphService(graphRepository, source)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	planningService, err := application.NewPlanningService(planningRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	commentService, err := application.NewCommentService(commentRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	decisionService, err := application.NewDecisionService(decisionRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	activityService, err := application.NewActivityService(activityRepository)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	searchService, err := application.NewSearchService(searchRepository)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	attemptService, err := application.NewAttemptService(attemptRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	maintenanceService, err := application.NewMaintenanceService(attemptRepository, searchIndexRepository, source)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	workContextService, err := application.NewWorkContextService(workContextRepository, source)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sessionRepository, err := sqlite.NewAgentSessionRepository(project.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sessionService, err := application.NewAgentSessionService(sessionRepository, source, generator)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	boardService, err := application.NewBoardService(issueService, attemptService, reviewService, graphService, source)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	bundle = &composedServices{
+	return &composedServices{
 		project:            project,
 		projectService:     projectService,
 		issueService:       issueService,
@@ -805,8 +844,21 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		workContextService: workContextService,
 		sessionService:     sessionService,
 		boardService:       boardService,
+	}, nil
+}
+
+func composeServicesFromExistingProject(ctx context.Context, projectID, dataRoot string, source clock.Clock, sqliteOptions sqlite.Options) (bundle *composedServices, project *projectruntime.Project, err error) {
+	if source == nil {
+		source = clock.RealClock{}
 	}
-	keepProject = true
+	project, err = projectruntime.OpenExistingProject(ctx, projectID, dataRoot, source, sqliteOptions)
+	if err != nil {
+		return nil, nil, err
+	}
+	bundle, err = newComposedServices(project)
+	if err != nil {
+		return nil, nil, err
+	}
 	return bundle, project, nil
 }
 
