@@ -31,6 +31,7 @@ import (
 
 	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/projectconfig"
 )
 
@@ -109,19 +110,20 @@ func TestIntegrationHTTPMCPConformanceMatrix(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	ctx := context.Background()
 	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}
-	bundle, project, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
+	bundle, _, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
+	router := newProjectRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 		defer cancel()
-		if closeErr := project.Close(closeCtx); closeErr != nil {
+		if closeErr := router.Close(closeCtx); closeErr != nil {
 			t.Errorf("close project: %v", closeErr)
 		}
 	}()
 
-	handler, err := newHTTPHandler(&config.Config{ServerName: "rhizome-http-test", Version: "test"}, bundle)
+	handler, err := newHTTPHandler(&config.Config{ServerName: "rhizome-http-test", Version: "test"}, router)
 	if err != nil {
 		t.Fatalf("create HTTP handler: %v", err)
 	}
@@ -267,19 +269,20 @@ func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	ctx := context.Background()
 	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}
-	bundle, project, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
+	bundle, _, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
+	router := newProjectRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 		defer cancel()
-		if closeErr := project.Close(closeCtx); closeErr != nil {
+		if closeErr := router.Close(closeCtx); closeErr != nil {
 			t.Errorf("close project: %v", closeErr)
 		}
 	}()
 
-	handler, err := newHTTPHandler(&config.Config{ServerName: "rhizome-http-test", Version: "test"}, bundle)
+	handler, err := newHTTPHandler(&config.Config{ServerName: "rhizome-http-test", Version: "test"}, router)
 	if err != nil {
 		t.Fatalf("create HTTP handler: %v", err)
 	}

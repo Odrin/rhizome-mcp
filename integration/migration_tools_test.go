@@ -41,7 +41,7 @@ func TestIntegrationMigrationProfileExportValidateApply(t *testing.T) {
 	sort.Strings(sourceToolNames)
 	sort.Strings(destToolNames)
 
-	expectedTools := []string{"apply_import", "export_project", "get_project", "validate_import"}
+	expectedTools := []string{"apply_import", "export_project", "get_project", "open_project", "validate_import"}
 	if len(sourceToolNames) != len(expectedTools) {
 		t.Fatalf("source profile advertised %d tools, want exactly %d: %v", len(sourceToolNames), len(expectedTools), sourceToolNames)
 	}
