@@ -117,11 +117,11 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 
 	// Finish the attempt.
 	finishResult := callIntegrationTool(t, session, "finish_attempt", map[string]any{
-		"attempt_id":           claimData.Attempt.ID,
-		"lease_token":          claimData.LeaseToken,
-		"outcome":              "completed",
-		"result_summary":       "Task completed successfully",
-		"target_issue_status":  "done",
+		"attempt_id":          claimData.Attempt.ID,
+		"lease_token":         claimData.LeaseToken,
+		"outcome":             "completed",
+		"result_summary":      "Task completed successfully",
+		"target_issue_status": "done",
 	})
 	if finishResult.IsError {
 		t.Fatalf("finish_attempt failed: %#v", finishResult)
@@ -273,8 +273,8 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 		t.Fatalf("get_changes (idle) failed: %#v", idleResult)
 	}
 	var idleState struct {
-		Events      []map[string]any `json:"events"`
-		HasMore     bool             `json:"has_more"`
+		Events        []map[string]any `json:"events"`
+		HasMore       bool             `json:"has_more"`
 		LatestEventID int64            `json:"latest_event_id"`
 	}
 	decodeIntegrationResult(t, idleResult, &idleState)

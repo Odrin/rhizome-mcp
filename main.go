@@ -639,7 +639,7 @@ func connectClaude(ctx context.Context, startingPath string, binaryPath string, 
 			"rhizome-mcp": map[string]interface{}{
 				"type":    "stdio",
 				"command": binaryPath,
-					"args":    []string{"serve", "--project-root", startingPath},
+				"args":    []string{"serve", "--project-root", startingPath},
 			},
 		},
 	}
@@ -660,7 +660,7 @@ func connectVSCode(ctx context.Context, startingPath string, binaryPath string, 
 			"rhizome-mcp": map[string]interface{}{
 				"type":    "stdio",
 				"command": binaryPath,
-					"args":    []string{"serve", "--project-root", startingPath},
+				"args":    []string{"serve", "--project-root", startingPath},
 			},
 		},
 	}

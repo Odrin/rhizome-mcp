@@ -20,9 +20,9 @@ func TestIntegrationSearchClassifiesParserNoSuchColumnAsInvalidInput(t *testing.
 		t.Fatalf("expected invalid search error, got %#v", result)
 	}
 	var output struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		Details   []struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details []struct {
 			Code string `json:"code"`
 		} `json:"details"`
 		Retryable bool `json:"retryable"`

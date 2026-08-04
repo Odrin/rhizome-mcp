@@ -11,9 +11,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.Write(data)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.String()
+}
+
+func (buffer *lockedBuffer) Len() int {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.Len()
+}
 
 func TestValidateLoopbackAddress(t *testing.T) {
 	accepted := []string{"127.0.0.1:0", "127.255.255.255:8080", "[::1]:0", "[::1]:8080"}
@@ -52,8 +76,8 @@ func TestServeHTTPServerRejectsOccupiedPort(t *testing.T) {
 }
 
 func TestServeHTTPServerUsesEphemeralListenerAndShutdowns(t *testing.T) {
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -213,8 +237,8 @@ func TestWrapHTTPHandlerRecoversPanics(t *testing.T) {
 }
 
 func TestServeHTTPServerRejectsOversizedBody(t *testing.T) {
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -258,8 +282,8 @@ func TestServeHTTPServerRejectsOversizedBody(t *testing.T) {
 }
 
 func TestServeHTTPServerRejectsMalformedRequest(t *testing.T) {
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

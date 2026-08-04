@@ -297,7 +297,7 @@ func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		args        []string
-		env        string
+		env         string
 		startingDir string
 		wantProject string
 		wantShared  bool
