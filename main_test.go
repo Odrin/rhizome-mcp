@@ -435,9 +435,11 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	}
 
 	called := false
+	var capturedRouter mcpadapter.ProjectRouter
 	originalServeRunner := serveRunner
 	serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
 		called = true
+		capturedRouter = router
 		return nil
 	}
 	defer func() { serveRunner = originalServeRunner }()
@@ -447,6 +449,9 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected serve handler to be invoked")
+	}
+	if _, err := capturedRouter.Acquire(ctx, nil); !errors.Is(err, errProjectRouterClosed) {
+		t.Fatalf("router Acquire() after serve = %v, want %v", err, errProjectRouterClosed)
 	}
 }
 

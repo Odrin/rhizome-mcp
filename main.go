@@ -297,7 +297,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 	}
 
-	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) error {
+	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) (err error) {
 		if httpAddress != "" {
 			cfg.HTTPAddress = httpAddress
 		}
@@ -323,6 +323,13 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 				router = newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 			}
 		}
+		defer func() {
+			if closer, ok := router.(interface{ Close(context.Context) error }); ok {
+				closeCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
+				defer cancel()
+				err = errors.Join(err, closer.Close(closeCtx))
+			}
+		}()
 		return serveRunner(ctx, cfg, stderr, router)
 	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
@@ -544,16 +551,6 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, router 
 	defer func() {
 		stopCleanup()
 		<-cleanupDone
-	}()
-	defer func() {
-		if router == nil {
-			return
-		}
-		if closer, ok := router.(interface{ Close(context.Context) error }); ok {
-			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
-			defer cancel()
-			err = errors.Join(err, closer.Close(closeCtx))
-		}
 	}()
 
 	if cfg.HTTPAddress != "" {
