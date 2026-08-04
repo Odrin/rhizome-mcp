@@ -28,7 +28,7 @@ Absolute path to a custom `rhizome-mcp` binary. Leave empty to use the binary bu
 
 ## How detection works
 
-The extension looks for a `.agent-tracker.json` file at each workspace folder's root. That file is what `Rhizome: Initialize Project` creates, and its presence is what makes the MCP server appear for that folder. No reload needed — the extension watches for the file and updates immediately.
+The extension looks for a `.agent-tracker.json` file at each workspace folder's root. That file is what `Rhizome: Initialize Project` creates, and its presence is what makes the MCP server appear for that folder. No reload needed — the extension watches for the file and updates immediately. When you want a workspace-specific server instance to target one project root, it uses `serve --project-root <absolute-root>`; the canonical routing behavior is described in [docs/11-project-routing.md](../../docs/11-project-routing.md).
 
 ## Existing setups
 

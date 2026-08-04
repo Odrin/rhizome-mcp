@@ -67,7 +67,7 @@ fresh one; the transport does not recover or replay that value for the server.
 
 ## Binding and configuration
 
-HTTP is opt-in through `rhizome-mcp serve --http-address HOST:PORT`.
+HTTP is opt-in through `rhizome-mcp serve --http-address HOST:PORT`. Project routing is independent of the transport: a workspace-specific server can still be started with `serve --project-root <absolute-root>`, while global registrations remain compatible with bare `serve`.
 The default HTTP address is `127.0.0.1:0`; port zero selects an ephemeral
 port and the selected endpoint is logged on stderr. Explicit configuration
 takes precedence over defaults. Stdio has no HTTP listener unless this option

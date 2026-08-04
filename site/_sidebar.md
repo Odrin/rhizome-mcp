@@ -1,4 +1,5 @@
 - [Home](./README.md)
 - [Quick start](./quick-start.md)
 - [Workflow](./workflow.md)
+- [Project routing](./project-routing.md)
 - [CLI reference](./cli.md)

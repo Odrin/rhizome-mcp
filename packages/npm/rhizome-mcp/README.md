@@ -27,6 +27,12 @@ npm install --global rhizome-mcp
 rhizome-mcp serve
 ```
 
+For a workspace-specific installation, pin the project root explicitly:
+
+```bash
+rhizome-mcp serve --project-root /absolute/path/to/workspace
+```
+
 ## Use with an MCP client
 
 Works with any MCP client — VS Code, Claude Code, Claude Desktop, Cursor, or a plain `mcp.json`:

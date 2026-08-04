@@ -1,6 +1,6 @@
 # CLI reference
 
-The CLI is for human-facing operations such as initialization, inspection, backup, and maintenance. The MCP server itself runs with `rhizome-mcp serve` over stdio for clients by default. For local testing, `serve --http-address 127.0.0.1:0` switches to a loopback-only Streamable HTTP transport at `http://127.0.0.1:<port>/mcp`.
+The CLI is for human-facing operations such as initialization, inspection, backup, and maintenance. The MCP server itself runs with `rhizome-mcp serve` over stdio for clients by default. For workspace-specific routing, use `serve --project-root /absolute/path/to/workspace`; for local testing, `serve --http-address 127.0.0.1:0` switches to a loopback-only Streamable HTTP transport at `http://127.0.0.1:<port>/mcp`. The canonical routing contract is in [docs/11-project-routing.md](../docs/11-project-routing.md).
 
 ## Global option
 

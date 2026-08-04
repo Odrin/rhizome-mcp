@@ -1,6 +1,6 @@
 # VS Code extension
 
-The "Rhizome MCP" extension (`editors/vscode/`) is a native VS Code extension that bundles a platform-specific `rhizome-mcp` binary and registers it as an MCP server automatically, so installing from the Marketplace is enough — no separate binary download, no `.vscode/mcp.json` editing.
+The "Rhizome MCP" extension (`editors/vscode/`) is a native VS Code extension that bundles a platform-specific `rhizome-mcp` binary and registers it as an MCP server automatically, so installing from the Marketplace is enough — no separate binary download, no `.vscode/mcp.json` editing. For workspace-specific project routing, the extension can start the server with an absolute project root via `serve --project-root <absolute-root>`; the canonical contract is documented in [docs/11-project-routing.md](docs/11-project-routing.md).
 
 ## Installation
 

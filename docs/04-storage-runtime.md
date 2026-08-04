@@ -29,7 +29,7 @@ with:
 }
 ```
 
-The project root is found by searching upward from the current directory.
+The project root is found by searching upward from the current directory for the default opening path, while project-aware serving can also pin a specific absolute root via `--project-root` or `RHIZOME_PROJECT_ROOT`. Routed opens remain existing-only and do not create or initialize a new project automatically.
 
 ## 2. SQLite driver
 

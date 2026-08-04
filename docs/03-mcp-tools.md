@@ -97,7 +97,7 @@ attempt's `lease_token`.
 
 ## 3. Tool inventory
 
-The catalog exposes 34 tools:
+The catalog exposes 35 full tools, 31 agent tools, 5 migration tools, and 16 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`

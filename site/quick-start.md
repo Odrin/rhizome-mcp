@@ -14,6 +14,12 @@ Try `rhizome-mcp` immediately with no separate binary install, no Go toolchain. 
 npx rhizome-mcp serve
 ```
 
+For a workspace-specific MCP registration, prefer an absolute project root:
+
+```bash
+npx rhizome-mcp serve --project-root /absolute/path/to/workspace
+```
+
 ```json
 {
   "mcpServers": {
