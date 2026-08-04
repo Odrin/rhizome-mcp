@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -77,6 +78,214 @@ func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("origin mismatch status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	startupDir := filepath.Join(tempDir, "outside")
+	dataRoot := filepath.Join(tempDir, "data")
+	for _, dir := range []string{repoRoot, startupDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	env := integrationEnvironment{repository: repoRoot, dataRoot: dataRoot}
+	runIntegrationCommand(t, env, "--data-root", dataRoot, "init")
+
+	server := launchIntegrationHTTPServerInDir(t, env, startupDir, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })
+
+	endpoint := "http://" + server.waitForEndpoint(t) + "/mcp"
+
+	for _, tc := range []struct {
+		name            string
+		protocolVersion string
+		params          map[string]any
+	}{
+		{
+			name:            "modern",
+			protocolVersion: "2026-07-28",
+			params: map[string]any{
+				"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+			},
+		},
+		{
+			name:            "legacy",
+			protocolVersion: "2025-11-25",
+			params:          map[string]any{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, body, err := postJSONRPCRequest(t, endpoint, tc.protocolVersion, "", tc.name+"-catalog", "tools/list", map[string]any{})
+			if err != nil {
+				t.Fatalf("tools/list failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("tools/list status = %d, body = %s", status, body)
+			}
+			var envelope jsonRPCEnvelope
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode tools/list response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("tools/list rpc error = %#v", envelope.Error)
+			}
+			var toolsResponse struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			}
+			if err := json.Unmarshal(envelope.Result, &toolsResponse); err != nil {
+				t.Fatalf("decode tools/list result: %v", err)
+			}
+			if len(toolsResponse.Tools) != 35 {
+				t.Fatalf("tools/list tool count = %d, want 35", len(toolsResponse.Tools))
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-open", "tools/call", map[string]any{
+				"name":      "open_project",
+				"arguments": map[string]any{"project_root": repoRoot},
+				"_meta":     tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("open_project failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("open_project status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode open_project response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("open_project rpc error = %#v", envelope.Error)
+			}
+			var openProjectResult struct {
+				StructuredContent struct {
+					ProjectRef string `json:"project_ref"`
+				} `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(envelope.Result, &openProjectResult); err != nil {
+				t.Fatalf("decode open_project result: %v", err)
+			}
+			if openProjectResult.StructuredContent.ProjectRef == "" {
+				t.Fatal("open_project returned an empty project_ref")
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-missing-ref", "tools/call", map[string]any{
+				"name":      "create_issue",
+				"arguments": map[string]any{"type": "task", "title": "missing-ref"},
+				"_meta":     tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("create_issue without project_ref failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("create_issue without project_ref status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode missing-ref response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("missing-ref rpc error = %#v", envelope.Error)
+			}
+			var missingRefResult struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal(envelope.Result, &missingRefResult); err != nil {
+				t.Fatalf("decode missing-ref result: %v", err)
+			}
+			if !missingRefResult.IsError {
+				t.Fatalf("create_issue without project_ref unexpectedly succeeded: %s", body)
+			}
+			if len(missingRefResult.Content) == 0 {
+				t.Fatal("create_issue without project_ref returned no content")
+			}
+			text := missingRefResult.Content[0].Text
+			if !strings.Contains(text, "PROJECT_REQUIRED") && !strings.Contains(text, "project_ref is required") {
+				t.Fatalf("create_issue without project_ref text = %q, want a project-ref requirement message", text)
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-explicit-ref", "tools/call", map[string]any{
+				"name": "create_issue",
+				"arguments": map[string]any{
+					"project_ref": openProjectResult.StructuredContent.ProjectRef,
+					"type":        "task",
+					"title":       tc.name + "-routed",
+				},
+				"_meta": tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("create_issue with explicit project_ref failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("create_issue with explicit project_ref status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode explicit-ref response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("explicit-ref rpc error = %#v", envelope.Error)
+			}
+			var explicitRefResult struct {
+				IsError bool `json:"isError"`
+			}
+			if err := json.Unmarshal(envelope.Result, &explicitRefResult); err != nil {
+				t.Fatalf("decode explicit-ref result: %v", err)
+			}
+			if explicitRefResult.IsError {
+				t.Fatalf("create_issue with explicit project_ref returned an error: %s", body)
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-list", "tools/call", map[string]any{
+				"name": "list_issues",
+				"arguments": map[string]any{
+					"project_ref": openProjectResult.StructuredContent.ProjectRef,
+					"limit":       10,
+				},
+				"_meta": tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("list_issues failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("list_issues status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode list_issues response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("list_issues rpc error = %#v", envelope.Error)
+			}
+			var listResult struct {
+				StructuredContent struct {
+					Items []struct {
+						Title string `json:"title"`
+					} `json:"items"`
+				} `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(envelope.Result, &listResult); err != nil {
+				t.Fatalf("decode list_issues result: %v", err)
+			}
+			if len(listResult.StructuredContent.Items) == 0 {
+				t.Fatal("list_issues returned no items after explicit project_ref routing")
+			}
+			foundRoutedIssue := false
+			for _, item := range listResult.StructuredContent.Items {
+				if item.Title == tc.name+"-routed" {
+					foundRoutedIssue = true
+					break
+				}
+			}
+			if !foundRoutedIssue {
+				t.Fatalf("list_issues titles = %#v, want %q", listResult.StructuredContent.Items, tc.name+"-routed")
+			}
+		})
 	}
 }
 
@@ -602,9 +811,14 @@ func (output *capturedOutput) String() string {
 
 func launchIntegrationHTTPServer(t *testing.T, env integrationEnvironment, httpAddress string, extraServeArgs ...string) *integrationHTTPServer {
 	t.Helper()
+	return launchIntegrationHTTPServerInDir(t, env, env.repository, httpAddress, extraServeArgs...)
+}
+
+func launchIntegrationHTTPServerInDir(t *testing.T, env integrationEnvironment, workingDir, httpAddress string, extraServeArgs ...string) *integrationHTTPServer {
+	t.Helper()
 	args := append([]string{"--data-root", env.dataRoot, "serve", "--http-address", httpAddress}, extraServeArgs...)
 	cmd := exec.Command(integrationBinary, args...)
-	cmd.Dir = env.repository
+	cmd.Dir = workingDir
 
 	stderrReader, stderrWriter := io.Pipe()
 	output := &capturedOutput{}
