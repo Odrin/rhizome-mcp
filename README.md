@@ -9,7 +9,6 @@
   <a href="https://github.com/Odrin/rhizome-mcp/releases"><img src="https://img.shields.io/github/v/release/Odrin/rhizome-mcp?sort=semver" alt="Latest release"></a>
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Odrin/rhizome-mcp" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Odrin/rhizome-mcp" alt="License"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp"><img src="https://img.shields.io/visual-studio-marketplace/v/odrin.rhizome-mcp?label=VS%20Code%20Marketplace" alt="VS Code Marketplace"></a>
   <a href="https://www.npmjs.com/package/rhizome-mcp"><img src="https://img.shields.io/npm/v/rhizome-mcp" alt="npm"></a>
 </p>
 
