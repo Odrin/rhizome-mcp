@@ -99,6 +99,50 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	}
 }
 
+func TestToolRequestsRouteThroughLeaseServicesAndReleaseLease(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(context.Background())
+
+	leaseDB, leaseSource := openDatabase(t, filepath.Join(t.TempDir(), "project-lease.db"))
+	defer leaseDB.Close(context.Background())
+	leaseOptions := composeServices(t, leaseDB, leaseSource)
+	leaseServices := servicesFromOptions(t, leaseOptions)
+	if err := leaseDB.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE projects SET instructions = ? WHERE id = ?`, "Lease instructions", projectID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseCount := 0
+	lease := &trackingLease{ProjectLease: mcpadapter.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
+	router := &trackingRouter{lease: lease}
+	options := composeServices(t, db, source)
+	options.ProjectRouter = router
+	client, stop := newClient(t, options)
+	defer stop()
+
+	result := call(t, client, "get_project", map[string]any{"include_instructions": true})
+	if result.IsError {
+		t.Fatalf("get_project result = %#v", result)
+	}
+	var output struct {
+		Project struct {
+			Instructions *string `json:"instructions"`
+		} `json:"project"`
+	}
+	decodeStructured(t, result, &output)
+	if output.Project.Instructions == nil || *output.Project.Instructions != "Lease instructions" {
+		t.Fatalf("routed project instructions = %#v, want %q", output.Project.Instructions, "Lease instructions")
+	}
+	if router.acquireCount != 2 {
+		t.Fatalf("router acquire count = %d, want 2 (bootstrap + tool request)", router.acquireCount)
+	}
+	if releaseCount != 2 {
+		t.Fatalf("lease release count = %d, want 2 (bootstrap + tool request)", releaseCount)
+	}
+}
+
 func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
@@ -2776,6 +2820,33 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil search service")
 	}
+}
+
+type trackingLease struct {
+	mcpadapter.ProjectLease
+	releaseCount *int
+}
+
+func (lease *trackingLease) Release() error {
+	if lease.releaseCount != nil {
+		*lease.releaseCount++
+	}
+	return lease.ProjectLease.Release()
+}
+
+type trackingRouter struct {
+	lease        mcpadapter.ProjectLease
+	err          error
+	acquireCount int
+}
+
+func (router *trackingRouter) Acquire(context.Context, *string) (mcpadapter.ProjectLease, error) {
+	router.acquireCount++
+	return router.lease, router.err
+}
+
+func (router *trackingRouter) OpenProject(context.Context, string) (mcpadapter.ProjectLease, error) {
+	return router.lease, router.err
 }
 
 func openDatabase(t *testing.T, path string) (*sqlite.DB, *clock.FakeClock) {

@@ -172,148 +172,148 @@ func isContextCancellation(err error) bool {
 // if the adapter's active tool profile includes that group (see profile.go).
 // Every call below is required to name a group — there is no path to
 // sdkmcp.AddTool that skips this decision.
-func (adapter *adapter) register(server *sdkmcp.Server) {
-	adapter.registerTool(server, groupLifecycle, tool("create_agent_session", "Create a durable agent session handle for explicit tool attribution.", schemaCreateAgentSession(), schemaCreateAgentSessionOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.createAgentSession)
+func (target *adapter) register(server *sdkmcp.Server) {
+	target.registerTool(server, groupLifecycle, tool("create_agent_session", "Create a durable agent session handle for explicit tool attribution.", schemaCreateAgentSession(), schemaCreateAgentSessionOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[createAgentSessionInput, any](target, t, (*adapter).createAgentSession))
 	})
-	adapter.registerTool(server, groupLifecycle, tool("end_agent_session", "End one explicitly created durable agent session handle.", schemaEndAgentSession(), schemaEndAgentSessionOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, adapter.endAgentSession)
+	target.registerTool(server, groupLifecycle, tool("end_agent_session", "End one explicitly created durable agent session handle.", schemaEndAgentSession(), schemaEndAgentSessionOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[endAgentSessionInput, any](target, t, (*adapter).endAgentSession))
 	})
-	adapter.registerTool(server, groupCore, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getProject))
+	target.registerTool(server, groupCore, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getProjectInput, any](target, t, (*adapter).getProject))
 	})
-	adapter.registerTool(server, groupMigration, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.exportProject))
+	target.registerTool(server, groupMigration, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[exportProjectInput, any](target, t, (*adapter).exportProject))
 	})
-	adapter.registerTool(server, groupMigration, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.validateImport))
+	target.registerTool(server, groupMigration, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[validateImportInput, any](target, t, (*adapter).validateImport))
 	})
 	// apply_import requires an empty destination, so a bare repeat with the
 	// same document fails safely once the destination is non-empty: no
 	// additional effect on retry, hence idempotentHint true despite no
 	// idempotency_key support.
-	adapter.registerTool(server, groupMigration, tool("apply_import", "Apply a validated logical project import document into an empty destination.", schemaApplyImport(), schemaApplyImportOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.applyImport))
+	target.registerTool(server, groupMigration, tool("apply_import", "Apply a validated logical project import document into an empty destination.", schemaApplyImport(), schemaApplyImportOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[applyImportInput, any](target, t, (*adapter).applyImport))
 	})
-	adapter.registerTool(server, groupIssues, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listLabels))
+	target.registerTool(server, groupIssues, tool("list_labels", "List reusable labels with optional name search and cursor pagination.", schemaListLabels(), schemaLabelListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listLabelsInput, any](target, t, (*adapter).listLabels))
 	})
 	// create_issue's idempotency_key is optional: a bare repeat without it
 	// creates a second issue, so idempotentHint is false.
-	adapter.registerTool(server, groupIssues, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.createIssue))
+	target.registerTool(server, groupIssues, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[createIssueInput, any](target, t, (*adapter).createIssue))
 	})
 	// expected_version gates every write: a bare repeat with the same
 	// (now-stale) version conflict-fails with no further mutation.
-	adapter.registerTool(server, groupIssues, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.updateIssue))
+	target.registerTool(server, groupIssues, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[updateIssueInput, any](target, t, (*adapter).updateIssue))
 	})
-	adapter.registerTool(server, groupIssues, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssue))
+	target.registerTool(server, groupIssues, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getIssueInput, any](target, t, (*adapter).getIssue))
 	})
-	adapter.registerTool(server, groupIssues, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listIssues))
+	target.registerTool(server, groupIssues, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listIssuesInput, any](target, t, (*adapter).listIssues))
 	})
-	adapter.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.archiveIssue))
+	target.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[archiveIssueInput, any](target, t, (*adapter).archiveIssue))
 	})
-	adapter.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.cancelReviewRequest))
+	target.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[cancelReviewRequestInput, any](target, t, (*adapter).cancelReviewRequest))
 	})
 	// create_review_request only records a supersedes_id link; it never
 	// closes the predecessor (that split is exactly what replace_review_request
 	// fixes), so it is purely additive and has no idempotency_key at all.
 	// Deprecated: supersedes_id is retained as a compatibility alias for one
 	// release; prefer replace_review_request for atomic supersession.
-	adapter.registerTool(server, groupReview, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set. Deprecated: prefer replace_review_request.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.createReviewRequest))
+	target.registerTool(server, groupReview, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set. Deprecated: prefer replace_review_request.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[createReviewRequestInput, any](target, t, (*adapter).createReviewRequest))
 	})
-	adapter.registerTool(server, groupReview, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getReviewRequest))
+	target.registerTool(server, groupReview, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getReviewRequestInput, any](target, t, (*adapter).getReviewRequest))
 	})
-	adapter.registerTool(server, groupReview, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listReviewRequests))
+	target.registerTool(server, groupReview, tool("list_review_requests", "List review requests with optional status and claimability filters.", schemaListReviewRequests(), schemaReviewRequestListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listReviewRequestsInput, any](target, t, (*adapter).listReviewRequests))
 	})
 	// add/remove are each gated (unique constraint on add, not-found on
 	// remove), so a bare repeat has no additional effect; remove can destroy
 	// an existing relation.
-	adapter.registerTool(server, groupIssues, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.manageIssueRelation))
+	target.registerTool(server, groupIssues, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[manageIssueRelationInput, any](target, t, (*adapter).manageIssueRelation))
 	})
 	// Deprecated: retained as a compatibility alias for one release; prefer
 	// replace_review_request, which closes the predecessor and opens its
 	// successor atomically instead of leaving the review lifecycle partial
 	// between two separate calls.
-	adapter.registerTool(server, groupReview, tool("supersede_review_request", "Supersede an open or claimed review request using its current version. Deprecated: prefer replace_review_request.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.supersedeReviewRequest))
+	target.registerTool(server, groupReview, tool("supersede_review_request", "Supersede an open or claimed review request using its current version. Deprecated: prefer replace_review_request.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[supersedeReviewRequestInput, any](target, t, (*adapter).supersedeReviewRequest))
 	})
 	// idempotency_key is required (not optional) and the repository replays
 	// the original result for a repeated key, so idempotentHint is
 	// genuinely true. A claimed predecessor is rejected (CodeReviewRequestClaimed)
 	// rather than replaced, since this operation does not hold the attempt's
 	// lease token.
-	adapter.registerTool(server, groupReview, tool("replace_review_request", "Atomically supersede a predecessor review request and create its open successor in one transaction.", schemaReplaceReviewRequest(), schemaReplaceReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.replaceReviewRequest))
+	target.registerTool(server, groupReview, tool("replace_review_request", "Atomically supersede a predecessor review request and create its open successor in one transaction.", schemaReplaceReviewRequest(), schemaReplaceReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[replaceReviewRequestInput, any](target, t, (*adapter).replaceReviewRequest))
 	})
-	adapter.registerTool(server, groupIssues, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssueGraph))
+	target.registerTool(server, groupIssues, tool("get_issue_graph", "Get a bounded relation and hierarchy graph around one issue.", schemaGetIssueGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getIssueGraphInput, any](target, t, (*adapter).getIssueGraph))
 	})
-	adapter.registerTool(server, groupIssues, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getPlanningGraph))
+	target.registerTool(server, groupIssues, tool("get_planning_graph", "Get dependency-aware entry points and blocking nodes for work selection.", schemaGetPlanningGraph(), schemaGraphOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getPlanningGraphInput, any](target, t, (*adapter).getPlanningGraph))
 	})
-	adapter.registerTool(server, groupPlanning, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.validateIssuePlan))
+	target.registerTool(server, groupPlanning, tool("validate_issue_plan", "Normalize and validate a bounded multi-issue plan without writing it.", schemaValidateIssuePlan(), schemaPlanValidationOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[issuePlanInput, any](target, t, (*adapter).validateIssuePlan))
 	})
 	// idempotency_key is required (not optional) for apply_issue_plan and
 	// the repository replays the original result for a repeated key, so
 	// idempotentHint is genuinely true for the advertised contract.
-	adapter.registerTool(server, groupPlanning, tool("apply_issue_plan", "Atomically create issues, relations, and decisions from a valid plan.", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.applyIssuePlan))
+	target.registerTool(server, groupPlanning, tool("apply_issue_plan", "Atomically create issues, relations, and decisions from a valid plan.", schemaApplyIssuePlan(), schemaApplyIssuePlanOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[applyIssuePlanInput, any](target, t, (*adapter).applyIssuePlan))
 	})
 	// add_comment's idempotency_key is optional: a bare repeat without it
 	// appends a second comment.
-	adapter.registerTool(server, groupKnowledge, tool("add_comment", "Append collaboration context to an issue without rewriting history.", schemaAddComment(), schemaAddCommentOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.addComment))
+	target.registerTool(server, groupKnowledge, tool("add_comment", "Append collaboration context to an issue without rewriting history.", schemaAddComment(), schemaAddCommentOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[addCommentInput, any](target, t, (*adapter).addComment))
 	})
 	// record_decision has no idempotency_key at all (a bare repeat always
 	// appends a new decision), and an optional supersedes_id overwrites the
 	// predecessor decision's status in the same transaction.
-	adapter.registerTool(server, groupKnowledge, tool("record_decision", "Append a durable project or issue decision, optionally superseding one.", schemaRecordDecision(), schemaRecordDecisionOutput(), toolHints(false, true, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.recordDecision))
+	target.registerTool(server, groupKnowledge, tool("record_decision", "Append a durable project or issue decision, optionally superseding one.", schemaRecordDecision(), schemaRecordDecisionOutput(), toolHints(false, true, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[recordDecisionInput, any](target, t, (*adapter).recordDecision))
 	})
-	adapter.registerTool(server, groupKnowledge, tool("list_decisions", "List project-wide or issue-scoped decisions with cursor pagination.", schemaListDecisions(), schemaDecisionListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.listDecisions))
+	target.registerTool(server, groupKnowledge, tool("list_decisions", "List project-wide or issue-scoped decisions with cursor pagination.", schemaListDecisions(), schemaDecisionListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listDecisionsInput, any](target, t, (*adapter).listDecisions))
 	})
-	adapter.registerTool(server, groupKnowledge, tool("get_issue_activity", "Get a unified newest-first timeline of issue work and artifacts.", schemaGetIssueActivity(), schemaGetIssueActivityOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getIssueActivity))
+	target.registerTool(server, groupKnowledge, tool("get_issue_activity", "Get a unified newest-first timeline of issue work and artifacts.", schemaGetIssueActivity(), schemaGetIssueActivityOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getIssueActivityInput, any](target, t, (*adapter).getIssueActivity))
 	})
 	// claimability gates every claim: once claimed, a bare repeat fails with
 	// no further effect. Claiming does not destroy prior state.
-	adapter.registerTool(server, groupLifecycle, tool("claim_issue", "Claim claimable ready or review work and receive a renewable lease token.", schemaClaimIssue(), schemaClaimIssueOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.claimIssue))
+	target.registerTool(server, groupLifecycle, tool("claim_issue", "Claim claimable ready or review work and receive a renewable lease token.", schemaClaimIssue(), schemaClaimIssueOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[claimIssueInput, any](target, t, (*adapter).claimIssue))
 	})
 	// unlike claim/finish, renew_attempt has no gate: each repeat pushes the
 	// lease expiry further out, a genuine additional effect every call.
-	adapter.registerTool(server, groupLifecycle, tool("renew_attempt", "Extend an active work or review lease before it expires.", schemaRenewAttempt(), schemaRenewAttemptOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.renewAttempt))
+	target.registerTool(server, groupLifecycle, tool("renew_attempt", "Extend an active work or review lease before it expires.", schemaRenewAttempt(), schemaRenewAttemptOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[renewAttemptInput, any](target, t, (*adapter).renewAttempt))
 	})
-	adapter.registerTool(server, groupLifecycle, tool("save_attempt_note", "Append a restartable checkpoint, finding, warning, or progress note.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.saveAttemptNote))
+	target.registerTool(server, groupLifecycle, tool("save_attempt_note", "Append a restartable checkpoint, finding, warning, or progress note.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[saveAttemptNoteInput, any](target, t, (*adapter).saveAttemptNote))
 	})
 	// finish_attempt is lease-gated (repository requires status = 'active'),
 	// so a bare repeat after the first success fails with no further
 	// mutation; it can overwrite the issue's status/blocked_reason.
-	adapter.registerTool(server, groupLifecycle, tool("finish_attempt", "End a leased attempt with outcome, verification, artifacts, and status.", schemaFinishAttempt(), schemaFinishAttemptOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.finishAttempt))
+	target.registerTool(server, groupLifecycle, tool("finish_attempt", "End a leased attempt with outcome, verification, artifacts, and status.", schemaFinishAttempt(), schemaFinishAttemptOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[finishAttemptInput, any](target, t, (*adapter).finishAttempt))
 	})
-	adapter.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getWorkContext))
+	target.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getWorkContextInput, any](target, t, (*adapter).getWorkContext))
 	})
-	adapter.registerTool(server, groupKnowledge, tool("search", "Full-text search issues, comments, decisions, and attempt notes.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.search))
+	target.registerTool(server, groupKnowledge, tool("search", "Full-text search issues, comments, decisions, and attempt notes.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[searchInput, any](target, t, (*adapter).search))
 	})
-	adapter.registerTool(server, groupSync, tool("get_changes", "Get ordered issue events after an event ID for incremental synchronization.", schemaGetChanges(), schemaChangesOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, touchSessionForMutatingTool(adapter, t, adapter.getChanges))
+	target.registerTool(server, groupSync, tool("get_changes", "Get ordered issue events after an event ID for incremental synchronization.", schemaGetChanges(), schemaChangesOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getChangesInput, any](target, t, (*adapter).getChanges))
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
+	"rhizome-mcp/internal/domain"
 )
 
 // toolNamesFor returns the sorted (lexical, per the SDK's own tools/list
@@ -45,6 +46,42 @@ func containsName(names []string, name string) bool {
 // TestToolProfileFullMatchesUnfilteredCatalog asserts that an empty
 // (default) profile and an explicit "full" profile both advertise the
 // exact same complete catalog asserted by TestToolAnnotationMatrixMatchesCatalog.
+func TestToolSessionResolutionUsesRoutedBundle(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "profile-session.db"))
+	defer db.Close(context.Background())
+
+	leaseDB, leaseSource := openDatabase(t, filepath.Join(t.TempDir(), "profile-session-lease.db"))
+	defer leaseDB.Close(context.Background())
+	leaseOptions := composeServices(t, leaseDB, leaseSource)
+	leaseServices := servicesFromOptions(t, leaseOptions)
+	clientVersion := "1.0.0"
+	agentLabel := "lease-agent"
+	created, err := leaseServices.SessionService.CreateWithHandle(context.Background(), domain.CreateAgentSessionInput{
+		ClientName:    "lease-client",
+		ClientVersion: &clientVersion,
+		AgentLabel:    &agentLabel,
+	})
+	if err != nil {
+		t.Fatalf("CreateWithHandle() error = %v", err)
+	}
+
+	releaseCount := 0
+	lease := &trackingLease{ProjectLease: mcpadapter.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
+	router := &trackingRouter{lease: lease}
+	options := composeServices(t, db, source)
+	options.ProjectRouter = router
+	client, stop := newClient(t, options)
+	defer stop()
+
+	result := call(t, client, "get_project", map[string]any{"agent_session_handle": created.Handle, "include_instructions": true})
+	if result.IsError {
+		t.Fatalf("get_project result = %#v", result)
+	}
+	if releaseCount != 2 {
+		t.Fatalf("lease release count = %d, want 2 (bootstrap + tool request)", releaseCount)
+	}
+}
+
 func TestToolProfileFullMatchesUnfilteredCatalog(t *testing.T) {
 	defaultNames := toolNamesFor(t, "")
 	fullNames := toolNamesFor(t, "full")

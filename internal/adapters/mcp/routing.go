@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
@@ -100,6 +103,27 @@ func WithProjectServices(ctx context.Context, services ProjectServices) context.
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, projectServicesContextKey{}, services)
+}
+
+func projectServicesFromLease(lease ProjectLease) ProjectServices {
+	if lease == nil {
+		return ProjectServices{}
+	}
+	return ProjectServices{
+		IssueService:       lease.IssueService(),
+		ProjectService:     lease.ProjectService(),
+		RelationService:    lease.RelationService(),
+		GraphService:       lease.GraphService(),
+		PlanningService:    lease.PlanningService(),
+		CommentService:     lease.CommentService(),
+		DecisionService:    lease.DecisionService(),
+		ActivityService:    lease.ActivityService(),
+		SearchService:      lease.SearchService(),
+		ReviewService:      lease.ReviewService(),
+		AttemptService:     lease.AttemptService(),
+		SessionService:     lease.SessionService(),
+		WorkContextService: lease.WorkContextService(),
+	}
 }
 
 // ProjectServicesFromContext retrieves project-local services from the request context.
@@ -342,4 +366,73 @@ func contextError(ctx context.Context) error {
 		return nil
 	}
 	return ctx.Err()
+}
+
+func projectRefArgument(request *sdkmcp.CallToolRequest) (*string, error) {
+	if request == nil || request.Params == nil || len(request.Params.Arguments) == 0 {
+		return nil, nil
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
+		return nil, err
+	}
+	value, ok := arguments["project_ref"]
+	if !ok || string(value) == "null" {
+		return nil, nil
+	}
+	var explicit string
+	if err := json.Unmarshal(value, &explicit); err != nil {
+		return nil, NewInvalidProjectRefError("")
+	}
+	return &explicit, nil
+}
+
+func (adapter *adapter) cloneForLease(lease ProjectLease) *adapter {
+	if adapter == nil {
+		return nil
+	}
+	clone := *adapter
+	if lease != nil {
+		services := projectServicesFromLease(lease)
+		clone.issues = services.IssueService
+		clone.projects = services.ProjectService
+		clone.relations = services.RelationService
+		clone.graphs = services.GraphService
+		clone.plans = services.PlanningService
+		clone.comments = services.CommentService
+		clone.decisions = services.DecisionService
+		clone.activities = services.ActivityService
+		clone.searches = services.SearchService
+		clone.reviews = services.ReviewService
+		clone.attempts = services.AttemptService
+		clone.sessions = services.SessionService
+		clone.workContexts = services.WorkContextService
+	}
+	return &clone
+}
+
+func routeProjectRequest[In, Out any](adapter *adapter, toolDef *sdkmcp.Tool, handler func(*adapter, context.Context, *sdkmcp.CallToolRequest, In) (*sdkmcp.CallToolResult, Out, error)) func(context.Context, *sdkmcp.CallToolRequest, In) (*sdkmcp.CallToolResult, Out, error) {
+	return func(ctx context.Context, request *sdkmcp.CallToolRequest, input In) (*sdkmcp.CallToolResult, Out, error) {
+		explicitRef, err := projectRefArgument(request)
+		if err != nil {
+			return nil, *new(Out), err
+		}
+		lease, err := adapter.router.Acquire(ctx, explicitRef)
+		if err != nil {
+			return nil, *new(Out), err
+		}
+		if lease == nil {
+			return nil, *new(Out), domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false)
+		}
+		defer func() {
+			_ = lease.Release()
+		}()
+		cloned := adapter.cloneForLease(lease)
+		ctx = WithProjectLease(ctx, lease)
+		ctx = WithProjectRef(ctx, lease.ProjectRef())
+		ctx = WithProjectServices(ctx, projectServicesFromLease(lease))
+		return touchSessionForMutatingTool(cloned, toolDef, func(ctx context.Context, request *sdkmcp.CallToolRequest, input In) (*sdkmcp.CallToolResult, Out, error) {
+			return handler(cloned, ctx, request, input)
+		})(ctx, request, input)
+	}
 }
