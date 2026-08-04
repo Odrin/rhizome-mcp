@@ -32,14 +32,16 @@ type projectRouter struct {
 	defaultRef    string
 	defaultRoot   string
 
-	mu           sync.Mutex
-	cond         *sync.Cond
-	entries      map[string]*projectRouterEntry
-	closed       bool
-	closing      bool
-	closingErr   error
-	closeOnce    sync.Once
-	closeStarted chan struct{}
+	mu                  sync.Mutex
+	cond                *sync.Cond
+	entries             map[string]*projectRouterEntry
+	closed              bool
+	closing             bool
+	closingErr          error
+	closeStarted        chan struct{}
+	closeStartedClosed  bool
+	closeCleanupStarted bool
+	closeComplete       bool
 
 	openingCount int
 	activeCount  int
@@ -295,65 +297,93 @@ func (router *projectRouter) evictIdleEntryLocked() *projectRouterEntry {
 }
 
 func (router *projectRouter) Close(ctx context.Context) error {
-	router.closeOnce.Do(func() {
-		router.mu.Lock()
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if _, ok := waitCtx.Deadline(); !ok {
+		waitCtx, cancel = context.WithTimeout(waitCtx, 5*time.Second)
+	}
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
+	if waitCtx.Done() != nil {
+		go func() {
+			<-waitCtx.Done()
+			router.mu.Lock()
+			router.cond.Broadcast()
+			router.mu.Unlock()
+		}()
+	}
+
+	router.mu.Lock()
+	if !router.closed {
 		router.closed = true
 		router.closing = true
-		if router.closeStarted != nil {
+		if router.closeStarted != nil && !router.closeStartedClosed {
 			close(router.closeStarted)
+			router.closeStartedClosed = true
 		}
+	}
+	if router.closeComplete {
+		result := router.closingErr
 		router.mu.Unlock()
-
-		deadline := time.Now().Add(5 * time.Second)
-		if ctx != nil {
-			if _, ok := ctx.Deadline(); !ok {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-			}
-			if dl, ok := ctx.Deadline(); ok {
-				deadline = dl
-			}
-		}
-		for time.Now().Before(deadline) {
-			router.mu.Lock()
-			opening := router.openingCount
-			active := router.activeCount
+		return result
+	}
+	for {
+		if router.closeComplete {
+			result := router.closingErr
 			router.mu.Unlock()
-			if opening == 0 && active == 0 {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
+			return result
 		}
-
-		router.mu.Lock()
-		if router.openingCount != 0 || router.activeCount != 0 {
-			router.closingErr = context.DeadlineExceeded
+		if err := waitCtx.Err(); err != nil {
 			router.mu.Unlock()
-			return
+			return err
 		}
-		remaining := make([]*projectRouterEntry, 0, len(router.entries))
-		for _, entry := range router.entries {
-			if entry != nil {
-				remaining = append(remaining, entry)
+		if !router.closeCleanupStarted {
+			if router.openingCount == 0 && router.activeCount == 0 {
+				router.closeCleanupStarted = true
+				router.mu.Unlock()
+				return router.runCleanup(waitCtx)
 			}
 		}
-		router.entries = make(map[string]*projectRouterEntry)
-		router.mu.Unlock()
+		router.cond.Wait()
+	}
+}
 
-		var errs []error
-		for _, entry := range remaining {
-			if entry == nil || entry.bundle == nil {
-				continue
-			}
-			if err := entry.bundle.Close(ctx); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		router.mu.Lock()
-		router.closingErr = errors.Join(errs...)
+func (router *projectRouter) runCleanup(ctx context.Context) error {
+	router.mu.Lock()
+	if router.openingCount != 0 || router.activeCount != 0 {
 		router.mu.Unlock()
-	})
+		return context.DeadlineExceeded
+	}
+	remaining := make([]*projectRouterEntry, 0, len(router.entries))
+	for _, entry := range router.entries {
+		if entry != nil {
+			remaining = append(remaining, entry)
+		}
+	}
+	router.entries = make(map[string]*projectRouterEntry)
+	router.mu.Unlock()
+
+	var errs []error
+	for _, entry := range remaining {
+		if entry == nil || entry.bundle == nil {
+			continue
+		}
+		if err := entry.bundle.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	router.mu.Lock()
+	router.closingErr = errors.Join(errs...)
+	router.closeComplete = true
+	router.cond.Broadcast()
+	router.mu.Unlock()
 	return router.closingErr
 }
 

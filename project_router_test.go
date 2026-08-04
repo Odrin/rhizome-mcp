@@ -512,6 +512,170 @@ func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
 	}
 }
 
+func TestProjectRouterCloseTimeoutDoesNotConsumeCleanupCapability(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB3"
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	lease, err := router.Acquire(context.Background(), &ref)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	deadlineCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	closeErr := router.Close(deadlineCtx)
+	if !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want context.DeadlineExceeded", closeErr)
+	}
+
+	router.mu.Lock()
+	_, ok := router.entries[ref]
+	closed := router.closed
+	opening := router.openingCount
+	active := router.activeCount
+	cleanupStarted := router.closeCleanupStarted
+	router.mu.Unlock()
+	if !ok {
+		t.Fatal("expected router entry to remain present after timed-out Close")
+	}
+	if !closed {
+		t.Fatal("expected router to be closed after first Close")
+	}
+	if opening != 0 || active != 1 {
+		t.Fatalf("openingCount/activeCount = %d/%d, want 0/1", opening, active)
+	}
+	if cleanupStarted {
+		t.Fatal("expected cleanup not to start before lease release")
+	}
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if err := router.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close() error = %v", err)
+	}
+
+	router.mu.Lock()
+	_, ok = router.entries[ref]
+	cleanupStarted = router.closeCleanupStarted
+	closeComplete := router.closeComplete
+	router.mu.Unlock()
+	if ok {
+		t.Fatal("expected router entry to be removed after retry Close")
+	}
+	if !cleanupStarted {
+		t.Fatal("expected cleanup to start on retry Close")
+	}
+	if !closeComplete {
+		t.Fatal("expected cleanup to complete on retry Close")
+	}
+	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, errProjectRouterClosed) {
+		t.Fatalf("Acquire() after timed-out Close error = %v, want %v", err, errProjectRouterClosed)
+	}
+}
+
+func TestProjectRouterCloseWithCanceledContextClosesAdmissionImmediately(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB5"
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	lease, err := router.Acquire(context.Background(), &ref)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	closeErr := router.Close(canceledCtx)
+	if !errors.Is(closeErr, context.Canceled) {
+		t.Fatalf("Close() error = %v, want context.Canceled", closeErr)
+	}
+
+	router.mu.Lock()
+	closed := router.closed
+	closeStarted := router.closeStartedClosed
+	router.mu.Unlock()
+	if !closed {
+		t.Fatal("expected router to be closed after canceled Close")
+	}
+	if !closeStarted {
+		t.Fatal("expected closeStarted to be signaled for canceled Close")
+	}
+	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, errProjectRouterClosed) {
+		t.Fatalf("Acquire() after canceled Close error = %v, want %v", err, errProjectRouterClosed)
+	}
+	if err := router.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close() error = %v", err)
+	}
+}
+
+func TestProjectRouterConcurrentCloseCallsShareCleanup(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB4"
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	lease, err := router.Acquire(context.Background(), &ref)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	router.mu.Lock()
+	entry := router.entries[ref]
+	router.mu.Unlock()
+	if entry == nil {
+		t.Fatal("expected router entry to be present")
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			errs <- router.Close(context.Background())
+		}()
+	}
+	close(start)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Close calls")
+		}
+	}
+
+	router.mu.Lock()
+	cleanupStarted := router.closeCleanupStarted
+	closeComplete := router.closeComplete
+	_, ok := router.entries[ref]
+	router.mu.Unlock()
+	if !cleanupStarted {
+		t.Fatal("expected cleanup to start for concurrent Close calls")
+	}
+	if !closeComplete {
+		t.Fatal("expected cleanup to complete for concurrent Close calls")
+	}
+	if ok {
+		t.Fatal("expected router entry to be removed after concurrent Close")
+	}
+}
+
 func newTestBundle(projectID string) *composedServices {
 	return &composedServices{project: &projectruntime.Project{ProjectID: projectID}}
 }
