@@ -4,6 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/Odrin/rhizome-mcp/actions/workflows/ci.yml"><img src="https://github.com/Odrin/rhizome-mcp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Odrin/rhizome-mcp/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/.badges/main/unit-coverage.svg" alt="Unit test coverage"></a>
+  <a href="https://github.com/Odrin/rhizome-mcp/actions/workflows/ci.yml"><img src="https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/.badges/main/integration-coverage.svg" alt="Integration test coverage"></a>
   <a href="https://github.com/Odrin/rhizome-mcp/releases"><img src="https://img.shields.io/github/v/release/Odrin/rhizome-mcp?sort=semver" alt="Latest release"></a>
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Odrin/rhizome-mcp" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Odrin/rhizome-mcp" alt="License"></a>

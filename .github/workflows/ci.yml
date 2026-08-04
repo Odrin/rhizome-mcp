@@ -35,3 +35,40 @@ jobs:
 
       - name: Run integration tests
         run: go test -tags=integration ./...
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Generate unit test coverage
+        run: go test ./... -covermode=atomic -coverpkg=./... -coverprofile=unit-coverage.out
+
+      - name: Check unit test coverage
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: .testcoverage.unit.yml
+          git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
+          git-branch: main
+          git-repository: ${{ github.repository }}
+          git-file-name: .badges/main/unit-coverage.svg
+
+      - name: Generate integration test coverage
+        run: go test -tags=integration ./... -covermode=atomic -coverpkg=./... -coverprofile=integration-coverage.out
+
+      - name: Check integration test coverage
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: .testcoverage.integration.yml
+          git-token: ${{ github.ref_name == 'main' && secrets.GITHUB_TOKEN || '' }}
+          git-branch: main
+          git-repository: ${{ github.repository }}
+          git-file-name: .badges/main/integration-coverage.svg
