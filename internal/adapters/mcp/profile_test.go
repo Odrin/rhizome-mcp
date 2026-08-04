@@ -132,7 +132,7 @@ func TestToolProfileReadOnlyContainsOnlyReadOnlyHintedTools(t *testing.T) {
 // export/validate/apply import.
 func TestToolProfileMigrationIsMinimalTransferWorkflow(t *testing.T) {
 	names := toolNamesFor(t, "migration")
-	want := []string{"apply_import", "export_project", "get_project", "validate_import"}
+	want := []string{"apply_import", "export_project", "get_project", "open_project", "validate_import"}
 	if len(names) != len(want) {
 		t.Fatalf("migration profile tools = %v, want %v", names, want)
 	}
@@ -157,7 +157,7 @@ func TestToolProfileAgentExcludesBulkTransferAndSync(t *testing.T) {
 	}
 	retained := []string{
 		"create_agent_session", "end_agent_session",
-		"get_project", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue",
+		"get_project", "open_project", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue",
 		"manage_issue_relation", "get_issue_graph", "get_planning_graph", "validate_issue_plan", "apply_issue_plan",
 		"create_review_request", "get_review_request", "list_review_requests", "cancel_review_request",
 		"supersede_review_request", "replace_review_request", "add_comment", "record_decision", "list_decisions",

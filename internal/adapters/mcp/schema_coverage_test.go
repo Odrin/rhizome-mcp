@@ -88,6 +88,59 @@ func TestAdvertisedSchemaPropertiesAreNeverRejectedAsUnsupported(t *testing.T) {
 	}
 }
 
+func TestProjectRefDecorationIsOptionalAndStructural(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "schema-project-ref.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	toolMap := make(map[string]*sdkmcp.Tool, len(tools.Tools))
+	for _, tool := range tools.Tools {
+		toolMap[tool.Name] = tool
+	}
+
+	for name, tool := range toolMap {
+		if name == "open_project" {
+			continue
+		}
+		schema := decodeInputSchema(t, tool)
+		prop := schema.Properties["project_ref"]
+		if prop == nil {
+			t.Fatalf("%s missing project_ref property", name)
+		}
+		if prop.MaxLength == nil || *prop.MaxLength != 26 {
+			t.Fatalf("%s project_ref maxLength = %v, want 26", name, prop.MaxLength)
+		}
+		if prop.Pattern != "^[0-9A-HJKMNP-TV-Z]{26}$" {
+			t.Fatalf("%s project_ref pattern = %q, want %q", name, prop.Pattern, "^[0-9A-HJKMNP-TV-Z]{26}$")
+		}
+		if len(prop.Types) != 2 || prop.Types[0] != "string" || prop.Types[1] != "null" {
+			t.Fatalf("%s project_ref types = %v, want [string null]", name, prop.Types)
+		}
+		required := make(map[string]bool, len(schema.Required))
+		for _, field := range schema.Required {
+			required[field] = true
+		}
+		if required["project_ref"] {
+			t.Fatalf("%s project_ref unexpectedly required", name)
+		}
+	}
+
+	open := toolMap["open_project"]
+	if open == nil {
+		t.Fatal("open_project tool missing")
+	}
+	schema := decodeInputSchema(t, open)
+	if _, ok := schema.Properties["project_ref"]; ok {
+		t.Fatal("open_project unexpectedly advertises project_ref")
+	}
+}
+
 // decodeInputSchema decodes the client-side JSON representation of a tool's
 // input schema (a map[string]any, per the SDK's Tool.InputSchema contract)
 // back into a typed jsonschema.Schema for property introspection.

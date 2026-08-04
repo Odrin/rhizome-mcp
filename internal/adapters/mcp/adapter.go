@@ -182,6 +182,11 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupCore, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getProjectInput, any](target, t, (*adapter).getProject))
 	})
+	target.registerTool(server, groupCore, tool("open_project", "Open a project by absolute root and return its metadata, limits, supported values, event position, and guide links.", schemaOpenProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, func(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
+			return target.openProject(ctx, request, input)
+		})
+	})
 	target.registerTool(server, groupMigration, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[exportProjectInput, any](target, t, (*adapter).exportProject))
 	})
@@ -668,6 +673,7 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		return adapter.failure(err)
 	}
 	output := projectOutput{
+		ProjectRef:             ProjectRefFromContext(ctx),
 		Project:                projectDTOFromDomain(project, input.IncludeInstructions),
 		Session:                nil,
 		AppVersion:             adapter.appVersion,
@@ -684,6 +690,41 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		NextActions:            []string{"Read rhizome://guides/agent-workflow; then find claimable work."},
 	}
 	return success(output, "project metadata returned")
+}
+
+func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
+	lease, err := adapter.router.OpenProject(ctx, input.ProjectRoot)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	if lease == nil {
+		return adapter.failure(domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false))
+	}
+	defer func() {
+		_ = lease.Release()
+	}()
+	project, err := lease.ProjectService().GetProject(ctx)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	output := projectOutput{
+		ProjectRef:             lease.ProjectRef(),
+		Project:                projectDTOFromDomain(project, false),
+		Session:                nil,
+		AppVersion:             adapter.appVersion,
+		SchemaVersion:          project.SchemaVersion,
+		ConfigVersion:          adapter.configVersion,
+		ToolProfile:            string(adapter.toolProfile),
+		Limits:                 limitsDTO{DefaultIssueListLimit: 20, DefaultLabelListLimit: 50, MaxCollectionLimit: 100},
+		SupportedIssueTypes:    []string{"epic", "task", "bug"},
+		SupportedStatuses:      []string{"open", "ready", "blocked", "review", "done", "cancelled"},
+		SupportedRelationTypes: []string{"blocks", "related_to", "duplicates"},
+		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
+		LatestEventID:          project.LatestEventID,
+		Guides:                 guideLinks(),
+		NextActions:            []string{"Read rhizome://guides/agent-workflow; then find claimable work."},
+	}
+	return success(output, "project opened")
 }
 
 func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {

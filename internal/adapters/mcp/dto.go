@@ -24,6 +24,10 @@ type getProjectInput struct {
 	IncludeInstructions bool `json:"include_instructions,omitempty"`
 }
 
+type openProjectInput struct {
+	ProjectRoot string `json:"project_root"`
+}
+
 type listLabelsInput struct {
 	Query  *string `json:"query,omitempty"`
 	Limit  int     `json:"limit,omitempty"`
@@ -509,6 +513,7 @@ type endAgentSessionOutput struct {
 }
 
 type projectOutput struct {
+	ProjectRef    string      `json:"project_ref"`
 	Project       projectDTO  `json:"project"`
 	Session       *sessionDTO `json:"session"`
 	AppVersion    string      `json:"app_version"`

@@ -10,6 +10,9 @@ import (
 )
 
 func tool(name, description string, input, output *jsonschema.Schema, hints *sdkmcp.ToolAnnotations) *sdkmcp.Tool {
+	if name != "open_project" {
+		input = withProjectRef(input)
+	}
 	return &sdkmcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: output, Annotations: hints}
 }
 
@@ -103,6 +106,28 @@ func withAgentSessionHandle(schema *jsonschema.Schema) *jsonschema.Schema {
 	}
 	schema.Properties["agent_session_handle"] = nullableBoundedStringSchema(256)
 	return schema
+}
+
+func withProjectRef(schema *jsonschema.Schema) *jsonschema.Schema {
+	if schema == nil {
+		return nil
+	}
+	if schema.Properties == nil {
+		schema.Properties = map[string]*jsonschema.Schema{}
+	}
+	if _, exists := schema.Properties["project_ref"]; exists {
+		return schema
+	}
+	schema.Properties["project_ref"] = nullableProjectRefSchema()
+	return schema
+}
+
+func nullableProjectRefSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{Types: []string{"string", "null"}, MaxLength: intPointer(26), Pattern: "^[0-9A-HJKMNP-TV-Z]{26}$", Description: "Optional explicit project reference; defaults to the configured project when omitted."}
+}
+
+func schemaOpenProject() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{"project_root": stringSchema()}, "project_root")
 }
 
 func schemaCreateAgentSession() *jsonschema.Schema {
