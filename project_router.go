@@ -13,6 +13,7 @@ import (
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
@@ -329,6 +330,42 @@ func (router *projectRouter) Close(ctx context.Context) error {
 		router.mu.Unlock()
 	})
 	return router.closingErr
+}
+
+// ExpireAttempts sweeps each currently ready project without retaining router
+// locks while project-local expiry performs storage work.
+func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
+	if router == nil {
+		return ports.ExpireAttemptsResult{}, nil
+	}
+	router.mu.Lock()
+	refs := make([]string, 0, len(router.entries))
+	for ref, entry := range router.entries {
+		if entry != nil && entry.state == "ready" && !entry.removed {
+			refs = append(refs, ref)
+		}
+	}
+	router.mu.Unlock()
+
+	var result ports.ExpireAttemptsResult
+	var errs []error
+	for _, ref := range refs {
+		lease, err := router.Acquire(ctx, &ref)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		projectResult, projectErr := lease.AttemptService().ExpireAttempts(ctx)
+		releaseErr := lease.Release()
+		result.ExpiredAttemptCount += projectResult.ExpiredAttemptCount
+		if projectErr != nil {
+			errs = append(errs, projectErr)
+		}
+		if releaseErr != nil {
+			errs = append(errs, releaseErr)
+		}
+	}
+	return result, errors.Join(errs...)
 }
 
 type projectRouterLease struct {

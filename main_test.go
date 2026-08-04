@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"rhizome-mcp/config"
+	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
@@ -240,156 +240,10 @@ func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
 	}
 }
 
-func TestComposeServicesBuildsLegacyServiceBundle(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	repoRoot := filepath.Join(tempDir, "repo")
-	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
-		t.Fatalf("create repo root: %v", err)
-	}
-	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
-	dataRoot := filepath.Join(tempDir, "data")
-	var stdout, stderr bytes.Buffer
-
-	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
-		t.Fatalf("init command failed: %v", err)
-	}
-
-	bundle, project, err := composeServices(ctx, repoRoot, pathInputs, dataRoot)
-	if err != nil {
-		t.Fatalf("compose services failed: %v", err)
-	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = project.Close(closeCtx)
-	}()
-
-	if bundle == nil || project == nil {
-		t.Fatal("expected bundle and project to be returned")
-	}
-	if bundle.project != project {
-		t.Fatal("expected bundle to own the opened project")
-	}
-	if bundle.ProjectRef() != project.ProjectID {
-		t.Fatalf("project ref = %q, want %q", bundle.ProjectRef(), project.ProjectID)
-	}
-
-	services := bundle.ProjectServices()
-	if services.ProjectService != bundle.projectService || services.IssueService != bundle.issueService || services.AttemptService != bundle.attemptService {
-		t.Fatal("expected project services accessor to expose the bundle services")
-	}
-	if services.SessionService == nil || services.WorkContextService == nil {
-		t.Fatal("expected session/work context services to be included")
-	}
-	if bundle.maintenanceService == nil || bundle.boardService == nil {
-		t.Fatal("expected CLI-only services to be present")
-	}
-}
-
-func TestComposedServicesCloseIsIdempotentAndClosesOnFactoryFailure(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	repoRoot := filepath.Join(tempDir, "repo")
-	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
-		t.Fatalf("create repo root: %v", err)
-	}
-	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
-	dataRoot := filepath.Join(tempDir, "data")
-	var stdout, stderr bytes.Buffer
-
-	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
-		t.Fatalf("init command failed: %v", err)
-	}
-
-	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
-	if err != nil {
-		t.Fatalf("open project: %v", err)
-	}
-	bundle, err := newComposedServices(project)
-	if err != nil {
-		t.Fatalf("build bundle: %v", err)
-	}
-	if err := bundle.Close(ctx); err != nil {
-		t.Fatalf("close bundle once: %v", err)
-	}
-	if err := bundle.Close(ctx); err != nil {
-		t.Fatalf("close bundle twice: %v", err)
-	}
-	if !reflectValueIsTrue(project, "closed") {
-		t.Fatal("expected bundle close to mark the project as closed")
-	}
-
-	project, err = projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
-	if err != nil {
-		t.Fatalf("reopen project: %v", err)
-	}
-	project.Database = nil
-	bundle, err = newComposedServices(project)
-	if err == nil {
-		t.Fatal("expected factory failure when project database is unavailable")
-	}
-	if bundle != nil {
-		t.Fatal("expected no bundle on factory failure")
-	}
-	if !reflectValueIsTrue(project, "closed") {
-		t.Fatal("expected factory failure to close the passed project")
-	}
-}
-
-func TestComposeServicesFromExistingProjectUsesExistingOnlySemantics(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	repoRoot := filepath.Join(tempDir, "repo")
-	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
-		t.Fatalf("create repo root: %v", err)
-	}
-	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
-	dataRoot := filepath.Join(tempDir, "data")
-	var stdout, stderr bytes.Buffer
-
-	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
-		t.Fatalf("init command failed: %v", err)
-	}
-
-	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
-	if err != nil {
-		t.Fatalf("open project: %v", err)
-	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = project.Close(closeCtx)
-	}()
-
-	bundle, openedProject, err := composeServicesFromExistingProject(ctx, project.ProjectID, dataRoot, clock.RealClock{}, sqlite.Options{})
-	if err != nil {
-		t.Fatalf("compose services from existing project failed: %v", err)
-	}
-	if bundle == nil || openedProject == nil {
-		t.Fatal("expected routed opener to return a bundle and project")
-	}
-	if bundle.ProjectRef() != project.ProjectID {
-		t.Fatalf("project ref = %q, want %q", bundle.ProjectRef(), project.ProjectID)
-	}
-	if _, _, err := composeServicesFromExistingProject(ctx, "missing-project", dataRoot, clock.RealClock{}, sqlite.Options{}); err == nil {
-		t.Fatal("expected routed opener to reject a missing existing project")
-	}
-}
-
-func reflectValueIsTrue(v interface{}, fieldName string) bool {
-	value := reflect.ValueOf(v)
-	if value.Kind() != reflect.Ptr {
-		return false
-	}
-	field := value.Elem().FieldByName(fieldName)
-	return field.IsValid() && field.Kind() == reflect.Bool && field.Bool()
-}
-
 func TestServeWithoutHTTPAddressUsesStdioTransport(t *testing.T) {
 	originalServeStdio := serveStdio
 	called := false
-	serveStdio = func(context.Context, *config.Config, io.Writer, *composedServices) error {
+	serveStdio = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error {
 		called = true
 		return nil
 	}
@@ -400,6 +254,166 @@ func TestServeWithoutHTTPAddressUsesStdioTransport(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected stdio serve path to be used")
+	}
+}
+
+func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+	discovered, err := projectconfig.Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("discover initialized project: %v", err)
+	}
+
+	flagRoot := filepath.Join(tempDir, "flag-root")
+	if err := os.MkdirAll(flagRoot, 0o755); err != nil {
+		t.Fatalf("create flag root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(flagRoot, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write flag identity: %v", err)
+	}
+	envRoot := filepath.Join(tempDir, "env-root")
+	if err := os.MkdirAll(envRoot, 0o755); err != nil {
+		t.Fatalf("create env root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(envRoot, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW"}`), 0o644); err != nil {
+		t.Fatalf("write env identity: %v", err)
+	}
+	sharedRoot := filepath.Join(tempDir, "shared-root")
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatalf("create shared root: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		env        string
+		startingDir string
+		wantProject string
+		wantShared  bool
+	}{
+		{name: "flag precedence", args: []string{"serve", "--project-root", flagRoot}, wantProject: "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+		{name: "env precedence", args: []string{"serve"}, env: envRoot, wantProject: "01ARZ3NDEKTSV4RRFFQ69G5FAW"},
+		{name: "cwd discovery", args: []string{"serve"}, startingDir: projectRoot, wantProject: discovered.Identity.ProjectID},
+		{name: "shared fallback", args: []string{"serve"}, startingDir: sharedRoot, wantShared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RHIZOME_PROJECT_ROOT", tc.env)
+			var captured mcpadapter.ProjectRouter
+			originalServeRunner := serveRunner
+			serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+				captured = router
+				return nil
+			}
+			defer func() { serveRunner = originalServeRunner }()
+
+			startingDir := tc.startingDir
+			if startingDir == "" {
+				startingDir = projectRoot
+			}
+			if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, tc.args, startingDir, pathInputs); err != nil {
+				t.Fatalf("runCLI(%s) error = %v", tc.name, err)
+			}
+			if captured == nil {
+				t.Fatal("expected serve runner to receive a router")
+			}
+			projectRouter, ok := captured.(*projectRouter)
+			if !ok {
+				t.Fatalf("router type = %T, want *projectRouter", captured)
+			}
+			if tc.wantShared {
+				if projectRouter.defaultBundle != nil {
+					t.Fatal("expected shared router to use a nil default bundle")
+				}
+				return
+			}
+			if projectRouter.defaultBundle == nil {
+				t.Fatal("expected router to carry a default bundle")
+			}
+			if projectRouter.defaultBundle.ProjectRef() != tc.wantProject {
+				t.Fatalf("router default ref = %q, want %q", projectRouter.defaultBundle.ProjectRef(), tc.wantProject)
+			}
+		})
+	}
+}
+
+func TestServeProjectRootExplicitInvalidRootFailsWithoutFallback(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+	t.Setenv("RHIZOME_PROJECT_ROOT", filepath.Join(tempDir, "env-root"))
+
+	originalServeRunner := serveRunner
+	serveRunner = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error { return nil }
+	defer func() { serveRunner = originalServeRunner }()
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"serve", "--project-root", filepath.Join(tempDir, "missing")}, projectRoot, pathInputs); err == nil {
+		t.Fatal("expected explicit invalid project root to fail")
+	}
+}
+
+func TestNewMCPServerWithSharedRouterHasNilDefault(t *testing.T) {
+	router := newProjectRouter(filepath.Join(t.TempDir(), "data"), clock.RealClock{}, sqlite.Options{}, nil)
+	server, err := newMCPServer(&config.Config{ServerName: "test", Version: "v1", ToolProfile: "full"}, router)
+	if err != nil {
+		t.Fatalf("newMCPServer(shared) error = %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected shared server")
+	}
+}
+
+func TestNewMCPServerWithDefaultRouterStillSupportsOmittedRef(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	if err := runCLI(ctx, &config.Config{}, io.Discard, io.Discard, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open project: %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = project.Close(closeCtx)
+	}()
+	bundle, err := newComposedServices(project)
+	if err != nil {
+		t.Fatalf("compose services: %v", err)
+	}
+	router := newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
+	server, err := newMCPServer(&config.Config{ServerName: "test", Version: "v1", ToolProfile: "full"}, router)
+	if err != nil {
+		t.Fatalf("newMCPServer(default) error = %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected default server")
 	}
 }
 
@@ -422,7 +436,7 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 
 	called := false
 	originalServeRunner := serveRunner
-	serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+	serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
 		called = true
 		return nil
 	}
@@ -814,6 +828,12 @@ func (s *fakeAttemptService) ExpireAttempts(ctx context.Context) (ports.ExpireAt
 	return ports.ExpireAttemptsResult{}, nil
 }
 
+func (s *fakeAttemptService) CallCount() int {
+	s.callsMutex <- struct{}{}
+	defer func() { <-s.callsMutex }()
+	return s.callCount
+}
+
 func TestAttemptSweeperRunsOnStartAndOnTicker(t *testing.T) {
 	fakeService := newFakeAttemptService(0)
 	interval := 3 * time.Millisecond
@@ -823,15 +843,15 @@ func TestAttemptSweeperRunsOnStartAndOnTicker(t *testing.T) {
 
 	// Poll for at least 2 calls instead of sleeping
 	deadline := time.Now().Add(100 * time.Millisecond)
-	for fakeService.callCount < 2 && time.Now().Before(deadline) {
+	for fakeService.CallCount() < 2 && time.Now().Before(deadline) {
 		time.Sleep(1 * time.Millisecond)
 	}
 
 	cancel()
 	<-done
 
-	if fakeService.callCount < 2 {
-		t.Fatalf("expected at least 2 calls (start + ticker), got %d", fakeService.callCount)
+	if fakeService.CallCount() < 2 {
+		t.Fatalf("expected at least 2 calls (start + ticker), got %d", fakeService.CallCount())
 	}
 }
 
@@ -844,15 +864,15 @@ func TestAttemptSweeperContinuesAfterError(t *testing.T) {
 
 	// Poll for at least 3 calls to ensure we see the error case
 	deadline := time.Now().Add(100 * time.Millisecond)
-	for fakeService.callCount < 3 && time.Now().Before(deadline) {
+	for fakeService.CallCount() < 3 && time.Now().Before(deadline) {
 		time.Sleep(1 * time.Millisecond)
 	}
 
 	cancel()
 	<-done
 
-	if fakeService.callCount < 3 {
-		t.Fatalf("expected at least 3 calls (to see 2nd error), got %d", fakeService.callCount)
+	if fakeService.CallCount() < 3 {
+		t.Fatalf("expected at least 3 calls (to see 2nd error), got %d", fakeService.CallCount())
 	}
 }
 

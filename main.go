@@ -28,6 +28,7 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
@@ -272,6 +273,9 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 
 	var bundle *composedServices
 	var project *projectruntime.Project
+	var router mcpadapter.ProjectRouter
+	var serveProjectRoot string
+	var serveShared bool
 
 	initHandler := func(ctx context.Context, dataRoot string) error {
 		if dataRootOverride != "" && dataRoot != "" {
@@ -282,6 +286,17 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return initRunner(ctx, startingPath, pathInputs, dataRoot, stdout)
 	}
+	args, serveProjectRootOverride, err := extractServeProjectRootOption(args)
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 && args[0] == "serve" {
+		serveProjectRoot, serveShared, err = resolveServeProjectRoot(startingPath, serveProjectRootOverride)
+		if err != nil {
+			return err
+		}
+	}
+
 	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) error {
 		if httpAddress != "" {
 			cfg.HTTPAddress = httpAddress
@@ -289,13 +304,26 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		if toolProfile != "" {
 			cfg.ToolProfile = toolProfile
 		}
-		if bundle == nil {
-			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
-			if err != nil {
-				return err
+		if router == nil {
+			dataRoot, dataRootErr := resolveDataRoot(pathInputs, dataRootOverride)
+			if dataRootErr != nil {
+				return dataRootErr
+			}
+			if serveShared {
+				router = newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, nil)
+			} else {
+				composeRoot := startingPath
+				if serveProjectRoot != "" {
+					composeRoot = serveProjectRoot
+				}
+				bundle, project, err = composeServices(ctx, composeRoot, pathInputs, dataRootOverride)
+				if err != nil {
+					return err
+				}
+				router = newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 			}
 		}
-		return serveRunner(ctx, cfg, stderr, bundle)
+		return serveRunner(ctx, cfg, stderr, router)
 	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
 		if project == nil {
@@ -326,7 +354,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return runConnect(ctx, startingPath, target, realPath, printOnly, stdout, stderr)
 	}
 
-	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && (args[0] == "serve" || args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
+	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && args[0] != "serve" && (args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
 		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
@@ -393,6 +421,67 @@ func extractDataRootOption(args []string) ([]string, string, error) {
 	return remaining, dataRoot, nil
 }
 
+func extractServeProjectRootOption(args []string) ([]string, string, error) {
+	if len(args) == 0 || args[0] != "serve" {
+		return args, "", nil
+	}
+	remaining := make([]string, 0, len(args))
+	var projectRoot string
+	for index := 1; index < len(args); index++ {
+		value := args[index]
+		if value == "--project-root" {
+			if index+1 >= len(args) {
+				return nil, "", errors.New("project root requires a path")
+			}
+			if projectRoot != "" {
+				return nil, "", errors.New("project root may only be specified once")
+			}
+			projectRoot = args[index+1]
+			index++
+			continue
+		}
+		if strings.HasPrefix(value, "--project-root=") {
+			if projectRoot != "" {
+				return nil, "", errors.New("project root may only be specified once")
+			}
+			projectRoot = strings.TrimPrefix(value, "--project-root=")
+			if projectRoot == "" {
+				return nil, "", errors.New("project root requires a path")
+			}
+			continue
+		}
+		remaining = append(remaining, value)
+	}
+	remaining = append([]string{"serve"}, remaining...)
+	return remaining, projectRoot, nil
+}
+
+func resolveServeProjectRoot(startingPath, projectRootOverride string) (string, bool, error) {
+	if projectRootOverride != "" {
+		resolved, err := projectconfig.LoadProjectRoot(projectRootOverride)
+		if err != nil {
+			return "", false, err
+		}
+		return resolved.Root, false, nil
+	}
+	if envRoot := os.Getenv("RHIZOME_PROJECT_ROOT"); envRoot != "" {
+		resolved, err := projectconfig.LoadProjectRoot(envRoot)
+		if err != nil {
+			return "", false, err
+		}
+		return resolved.Root, false, nil
+	}
+	discovered, err := projectconfig.Discover(startingPath)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) && domainErr.Code == projectconfig.CodeProjectNotFound {
+			return "", true, nil
+		}
+		return "", false, err
+	}
+	return discovered.Root, false, nil
+}
+
 func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string, stdout io.Writer) error {
 	dataRoot, err := resolveDataRoot(pathInputs, dataRootOverride)
 	if err != nil {
@@ -439,7 +528,7 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 	return writeJSON(stdout, response)
 }
 
-func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
+func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) (err error) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -448,28 +537,37 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle 
 
 	cleanupCtx, stopCleanup := context.WithCancel(ctx)
 	var expirer attemptExpirer
-	if bundle != nil {
-		expirer = bundle.attemptService
+	if routerExpirer, ok := router.(attemptExpirer); ok {
+		expirer = routerExpirer
 	}
 	cleanupDone := runAttemptSweeper(cleanupCtx, attemptCleanupInterval, expirer)
 	defer func() {
 		stopCleanup()
 		<-cleanupDone
 	}()
+	defer func() {
+		if router == nil {
+			return
+		}
+		if closer, ok := router.(interface{ Close(context.Context) error }); ok {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, closer.Close(closeCtx))
+		}
+	}()
 
 	if cfg.HTTPAddress != "" {
-		return serveHTTP(ctx, cfg, stderr, bundle)
+		return serveHTTP(ctx, cfg, stderr, router)
 	}
-	return serveStdio(ctx, cfg, stderr, bundle)
+	return serveStdio(ctx, cfg, stderr, router)
 }
 
-func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Server, error) {
-	if bundle == nil || bundle.project == nil {
-		return nil, errors.New("project bundle is required")
+func newMCPServer(cfg *config.Config, router mcpadapter.ProjectRouter) (*mcpadapter.Server, error) {
+	if router == nil {
+		return nil, errors.New("project router is required")
 	}
-	services := bundle.ProjectServices()
 	return mcpadapter.NewServer(mcpadapter.Options{
-		ProjectRouter: mcpadapter.NewStaticProjectRouter(bundle.project.ProjectID, bundle.project.Root, services),
+		ProjectRouter: router,
 		ServerName:    cfg.ServerName,
 		ServerVersion: cfg.Version,
 		ConfigVersion: projectconfig.CurrentIdentityVersion,
@@ -477,16 +575,16 @@ func newMCPServer(cfg *config.Config, bundle *composedServices) (*mcpadapter.Ser
 	})
 }
 
-func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
-	server, err := newMCPServer(cfg, bundle)
+func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+	server, err := newMCPServer(cfg, router)
 	if err != nil {
 		return err
 	}
 	return server.Run(ctx, &sdkmcp.StdioTransport{})
 }
 
-func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, bundle *composedServices) error {
-	handler, err := newHTTPHandler(cfg, bundle)
+func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+	handler, err := newHTTPHandler(cfg, router)
 	if err != nil {
 		return err
 	}
@@ -494,16 +592,16 @@ func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, bun
 	return projectruntime.ServeHTTPServer(ctx, projectruntime.HTTPServerOptions{Address: cfg.HTTPAddress, Logger: logger, Handler: handler})
 }
 
-func newHTTPHandler(cfg *config.Config, bundle *composedServices) (http.Handler, error) {
+func newHTTPHandler(cfg *config.Config, router mcpadapter.ProjectRouter) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	if bundle == nil {
-		return nil, errors.New("mcp services are required")
+	if router == nil {
+		return nil, errors.New("project router is required")
 	}
 	// One server serves every session: the adapter keys all of its state per
 	// session, and the SDK allows the factory to return the same server.
-	server, err := newMCPServer(cfg, bundle)
+	server, err := newMCPServer(cfg, router)
 	if err != nil {
 		return nil, err
 	}
@@ -678,32 +776,10 @@ func writeJSONToWriter(w io.Writer, value interface{}) error {
 	return err
 }
 
-func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {
-	project, err = openProject(ctx, startingPath, pathInputs, dataRootOverride)
-	if err != nil {
-		return nil, nil, err
-	}
-	bundle, err = newComposedServices(project)
-	if err != nil {
-		return nil, nil, err
-	}
-	return bundle, project, nil
-}
-
-func newComposedServices(project *projectruntime.Project) (_ *composedServices, err error) {
+func newComposedServices(project *projectruntime.Project) (*composedServices, error) {
 	if project == nil {
-		return nil, errors.New("project is required")
+		return nil, errors.New("project is nil")
 	}
-	defer func() {
-		if err == nil {
-			return
-		}
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
-		defer cancel()
-		if closeErr := project.Close(closeCtx); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
 
 	source := clock.RealClock{}
 	issueRepository, err := sqlite.NewIssueRepository(project.Database)
@@ -847,6 +923,32 @@ func newComposedServices(project *projectruntime.Project) (_ *composedServices, 
 	}, nil
 }
 
+func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {
+	project, err = openProject(ctx, startingPath, pathInputs, dataRootOverride)
+	if err != nil {
+		return nil, nil, err
+	}
+	openedProject := project
+	keepProject := false
+	defer func() {
+		if keepProject {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := openedProject.Close(closeCtx); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	bundle, err = newComposedServices(project)
+	if err != nil {
+		return nil, nil, err
+	}
+	keepProject = true
+	return bundle, project, nil
+}
+
 func composeServicesFromExistingProject(ctx context.Context, projectID, dataRoot string, source clock.Clock, sqliteOptions sqlite.Options) (bundle *composedServices, project *projectruntime.Project, err error) {
 	if source == nil {
 		source = clock.RealClock{}
@@ -855,10 +957,24 @@ func composeServicesFromExistingProject(ctx context.Context, projectID, dataRoot
 	if err != nil {
 		return nil, nil, err
 	}
+	openedProject := project
+	keepProject := false
+	defer func() {
+		if keepProject {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := openedProject.Close(closeCtx); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
 	bundle, err = newComposedServices(project)
 	if err != nil {
 		return nil, nil, err
 	}
+	keepProject = true
 	return bundle, project, nil
 }
 
