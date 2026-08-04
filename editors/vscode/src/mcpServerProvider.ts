@@ -138,7 +138,7 @@ export function createRhizomeMcpServerProvider(
       const definition = new vscode.McpStdioServerDefinition(
         label,
         binaryInfo.binaryPath,
-        ['serve'],
+        ['serve', '--project-root', folder.uri.fsPath],
         undefined,
         binaryInfo.version ?? undefined,
       );

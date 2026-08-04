@@ -57,8 +57,8 @@ func TestIntegrationConnectClaudeCreatesConfig(t *testing.T) {
 	}
 
 	args, ok := rhizome["args"].([]interface{})
-	if !ok || len(args) != 1 || args[0] != "serve" {
-		t.Errorf("args = %v, want [serve]", rhizome["args"])
+	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != env.repository {
+		t.Errorf("args = %v, want [serve --project-root %s]", rhizome["args"], env.repository)
 	}
 
 	_ = output
@@ -180,6 +180,11 @@ func TestIntegrationConnectVSCodeCreatesConfig(t *testing.T) {
 
 	if !filepath.IsAbs(command) {
 		t.Errorf("command is not an absolute path: %s", command)
+	}
+
+	args, ok := rhizome["args"].([]interface{})
+	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != env.repository {
+		t.Errorf("args = %v, want [serve --project-root %s]", rhizome["args"], env.repository)
 	}
 }
 

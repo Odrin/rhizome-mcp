@@ -117,10 +117,11 @@ suite('createRhizomeMcpServerProvider (real workspace integration)', () => {
     const [definition] = definitions;
     assert.equal(definition.label, 'rhizome');
     assert.equal(definition.command, FAKE_BINARY_PATH);
-    assert.deepEqual(definition.args, ['serve']);
+    assert.strictEqual(definition.args.length, 3, 'expected exactly three args');
+    assert.deepStrictEqual(definition.args, ['serve', '--project-root', folder.uri.fsPath]);
     assert.equal(definition.version, FAKE_VERSION);
     assert.ok(definition.cwd, 'expected cwd to be set');
-    assert.equal(path.resolve(definition.cwd!.fsPath), path.resolve(folder.uri.fsPath));
+    assert.strictEqual(definition.cwd?.toString(), folder.uri.toString());
   });
 
   test('yields no definition for a workspace folder without .agent-tracker.json', async () => {
