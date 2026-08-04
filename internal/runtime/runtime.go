@@ -136,6 +136,60 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 	}, nil
 }
 
+// OpenExistingProject opens a project database that is already present on disk
+// without discovering a repository root or creating a missing database.
+func OpenExistingProject(ctx context.Context, projectID, dataRoot string, clock clock.Clock, sqliteOptions sqlite.Options) (_ *Project, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clock == nil {
+		return nil, domain.NewError(CodeProjectOpen, "project clock is required", false)
+	}
+
+	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingDatabasePath(databasePath); err != nil {
+		return nil, err
+	}
+
+	db, err := sqlite.Open(ctx, databasePath, sqliteOptions)
+	if err != nil {
+		return nil, lifecycleError(err, CodeProjectOpen, "cannot open project database")
+	}
+	keep := false
+	defer func() {
+		if keep || err == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		closeErr := db.Close(closeCtx)
+		if err == nil && closeErr != nil {
+			err = lifecycleError(closeErr, CodeProjectOpen, "cannot close project database after startup failure")
+		}
+	}()
+
+	schemaVersion, err := verifyProjectHistory(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyProjectRowIdentity(ctx, db, projectID); err != nil {
+		return nil, err
+	}
+
+	keep = true
+	return &Project{
+		ProjectID:     projectID,
+		DatabasePath:  databasePath,
+		SchemaVersion: schemaVersion,
+		Database:      db,
+		SQLite:        sqliteOptions,
+		clock:         clock,
+	}, nil
+}
+
 func prepareDatabaseDestination(path string) (bool, error) {
 	parent := filepath.Dir(path)
 	info, err := os.Stat(parent)
@@ -159,6 +213,68 @@ func prepareDatabaseDestination(path string) (bool, error) {
 	default:
 		return true, nil
 	}
+}
+
+func validateExistingDatabasePath(path string) error {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return domain.NewError(domain.CodeProjectNotFound, "project database not found", false)
+	case err != nil:
+		return domain.WrapError(err, domain.CodeStorageConfiguration, "project database path is invalid", false)
+	case info.Mode()&os.ModeSymlink != 0:
+		return domain.NewError(domain.CodeStorageConfiguration, "project database path must not be a symlink", false)
+	case !info.Mode().IsRegular():
+		return domain.NewError(domain.CodeStorageConfiguration, "project database path must be a regular file", false)
+	default:
+		return nil
+	}
+}
+
+func verifyProjectHistory(ctx context.Context, db *sqlite.DB) (int, error) {
+	var version int
+	err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		var verifyErr error
+		version, verifyErr = migrations.VerifyHistory(ctx, query)
+		return verifyErr
+	})
+	if err != nil {
+		return 0, err
+	}
+	if version != migrations.CurrentVersion() {
+		return 0, domain.NewError(domain.CodeStorageMigration, fmt.Sprintf("project database schema version %d is out of date", version), false)
+	}
+	return version, nil
+}
+
+func verifyProjectRowIdentity(ctx context.Context, db *sqlite.DB, projectID string) error {
+	var ids []string
+	err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		rows, err := query.QueryContext(ctx, "SELECT id FROM projects ORDER BY id")
+		if err != nil {
+			return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(ids) != 1 || ids[0] != projectID {
+		return domain.NewError(CodeProjectMismatch, "project database identity does not match repository identity", false,
+			domain.Detail{Field: "projects", Code: CodeProjectMismatch, Message: fmt.Sprintf("expected one row for project %s", projectID)})
+	}
+	return nil
 }
 
 func ensureProjectRow(ctx context.Context, db *sqlite.DB, projectID string, now time.Time) error {

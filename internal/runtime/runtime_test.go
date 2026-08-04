@@ -157,6 +157,304 @@ func TestOpenProjectInitializesMissingDatabaseForExistingIdentity(t *testing.T) 
 	assertHealthy(t, project)
 }
 
+func TestOpenExistingProjectOpensExistingCurrentDatabase(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	existing, err := projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("OpenExistingProject() error = %v", err)
+	}
+	t.Cleanup(func() { _ = existing.Close(context.Background()) })
+
+	if existing.Root != "" {
+		t.Fatalf("root = %q, want empty", existing.Root)
+	}
+	if existing.ProjectID != projectID {
+		t.Fatalf("project ID = %q, want %q", existing.ProjectID, projectID)
+	}
+	if existing.SchemaVersion != migrations.CurrentVersion() {
+		t.Fatalf("schema version = %d, want %d", existing.SchemaVersion, migrations.CurrentVersion())
+	}
+	if existing.DatabasePath != filepath.Join(dataRoot, "projects", projectID, "tasks.db") {
+		t.Fatalf("database path = %q", existing.DatabasePath)
+	}
+	assertProjectRow(t, existing, projectID, testTime.UTC().Format(time.RFC3339Nano))
+}
+
+func TestOpenExistingProjectRejectsMissingDatabaseWithoutFilesystemWrites(t *testing.T) {
+	dataRoot := filepath.Join(t.TempDir(), "application-data", "rhizome-mcp")
+	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(databasePath)
+
+	_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	assertDomainCode(t, err, domain.CodeProjectNotFound)
+	if _, statErr := os.Stat(parent); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("parent dir stat error = %v, want not-exist", statErr)
+	}
+	if _, statErr := os.Stat(databasePath + ".wal"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("wal stat error = %v, want not-exist", statErr)
+	}
+}
+
+func TestOpenExistingProjectRejectsNonRegularAndSymlinkDatabasePaths(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		prepare  func(path string) error
+		wantCode string
+	}{
+		{
+			name: "symlink",
+			prepare: func(path string) error {
+				target := filepath.Join(t.TempDir(), "target.db")
+				if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+					return err
+				}
+				return os.Symlink(target, path)
+			},
+			wantCode: domain.CodeStorageConfiguration,
+		},
+		{
+			name:     "directory",
+			prepare:  func(path string) error { return os.MkdirAll(path, 0o700) },
+			wantCode: domain.CodeStorageConfiguration,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataRoot := filepath.Join(t.TempDir(), "application-data", "rhizome-mcp")
+			databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(databasePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.prepare(databasePath); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+			assertDomainCode(t, err, tt.wantCode)
+		})
+	}
+}
+
+func TestOpenExistingProjectRejectsCorruptDatabase(t *testing.T) {
+	dataRoot := filepath.Join(t.TempDir(), "application-data", "rhizome-mcp")
+	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(databasePath, []byte("not-a-database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	assertDomainCode(t, err, domain.CodeStorageCorrupt)
+}
+
+func TestOpenExistingProjectRejectsStaleMigrationHistoryWithoutMigrating(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sqlite.Open(context.Background(), project.DatabasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeRows int
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&beforeRows)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	assertDomainCode(t, err, domain.CodeStorageMigration)
+
+	db, err = sqlite.Open(context.Background(), project.DatabasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close(context.Background()) }()
+	var afterRows int
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&afterRows)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if afterRows != beforeRows-1 {
+		t.Fatalf("schema_migrations rows = %d, want %d", afterRows, beforeRows-1)
+	}
+}
+
+func TestOpenExistingProjectRejectsInvalidProjectRows(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(t *testing.T, databasePath string)
+	}{
+		{
+			name: "zero rows",
+			mutate: func(t *testing.T, databasePath string) {
+				db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close(context.Background()) }()
+				if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+					_, err := tx.ExecContext(ctx, "DELETE FROM projects")
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "other project id",
+			mutate: func(t *testing.T, databasePath string) {
+				db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close(context.Background()) }()
+				if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+					_, err := tx.ExecContext(ctx, "UPDATE projects SET id = ? WHERE id = ?", otherProjectID, projectID)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "multiple rows",
+			mutate: func(t *testing.T, databasePath string) {
+				db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close(context.Background()) }()
+				if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+					_, err := tx.ExecContext(ctx, "INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)", otherProjectID, testTime.UTC().Format(time.RFC3339Nano), testTime.UTC().Format(time.RFC3339Nano))
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repository, dataRoot := initializeProject(t)
+			project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+				StartingPath: repository,
+				DataRoot:     dataRoot,
+				Clock:        clock.NewFakeClock(testTime),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := project.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			tt.mutate(t, project.DatabasePath)
+			_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+			assertDomainCode(t, err, projectruntime.CodeProjectMismatch)
+		})
+	}
+}
+
+func TestOpenExistingProjectRejectsCancellation(t *testing.T) {
+	_, dataRoot := initializeProject(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := projectruntime.OpenExistingProject(ctx, projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
+
+func TestOpenExistingProjectCleansUpAfterFailure(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sqlite.Open(context.Background(), project.DatabasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	assertDomainCode(t, err, domain.CodeStorageMigration)
+
+	renamed := project.DatabasePath + ".renamed"
+	if err := os.Rename(project.DatabasePath, renamed); err != nil {
+		if goruntime.GOOS == "windows" {
+			t.Fatalf("rename after failed startup indicates leaked handle: %v", err)
+		}
+		t.Skipf("filesystem does not support verification rename: %v", err)
+	}
+	reopened, err := sqlite.Open(context.Background(), renamed, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("reopen renamed database after startup failure: %v", err)
+	}
+	if err := reopened.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenProjectRejectsMismatchedPreseededProject(t *testing.T) {
 	repository, dataRoot := initializeProject(t)
 	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
