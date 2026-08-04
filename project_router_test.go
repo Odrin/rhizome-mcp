@@ -284,6 +284,149 @@ func TestProjectRouterReleaseIsIdempotentAndCloseDrains(t *testing.T) {
 	}
 }
 
+func TestProjectRouterCancelingInitiatingWaiterReleasesReservation(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+	openStarted := make(chan struct{})
+	allowOpen := make(chan struct{})
+	acquireErr := make(chan error, 1)
+
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		close(openStarted)
+		<-allowOpen
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_, err := router.Acquire(ctx, &ref)
+		acquireErr <- err
+	}()
+
+	select {
+	case <-openStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for open to begin")
+	}
+
+	cancel()
+
+	select {
+	case err := <-acquireErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Acquire() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled acquire to return")
+	}
+
+	router.mu.Lock()
+	entry, present := router.entries[ref]
+	opening := router.openingCount
+	active := router.activeCount
+	router.mu.Unlock()
+	if !present {
+		t.Fatal("expected router entry to remain present while open is in flight")
+	}
+	if opening != 1 {
+		t.Fatalf("openingCount = %d, want 1 while open is still in flight", opening)
+	}
+	if active != 0 {
+		t.Fatalf("activeCount = %d, want 0 after canceled waiter releases reservation", active)
+	}
+	if entry == nil || entry.active != 0 {
+		t.Fatalf("entry.active = %d, want 0 after canceled waiter releases reservation", entry.active)
+	}
+
+	close(allowOpen)
+}
+
+func TestProjectRouterCancelingCoalescedWaiterLeavesHealthyWaiterWorking(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB2"
+	openStarted := make(chan struct{})
+	allowOpen := make(chan struct{})
+	healthyLeaseCh := make(chan mcpadapter.ProjectLease, 1)
+	healthyErrCh := make(chan error, 1)
+	coalescedErrCh := make(chan error, 1)
+
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		close(openStarted)
+		<-allowOpen
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	healthyCtx := context.Background()
+	go func() {
+		lease, err := router.Acquire(healthyCtx, &ref)
+		if err != nil {
+			healthyErrCh <- err
+			return
+		}
+		healthyLeaseCh <- lease
+	}()
+
+	select {
+	case <-openStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for open to begin")
+	}
+
+	coalescedCtx, cancelCoalesced := context.WithCancel(context.Background())
+	go func() {
+		_, err := router.Acquire(coalescedCtx, &ref)
+		coalescedErrCh <- err
+	}()
+
+	cancelCoalesced()
+
+	select {
+	case err := <-coalescedErrCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("coalesced Acquire() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled coalesced acquire to return")
+	}
+
+	router.mu.Lock()
+	entry, present := router.entries[ref]
+	opening := router.openingCount
+	active := router.activeCount
+	router.mu.Unlock()
+	if !present {
+		t.Fatal("expected router entry to remain present while healthy waiter is still waiting")
+	}
+	if opening != 1 {
+		t.Fatalf("openingCount = %d, want 1 while open is still in flight", opening)
+	}
+	if active != 1 {
+		t.Fatalf("activeCount = %d, want 1 after canceled coalesced waiter releases reservation", active)
+	}
+	if entry == nil || entry.active != 1 {
+		t.Fatalf("entry.active = %d, want 1 after canceled coalesced waiter releases reservation", entry.active)
+	}
+
+	close(allowOpen)
+
+	select {
+	case err := <-healthyErrCh:
+		t.Fatalf("healthy Acquire() error = %v", err)
+	case lease := <-healthyLeaseCh:
+		if lease == nil {
+			t.Fatal("healthy Acquire() returned nil lease")
+		}
+		if lease.ProjectRef() != ref {
+			t.Fatalf("healthy lease ref = %q, want %q", lease.ProjectRef(), ref)
+		}
+		if err := lease.Release(); err != nil {
+			t.Fatalf("Release() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for healthy waiter to receive lease")
+	}
+}
+
 func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB1"
 	openStarted := make(chan struct{})

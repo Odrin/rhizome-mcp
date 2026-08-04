@@ -96,6 +96,10 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
 
 	router.mu.Lock()
 	if router.closed {
@@ -119,7 +123,14 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 			entry.lastUsed = time.Now().UnixNano()
 			router.activeCount++
 			router.mu.Unlock()
-			<-entry.done
+			select {
+			case <-entry.done:
+			case <-waitCtx.Done():
+				router.mu.Lock()
+				router.releaseEntryLocked(entry)
+				router.mu.Unlock()
+				return nil, waitCtx.Err()
+			}
 			router.mu.Lock()
 			defer router.mu.Unlock()
 			if entry.result.err != nil {
@@ -161,7 +172,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	}
 
 	go func() {
-		result := router.openEntry(ctx, entry)
+		result := router.openEntry(context.WithoutCancel(waitCtx), entry)
 		router.mu.Lock()
 		defer router.mu.Unlock()
 		if entry.removed {
@@ -185,7 +196,14 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 		router.cond.Broadcast()
 	}()
 
-	<-entry.done
+	select {
+	case <-entry.done:
+	case <-waitCtx.Done():
+		router.mu.Lock()
+		router.releaseEntryLocked(entry)
+		router.mu.Unlock()
+		return nil, waitCtx.Err()
+	}
 	router.mu.Lock()
 	defer router.mu.Unlock()
 	if entry.result.err != nil {
