@@ -32,13 +32,14 @@ type projectRouter struct {
 	defaultRef    string
 	defaultRoot   string
 
-	mu         sync.Mutex
-	cond       *sync.Cond
-	entries    map[string]*projectRouterEntry
-	closed     bool
-	closing    bool
-	closingErr error
-	closeOnce  sync.Once
+	mu           sync.Mutex
+	cond         *sync.Cond
+	entries      map[string]*projectRouterEntry
+	closed       bool
+	closing      bool
+	closingErr   error
+	closeOnce    sync.Once
+	closeStarted chan struct{}
 
 	openingCount int
 	activeCount  int
@@ -71,6 +72,7 @@ func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.
 		sqliteOptions: sqliteOptions,
 		entries:       make(map[string]*projectRouterEntry),
 		composeFn:     composeServicesFromExistingProject,
+		closeStarted:  make(chan struct{}),
 	}
 	router.cond = sync.NewCond(&router.mu)
 	if defaultBundle != nil && defaultBundle.ProjectRef() != "" {
@@ -150,6 +152,9 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	entry := &projectRouterEntry{ref: ref, state: "opening", done: make(chan struct{}), lastUsed: time.Now().UnixNano()}
 	router.entries[ref] = entry
 	router.openingCount++
+	entry.active++
+	entry.lastUsed = time.Now().UnixNano()
+	router.activeCount++
 	router.mu.Unlock()
 	if evicted != nil && evicted.bundle != nil {
 		_ = evicted.bundle.Close(context.Background())
@@ -184,14 +189,13 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	router.mu.Lock()
 	defer router.mu.Unlock()
 	if entry.result.err != nil {
+		router.releaseEntryLocked(entry)
 		return nil, entry.result.err
 	}
 	if entry.result.bundle == nil {
+		router.releaseEntryLocked(entry)
 		return nil, errProjectRouterClosed
 	}
-	entry.active++
-	entry.lastUsed = time.Now().UnixNano()
-	router.activeCount++
 	return router.wrapLease(entry), nil
 }
 
@@ -277,6 +281,9 @@ func (router *projectRouter) Close(ctx context.Context) error {
 		router.mu.Lock()
 		router.closed = true
 		router.closing = true
+		if router.closeStarted != nil {
+			close(router.closeStarted)
+		}
 		router.mu.Unlock()
 
 		deadline := time.Now().Add(5 * time.Second)

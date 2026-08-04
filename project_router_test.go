@@ -284,6 +284,91 @@ func TestProjectRouterReleaseIsIdempotentAndCloseDrains(t *testing.T) {
 	}
 }
 
+func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
+	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+	openStarted := make(chan struct{})
+	allowOpen := make(chan struct{})
+	leaseDelivered := make(chan mcpadapter.ProjectLease, 1)
+	acquireErr := make(chan error, 1)
+	closeDone := make(chan error, 1)
+
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		close(openStarted)
+		<-allowOpen
+		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	go func() {
+		lease, err := router.Acquire(context.Background(), &ref)
+		if err != nil {
+			acquireErr <- err
+			return
+		}
+		leaseDelivered <- lease
+	}()
+
+	<-openStarted
+	go func() {
+		closeDone <- router.Close(context.Background())
+	}()
+
+	select {
+	case <-router.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Close to begin draining")
+	}
+
+	close(allowOpen)
+
+	var lease mcpadapter.ProjectLease
+	select {
+	case err := <-acquireErr:
+		t.Fatalf("Acquire() error after open = %v", err)
+	case lease = <-leaseDelivered:
+	}
+	if lease == nil {
+		t.Fatal("Acquire() returned nil lease")
+	}
+
+	router.mu.Lock()
+	entry, present := router.entries[ref]
+	opening := router.openingCount
+	active := router.activeCount
+	router.mu.Unlock()
+	if !present {
+		t.Fatal("expected router entry to remain present while active lease is outstanding")
+	}
+	if opening != 0 {
+		t.Fatalf("openingCount = %d, want 0 after open completion", opening)
+	}
+	if active != 1 {
+		t.Fatalf("activeCount = %d, want 1 while lease is active", active)
+	}
+	if entry == nil || entry.active != 1 {
+		t.Fatalf("entry.active = %v, want 1 while lease is active", entry.active)
+	}
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close completed before initiating lease was released: %v", err)
+	default:
+	}
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Close to finish after lease release")
+	}
+}
+
 func newTestBundle(projectID string) *composedServices {
 	return &composedServices{project: &projectruntime.Project{ProjectID: projectID}}
 }
