@@ -506,7 +506,34 @@ func schemaCreateAgentSessionOutput() *jsonschema.Schema {
 func schemaEndAgentSessionOutput() *jsonschema.Schema { return typedSchema[endAgentSessionOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema       { return typedSchema[labelListOutput]() }
 func schemaIssueOutput() *jsonschema.Schema           { return typedSchema[issueDTO]() }
-func schemaReviewRequestOutput() *jsonschema.Schema   { return typedSchema[reviewRequestDTO]() }
+func schemaGetIssueOutput() *jsonschema.Schema {
+	properties := map[string]*jsonschema.Schema{
+		"id":                  stringSchema(),
+		"display_id":          stringSchema(),
+		"sequence_no":         integerSchema(),
+		"type":                stringSchema(),
+		"title":               stringSchema(),
+		"version":             integerSchema(),
+		"updated_at":          stringSchema(),
+		"status":              stringSchema(),
+		"priority":            stringSchema(),
+		"parent_issue_id":     nullableStringSchema(),
+		"blocked_reason":      nullableStringSchema(),
+		"created_at":          stringSchema(),
+		"closed_at":           nullableStringSchema(),
+		"archived_at":         nullableStringSchema(),
+		"description":         nullableStringSchema(),
+		"acceptance_criteria": nullableStringSchema(),
+		"labels": &jsonschema.Schema{AnyOf: []*jsonschema.Schema{
+			{Type: "array", Items: typedSchema[labelReferenceDTO]()},
+			{Type: "array", Items: typedSchema[labelDTO]()},
+		}},
+	}
+	return object(properties,
+		"id", "display_id", "sequence_no", "type", "title", "version", "updated_at",
+	)
+}
+func schemaReviewRequestOutput() *jsonschema.Schema { return typedSchema[reviewRequestDTO]() }
 func schemaReviewRequestListOutput() *jsonschema.Schema {
 	return typedSchema[reviewRequestListOutput]()
 }

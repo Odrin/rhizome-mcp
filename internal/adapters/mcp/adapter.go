@@ -213,7 +213,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupIssues, tool("update_issue", "Patch one issue using its current version for optimistic concurrency.", schemaUpdateIssue(), schemaUpdateOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[updateIssueInput, any](target, t, (*adapter).updateIssue))
 	})
-	target.registerTool(server, groupIssues, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaIssueOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupIssues, tool("get_issue", "Get the current issue record by ULID or ISSUE-N display ID.", schemaGetIssue(), schemaGetIssueOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getIssueInput, any](target, t, (*adapter).getIssue))
 	})
 	target.registerTool(server, groupIssues, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
@@ -828,7 +828,20 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(issueDTOFromDomain(issue), "issue returned")
+	view := input.View
+	if view == "" {
+		view = "standard"
+	}
+	switch view {
+	case "compact":
+		return success(issueCompactProjectionDTOFromDomain(issue), "issue returned")
+	case "standard":
+		return success(issueStandardProjectionDTOFromDomain(issue), "issue returned")
+	case "full":
+		return success(issueDTOFromDomain(issue), "issue returned")
+	default:
+		return adapter.failure(unsupportedField("view"))
+	}
 }
 
 func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {

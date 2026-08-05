@@ -815,6 +815,107 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 // set with no unbounded free-text fields, "full" reproduces the complete
 // pre-ISSUE-63 projection unchanged, and an unsupported view value still
 // fails with a structured validation error.
+func TestGetIssueViewProjections(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "get-issue-view.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	parent := call(t, client, "create_issue", map[string]any{"type": "epic", "title": "Parent epic"})
+	var parentOut struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, parent, &parentOut)
+	if parent.IsError || parentOut.ID == "" {
+		t.Fatalf("create parent = %#v", parent)
+	}
+
+	created := call(t, client, "create_issue", map[string]any{
+		"type": "task", "title": "Projection subject", "status": "ready",
+		"description":           "Body for compact/standard/full projection test.",
+		"acceptance_criteria":   "Acceptance criteria body for projection test.",
+		"parent_issue_id":       parentOut.ID,
+		"labels":                []string{"projection"},
+		"create_missing_labels": true,
+	})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue = %#v", created)
+	}
+
+	compact := singleIssueFields(t, call(t, client, "get_issue", map[string]any{"issue_id": issue.ID, "view": "compact"}))
+	for _, field := range []string{"id", "display_id", "sequence_no", "type", "title", "version", "updated_at"} {
+		if _, ok := compact[field]; !ok {
+			t.Fatalf("compact view missing field %q: %v", field, compact)
+		}
+	}
+	for _, field := range []string{"status", "priority", "parent_issue_id", "blocked_reason", "created_at", "closed_at", "archived_at", "labels", "description", "acceptance_criteria"} {
+		if _, present := compact[field]; present {
+			t.Fatalf("compact view unexpectedly includes field %q: %v", field, compact)
+		}
+	}
+
+	standard := singleIssueFields(t, call(t, client, "get_issue", map[string]any{"issue_id": issue.ID, "view": "standard"}))
+	for _, field := range []string{"id", "display_id", "sequence_no", "type", "title", "version", "updated_at", "status", "priority", "parent_issue_id", "blocked_reason", "created_at", "closed_at", "archived_at", "labels"} {
+		if _, ok := standard[field]; !ok {
+			t.Fatalf("standard view missing field %q: %v", field, standard)
+		}
+	}
+	for _, field := range []string{"description", "acceptance_criteria"} {
+		if _, present := standard[field]; present {
+			t.Fatalf("standard view unexpectedly includes field %q: %v", field, standard)
+		}
+	}
+	var labels []map[string]json.RawMessage
+	if err := json.Unmarshal(standard["labels"], &labels); err != nil {
+		t.Fatalf("decode standard labels: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("standard labels = %#v", labels)
+	}
+	if _, ok := labels[0]["normalized_name"]; ok {
+		t.Fatalf("standard labels unexpectedly include full metadata: %#v", labels[0])
+	}
+
+	omitted := singleIssueFields(t, call(t, client, "get_issue", map[string]any{"issue_id": issue.ID}))
+	if !reflect.DeepEqual(omitted, standard) {
+		t.Fatalf("omitted get_issue should match standard projection: omitted=%v standard=%v", omitted, standard)
+	}
+
+	full := singleIssueFields(t, call(t, client, "get_issue", map[string]any{"issue_id": issue.ID, "view": "full"}))
+	for _, field := range []string{"id", "display_id", "sequence_no", "type", "title", "version", "updated_at", "status", "priority", "parent_issue_id", "blocked_reason", "created_at", "closed_at", "archived_at", "labels", "description", "acceptance_criteria"} {
+		if _, ok := full[field]; !ok {
+			t.Fatalf("full view missing field %q: %v", field, full)
+		}
+	}
+	var fullLabels []map[string]json.RawMessage
+	if err := json.Unmarshal(full["labels"], &fullLabels); err != nil {
+		t.Fatalf("decode full labels: %v", err)
+	}
+	if len(fullLabels) != 1 || len(fullLabels[0]) == 0 {
+		t.Fatalf("full labels = %#v", fullLabels)
+	}
+	if _, ok := fullLabels[0]["normalized_name"]; !ok {
+		t.Fatalf("full labels should preserve full metadata: %#v", fullLabels[0])
+	}
+	var description string
+	if err := json.Unmarshal(full["description"], &description); err != nil {
+		t.Fatalf("decode description: %v", err)
+	}
+	if description != "Body for compact/standard/full projection test." {
+		t.Fatalf("full description = %q", description)
+	}
+
+	invalidView := call(t, client, "get_issue", map[string]any{"issue_id": issue.ID, "view": "detailed"})
+	if !invalidView.IsError || invalidView.StructuredContent != nil {
+		t.Fatalf("get_issue detailed view should be rejected by the advertised schema: %#v", invalidView)
+	}
+}
+
 func TestListIssuesViewProjections(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "list-issues-view.db"))
@@ -900,6 +1001,16 @@ func TestListIssuesViewProjections(t *testing.T) {
 	if !invalidView.IsError || invalidView.StructuredContent != nil {
 		t.Fatalf("list_issues detailed view should be rejected by the advertised schema: %#v", invalidView)
 	}
+}
+
+func singleIssueFields(t *testing.T, result *sdkmcp.CallToolResult) map[string]json.RawMessage {
+	t.Helper()
+	var output map[string]json.RawMessage
+	decodeStructured(t, result, &output)
+	if result.IsError {
+		t.Fatalf("get_issue result = %#v", result)
+	}
+	return output
 }
 
 func singleListedItemFields(t *testing.T, result *sdkmcp.CallToolResult, wantID string) map[string]json.RawMessage {

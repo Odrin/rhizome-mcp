@@ -563,6 +563,39 @@ type labelDTO struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+type labelReferenceDTO struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type issueCompactProjectionDTO struct {
+	ID         string    `json:"id"`
+	DisplayID  string    `json:"display_id"`
+	SequenceNo int64     `json:"sequence_no"`
+	Type       string    `json:"type"`
+	Title      string    `json:"title"`
+	Version    int64     `json:"version"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type issueStandardProjectionDTO struct {
+	ID            string              `json:"id"`
+	DisplayID     string              `json:"display_id"`
+	SequenceNo    int64               `json:"sequence_no"`
+	Type          string              `json:"type"`
+	Title         string              `json:"title"`
+	Version       int64               `json:"version"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+	Status        string              `json:"status"`
+	Priority      string              `json:"priority"`
+	ParentIssueID *string             `json:"parent_issue_id"`
+	BlockedReason *string             `json:"blocked_reason"`
+	CreatedAt     time.Time           `json:"created_at"`
+	ClosedAt      *time.Time          `json:"closed_at"`
+	ArchivedAt    *time.Time          `json:"archived_at"`
+	Labels        []labelReferenceDTO `json:"labels"`
+}
+
 type labelListOutput struct {
 	Items      []labelDTO `json:"items"`
 	NextCursor *string    `json:"next_cursor"`
@@ -1073,6 +1106,31 @@ func labelDTOFromDomain(label domain.Label) labelDTO {
 	return labelDTO{
 		ID: label.ID, Name: label.Name, NormalizedName: label.NormalizedName,
 		Description: label.Description, CreatedAt: label.CreatedAt,
+	}
+}
+
+func labelReferenceDTOFromDomain(label domain.Label) labelReferenceDTO {
+	return labelReferenceDTO{ID: label.ID, Name: label.Name}
+}
+
+func issueCompactProjectionDTOFromDomain(issue domain.Issue) issueCompactProjectionDTO {
+	return issueCompactProjectionDTO{
+		ID: issue.ID, DisplayID: issue.DisplayID, SequenceNo: issue.SequenceNo,
+		Type: string(issue.Type), Title: issue.Title, Version: issue.Version, UpdatedAt: issue.UpdatedAt,
+	}
+}
+
+func issueStandardProjectionDTOFromDomain(issue domain.Issue) issueStandardProjectionDTO {
+	labels := make([]labelReferenceDTO, len(issue.Labels))
+	for i, label := range issue.Labels {
+		labels[i] = labelReferenceDTOFromDomain(label)
+	}
+	return issueStandardProjectionDTO{
+		ID: issue.ID, DisplayID: issue.DisplayID, SequenceNo: issue.SequenceNo,
+		Type: string(issue.Type), Title: issue.Title, Version: issue.Version, UpdatedAt: issue.UpdatedAt,
+		Status: string(issue.Status), Priority: string(issue.Priority), ParentIssueID: issue.ParentID,
+		BlockedReason: issue.BlockedReason, CreatedAt: issue.CreatedAt, ClosedAt: issue.ClosedAt,
+		ArchivedAt: issue.ArchivedAt, Labels: labels,
 	}
 }
 

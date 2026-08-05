@@ -742,6 +742,38 @@ Output:
 issue projection
 ```
 
+Projection matrix:
+
+```text
+compact
+- id
+- display_id
+- sequence_no
+- type
+- title
+- version
+- updated_at
+
+standard (default when view is omitted)
+- all compact fields
+- status
+- priority
+- parent_issue_id
+- blocked_reason
+- created_at
+- closed_at
+- archived_at
+- labels (bounded reference: id, name)
+- description and acceptance_criteria are absent even when null
+
+full
+- exactly the existing full issue payload
+- includes description and acceptance_criteria
+- includes full label metadata records
+```
+
+`full` is the explicit form for free-text bodies and full label metadata. Compact and standard intentionally omit those fields to keep the response compact and predictable.
+
 ### 7.4. `list_issues`
 
 Input filters:

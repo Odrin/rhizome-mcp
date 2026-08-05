@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
@@ -123,11 +124,20 @@ func TestIntegrationIssueWorkflow(t *testing.T) {
 
 	retrieved := callIntegrationTool(t, session, "get_issue", map[string]any{"issue_id": issue.DisplayID})
 	var persisted struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID      string `json:"id"`
+		Status  string `json:"status"`
+		Version int64  `json:"version"`
 	}
 	decodeIntegrationResult(t, retrieved, &persisted)
-	if retrieved.IsError || persisted.ID != issue.ID || persisted.Status != "done" {
+	if retrieved.IsError || persisted.ID != issue.ID || persisted.Status != "done" || persisted.Version <= 0 {
 		t.Fatalf("get_issue result = %#v, decoded = %#v", retrieved, persisted)
+	}
+	var fields map[string]json.RawMessage
+	decodeIntegrationResult(t, retrieved, &fields)
+	if _, ok := fields["description"]; ok {
+		t.Fatalf("standard get_issue should omit description: %#v", fields)
+	}
+	if _, ok := fields["acceptance_criteria"]; ok {
+		t.Fatalf("standard get_issue should omit acceptance_criteria: %#v", fields)
 	}
 }
