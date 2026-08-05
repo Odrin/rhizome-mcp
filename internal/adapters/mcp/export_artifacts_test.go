@@ -3,6 +3,7 @@ package mcp
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,9 @@ func TestExportArtifactStoreRoundTripAndPermissions(t *testing.T) {
 	info, err := os.Stat(filepath.Join(store.directory, name))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skipf("artifact permissions are reported via the platform filesystem on %s", runtime.GOOS)
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("artifact permissions = %o, want 600", info.Mode().Perm())
