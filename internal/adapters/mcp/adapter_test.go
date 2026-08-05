@@ -1607,6 +1607,123 @@ func TestGraphToolsLifecycleAndValidation(t *testing.T) {
 	}
 }
 
+func TestGraphAndRelationOutputsUseBoundedProjections(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer func() {
+		if err := db.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	root := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Root", "status": "ready", "description": "long body"})
+	var rootIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, root, &rootIssue)
+	related := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Related", "status": "ready", "description": "long body"})
+	var relatedIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, related, &relatedIssue)
+
+	relation := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": relatedIssue.ID, "target_issue_id": rootIssue.ID, "relation_type": "related_to",
+	})
+	if relation.IsError {
+		t.Fatalf("manage_issue_relation error = %#v", relation)
+	}
+	var relationPayload map[string]any
+	mustDecodeStructuredContent(t, relation, &relationPayload)
+	affectedIssues, ok := relationPayload["affected_issues"].([]any)
+	if !ok || len(affectedIssues) != 2 {
+		t.Fatalf("affected_issues = %#v", relationPayload["affected_issues"])
+	}
+	for index, item := range affectedIssues {
+		issueMap, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("affected issue %d = %#v", index, item)
+		}
+		for _, field := range []string{"id", "display_id", "version", "status", "effective_status", "unresolved_blocker_count", "is_blocked", "is_claimable"} {
+			if _, exists := issueMap[field]; !exists {
+				t.Fatalf("affected issue %d missing %q: %#v", index, field, issueMap)
+			}
+		}
+		for _, field := range []string{"description", "acceptance_criteria", "labels", "parent_issue_id", "blocked_reason", "created_at", "updated_at", "closed_at", "archived_at", "active_attempt_id"} {
+			if _, exists := issueMap[field]; exists {
+				t.Fatalf("affected issue %d unexpectedly includes %q: %#v", index, field, issueMap)
+			}
+		}
+	}
+
+	graph := call(t, client, "get_issue_graph", map[string]any{"root_issue_id": rootIssue.ID, "depth": 1, "max_nodes": 2})
+	if graph.IsError {
+		t.Fatalf("get_issue_graph error = %#v", graph)
+	}
+	var graphPayload map[string]any
+	mustDecodeStructuredContent(t, graph, &graphPayload)
+	nodes, ok := graphPayload["nodes"].([]any)
+	if !ok || len(nodes) != 2 {
+		t.Fatalf("graph nodes = %#v", graphPayload["nodes"])
+	}
+	for index, item := range nodes {
+		nodeMap, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("graph node %d = %#v", index, item)
+		}
+		for _, field := range []string{"id", "display_id", "sequence_no", "type", "title", "status", "effective_status", "priority", "unresolved_blocker_count", "is_blocked", "is_claimable"} {
+			if _, exists := nodeMap[field]; !exists {
+				t.Fatalf("graph node %d missing %q: %#v", index, field, nodeMap)
+			}
+		}
+		for _, field := range []string{"description", "acceptance_criteria", "labels", "parent_issue_id", "blocked_reason", "created_at", "updated_at", "closed_at", "archived_at", "active_attempt_id"} {
+			if _, exists := nodeMap[field]; exists {
+				t.Fatalf("graph node %d unexpectedly includes %q: %#v", index, field, nodeMap)
+			}
+		}
+	}
+
+	planning := call(t, client, "get_planning_graph", map[string]any{"max_nodes": 2})
+	if planning.IsError {
+		t.Fatalf("get_planning_graph error = %#v", planning)
+	}
+	var planningPayload map[string]any
+	mustDecodeStructuredContent(t, planning, &planningPayload)
+	planningNodes, ok := planningPayload["nodes"].([]any)
+	if !ok || len(planningNodes) < 1 {
+		t.Fatalf("planning graph nodes = %#v", planningPayload["nodes"])
+	}
+	for index, item := range planningNodes {
+		nodeMap, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("planning graph node %d = %#v", index, item)
+		}
+		for _, field := range []string{"id", "display_id", "sequence_no", "type", "title", "status", "effective_status", "priority", "unresolved_blocker_count", "is_blocked", "is_claimable"} {
+			if _, exists := nodeMap[field]; !exists {
+				t.Fatalf("planning graph node %d missing %q: %#v", index, field, nodeMap)
+			}
+		}
+		for _, field := range []string{"description", "acceptance_criteria", "labels", "parent_issue_id", "blocked_reason", "created_at", "updated_at", "closed_at", "archived_at", "active_attempt_id"} {
+			if _, exists := nodeMap[field]; exists {
+				t.Fatalf("planning graph node %d unexpectedly includes %q: %#v", index, field, nodeMap)
+			}
+		}
+	}
+}
+
+func mustDecodeStructuredContent(t *testing.T, result *sdkmcp.CallToolResult, destination any) {
+	t.Helper()
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured content: %v", err)
+	}
+	if err := json.Unmarshal(data, destination); err != nil {
+		t.Fatalf("decode structured content: %v", err)
+	}
+}
+
 func TestNewServerRejectsNilRouter(t *testing.T) {
 	_, err := mcpadapter.NewServer(mcpadapter.Options{ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1})
 	if err == nil {

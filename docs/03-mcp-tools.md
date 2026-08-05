@@ -1147,6 +1147,23 @@ relation
 affected_issues
 ```
 
+`affected_issues` is a bounded acknowledgement projection with exactly these
+fields:
+
+```text
+id
+display_id
+version
+status
+effective_status
+unresolved_blocker_count
+is_blocked
+is_claimable
+```
+
+It omits bodies, labels, timestamps, parent/block reason, and active attempt
+IDs.
+
 ### 8.2. `get_issue_graph`
 
 Input:
@@ -1187,17 +1204,28 @@ Graph format uses normalized `nodes` and `edges`, not recursive trees.
 
 Epic hierarchy is represented as a derived `contains` edge.
 
-**Response budget.** Each node carries the same enriched issue fields as
-`list_issues`' `view: "full"` item shape (identifiers, classification,
-`parent_issue_id`, `blocked_reason`, timestamps, labels, and the computed
-status/claimability fields) — but `description` and `acceptance_criteria` are
-always `null` on every node: the repository query that loads graph snapshots
-selects `NULL AS description, NULL AS acceptance_criteria` at the SQL layer,
-so the two unbounded free-text fields are excluded before the request even
-reaches the graph traversal engine, not merely omitted by convention. Node
-count is bounded by `max_nodes` (default 100, maximum 500), so response size
-scales predictably with a config knob the caller controls, not with issue
-body length.
+**Response budget.** Each graph node is a bounded projection with exactly these
+fields:
+
+```text
+id
+display_id
+sequence_no
+type
+title
+status
+effective_status
+priority
+unresolved_blocker_count
+is_blocked
+is_claimable
+```
+
+Graph nodes omit `description`, `acceptance_criteria`, labels,
+`parent_issue_id`, `blocked_reason`, timestamps, and `active_attempt_id`.
+The response envelope remains bounded by `max_nodes` (default 100, maximum
+500), and the `structuredContent` payload is kept under the 96 KiB MCP cap for
+100-node graph results.
 
 ### 8.3. `get_planning_graph`
 
@@ -1234,10 +1262,9 @@ warnings
 truncated
 ```
 
-**Response budget.** Shares the same node projection, storage-level
-`description`/`acceptance_criteria` exclusion, and `max_nodes` bound (default
-100, maximum 500) documented in section 8.2 for `get_issue_graph` — see that
-section's response budget note.
+**Response budget.** Shares the same bounded node projection and the same
+100-node `structuredContent` 96 KiB budget documented in section 8.2 for
+`get_issue_graph` — see that section's response budget note.
 
 ---
 

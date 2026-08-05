@@ -986,10 +986,21 @@ type relationDTO struct {
 	CreatedAt     time.Time `json:"created_at,omitempty"`
 }
 
+type relationAffectedIssueDTO struct {
+	ID                     string `json:"id"`
+	DisplayID              string `json:"display_id"`
+	Version                int64  `json:"version"`
+	Status                 string `json:"status"`
+	EffectiveStatus        string `json:"effective_status"`
+	UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+	IsBlocked              bool   `json:"is_blocked"`
+	IsClaimable            bool   `json:"is_claimable"`
+}
+
 type manageIssueRelationOutput struct {
-	Relation       relationDTO        `json:"relation"`
-	AffectedIssues []issueListItemDTO `json:"affected_issues"`
-	Changed        bool               `json:"changed"`
+	Relation       relationDTO                `json:"relation"`
+	AffectedIssues []relationAffectedIssueDTO `json:"affected_issues"`
+	Changed        bool                       `json:"changed"`
 }
 
 type graphEdgeDTO struct {
@@ -1005,17 +1016,31 @@ type graphSummaryDTO struct {
 	BlockingNodeCount int `json:"blocking_node_count"`
 }
 
+type graphNodeDTO struct {
+	ID                     string `json:"id"`
+	DisplayID              string `json:"display_id"`
+	SequenceNo             int64  `json:"sequence_no"`
+	Type                   string `json:"type"`
+	Title                  string `json:"title"`
+	Status                 string `json:"status"`
+	EffectiveStatus        string `json:"effective_status"`
+	Priority               string `json:"priority"`
+	UnresolvedBlockerCount int64  `json:"unresolved_blocker_count"`
+	IsBlocked              bool   `json:"is_blocked"`
+	IsClaimable            bool   `json:"is_claimable"`
+}
+
 type graphOutput struct {
-	RootIssueID      *string            `json:"root_issue_id,omitempty"`
-	Nodes            []issueListItemDTO `json:"nodes"`
-	Edges            []graphEdgeDTO     `json:"edges"`
-	EntryPoints      []string           `json:"entry_points"`
-	BlockingNodes    []string           `json:"blocking_nodes,omitempty"`
-	Summary          graphSummaryDTO    `json:"summary"`
-	Warnings         []string           `json:"warnings,omitempty"`
-	Truncated        bool               `json:"truncated"`
-	TruncationReason *string            `json:"truncation_reason,omitempty"`
-	NextActions      []string           `json:"next_actions"`
+	RootIssueID      *string         `json:"root_issue_id,omitempty"`
+	Nodes            []graphNodeDTO  `json:"nodes"`
+	Edges            []graphEdgeDTO  `json:"edges"`
+	EntryPoints      []string        `json:"entry_points"`
+	BlockingNodes    []string        `json:"blocking_nodes,omitempty"`
+	Summary          graphSummaryDTO `json:"summary"`
+	Warnings         []string        `json:"warnings,omitempty"`
+	Truncated        bool            `json:"truncated"`
+	TruncationReason *string         `json:"truncation_reason,omitempty"`
+	NextActions      []string        `json:"next_actions"`
 }
 
 type planSummaryDTO struct {
@@ -1477,14 +1502,39 @@ func issueActivityOutputFromDomain(activity domain.IssueActivity) issueActivityO
 	return issueActivityOutput{Items: items, NextCursor: copyString(activity.NextCursor), HasMore: activity.HasMore}
 }
 
+func relationAffectedIssueDTOFromDomain(item domain.IssueProjection) relationAffectedIssueDTO {
+	return relationAffectedIssueDTO{
+		ID:                     item.Issue.ID,
+		DisplayID:              item.Issue.DisplayID,
+		Version:                item.Issue.Version,
+		Status:                 string(item.Issue.Status),
+		EffectiveStatus:        string(item.EffectiveStatus),
+		UnresolvedBlockerCount: item.UnresolvedBlockerCount,
+		IsBlocked:              item.IsBlocked,
+		IsClaimable:            item.IsClaimable,
+	}
+}
+
+func graphNodeDTOFromDomain(item domain.IssueProjection) graphNodeDTO {
+	return graphNodeDTO{
+		ID:                     item.Issue.ID,
+		DisplayID:              item.Issue.DisplayID,
+		SequenceNo:             item.Issue.SequenceNo,
+		Type:                   string(item.Issue.Type),
+		Title:                  item.Issue.Title,
+		Status:                 string(item.Issue.Status),
+		EffectiveStatus:        string(item.EffectiveStatus),
+		Priority:               string(item.Issue.Priority),
+		UnresolvedBlockerCount: item.UnresolvedBlockerCount,
+		IsBlocked:              item.IsBlocked,
+		IsClaimable:            item.IsClaimable,
+	}
+}
+
 func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
-	nodes := make([]issueListItemDTO, len(graph.Nodes))
+	nodes := make([]graphNodeDTO, len(graph.Nodes))
 	for index, node := range graph.Nodes {
-		nodes[index] = issueListItemDTO{
-			issueDTO: issueDTOFromDomain(node.Issue), EffectiveStatus: string(node.EffectiveStatus),
-			UnresolvedBlockerCount: node.UnresolvedBlockerCount, IsBlocked: node.IsBlocked, IsClaimable: node.IsClaimable,
-			ActiveAttemptID: node.ActiveAttemptID,
-		}
+		nodes[index] = graphNodeDTOFromDomain(node)
 	}
 	edges := make([]graphEdgeDTO, len(graph.Edges))
 	for index, edge := range graph.Edges {

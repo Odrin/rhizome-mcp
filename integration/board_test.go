@@ -193,6 +193,58 @@ func TestIntegrationBoardCommand(t *testing.T) {
 	}
 }
 
+func TestIntegrationGraphProjectionStaysBoundedWithLargeBodies(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	root := mustCreateBoardIssue(t, session, map[string]any{"type": "task", "title": "Root graph", "status": "ready"})
+	for i := 0; i < 99; i++ {
+		issue := mustCreateBoardIssue(t, session, map[string]any{
+			"type": "task", "title": "Graph node " + string(rune('A'+i%26)), "status": "ready",
+			"description": strings.Repeat("long-body-", 2000),
+		})
+		result := callIntegrationTool(t, session, "manage_issue_relation", map[string]any{
+			"action": "add", "source_issue_id": issue.DisplayID, "target_issue_id": root.DisplayID, "relation_type": "blocks",
+		})
+		if result.IsError {
+			t.Fatalf("manage_issue_relation %d error = %#v", i, result)
+		}
+	}
+
+	graphResult := callIntegrationTool(t, session, "get_issue_graph", map[string]any{
+		"root_issue_id": root.DisplayID, "depth": 1, "max_nodes": 100,
+	})
+	if graphResult.IsError {
+		t.Fatalf("get_issue_graph error = %#v", graphResult)
+	}
+	data, err := json.Marshal(graphResult.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured content: %v", err)
+	}
+	if len(data) > 96*1024 {
+		t.Fatalf("graph payload size = %d bytes, want <= %d", len(data), 96*1024)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode graph payload: %v", err)
+	}
+	nodes, ok := payload["nodes"].([]any)
+	if !ok || len(nodes) != 100 {
+		t.Fatalf("graph nodes = %#v", payload["nodes"])
+	}
+	for index, entry := range nodes {
+		node, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("graph node %d = %#v", index, entry)
+		}
+		for _, field := range []string{"description", "acceptance_criteria", "labels", "parent_issue_id", "blocked_reason", "created_at", "updated_at", "closed_at", "archived_at", "active_attempt_id"} {
+			if _, exists := node[field]; exists {
+				t.Fatalf("graph node %d unexpectedly includes %q: %#v", index, field, node)
+			}
+		}
+	}
+}
+
 type boardIssueRef struct {
 	ID        string
 	DisplayID string

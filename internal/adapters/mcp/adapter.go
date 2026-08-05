@@ -738,16 +738,9 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp
 	if err != nil {
 		return adapter.failure(err)
 	}
-	affected := make([]issueListItemDTO, len(result.AffectedIssues))
+	affected := make([]relationAffectedIssueDTO, len(result.AffectedIssues))
 	for index, issue := range result.AffectedIssues {
-		affected[index] = issueListItemDTO{
-			issueDTO:               issueDTOFromDomain(issue.Issue),
-			EffectiveStatus:        string(issue.EffectiveStatus),
-			UnresolvedBlockerCount: issue.UnresolvedBlockerCount,
-			IsBlocked:              issue.IsBlocked,
-			IsClaimable:            issue.IsClaimable,
-			ActiveAttemptID:        issue.ActiveAttemptID,
-		}
+		affected[index] = relationAffectedIssueDTOFromDomain(issue)
 	}
 	summary := "relation was already absent"
 	if input.Action == string(domain.RelationActionAdd) {

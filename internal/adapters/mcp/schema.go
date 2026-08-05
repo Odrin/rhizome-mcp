@@ -603,9 +603,47 @@ func schemaIssueListOutput() *jsonschema.Schema {
 	}, "items", "next_cursor", "has_more", "next_actions")
 }
 func schemaManageIssueRelationOutput() *jsonschema.Schema {
-	return typedSchema[manageIssueRelationOutput]()
+	return object(map[string]*jsonschema.Schema{
+		"relation": typedSchema[relationDTO](),
+		"affected_issues": &jsonschema.Schema{Type: "array", Items: object(map[string]*jsonschema.Schema{
+			"id":                       stringSchema(),
+			"display_id":               stringSchema(),
+			"version":                  integerSchema(),
+			"status":                   stringSchema(),
+			"effective_status":         stringSchema(),
+			"unresolved_blocker_count": integerSchema(),
+			"is_blocked":               booleanSchema(),
+			"is_claimable":             booleanSchema(),
+		}, "id", "display_id", "version", "status", "effective_status", "unresolved_blocker_count", "is_blocked", "is_claimable")},
+		"changed": booleanSchema(),
+	}, "relation", "affected_issues", "changed")
 }
-func schemaGraphOutput() *jsonschema.Schema           { return typedSchema[graphOutput]() }
+func schemaGraphOutput() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"root_issue_id": nullableIssueIdentifierSchema(),
+		"nodes": &jsonschema.Schema{Type: "array", Items: object(map[string]*jsonschema.Schema{
+			"id":                       stringSchema(),
+			"display_id":               stringSchema(),
+			"sequence_no":              integerSchema(),
+			"type":                     stringSchema(),
+			"title":                    stringSchema(),
+			"status":                   stringSchema(),
+			"effective_status":         stringSchema(),
+			"priority":                 stringSchema(),
+			"unresolved_blocker_count": integerSchema(),
+			"is_blocked":               booleanSchema(),
+			"is_claimable":             booleanSchema(),
+		}, "id", "display_id", "sequence_no", "type", "title", "status", "effective_status", "priority", "unresolved_blocker_count", "is_blocked", "is_claimable")},
+		"edges":             &jsonschema.Schema{Type: "array", Items: typedSchema[graphEdgeDTO]()},
+		"entry_points":      &jsonschema.Schema{Type: "array", Items: stringSchema()},
+		"blocking_nodes":    &jsonschema.Schema{Type: "array", Items: stringSchema()},
+		"summary":           typedSchema[graphSummaryDTO](),
+		"warnings":          &jsonschema.Schema{Type: "array", Items: stringSchema()},
+		"truncated":         booleanSchema(),
+		"truncation_reason": nullableStringSchema(),
+		"next_actions":      stringsSchema(),
+	}, "nodes", "edges", "entry_points", "summary", "truncated", "next_actions")
+}
 func schemaPlanValidationOutput() *jsonschema.Schema  { return typedSchema[planValidationOutput]() }
 func schemaApplyIssuePlanOutput() *jsonschema.Schema  { return typedSchema[applyIssuePlanOutput]() }
 func schemaClaimIssueOutput() *jsonschema.Schema      { return typedSchema[claimIssueOutput]() }
