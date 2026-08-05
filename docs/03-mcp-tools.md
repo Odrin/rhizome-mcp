@@ -117,7 +117,50 @@ snippet is for `open_project`, add the retained value:
 }
 ```
 
-## 3. Tool inventory
+## 3. Response budgets and client guidance
+
+The default MCP responses in this catalog are intentionally bounded projections. The acceptance gate in the integration suite serializes the actual `structuredContent` payload and asserts the byte budgets below so clients can rely on the defaults staying compact even when issue bodies and other free-text fields are very large.
+
+The following defaults are covered by the integration gate and should be treated as the documented baselines for normal client use:
+
+| Tool | Default fields or delivery | Budget |
+| --- | --- | ---: |
+| `get_issue` | standard: `id`, `display_id`, `sequence_no`, `type`, `title`, `status`, `priority`, `parent_issue_id`, `blocked_reason`, `version`, timestamps, `labels`; no bodies | 32 KiB |
+| `get_issue_graph` | `root_issue_id`, bounded `nodes`, `edges`, `summary`, `entry_points`, truncation fields | 32 KiB for the deterministic fixture used in the integration test |
+| `get_planning_graph` | bounded `nodes`, `edges`, `entry_points`, `blocking_nodes`, `summary`, `warnings`, `truncated` | 32 KiB for the deterministic fixture used in the integration test |
+| `manage_issue_relation` | `changed`, relation fields, `affected_issues`, `latest_event_id` | 32 KiB |
+| `create_issue` | compact: `id`, `display_id`, `sequence_no`, `type`, `status`, `priority`, `version` | 32 KiB |
+| `update_issue` | compact `issue` (`id`, `display_id`, `status`, `version`) and `changed_fields` | 32 KiB |
+| `archive_issue` | compact: `id`, `display_id`, `status`, `version` | 32 KiB |
+| `claim_issue` | compact `issue`, compact `attempt`, `lease_token` | 32 KiB |
+| `renew_attempt` | `lease_expires_at`, `server_time`, `next_actions` | 32 KiB |
+| `save_attempt_note` | `attempt_note`, `artifacts`, `next_actions` | 64 KiB |
+| `finish_attempt` | compact `attempt`, compact `issue`, `warnings`, `latest_event_id`, compact `artifacts`, `next_actions` | 128 KiB |
+| `get_work_context` | `issue`, `blockers`, `decisions`, `reviews`, attempt/checkpoint summaries, optional-section placeholders, warnings and truncation fields | 256 KiB |
+| `get_issue_activity` | `items`, `next_cursor`, `has_more` | 32 KiB |
+| `get_changes` | `events`, `latest_event_id`, `has_more`, `next_event_id` | 128 KiB |
+| `validate_issue_plan` | `valid`, `errors`, `warnings`, `plan_fingerprint`, `normalization_changed`; no `normalized_plan` | 32 KiB |
+| `export_project` | artifact: `format`, `version`, `exported_at`, `byte_count`, `sha256`, `artifact_uri` | 32 KiB |
+
+Existing list/graph budgets remain authoritative for the larger maximum-node cases: `list_issues` stays within 64 KiB for 100 compact items, and graph results stay within 96 KiB for 100-node graphs. Those are maximum-node proofs and should not be treated as the default response size for ordinary calls.
+
+Explicit opt-in modes are intentionally larger and are not part of the default gate:
+
+- `get_issue` with `view: "full"` includes the full free-text bodies and full label metadata; it is larger than the standard default when bodies are present.
+- `validate_issue_plan` with `include_normalized_plan: true` includes the normalized plan and is larger than the compact default.
+- `export_project` with `delivery: "inline"` returns the full logical project document and is not used in the default budget gate; it can exceed the bounded artifact acknowledgement and is only appropriate when the caller needs the document itself.
+- Optional sections in `get_work_context` are opt-in and bounded by their own per-section limits; the default response intentionally includes the primary issue's full description and acceptance criteria, which is why its budget is larger than the other compact defaults.
+
+Client guidance:
+
+- Call `open_project` once to get a canonical `project_ref`, then reuse that reference for subsequent project-scoped calls.
+- Use `get_project` only for metadata or instruction refresh; avoid treating it as a full state snapshot or a substitute for targeted reads.
+- Filter and list first (`list_issues`, `get_planning_graph`, `get_issue_graph`) before requesting detail calls for specific issues.
+- Request explicit `full`, normalized-plan, or `inline` modes only when the caller genuinely needs the larger payload; the default responses are designed to stay compact and predictable.
+
+Audited baselines from prior review work are informative but are not current default-response guarantees: a 20-node planning graph was observed at approximately 26 KiB, and a pre-ISSUE-154 inline export was observed at approximately 981 KiB.
+
+## 3.1. Tool inventory
 
 The catalog exposes 35 full tools, 31 agent tools, 5 migration tools, and 16 read-only tools:
 

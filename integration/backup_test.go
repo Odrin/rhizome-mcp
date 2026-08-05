@@ -446,7 +446,7 @@ func restoreBackupAndAssertQueryable(t *testing.T, sourceEnv integrationEnvironm
 	}
 
 	restoredSession := restoredEnv.connect(t)
-	exportResult := callIntegrationTool(t, restoredSession, "export_project", map[string]any{})
+	exportResult := callIntegrationTool(t, restoredSession, "export_project", map[string]any{"delivery": "inline"})
 	if exportResult.IsError {
 		t.Fatalf("export_project on restored backup result = %#v", exportResult)
 	}
