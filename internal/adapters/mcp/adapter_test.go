@@ -366,18 +366,25 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		"priority": "high", "labels": []string{"Database"}, "create_missing_labels": true,
 	})
 	var issue struct {
-		ID        string `json:"id"`
-		DisplayID string `json:"display_id"`
-		Version   int64  `json:"version"`
-		Labels    []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-		Description *string `json:"description"`
+		ID         string `json:"id"`
+		DisplayID  string `json:"display_id"`
+		SequenceNo int64  `json:"sequence_no"`
+		Type       string `json:"type"`
+		Status     string `json:"status"`
+		Priority   string `json:"priority"`
+		Version    int64  `json:"version"`
 	}
 	decodeStructured(t, created, &issue)
-	if created.IsError || issue.DisplayID != "ISSUE-1" || issue.Version != 1 || issue.Description == nil ||
-		len(issue.Labels) != 1 || issue.Labels[0].Name != "Database" {
+	if created.IsError || issue.DisplayID != "ISSUE-1" || issue.Version != 1 || issue.Status != "open" || issue.Priority != "high" {
 		t.Fatalf("create result = %#v, issue = %#v", created, issue)
+	}
+	var compactCreate map[string]json.RawMessage
+	decodeStructured(t, created, &compactCreate)
+	if _, ok := compactCreate["description"]; ok {
+		t.Fatalf("create_issue compact default leaked description: %#v", compactCreate)
+	}
+	if _, ok := compactCreate["labels"]; ok {
+		t.Fatalf("create_issue compact default leaked labels: %#v", compactCreate)
 	}
 	comment := call(t, client, "add_comment", map[string]any{
 		"issue_id": issue.DisplayID, "content": "  preserved comment  ",
@@ -637,22 +644,17 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	})
 	var updatedOutput struct {
 		Issue struct {
-			Version     int64   `json:"version"`
-			Description *string `json:"description"`
-			Status      string  `json:"status"`
-			Labels      []struct {
-				Name string `json:"name"`
-			} `json:"labels"`
+			ID        string `json:"id"`
+			Status    string `json:"status"`
+			Version   int64  `json:"version"`
+			DisplayID string `json:"display_id"`
 		} `json:"issue"`
 		ChangedFields []string `json:"changed_fields"`
 	}
 	decodeStructured(t, updated, &updatedOutput)
-	if updated.IsError || updatedOutput.Issue.Version != 2 || updatedOutput.Issue.Description != nil ||
-		updatedOutput.Issue.Status != "ready" || !reflect.DeepEqual(updatedOutput.ChangedFields, []string{"description", "status"}) {
+	if updated.IsError || updatedOutput.Issue.Version != 2 || updatedOutput.Issue.Status != "ready" ||
+		!reflect.DeepEqual(updatedOutput.ChangedFields, []string{"description", "status"}) {
 		t.Fatalf("update output = %#v", updatedOutput)
-	}
-	if len(updatedOutput.Issue.Labels) != 1 || updatedOutput.Issue.Labels[0].Name != "Database" {
-		t.Fatalf("absent labels did not preserve assignments: %#v", updatedOutput.Issue.Labels)
 	}
 
 	got := call(t, client, "get_issue", map[string]any{"issue_id": issue.ID, "view": "full"})
@@ -775,11 +777,13 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 
 	archived := call(t, client, "archive_issue", map[string]any{"issue_id": issue.DisplayID, "expected_version": 2})
 	var archivedIssue struct {
-		Version    int64      `json:"version"`
-		ArchivedAt *time.Time `json:"archived_at"`
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Version   int64  `json:"version"`
+		DisplayID string `json:"display_id"`
 	}
 	decodeStructured(t, archived, &archivedIssue)
-	if archived.IsError || archivedIssue.Version != 3 || archivedIssue.ArchivedAt == nil {
+	if archived.IsError || archivedIssue.Version != 3 || archivedIssue.Status != "ready" {
 		t.Fatalf("archive output = %#v", archivedIssue)
 	}
 	hidden := call(t, client, "list_issues", map[string]any{})
@@ -801,7 +805,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	restartedClient, restartedStop := newClient(t, composeServices(t, db, source))
 	restarted := call(t, restartedClient, "get_issue", map[string]any{"issue_id": issue.DisplayID})
 	decodeStructured(t, restarted, &archivedIssue)
-	if restarted.IsError || archivedIssue.Version != 3 || archivedIssue.ArchivedAt == nil {
+	if restarted.IsError || archivedIssue.Version != 3 || archivedIssue.Status != "ready" {
 		t.Fatalf("restarted get = %#v", archivedIssue)
 	}
 	restartedStop()
@@ -1035,6 +1039,200 @@ func singleListedItemFields(t *testing.T, result *sdkmcp.CallToolResult, wantID 
 	return nil
 }
 
+func TestMutationViewProjections(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "mutation-view-projections.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "projection", "status": "ready", "description": "body", "labels": []string{"projection"}, "create_missing_labels": true})
+	var createdIssue struct {
+		ID         string `json:"id"`
+		DisplayID  string `json:"display_id"`
+		SequenceNo int64  `json:"sequence_no"`
+		Type       string `json:"type"`
+		Status     string `json:"status"`
+		Priority   string `json:"priority"`
+		Version    int64  `json:"version"`
+	}
+	decodeStructured(t, created, &createdIssue)
+	if created.IsError || createdIssue.ID == "" || createdIssue.DisplayID == "" || createdIssue.SequenceNo <= 0 || createdIssue.Version != 1 {
+		t.Fatalf("create_issue compact default = %#v", created)
+	}
+	var compactCreate map[string]json.RawMessage
+	decodeStructured(t, created, &compactCreate)
+	if _, ok := compactCreate["description"]; ok {
+		t.Fatalf("create_issue compact default leaked description: %#v", compactCreate)
+	}
+	if _, ok := compactCreate["labels"]; ok {
+		t.Fatalf("create_issue compact default leaked labels: %#v", compactCreate)
+	}
+
+	fullCreate := call(t, client, "create_issue", map[string]any{"type": "task", "title": "projection full", "status": "ready", "description": "full body", "view": "full"})
+	var fullCreateIssue struct {
+		ID          string  `json:"id"`
+		DisplayID   string  `json:"display_id"`
+		Description *string `json:"description"`
+		Labels      []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	decodeStructured(t, fullCreate, &fullCreateIssue)
+	if fullCreate.IsError || fullCreateIssue.Description == nil || *fullCreateIssue.Description != "full body" {
+		t.Fatalf("create_issue full view = %#v", fullCreate)
+	}
+
+	updated := call(t, client, "update_issue", map[string]any{"issue_id": createdIssue.DisplayID, "expected_version": int64(1), "changes": map[string]any{"title": "updated", "status": "blocked", "blocked_reason": "blocked by projection test"}})
+	var compactUpdate struct {
+		Issue struct {
+			ID        string `json:"id"`
+			DisplayID string `json:"display_id"`
+			Status    string `json:"status"`
+			Version   int64  `json:"version"`
+		} `json:"issue"`
+		ChangedFields []string `json:"changed_fields"`
+	}
+	decodeStructured(t, updated, &compactUpdate)
+	if updated.IsError || !reflect.DeepEqual(compactUpdate.ChangedFields, []string{"blocked_reason", "status", "title"}) {
+		t.Fatalf("update_issue compact default = %#v", updated)
+	}
+	var updateFields map[string]json.RawMessage
+	decodeStructured(t, updated, &updateFields)
+	if _, ok := updateFields["issue"]; !ok {
+		t.Fatalf("update_issue compact default missing issue: %#v", updateFields)
+	}
+	if _, ok := updateFields["description"]; ok {
+		t.Fatalf("update_issue compact default leaked description: %#v", updateFields)
+	}
+
+	fullUpdate := call(t, client, "update_issue", map[string]any{"issue_id": createdIssue.DisplayID, "expected_version": int64(2), "changes": map[string]any{"priority": "high"}, "view": "full"})
+	var fullUpdateOutput struct {
+		Issue struct {
+			ID          string  `json:"id"`
+			DisplayID   string  `json:"display_id"`
+			Description *string `json:"description"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, fullUpdate, &fullUpdateOutput)
+	if fullUpdate.IsError || fullUpdateOutput.Issue.ID == "" {
+		t.Fatalf("update_issue full view = %#v", fullUpdate)
+	}
+
+	archived := call(t, client, "archive_issue", map[string]any{"issue_id": createdIssue.DisplayID, "expected_version": int64(3)})
+	var compactArchive map[string]json.RawMessage
+	decodeStructured(t, archived, &compactArchive)
+	if archived.IsError || compactArchive["status"] == nil || compactArchive["version"] == nil {
+		t.Fatalf("archive_issue compact default = %#v", archived)
+	}
+	if _, ok := compactArchive["description"]; ok {
+		t.Fatalf("archive_issue compact default leaked description: %#v", compactArchive)
+	}
+
+	claimable := call(t, client, "create_issue", map[string]any{"type": "task", "title": "claimable projection", "status": "ready"})
+	var claimableIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, claimable, &claimableIssue)
+	if claimable.IsError || claimableIssue.ID == "" {
+		t.Fatalf("claimable issue creation = %#v", claimable)
+	}
+
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": claimableIssue.ID, "lease_seconds": 60})
+	var compactClaim struct {
+		Issue struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
+		} `json:"issue"`
+		Attempt struct {
+			ID           string    `json:"id"`
+			Kind         string    `json:"kind"`
+			LeaseExpires time.Time `json:"lease_expires_at"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &compactClaim)
+	if claimed.IsError || compactClaim.LeaseToken == "" || compactClaim.Attempt.ID == "" || compactClaim.Attempt.Kind == "" {
+		t.Fatalf("claim_issue compact default = %#v", claimed)
+	}
+	var claimFields map[string]json.RawMessage
+	decodeStructured(t, claimed, &claimFields)
+	if _, ok := claimFields["minimal_work_context"]; ok {
+		t.Fatalf("claim_issue compact default leaked minimal_work_context: %#v", claimFields)
+	}
+
+	fullClaimIssue := call(t, client, "create_issue", map[string]any{"type": "task", "title": "claimable projection full", "status": "ready"})
+	var fullClaimIssueID struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, fullClaimIssue, &fullClaimIssueID)
+	if fullClaimIssue.IsError || fullClaimIssueID.ID == "" {
+		t.Fatalf("full claim issue creation = %#v", fullClaimIssue)
+	}
+	fullClaim := call(t, client, "claim_issue", map[string]any{"issue_id": fullClaimIssueID.ID, "lease_seconds": 60, "view": "full"})
+	var fullClaimOutput struct {
+		Issue struct {
+			EffectiveStatus string `json:"effective_status"`
+		} `json:"issue"`
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+	}
+	decodeStructured(t, fullClaim, &fullClaimOutput)
+	if fullClaim.IsError || fullClaimOutput.Issue.EffectiveStatus == "" || fullClaimOutput.Attempt.ID == "" {
+		t.Fatalf("claim_issue full view = %#v", fullClaim)
+	}
+
+	finished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": compactClaim.Attempt.ID, "lease_token": compactClaim.LeaseToken, "outcome": "completed",
+		"result_summary": "done", "target_issue_status": "done", "verification": []string{"tests"},
+		"artifacts": []any{map[string]any{"type": "file", "uri": "foo.txt", "title": "foo"}},
+	})
+	var compactFinish struct {
+		Attempt struct {
+			ID                  string `json:"id"`
+			IssueID             string `json:"issue_id"`
+			Kind                string `json:"kind"`
+			Status              string `json:"status"`
+			IssueVersionAtStart int64  `json:"issue_version_at_start"`
+		} `json:"attempt"`
+		Issue struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
+		} `json:"issue"`
+		Warnings      []string `json:"warnings"`
+		LatestEventID int64    `json:"latest_event_id"`
+		Artifacts     []struct {
+			ID    string  `json:"id"`
+			Type  string  `json:"type"`
+			URI   string  `json:"uri"`
+			Title *string `json:"title"`
+		} `json:"artifacts"`
+		NextActions []string `json:"next_actions"`
+	}
+	decodeStructured(t, finished, &compactFinish)
+	if finished.IsError || compactFinish.Attempt.ID == "" || compactFinish.Issue.Version == 0 || len(compactFinish.Artifacts) != 1 || compactFinish.LatestEventID == 0 {
+		t.Fatalf("finish_attempt compact default = %#v", finished)
+	}
+	var finishFields map[string]json.RawMessage
+	decodeStructured(t, finished, &finishFields)
+	if _, ok := finishFields["result_summary"]; ok {
+		t.Fatalf("finish_attempt compact default leaked result_summary: %#v", finishFields)
+	}
+	if _, ok := finishFields["verification"]; ok {
+		t.Fatalf("finish_attempt compact default leaked verification: %#v", finishFields)
+	}
+
+	for _, tool := range []string{"create_issue", "update_issue", "archive_issue", "claim_issue", "finish_attempt"} {
+		result := call(t, client, tool, map[string]any{"view": "detailed"})
+		if result.IsError == false {
+			t.Fatalf("%s should reject unsupported view: %#v", tool, result)
+		}
+	}
+}
+
 func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "claim-idempotency.db"))
@@ -1096,24 +1294,30 @@ func TestUpdateIssueAcceptsIdempotencyKey(t *testing.T) {
 	first := call(t, client, "update_issue", args)
 	var firstOutput struct {
 		Issue struct {
-			Version int64  `json:"version"`
-			Title   string `json:"title"`
+			ID        string `json:"id"`
+			DisplayID string `json:"display_id"`
+			Status    string `json:"status"`
+			Version   int64  `json:"version"`
 		} `json:"issue"`
+		ChangedFields []string `json:"changed_fields"`
 	}
 	decodeStructured(t, first, &firstOutput)
-	if first.IsError || firstOutput.Issue.Version != 2 || firstOutput.Issue.Title != "updated" {
+	if first.IsError || firstOutput.Issue.Version != 2 || len(firstOutput.ChangedFields) != 1 || firstOutput.ChangedFields[0] != "title" {
 		t.Fatalf("update output = %#v", first)
 	}
 	replayed := call(t, client, "update_issue", args)
 	var replayOutput struct {
 		Issue struct {
-			Version int64  `json:"version"`
-			Title   string `json:"title"`
+			ID        string `json:"id"`
+			DisplayID string `json:"display_id"`
+			Status    string `json:"status"`
+			Version   int64  `json:"version"`
 		} `json:"issue"`
+		ChangedFields []string `json:"changed_fields"`
 	}
 	decodeStructured(t, replayed, &replayOutput)
-	if replayed.IsError || replayOutput.Issue.Version != firstOutput.Issue.Version || replayOutput.Issue.Title != firstOutput.Issue.Title {
-		t.Fatalf("update replay = %#v, want version %d title %q", replayed, firstOutput.Issue.Version, firstOutput.Issue.Title)
+	if replayed.IsError || replayOutput.Issue.Version != firstOutput.Issue.Version || !reflect.DeepEqual(replayOutput.ChangedFields, firstOutput.ChangedFields) {
+		t.Fatalf("update replay = %#v, want version %d changed fields %v", replayed, firstOutput.Issue.Version, firstOutput.ChangedFields)
 	}
 	conflicting := call(t, client, "update_issue", map[string]any{
 		"issue_id": issue.ID, "expected_version": int64(1),
@@ -1140,17 +1344,21 @@ func TestArchiveIssueAcceptsIdempotencyKey(t *testing.T) {
 	args := map[string]any{"issue_id": issue.ID, "expected_version": int64(1), "idempotency_key": "archive-key"}
 	first := call(t, client, "archive_issue", args)
 	var firstOutput struct {
-		Version    int64      `json:"version"`
-		ArchivedAt *time.Time `json:"archived_at"`
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+		Status    string `json:"status"`
+		Version   int64  `json:"version"`
 	}
 	decodeStructured(t, first, &firstOutput)
-	if first.IsError || firstOutput.Version != 2 || firstOutput.ArchivedAt == nil {
+	if first.IsError || firstOutput.Version != 2 || firstOutput.Status == "" {
 		t.Fatalf("archive output = %#v", first)
 	}
 	replayed := call(t, client, "archive_issue", args)
 	var replayOutput struct {
-		Version    int64      `json:"version"`
-		ArchivedAt *time.Time `json:"archived_at"`
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+		Status    string `json:"status"`
+		Version   int64  `json:"version"`
 	}
 	decodeStructured(t, replayed, &replayOutput)
 	if replayed.IsError || replayOutput.Version != firstOutput.Version {
@@ -2442,8 +2650,9 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID, "lease_seconds": 60})
 	var output struct {
 		Issue struct {
-			EffectiveStatus string  `json:"effective_status"`
-			ActiveAttemptID *string `json:"active_attempt_id"`
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
 		} `json:"issue"`
 		Attempt struct {
 			ID   string `json:"id"`
@@ -2452,10 +2661,9 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 		LeaseToken string `json:"lease_token"`
 	}
 	decodeStructured(t, claimed, &output)
-	if claimed.IsError || output.Issue.EffectiveStatus != "in_progress" || output.Issue.ActiveAttemptID == nil ||
-		*output.Issue.ActiveAttemptID != output.Attempt.ID || output.Attempt.Kind != "work" || output.LeaseToken == "" {
-		t.Fatalf("claim metadata = status %q active ID present %t kind %q token present %t",
-			output.Issue.EffectiveStatus, output.Issue.ActiveAttemptID != nil, output.Attempt.Kind, output.LeaseToken != "")
+	if claimed.IsError || output.Issue.ID == "" || output.Issue.Status != "ready" || output.Attempt.Kind != "work" || output.LeaseToken == "" {
+		t.Fatalf("claim metadata = issue %q status %q kind %q token present %t",
+			output.Issue.ID, output.Issue.Status, output.Attempt.Kind, output.LeaseToken != "")
 	}
 	saved := call(t, client, "save_attempt_note", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "kind": "checkpoint",
@@ -2586,7 +2794,7 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	finished := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
 		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
-		"idempotency_key": "finish-retry", "acknowledged_changes": nil,
+		"idempotency_key": "finish-retry", "acknowledged_changes": nil, "view": "full",
 		"artifacts": []any{
 			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
 			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},
@@ -2595,7 +2803,7 @@ func TestAttemptToolsLifecycle(t *testing.T) {
 	replayed := call(t, client, "finish_attempt", map[string]any{
 		"attempt_id": output.Attempt.ID, "lease_token": output.LeaseToken, "outcome": "completed",
 		"result_summary": "implemented", "target_issue_status": "done", "verification": []string{"tests"},
-		"idempotency_key": "finish-retry",
+		"idempotency_key": "finish-retry", "view": "full",
 		"artifacts": []any{
 			map[string]any{"type": "file", "uri": "internal/application/attempt_service.go", "title": "service", "metadata": map[string]any{"language": "go"}},
 			map[string]any{"type": "url", "uri": "https://example.invalid/build/42"},

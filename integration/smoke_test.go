@@ -65,6 +65,26 @@ func TestIntegrationIssueWorkflow(t *testing.T) {
 	if created.IsError || issue.ID == "" || issue.DisplayID == "" || issue.Status != "ready" {
 		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
 	}
+	var compactCreate map[string]json.RawMessage
+	decodeIntegrationResult(t, created, &compactCreate)
+	if _, ok := compactCreate["description"]; ok {
+		t.Fatalf("create_issue default compact should omit description: %#v", compactCreate)
+	}
+
+	fullCreate := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type":        "task",
+		"title":       "Complete integration workflow full",
+		"description": "Verify the MCP server through its public stdio interface in full mode.",
+		"view":        "full",
+	})
+	var fullIssue struct {
+		ID          string  `json:"id"`
+		Description *string `json:"description"`
+	}
+	decodeIntegrationResult(t, fullCreate, &fullIssue)
+	if fullCreate.IsError || fullIssue.Description == nil || *fullIssue.Description == "" {
+		t.Fatalf("create_issue full compatibility = %#v, decoded = %#v", fullCreate, fullIssue)
+	}
 
 	claimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
 		"issue_id":      issue.DisplayID,

@@ -180,7 +180,7 @@ func schemaCreateIssue() *jsonschema.Schema {
 		"acceptance_criteria": nullableStringSchema(), "status": stringSchema(), "priority": stringSchema(),
 		"parent_issue_id": nullableIssueIdentifierSchema(), "blocked_reason": nullableStringSchema(),
 		"labels": stringsSchema(), "create_missing_labels": booleanSchema(),
-		"idempotency_key": nullableBoundedStringSchema(128),
+		"idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
 	}, "type", "title"))
 }
 
@@ -193,7 +193,7 @@ func schemaUpdateIssue() *jsonschema.Schema {
 	})
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "changes": changes,
-		"create_missing_labels": booleanSchema(), "idempotency_key": nullableBoundedStringSchema(128),
+		"create_missing_labels": booleanSchema(), "idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
 	}, "issue_id", "expected_version", "changes"))
 }
 
@@ -289,7 +289,7 @@ func schemaListIssues() *jsonschema.Schema {
 
 func schemaArchiveIssue() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableBoundedStringSchema(128),
+		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
 	}, "issue_id", "expected_version"))
 }
 
@@ -439,7 +439,7 @@ func schemaApplyIssuePlan() *jsonschema.Schema {
 func schemaClaimIssue() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"issue_id": issueIdentifierSchema(), "lease_seconds": boundedIntegerSchema(60, 3600),
-		"idempotency_key": nullableBoundedStringSchema(128),
+		"idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
 	}, "issue_id"))
 }
 
@@ -487,6 +487,7 @@ func schemaFinishAttempt() *jsonschema.Schema {
 		"outcome":        enumSchema("completed", "failed", "interrupted"),
 		"result_summary": boundedStringSchema(50_000),
 		"next_steps":     boundedStringsSchema(20, 1_000), "verification": boundedStringsSchema(20, 1_000),
+		"view":                     enumSchema("compact", "full"),
 		"target_issue_status":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"done", "review", "ready", "blocked", nil}},
 		"blocked_reason":           nullableBoundedStringSchema(50_000),
 		"review_outcome":           &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"approved", "changes_requested", "blocked", nil}},
@@ -505,7 +506,9 @@ func schemaCreateAgentSessionOutput() *jsonschema.Schema {
 }
 func schemaEndAgentSessionOutput() *jsonschema.Schema { return typedSchema[endAgentSessionOutput]() }
 func schemaLabelListOutput() *jsonschema.Schema       { return typedSchema[labelListOutput]() }
-func schemaIssueOutput() *jsonschema.Schema           { return typedSchema[issueDTO]() }
+func schemaIssueOutput() *jsonschema.Schema           { return schemaCreateIssueUnion() }
+func schemaCreateIssueOutput() *jsonschema.Schema     { return schemaCreateIssueUnion() }
+func schemaArchiveIssueOutput() *jsonschema.Schema    { return schemaArchiveIssueUnion() }
 func schemaGetIssueOutput() *jsonschema.Schema {
 	properties := map[string]*jsonschema.Schema{
 		"id":                  stringSchema(),
@@ -549,7 +552,27 @@ func schemaRecordDecisionOutput() *jsonschema.Schema {
 }
 func schemaDecisionListOutput() *jsonschema.Schema   { return typedSchema[decisionListOutput]() }
 func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workContextOutput]() }
-func schemaUpdateOutput() *jsonschema.Schema         { return typedSchema[updateIssueOutput]() }
+func schemaUpdateOutput() *jsonschema.Schema         { return schemaUpdateIssueUnion() }
+
+func schemaCreateIssueUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[createIssueCompactOutput]()}}
+}
+
+func schemaUpdateIssueUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[updateIssueOutput](), typedSchema[updateIssueCompactOutput]()}}
+}
+
+func schemaArchiveIssueUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[archiveIssueCompactOutput]()}}
+}
+
+func schemaClaimIssueUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[claimIssueOutput](), typedSchema[claimIssueCompactOutput]()}}
+}
+
+func schemaFinishAttemptUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[finishAttemptOutput](), typedSchema[finishAttemptCompactOutput]()}}
+}
 
 // schemaIssueListItem describes one list_issues item. list_issues returns one
 // of two item shapes depending on the request's view (compact, the default,
@@ -646,10 +669,10 @@ func schemaGraphOutput() *jsonschema.Schema {
 }
 func schemaPlanValidationOutput() *jsonschema.Schema  { return typedSchema[planValidationOutput]() }
 func schemaApplyIssuePlanOutput() *jsonschema.Schema  { return typedSchema[applyIssuePlanOutput]() }
-func schemaClaimIssueOutput() *jsonschema.Schema      { return typedSchema[claimIssueOutput]() }
+func schemaClaimIssueOutput() *jsonschema.Schema      { return schemaClaimIssueUnion() }
 func schemaRenewAttemptOutput() *jsonschema.Schema    { return typedSchema[renewAttemptOutput]() }
 func schemaSaveAttemptNoteOutput() *jsonschema.Schema { return typedSchema[saveAttemptNoteOutput]() }
-func schemaFinishAttemptOutput() *jsonschema.Schema   { return typedSchema[finishAttemptOutput]() }
+func schemaFinishAttemptOutput() *jsonschema.Schema   { return schemaFinishAttemptUnion() }
 
 func typedSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})

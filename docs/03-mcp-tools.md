@@ -646,7 +646,8 @@ Input:
   "blocked_reason": null,
   "labels": [],
   "create_missing_labels": true,
-  "idempotency_key": null
+  "idempotency_key": null,
+  "view": "compact"
 }
 ```
 
@@ -659,11 +660,25 @@ Rules:
 - Parent constraints are validated.
 - `idempotency_key` is optional. When supplied, it must be a non-blank string up to 128 runes. Reusing the same key with the same normalized request replays the original issue response; reusing it with a different request returns `IDEMPOTENCY_CONFLICT`.
 
-Output:
+`view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete issue response for callers that need the full record.
 
-```text
-issue compact projection
+Compact output (`view: "compact"`, default):
+
+```json
+{
+  "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "display_id": "ISSUE-42",
+  "sequence_no": 42,
+  "type": "task",
+  "status": "open",
+  "priority": "medium",
+  "version": 1
+}
 ```
+
+Compact responses omit issue bodies, labels, timestamps, and other non-essential issue metadata. The full response is the legacy complete issue payload.
+
+Migration guidance: callers that previously relied on the full issue record should pass `view: "full"`; callers that only need the compact identifiers and status fields can keep the default.
 
 ### 7.2. `update_issue`
 
@@ -691,7 +706,8 @@ Input:
     "labels": ["database", "concurrency"]
   },
   "create_missing_labels": true,
-  "idempotency_key": null
+  "idempotency_key": null,
+  "view": "compact"
 }
 ```
 
@@ -704,12 +720,23 @@ patch response, including after `expected_version` has since moved on from a
 later, unrelated update. Reusing the key with a different normalized request
 returns `IDEMPOTENCY_CONFLICT`.
 
-Output:
+`view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete issue response with the full issue payload plus the changed field list.
 
-```text
-issue standard projection
-changed_fields
+Compact output (`view: "compact"`, default):
+
+```json
+{
+  "issue": {
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "display_id": "ISSUE-42",
+    "status": "ready",
+    "version": 8
+  },
+  "changed_fields": ["status", "priority", "version"]
+}
 ```
+
+Compact responses omit issue bodies, labels, timestamps, and other non-essential issue metadata. Migration guidance is the same as for create: callers that need the legacy full issue payload should pass `view: "full"`.
 
 ### 7.3. `get_issue`
 
@@ -901,7 +928,8 @@ Input:
 {
   "issue_id": "ISSUE-42",
   "expected_version": 9,
-  "idempotency_key": null
+  "idempotency_key": null,
+  "view": "compact"
 }
 ```
 
@@ -917,11 +945,20 @@ and `expected_version`) replays the original archive response, including after
 the issue has already been archived by that same call. Reusing the key with a
 different normalized request returns `IDEMPOTENCY_CONFLICT`.
 
-Output:
+`view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete issue response for callers that need the full archived issue record.
 
-```text
-issue compact projection
+Compact output (`view: "compact"`, default):
+
+```json
+{
+  "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "display_id": "ISSUE-42",
+  "status": "ready",
+  "version": 10
+}
 ```
+
+Compact responses omit issue bodies, labels, timestamps, and other non-essential issue metadata. Migration guidance is the same as for create: callers that need the full issue payload should pass `view: "full"`.
 
 ### 7.6. Review requests
 
@@ -1503,7 +1540,8 @@ Input:
 {
   "issue_id": "ISSUE-42",
   "lease_seconds": null,
-  "idempotency_key": null
+  "idempotency_key": null,
+  "view": "compact"
 }
 ```
 
@@ -1516,18 +1554,27 @@ Behavior:
 - creates an opaque lease token;
 - accepts an optional `idempotency_key` that replays the original claim response for the same normalized request and returns `IDEMPOTENCY_CONFLICT` for a different request with the same key.
 
-Output:
+`view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete claim response with the full issue projection, the full attempt payload, and the same workflow context fields.
 
-```text
-issue compact projection
-attempt
-lease_token
-lease_expires_at
-minimal_work_context
-warnings
+Compact output (`view: "compact"`, default):
+
+```json
+{
+  "issue": {
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "status": "ready",
+    "version": 8
+  },
+  "attempt": {
+    "id": "01J0ABCDEF1234567890",
+    "kind": "work",
+    "lease_expires_at": "2026-08-05T12:34:56Z"
+  },
+  "lease_token": "opaque-token"
+}
 ```
 
-The raw lease token is returned once.
+The `lease_token` field appears only in claim results, including idempotent claim replay responses. Compact claim responses omit issue bodies, labels, timestamps, attempt history, and other non-essential metadata. They also never introduce lease tokens outside claim results. Migration guidance is the same as for the other mutations: callers that need the legacy full claim payload should pass `view: "full"`.
 
 ### 11.2. `renew_attempt`
 
@@ -1646,15 +1693,39 @@ review_outcome:
   blocked
 ```
 
-Output:
+`view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete finish response with the full attempt and issue payloads plus the complete artifact set.
 
-```text
-attempt
-issue
-warnings
-latest_event_id
-artifacts
+Compact output (`view: "compact"`, default):
+
+```json
+{
+  "attempt": {
+    "id": "01J0ABCDEF1234567890",
+    "issue_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "kind": "work",
+    "status": "completed",
+    "issue_version_at_start": 8
+  },
+  "issue": {
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "status": "done",
+    "version": 9
+  },
+  "warnings": [],
+  "latest_event_id": 1842,
+  "artifacts": [
+    {
+      "id": "01J0XYZ1234567890",
+      "type": "file",
+      "uri": "file:///tmp/summary.md",
+      "title": "Summary"
+    }
+  ],
+  "next_actions": ["Select new work from get_planning_graph."]
+}
 ```
+
+Compact finish responses omit issue bodies, labels, timestamps, unnecessary attempt history/default fields, artifact metadata, and artifact timestamps. They also never introduce lease tokens; only claim results carry that field. Migration guidance is the same as for the other mutations: callers that need the legacy full finish payload should pass `view: "full"`.
 
 Completion checks:
 

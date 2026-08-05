@@ -46,6 +46,7 @@ type createIssueInput struct {
 	Labels              []string `json:"labels,omitempty"`
 	CreateMissingLabels bool     `json:"create_missing_labels,omitempty"`
 	IdempotencyKey      *string  `json:"idempotency_key,omitempty"`
+	View                string   `json:"view,omitempty"`
 }
 
 type updateIssueInput struct {
@@ -54,6 +55,7 @@ type updateIssueInput struct {
 	Changes             patchInput `json:"changes"`
 	CreateMissingLabels bool       `json:"create_missing_labels,omitempty"`
 	IdempotencyKey      *string    `json:"idempotency_key,omitempty"`
+	View                string     `json:"view,omitempty"`
 }
 
 type getIssueInput struct {
@@ -126,6 +128,7 @@ type archiveIssueInput struct {
 	IssueID         string  `json:"issue_id"`
 	ExpectedVersion int64   `json:"expected_version"`
 	IdempotencyKey  *string `json:"idempotency_key,omitempty"`
+	View            string  `json:"view,omitempty"`
 }
 
 type addCommentInput struct {
@@ -153,6 +156,7 @@ type claimIssueInput struct {
 	IssueID        string  `json:"issue_id"`
 	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	View           string  `json:"view,omitempty"`
 }
 
 type createAgentSessionInput struct {
@@ -250,6 +254,7 @@ type finishAttemptInput struct {
 	AcknowledgedChanges    *acknowledgementInput `json:"acknowledged_changes,omitempty"`
 	Artifacts              []artifactInput       `json:"artifacts,omitempty"`
 	IdempotencyKey         *string               `json:"idempotency_key,omitempty"`
+	View                   string                `json:"view,omitempty"`
 }
 
 type manageIssueRelationInput struct {
@@ -747,6 +752,83 @@ type updateIssueOutput struct {
 	ChangedFields []string `json:"changed_fields"`
 }
 
+type createIssueCompactOutput struct {
+	ID         string `json:"id"`
+	DisplayID  string `json:"display_id"`
+	SequenceNo int64  `json:"sequence_no"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	Priority   string `json:"priority"`
+	Version    int64  `json:"version"`
+}
+
+type archiveIssueCompactOutput struct {
+	ID        string `json:"id"`
+	DisplayID string `json:"display_id"`
+	Status    string `json:"status"`
+	Version   int64  `json:"version"`
+}
+
+type updateIssueCompactOutput struct {
+	Issue         updateIssueCompactIssueDTO `json:"issue"`
+	ChangedFields []string                   `json:"changed_fields"`
+}
+
+type updateIssueCompactIssueDTO struct {
+	ID        string `json:"id"`
+	DisplayID string `json:"display_id"`
+	Status    string `json:"status"`
+	Version   int64  `json:"version"`
+}
+
+type claimIssueCompactOutput struct {
+	Issue      claimIssueCompactIssueDTO   `json:"issue"`
+	Attempt    claimIssueCompactAttemptDTO `json:"attempt"`
+	LeaseToken string                      `json:"lease_token"`
+}
+
+type claimIssueCompactIssueDTO struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Version int64  `json:"version"`
+}
+
+type claimIssueCompactAttemptDTO struct {
+	ID             string    `json:"id"`
+	Kind           string    `json:"kind"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+type finishAttemptCompactOutput struct {
+	Attempt       finishAttemptCompactAttemptDTO    `json:"attempt"`
+	Issue         finishAttemptCompactIssueDTO      `json:"issue"`
+	Warnings      []string                          `json:"warnings"`
+	LatestEventID int64                             `json:"latest_event_id"`
+	Artifacts     []finishAttemptCompactArtifactDTO `json:"artifacts"`
+	NextActions   []string                          `json:"next_actions"`
+}
+
+type finishAttemptCompactAttemptDTO struct {
+	ID                  string `json:"id"`
+	IssueID             string `json:"issue_id"`
+	Kind                string `json:"kind"`
+	Status              string `json:"status"`
+	IssueVersionAtStart int64  `json:"issue_version_at_start"`
+}
+
+type finishAttemptCompactIssueDTO struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Version int64  `json:"version"`
+}
+
+type finishAttemptCompactArtifactDTO struct {
+	ID    string  `json:"id"`
+	Type  string  `json:"type"`
+	URI   string  `json:"uri"`
+	Title *string `json:"title"`
+}
+
 // issueListItemDTO is the list_issues "full" projection: the complete issue
 // record plus every computed field. It is returned unchanged from today's
 // behavior when a caller passes view: "full", and is also reused (unchanged)
@@ -1143,6 +1225,31 @@ func issueCompactProjectionDTOFromDomain(issue domain.Issue) issueCompactProject
 		ID: issue.ID, DisplayID: issue.DisplayID, SequenceNo: issue.SequenceNo,
 		Type: string(issue.Type), Title: issue.Title, Version: issue.Version, UpdatedAt: issue.UpdatedAt,
 	}
+}
+
+func createIssueCompactOutputFromDomain(issue domain.Issue) createIssueCompactOutput {
+	return createIssueCompactOutput{ID: issue.ID, DisplayID: issue.DisplayID, SequenceNo: issue.SequenceNo,
+		Type: string(issue.Type), Status: string(issue.Status), Priority: string(issue.Priority), Version: issue.Version}
+}
+
+func archiveIssueCompactOutputFromDomain(issue domain.Issue) archiveIssueCompactOutput {
+	return archiveIssueCompactOutput{ID: issue.ID, DisplayID: issue.DisplayID, Status: string(issue.Status), Version: issue.Version}
+}
+
+func updateIssueCompactOutputFromDomain(issue domain.Issue, changedFields []string) updateIssueCompactOutput {
+	return updateIssueCompactOutput{Issue: updateIssueCompactIssueDTO{ID: issue.ID, DisplayID: issue.DisplayID, Status: string(issue.Status), Version: issue.Version}, ChangedFields: append([]string(nil), changedFields...)}
+}
+
+func claimIssueCompactOutputFromDomain(issue domain.Issue, attempt domain.WorkAttempt, leaseToken string) claimIssueCompactOutput {
+	return claimIssueCompactOutput{Issue: claimIssueCompactIssueDTO{ID: issue.ID, Status: string(issue.Status), Version: issue.Version}, Attempt: claimIssueCompactAttemptDTO{ID: attempt.ID, Kind: string(attempt.Kind), LeaseExpiresAt: attempt.LeaseExpiresAt}, LeaseToken: leaseToken}
+}
+
+func finishAttemptCompactOutputFromDomain(attempt domain.WorkAttempt, issue domain.Issue, warnings []string, latestEventID int64, artifacts []domain.Artifact, nextActions []string) finishAttemptCompactOutput {
+	compactArtifacts := make([]finishAttemptCompactArtifactDTO, len(artifacts))
+	for index, artifact := range artifacts {
+		compactArtifacts[index] = finishAttemptCompactArtifactDTO{ID: artifact.ID, Type: string(artifact.Type), URI: artifact.URI, Title: copyString(artifact.Title)}
+	}
+	return finishAttemptCompactOutput{Attempt: finishAttemptCompactAttemptDTO{ID: attempt.ID, IssueID: attempt.IssueID, Kind: string(attempt.Kind), Status: string(attempt.Status), IssueVersionAtStart: attempt.IssueVersionAtStart}, Issue: finishAttemptCompactIssueDTO{ID: issue.ID, Status: string(issue.Status), Version: issue.Version}, Warnings: append([]string(nil), warnings...), LatestEventID: latestEventID, Artifacts: compactArtifacts, NextActions: append([]string(nil), nextActions...)}
 }
 
 func issueStandardProjectionDTOFromDomain(issue domain.Issue) issueStandardProjectionDTO {

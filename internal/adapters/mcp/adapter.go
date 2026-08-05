@@ -205,7 +205,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	})
 	// create_issue's idempotency_key is optional: a bare repeat without it
 	// creates a second issue, so idempotentHint is false.
-	target.registerTool(server, groupIssues, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaIssueOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupIssues, tool("create_issue", "Create one epic, task, or bug with optional hierarchy and labels.", schemaCreateIssue(), schemaCreateIssueOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[createIssueInput, any](target, t, (*adapter).createIssue))
 	})
 	// expected_version gates every write: a bare repeat with the same
@@ -219,7 +219,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupIssues, tool("list_issues", "List and filter issues, including effective status, blockers, and claimability.", schemaListIssues(), schemaIssueListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[listIssuesInput, any](target, t, (*adapter).listIssues))
 	})
-	target.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaArchiveIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[archiveIssueInput, any](target, t, (*adapter).archiveIssue))
 	})
 	target.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
@@ -406,19 +406,29 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
 	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID, IdempotencyKey: input.IdempotencyKey})
 	if err != nil {
 		return adapter.failure(err)
 	}
-	attempt := attemptDTOFromDomain(result.Attempt)
-	return success(claimIssueOutput{
-		Issue: issueListItemDTO{issueDTO: issueDTOFromDomain(result.Issue), EffectiveStatus: string(domain.EffectiveStatusInProgress),
-			UnresolvedBlockerCount: 0, IsBlocked: false, IsClaimable: false, ActiveAttemptID: &result.Attempt.ID},
-		Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
-		MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
-		NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
-	}, "issue claimed")
+	view := input.View
+	if view == "" {
+		view = "compact"
+	}
+	if view == "full" {
+		attempt := attemptDTOFromDomain(result.Attempt)
+		return success(claimIssueOutput{
+			Issue: issueListItemDTO{issueDTO: issueDTOFromDomain(result.Issue), EffectiveStatus: string(domain.EffectiveStatusInProgress),
+				UnresolvedBlockerCount: 0, IsBlocked: false, IsClaimable: false, ActiveAttemptID: &result.Attempt.ID},
+			Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
+			MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
+			NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
+		}, "issue claimed")
+	}
+	return success(claimIssueCompactOutputFromDomain(result.Issue, result.Attempt, result.LeaseToken), "issue claimed")
 }
 
 func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
@@ -463,6 +473,9 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
 	for index, artifact := range input.Artifacts {
@@ -486,13 +499,20 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 	if err != nil {
 		return adapter.failure(err)
 	}
-	outputArtifacts := make([]artifactDTO, len(result.Artifacts))
-	for index, artifact := range result.Artifacts {
-		outputArtifacts[index] = artifactDTOFromDomain(artifact)
+	view := input.View
+	if view == "" {
+		view = "compact"
 	}
-	return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
-		Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts,
-		NextActions: []string{"Select new work from get_planning_graph."}}, "attempt finished")
+	if view == "full" {
+		outputArtifacts := make([]artifactDTO, len(result.Artifacts))
+		for index, artifact := range result.Artifacts {
+			outputArtifacts[index] = artifactDTOFromDomain(artifact)
+		}
+		return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
+			Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts,
+			NextActions: []string{"Select new work from get_planning_graph."}}, "attempt finished")
+	}
+	return success(finishAttemptCompactOutputFromDomain(result.Attempt, result.Issue, result.Warnings, result.LatestEventID, result.Artifacts, []string{"Select new work from get_planning_graph."}), "attempt finished")
 }
 
 func (adapter *adapter) sessionIDForRequest(ctx context.Context, request *sdkmcp.CallToolRequest) *string {
@@ -774,6 +794,9 @@ func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
 	result, err := adapter.issues.CreateIssue(ctx, domain.CreateIssueInput{
 		Type:                domain.Type(input.Type),
 		Title:               input.Title,
@@ -790,10 +813,20 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(issueDTOFromDomain(result.Issue), "issue created")
+	view := input.View
+	if view == "" {
+		view = "compact"
+	}
+	if view == "full" {
+		return success(issueDTOFromDomain(result.Issue), "issue created")
+	}
+	return success(createIssueCompactOutputFromDomain(result.Issue), "issue created")
 }
 
 func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
 	result, err := adapter.issues.UpdateIssue(ctx, domain.UpdateIssueInput{
 		IssueID:             input.IssueID,
 		ExpectedVersion:     input.ExpectedVersion,
@@ -804,7 +837,14 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, "issue updated")
+	view := input.View
+	if view == "" {
+		view = "compact"
+	}
+	if view == "full" {
+		return success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, "issue updated")
+	}
+	return success(updateIssueCompactOutputFromDomain(result.Issue, result.ChangedFields), "issue updated")
 }
 
 func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -891,6 +931,9 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
 	result, err := adapter.issues.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
@@ -899,7 +942,14 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(issueDTOFromDomain(result.Issue), "issue archived")
+	view := input.View
+	if view == "" {
+		view = "compact"
+	}
+	if view == "full" {
+		return success(issueDTOFromDomain(result.Issue), "issue archived")
+	}
+	return success(archiveIssueCompactOutputFromDomain(result.Issue), "issue archived")
 }
 
 func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
