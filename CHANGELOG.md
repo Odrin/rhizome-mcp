@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-05
+
+### Added
+
+- **Stateless MCP transport** — Supports modern and legacy local HTTP clients. Added MCP version 2026-07-28 support.
+- **Agent session attribution** — Durable audit handles outlive connections.
+- **Shared project routing** — Serves initialized projects from one data root.
+- **MCP projections and artifacts** — Added compact issues and export files.
+- **Coverage reporting** — CI publishes unit and integration coverage badges.
+
+### Changed
+
+- **MCP responses are smaller** — Removed duplicate payloads and bounded output.
+- **Project routing documentation** — Clarifies client and runtime constraints.
+
+### Fixed
+
+- **Shared-project runtime** — Fixed cancellation, leases, and cleanup retries.
+
 ## [1.0.1] - 2026-07-25
 
 ### Changed
