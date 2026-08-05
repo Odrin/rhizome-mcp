@@ -68,6 +68,16 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 	}
 	decodeIntegrationResult(t, issue2Result, &issue2)
 
+	relationResult := callIntegrationTool(t, session, "manage_issue_relation", map[string]any{
+		"action":          "add",
+		"source_issue_id": issue1.DisplayID,
+		"target_issue_id": issue2.DisplayID,
+		"relation_type":   "related_to",
+	})
+	if relationResult.IsError {
+		t.Fatalf("manage_issue_relation failed: %#v", relationResult)
+	}
+
 	// Add comment to first issue.
 	commentResult := callIntegrationTool(t, session, "add_comment", map[string]any{
 		"issue_id": issue1.DisplayID,
@@ -136,8 +146,8 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 
 	// 4. Assert the drained event set:
 	// - contains every expected mutation EXACTLY ONCE
-	// - has no gaps in event ordering
 	// - is monotonically ordered by event id
+	// Global IDs may contain gaps when redundant endpoint copies are hidden.
 
 	eventIDs := make(map[int64]int)
 	for _, evt := range allEventsPaged {
@@ -154,11 +164,10 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 			t.Errorf("events not monotonically ordered: event %d <= event %d",
 				allEventsPaged[i].ID, allEventsPaged[i-1].ID)
 		}
-		// Check for gaps: next event ID should be exactly 1 more than previous
-		if allEventsPaged[i].ID != allEventsPaged[i-1].ID+1 {
-			t.Errorf("gap in event ordering at events %d and %d",
-				allEventsPaged[i-1].ID, allEventsPaged[i].ID)
-		}
+	}
+	relationEvents := filterEventsByType(allEventsPaged, "relation_added")
+	if len(relationEvents) != 1 {
+		t.Fatalf("global relation_added events = %d, want 1 canonical event", len(relationEvents))
 	}
 
 	// 5. Assert latest_event_id is monotonically non-decreasing across polls
@@ -224,6 +233,14 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 				evt.IssueID, issue1.ID)
 		}
 	}
+	if relationEvents := filterEventsByType(issue1Events, "relation_added"); len(relationEvents) != 1 {
+		t.Errorf("issue1 relation_added events = %d, want 1", len(relationEvents))
+	}
+
+	issue2Events := drainGetChanges(t, session, baselineSinceEventID, largeLimit, issue2.ID, nil)
+	if relationEvents := filterEventsByType(issue2Events, "relation_added"); len(relationEvents) != 1 {
+		t.Errorf("issue2 relation_added events = %d, want 1", len(relationEvents))
+	}
 
 	// Filter by event_types.
 	// Fixture produces issue_created (2), comment_added (1), decision_recorded (1).
@@ -278,8 +295,8 @@ func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
 		LatestEventID int64            `json:"latest_event_id"`
 	}
 	decodeIntegrationResult(t, idleResult, &idleState)
-	if len(idleState.Events) != 0 {
-		t.Errorf("idle poll returned %d events, want 0", len(idleState.Events))
+	if idleState.Events == nil || len(idleState.Events) != 0 {
+		t.Errorf("idle poll events = %#v, want []", idleState.Events)
 	}
 	if idleState.HasMore {
 		t.Errorf("idle poll has_more = true, want false")
@@ -299,6 +316,16 @@ type issueEventDTO struct {
 	AttemptID *string         `json:"attempt_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt string          `json:"created_at"`
+}
+
+func filterEventsByType(events []issueEventDTO, eventType string) []issueEventDTO {
+	filtered := make([]issueEventDTO, 0)
+	for _, event := range events {
+		if event.EventType == eventType {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
 }
 
 // drainGetChanges repeatedly calls get_changes, following next_event_id and

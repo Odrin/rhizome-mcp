@@ -561,13 +561,17 @@ func interruptionPointer(value *string) *domain.InterruptionReasonCode {
 }
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
-	validation, err := adapter.plans.ValidateIssuePlan(ctx, input.domainPlan())
+	plan := input.domainPlan()
+	validation, err := adapter.plans.ValidateIssuePlan(ctx, plan)
 	if err != nil {
 		return adapter.failure(err)
 	}
-	output := planValidationOutputFromDomain(validation)
+	output, err := planValidationOutputFromDomain(validation, plan, input.IncludeNormalizedPlan)
+	if err != nil {
+		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "normalized issue plan could not be encoded", false))
+	}
 	if output.Valid {
-		output.NextActions = []string{"Apply normalized_plan with apply_issue_plan."}
+		output.NextActions = []string{"Request include_normalized_plan when normalized fields are needed for apply_issue_plan."}
 	} else {
 		output.NextActions = []string{"Correct errors and validate again."}
 	}

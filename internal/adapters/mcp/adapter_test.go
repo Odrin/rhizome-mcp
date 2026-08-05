@@ -432,15 +432,14 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		Items []struct {
 			IssueID    string `json:"issue_id"`
 			EntityType string `json:"entity_type"`
+			EntityID   string `json:"entity_id"`
 			Comment    *struct {
-				ID      string `json:"id"`
 				Content string `json:"content"`
 			} `json:"comment"`
 			Decision *struct {
-				ID string `json:"id"`
+				Status string `json:"status"`
 			} `json:"decision"`
 			Event *struct {
-				ID         int64   `json:"id"`
 				EventType  string  `json:"event_type"`
 				LeaseToken *string `json:"lease_token"`
 			} `json:"event"`
@@ -471,85 +470,37 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	if entityCounts["comment"] != 1 || entityCounts["decision"] != 1 || entityCounts["event"] < 1 {
 		t.Fatalf("issue activity entity counts = %#v", entityCounts)
 	}
-	var commentItem, decisionItem, eventItem struct {
-		IssueID    string `json:"issue_id"`
-		EntityType string `json:"entity_type"`
-		Comment    *struct {
-			ID      string `json:"id"`
-			Content string `json:"content"`
-		} `json:"comment"`
-		Decision *struct {
-			ID string `json:"id"`
-		} `json:"decision"`
-		Event *struct {
-			ID         int64   `json:"id"`
-			EventType  string  `json:"event_type"`
-			LeaseToken *string `json:"lease_token"`
-		} `json:"event"`
-	}
+	var commentEntityID, decisionEntityID, eventEntityID, commentContent, eventType string
 	for _, item := range activityOutput.Items {
 		switch item.EntityType {
 		case "comment":
-			commentItem = struct {
-				IssueID    string `json:"issue_id"`
-				EntityType string `json:"entity_type"`
-				Comment    *struct {
-					ID      string `json:"id"`
-					Content string `json:"content"`
-				} `json:"comment"`
-				Decision *struct {
-					ID string `json:"id"`
-				} `json:"decision"`
-				Event *struct {
-					ID         int64   `json:"id"`
-					EventType  string  `json:"event_type"`
-					LeaseToken *string `json:"lease_token"`
-				} `json:"event"`
-			}{IssueID: item.IssueID, EntityType: item.EntityType, Comment: item.Comment}
+			commentEntityID = item.EntityID
+			commentContent = item.Comment.Content
 		case "decision":
-			decisionItem = struct {
-				IssueID    string `json:"issue_id"`
-				EntityType string `json:"entity_type"`
-				Comment    *struct {
-					ID      string `json:"id"`
-					Content string `json:"content"`
-				} `json:"comment"`
-				Decision *struct {
-					ID string `json:"id"`
-				} `json:"decision"`
-				Event *struct {
-					ID         int64   `json:"id"`
-					EventType  string  `json:"event_type"`
-					LeaseToken *string `json:"lease_token"`
-				} `json:"event"`
-			}{IssueID: item.IssueID, EntityType: item.EntityType, Decision: item.Decision}
+			decisionEntityID = item.EntityID
 		case "event":
-			eventItem = struct {
-				IssueID    string `json:"issue_id"`
-				EntityType string `json:"entity_type"`
-				Comment    *struct {
-					ID      string `json:"id"`
-					Content string `json:"content"`
-				} `json:"comment"`
-				Decision *struct {
-					ID string `json:"id"`
-				} `json:"decision"`
-				Event *struct {
-					ID         int64   `json:"id"`
-					EventType  string  `json:"event_type"`
-					LeaseToken *string `json:"lease_token"`
-				} `json:"event"`
-			}{IssueID: item.IssueID, EntityType: item.EntityType, Event: item.Event}
+			eventEntityID = item.EntityID
+			eventType = item.Event.EventType
 		}
 	}
-	if commentItem.Comment == nil || commentItem.Comment.ID != commentOutput.Comment.ID || commentItem.Comment.Content != commentOutput.Comment.Content {
-		t.Fatalf("comment activity item = %#v", commentItem)
+	if commentEntityID != commentOutput.Comment.ID || commentContent != commentOutput.Comment.Content {
+		t.Fatalf("comment activity = entity %q, content %q", commentEntityID, commentContent)
 	}
-	if decisionItem.Decision == nil || decisionItem.Decision.ID != decisionOutput.Decision.ID {
-		t.Fatalf("decision activity item = %#v", decisionItem)
+	if decisionEntityID != decisionOutput.Decision.ID {
+		t.Fatalf("decision activity entity = %q, want %q", decisionEntityID, decisionOutput.Decision.ID)
 	}
-	if eventItem.Event == nil || eventItem.Event.ID <= 0 || eventItem.Event.EventType == "" {
-		t.Fatalf("event activity item = %#v", eventItem)
+	if eventEntityID == "" || eventType == "" {
+		t.Fatalf("event activity = entity %q, type %q", eventEntityID, eventType)
+	}
+	structuredActivity := activity.StructuredContent.(map[string]any)
+	for _, rawItem := range structuredActivity["items"].([]any) {
+		item := rawItem.(map[string]any)
+		payload := item[item["entity_type"].(string)].(map[string]any)
+		for _, repeated := range []string{"id", "issue_id", "created_at"} {
+			if _, exists := payload[repeated]; exists {
+				t.Fatalf("activity payload repeated %s: %#v", repeated, payload)
+			}
+		}
 	}
 	for _, item := range activityOutput.Items {
 		if item.Event != nil && item.Event.LeaseToken != nil {
@@ -563,14 +514,14 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	var commentsOnlyOutput struct {
 		Items []struct {
 			EntityType string `json:"entity_type"`
+			EntityID   string `json:"entity_id"`
 			Comment    *struct {
-				ID      string `json:"id"`
 				Content string `json:"content"`
 			} `json:"comment"`
 		} `json:"items"`
 	}
 	decodeStructured(t, activityCommentsOnly, &commentsOnlyOutput)
-	if activityCommentsOnly.IsError || len(commentsOnlyOutput.Items) != 1 || commentsOnlyOutput.Items[0].EntityType != "comment" || commentsOnlyOutput.Items[0].Comment == nil || commentsOnlyOutput.Items[0].Comment.ID != commentOutput.Comment.ID || commentsOnlyOutput.Items[0].Comment.Content != commentOutput.Comment.Content {
+	if activityCommentsOnly.IsError || len(commentsOnlyOutput.Items) != 1 || commentsOnlyOutput.Items[0].EntityType != "comment" || commentsOnlyOutput.Items[0].EntityID != commentOutput.Comment.ID || commentsOnlyOutput.Items[0].Comment == nil || commentsOnlyOutput.Items[0].Comment.Content != commentOutput.Comment.Content {
 		t.Fatalf("comments-only activity = %#v", commentsOnlyOutput)
 	}
 	malformedCursor := call(t, client, "get_issue_activity", map[string]any{
@@ -1510,8 +1461,6 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 			EntityID   string `json:"entity_id"`
 			IssueID    string `json:"issue_id"`
 			Review     *struct {
-				ID        string `json:"id"`
-				IssueID   string `json:"issue_id"`
 				Status    string `json:"status"`
 				Claimable bool   `json:"claimable"`
 			} `json:"review"`
@@ -1520,8 +1469,7 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	decodeStructured(t, activity, &activityOutput)
 	if activity.IsError || len(activityOutput.Items) != 1 || activityOutput.Items[0].EntityType != "review" ||
 		activityOutput.Items[0].EntityID != createdOutput.ID || activityOutput.Items[0].IssueID != issue.ID ||
-		activityOutput.Items[0].Review == nil || activityOutput.Items[0].Review.ID != createdOutput.ID ||
-		activityOutput.Items[0].Review.IssueID != issue.ID || activityOutput.Items[0].Review.Status != "open" || !activityOutput.Items[0].Review.Claimable {
+		activityOutput.Items[0].Review == nil || activityOutput.Items[0].Review.Status != "open" || !activityOutput.Items[0].Review.Claimable {
 		t.Fatalf("review activity = %#v", activityOutput)
 	}
 
@@ -3030,21 +2978,62 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 		"decisions": []any{map[string]any{"issue_ref": "task", "title": "Choice", "summary": "short", "content": "long"}},
 	}
 	validation := call(t, client, "validate_issue_plan", plan)
+	defaultValidation := validation
 	var checked struct {
-		Valid          bool           `json:"valid"`
-		NormalizedPlan map[string]any `json:"normalized_plan"`
+		Valid                bool             `json:"valid"`
+		Errors               []map[string]any `json:"errors"`
+		Warnings             []string         `json:"warnings"`
+		PlanFingerprint      string           `json:"plan_fingerprint"`
+		NormalizationChanged bool             `json:"normalization_changed"`
+		NormalizedPlan       map[string]any   `json:"normalized_plan"`
 	}
 	decodeStructured(t, validation, &checked)
-	normalizedIssues, ok := checked.NormalizedPlan["issues"].([]any)
+	if validation.IsError || !checked.Valid || checked.Errors == nil || checked.Warnings == nil || len(checked.PlanFingerprint) != 64 || !checked.NormalizationChanged || checked.NormalizedPlan != nil {
+		t.Fatalf("default validation = %#v, output = %#v", validation, checked)
+	}
+	plan["include_normalized_plan"] = true
+	validation = call(t, client, "validate_issue_plan", plan)
+	var detailed struct {
+		Valid                bool           `json:"valid"`
+		PlanFingerprint      string         `json:"plan_fingerprint"`
+		NormalizationChanged bool           `json:"normalization_changed"`
+		NormalizedPlan       map[string]any `json:"normalized_plan"`
+	}
+	decodeStructured(t, validation, &detailed)
+	if detailed.PlanFingerprint != checked.PlanFingerprint || !detailed.NormalizationChanged {
+		t.Fatalf("detailed validation metadata = %#v, want fingerprint %q", detailed, checked.PlanFingerprint)
+	}
+	normalizedIssues, ok := detailed.NormalizedPlan["issues"].([]any)
 	if validation.IsError || !checked.Valid || !ok || len(normalizedIssues) != 2 {
-		t.Fatalf("validation = %#v, output = %#v", validation, checked)
+		t.Fatalf("validation = %#v, output = %#v", validation, detailed)
 	}
 	normalizedTask, ok := normalizedIssues[1].(map[string]any)
 	if !ok || normalizedTask["status"] != "open" || !reflect.DeepEqual(normalizedTask["labels"], []any{"Plan Existing"}) {
 		t.Fatalf("normalized task = %#v", normalizedIssues[1])
 	}
-	checked.NormalizedPlan["idempotency_key"] = "mcp-plan-key"
-	applied := call(t, client, "apply_issue_plan", checked.NormalizedPlan)
+	defaultBytes, err := json.Marshal(defaultValidation.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailedBytes, err := json.Marshal(validation.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultBytes) >= len(detailedBytes) {
+		t.Fatalf("default validation size = %d, opt-in size = %d", len(defaultBytes), len(detailedBytes))
+	}
+	normalizedValidation := call(t, client, "validate_issue_plan", detailed.NormalizedPlan)
+	var normalizedCheck struct {
+		Valid                bool   `json:"valid"`
+		PlanFingerprint      string `json:"plan_fingerprint"`
+		NormalizationChanged bool   `json:"normalization_changed"`
+	}
+	decodeStructured(t, normalizedValidation, &normalizedCheck)
+	if normalizedValidation.IsError || !normalizedCheck.Valid || normalizedCheck.PlanFingerprint != checked.PlanFingerprint || normalizedCheck.NormalizationChanged {
+		t.Fatalf("normalized validation = %#v, output = %#v", normalizedValidation, normalizedCheck)
+	}
+	detailed.NormalizedPlan["idempotency_key"] = "mcp-plan-key"
+	applied := call(t, client, "apply_issue_plan", detailed.NormalizedPlan)
 	var result struct {
 		CreatedIssues []struct {
 			Ref   string `json:"ref"`
@@ -3068,7 +3057,7 @@ func TestIssuePlanToolsValidateAndApply(t *testing.T) {
 		len(result.CreatedRelations) != 1 || len(result.CreatedDecisions) != 1 || result.LatestEventID == 0 {
 		t.Fatalf("apply = %#v, output = %#v", applied, result)
 	}
-	replay := call(t, client, "apply_issue_plan", checked.NormalizedPlan)
+	replay := call(t, client, "apply_issue_plan", detailed.NormalizedPlan)
 	if replay.IsError {
 		t.Fatalf("replay = %#v", replay)
 	}
@@ -3152,7 +3141,19 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 		t.Fatal("limits schema unexpectedly allowed parent_epic")
 	}
 
-	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Work context", "status": "ready", "priority": "medium"})
+	createdParent := call(t, client, "create_issue", map[string]any{"type": "epic", "title": "Parent epic", "status": "open", "priority": "medium"})
+	var parent struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdParent, &parent)
+	if createdParent.IsError {
+		t.Fatalf("create parent = %#v", createdParent)
+	}
+
+	created := call(t, client, "create_issue", map[string]any{
+		"type": "task", "title": "Work context", "status": "ready", "priority": "medium", "parent_issue_id": parent.DisplayID,
+	})
 	var issue struct {
 		ID        string `json:"id"`
 		DisplayID string `json:"display_id"`
@@ -3160,6 +3161,12 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	decodeStructured(t, created, &issue)
 	if created.IsError {
 		t.Fatalf("create_issue = %#v", created)
+	}
+	related := call(t, client, "manage_issue_relation", map[string]any{
+		"action": "add", "source_issue_id": parent.DisplayID, "target_issue_id": issue.DisplayID, "relation_type": "related_to",
+	})
+	if related.IsError {
+		t.Fatalf("relate parent = %#v", related)
 	}
 
 	if _, err := client.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: "add_comment", Arguments: map[string]any{"issue_id": issue.DisplayID, "content": "first"}}); err != nil {
@@ -3205,7 +3212,7 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 
 	requestedResult := call(t, client, "get_work_context", map[string]any{
 		"issue_id": issue.DisplayID,
-		"include":  []string{"recent_comments", "decision_content", "attempt_history"},
+		"include":  []string{"parent_epic", "related_issue_summaries", "recent_comments", "decision_content", "attempt_history"},
 		"limits":   map[string]any{"recent_comments": 1, "attempt_history": 1},
 	})
 	var requestedOutput map[string]any
@@ -3217,9 +3224,25 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	if !ok || len(recentComments) != 1 {
 		t.Fatalf("requested recent_comments = %#v", requestedOutput["recent_comments"])
 	}
-	decisionContent, ok := requestedOutput["decision_content"].([]any)
-	if !ok || len(decisionContent) != 1 {
-		t.Fatalf("requested decision_content = %#v", requestedOutput["decision_content"])
+	if _, exists := requestedOutput["decision_content"]; exists {
+		t.Fatalf("requested work context duplicated decision_content: %#v", requestedOutput["decision_content"])
+	}
+	decisions, ok := requestedOutput["decisions"].([]any)
+	if !ok || len(decisions) != 1 || decisions[0].(map[string]any)["content"] != "Detail" {
+		t.Fatalf("enriched decisions = %#v", requestedOutput["decisions"])
+	}
+	parentEpic, ok := requestedOutput["parent_epic"].(map[string]any)
+	if !ok || parentEpic["id"] != parent.ID {
+		t.Fatalf("parent_epic = %#v", requestedOutput["parent_epic"])
+	}
+	relatedIssues, ok := requestedOutput["related_issue_summaries"].([]any)
+	if !ok {
+		t.Fatalf("related_issue_summaries = %#v", requestedOutput["related_issue_summaries"])
+	}
+	for _, relatedIssue := range relatedIssues {
+		if relatedIssue.(map[string]any)["id"] == parent.ID {
+			t.Fatalf("parent duplicated in related_issue_summaries: %#v", relatedIssues)
+		}
 	}
 	attemptHistory, ok := requestedOutput["attempt_history"].([]any)
 	if !ok || len(attemptHistory) != 1 {

@@ -426,7 +426,7 @@ func schemaPlanFields(properties map[string]*jsonschema.Schema) {
 }
 func intPointer(value int) *int { return &value }
 func schemaValidateIssuePlan() *jsonschema.Schema {
-	properties := map[string]*jsonschema.Schema{}
+	properties := map[string]*jsonschema.Schema{"include_normalized_plan": booleanSchema()}
 	schemaPlanFields(properties)
 	return withAgentSessionHandle(object(properties, "issues", "relations", "decisions"))
 }

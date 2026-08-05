@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -285,9 +286,10 @@ type getPlanningGraphInput struct {
 }
 
 type issuePlanInput struct {
-	Issues    []planIssueInput    `json:"issues"`
-	Relations []planRelationInput `json:"relations"`
-	Decisions []planDecisionInput `json:"decisions"`
+	Issues                []planIssueInput    `json:"issues"`
+	Relations             []planRelationInput `json:"relations"`
+	Decisions             []planDecisionInput `json:"decisions"`
+	IncludeNormalizedPlan bool                `json:"include_normalized_plan,omitempty"`
 }
 
 type applyIssuePlanInput struct {
@@ -679,17 +681,84 @@ type replaceReviewRequestOutput struct {
 }
 
 type activityItemDTO struct {
-	EntityType  string                     `json:"entity_type"`
-	EntityID    string                     `json:"entity_id"`
-	IssueID     string                     `json:"issue_id"`
-	OccurredAt  time.Time                  `json:"occurred_at"`
-	Comment     *commentDTO                `json:"comment,omitempty"`
-	Decision    *recordDecisionDecisionDTO `json:"decision,omitempty"`
-	Review      *reviewRequestDTO          `json:"review,omitempty"`
-	Attempt     *attemptDTO                `json:"attempt,omitempty"`
-	AttemptNote *attemptNoteDTO            `json:"attempt_note,omitempty"`
-	Event       *issueEventDTO             `json:"event,omitempty"`
-	Artifact    *artifactDTO               `json:"artifact,omitempty"`
+	EntityType  string                  `json:"entity_type"`
+	EntityID    string                  `json:"entity_id"`
+	IssueID     string                  `json:"issue_id"`
+	OccurredAt  time.Time               `json:"occurred_at"`
+	Comment     *activityCommentDTO     `json:"comment,omitempty"`
+	Decision    *activityDecisionDTO    `json:"decision,omitempty"`
+	Review      *activityReviewDTO      `json:"review,omitempty"`
+	Attempt     *activityAttemptDTO     `json:"attempt,omitempty"`
+	AttemptNote *activityAttemptNoteDTO `json:"attempt_note,omitempty"`
+	Event       *activityEventDTO       `json:"event,omitempty"`
+	Artifact    *activityArtifactDTO    `json:"artifact,omitempty"`
+}
+
+type activityCommentDTO struct {
+	Content            string     `json:"content"`
+	CreatedBySessionID *string    `json:"created_by_session_id"`
+	AuthorLabel        *string    `json:"author_label"`
+	EditedAt           *time.Time `json:"edited_at"`
+}
+
+type activityDecisionDTO struct {
+	Title              string  `json:"title"`
+	Summary            string  `json:"summary"`
+	Content            string  `json:"content"`
+	Status             string  `json:"status"`
+	SupersedesID       *string `json:"supersedes_id"`
+	CreatedBySessionID *string `json:"created_by_session_id"`
+}
+
+type activityReviewDTO struct {
+	TargetIssueVersion int64      `json:"target_issue_version"`
+	TargetEventID      int64      `json:"target_event_id"`
+	ArtifactIDs        []string   `json:"artifact_ids"`
+	Status             string     `json:"status"`
+	SupersedesID       *string    `json:"supersedes_id,omitempty"`
+	ActiveAttemptID    *string    `json:"active_attempt_id,omitempty"`
+	Claimable          bool       `json:"claimable"`
+	Version            int64      `json:"version"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+}
+
+type activityAttemptDTO struct {
+	Kind                   string     `json:"kind"`
+	Status                 string     `json:"status"`
+	IssueVersionAtStart    int64      `json:"issue_version_at_start"`
+	ContextEventIDAtStart  int64      `json:"context_event_id_at_start"`
+	LeaseExpiresAt         time.Time  `json:"lease_expires_at"`
+	LastHeartbeatAt        time.Time  `json:"last_heartbeat_at"`
+	FinishedAt             *time.Time `json:"finished_at"`
+	ResultSummary          *string    `json:"result_summary"`
+	NextSteps              []string   `json:"next_steps"`
+	Verification           []string   `json:"verification"`
+	FailureReasonCode      *string    `json:"failure_reason_code"`
+	InterruptionReasonCode *string    `json:"interruption_reason_code"`
+	ReasonDetails          *string    `json:"reason_details"`
+}
+
+type activityAttemptNoteDTO struct {
+	AttemptID string   `json:"attempt_id"`
+	Kind      string   `json:"kind"`
+	Content   string   `json:"content"`
+	NextSteps []string `json:"next_steps"`
+	Important bool     `json:"important"`
+}
+
+type activityEventDTO struct {
+	EventType string          `json:"event_type"`
+	SessionID *string         `json:"session_id"`
+	AttemptID *string         `json:"attempt_id"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type activityArtifactDTO struct {
+	AttemptID *string         `json:"attempt_id"`
+	Type      string          `json:"type"`
+	URI       string          `json:"uri"`
+	Title     *string         `json:"title"`
+	Metadata  json.RawMessage `json:"metadata"`
 }
 
 type issueActivityOutput struct {
@@ -936,11 +1005,14 @@ type workContextIssueDTO struct {
 }
 
 type workContextDecisionSummaryDTO struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Summary   string    `json:"summary"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	Title              string    `json:"title"`
+	Summary            string    `json:"summary"`
+	Content            *string   `json:"content,omitempty"`
+	Status             string    `json:"status"`
+	SupersedesID       *string   `json:"supersedes_id,omitempty"`
+	CreatedBySessionID *string   `json:"created_by_session_id,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type workContextReviewOutcomeDTO struct {
@@ -988,7 +1060,6 @@ type workContextOutput struct {
 	RelatedIssueSummaries       []workContextIssueDTO           `json:"related_issue_summaries"`
 	RecentComments              []commentDTO                    `json:"recent_comments"`
 	RecentAttemptNotes          []attemptNoteDTO                `json:"recent_attempt_notes"`
-	DecisionContent             []recordDecisionDecisionDTO     `json:"decision_content"`
 	AttemptHistory              []attemptDTO                    `json:"attempt_history"`
 	Artifacts                   []artifactDTO                   `json:"artifacts"`
 	ProjectInstructions         *string                         `json:"project_instructions"`
@@ -1137,12 +1208,14 @@ type normalizedPlanDTO struct {
 	Decisions []planDecisionInput `json:"decisions"`
 }
 type planValidationOutput struct {
-	Valid          bool              `json:"valid"`
-	Errors         []domain.Detail   `json:"errors"`
-	Warnings       []string          `json:"warnings"`
-	Summary        planSummaryDTO    `json:"summary"`
-	NormalizedPlan normalizedPlanDTO `json:"normalized_plan"`
-	NextActions    []string          `json:"next_actions"`
+	Valid                bool               `json:"valid"`
+	Errors               []domain.Detail    `json:"errors"`
+	Warnings             []string           `json:"warnings"`
+	Summary              planSummaryDTO     `json:"summary"`
+	PlanFingerprint      string             `json:"plan_fingerprint"`
+	NormalizationChanged bool               `json:"normalization_changed"`
+	NormalizedPlan       *normalizedPlanDTO `json:"normalized_plan,omitempty"`
+	NextActions          []string           `json:"next_actions"`
 }
 type createdPlanIssueDTO struct {
 	Ref   string   `json:"ref,omitempty"`
@@ -1165,11 +1238,27 @@ type applyIssuePlanOutput struct {
 	NextActions      []string              `json:"next_actions"`
 }
 
-func planValidationOutputFromDomain(value domain.PlanValidation) planValidationOutput {
-	plan := issuePlanInputFromDomain(value.NormalizedPlan)
-	return planValidationOutput{Valid: value.Valid, Errors: append([]domain.Detail{}, value.Errors...), Warnings: append([]string{}, value.Warnings...),
-		Summary:        planSummaryDTO{IssueCount: value.Summary.IssueCount, RelationCount: value.Summary.RelationCount, DecisionCount: value.Summary.DecisionCount, LabelAssignmentCount: value.Summary.LabelAssignmentCount},
-		NormalizedPlan: normalizedPlanDTO{Issues: plan.Issues, Relations: plan.Relations, Decisions: plan.Decisions}}
+func planValidationOutputFromDomain(value domain.PlanValidation, input domain.IssuePlan, includeNormalizedPlan bool) (planValidationOutput, error) {
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return planValidationOutput{}, err
+	}
+	normalizedJSON, err := json.Marshal(value.NormalizedPlan)
+	if err != nil {
+		return planValidationOutput{}, err
+	}
+	fingerprint := sha256.Sum256(normalizedJSON)
+	result := planValidationOutput{
+		Valid: value.Valid, Errors: append([]domain.Detail{}, value.Errors...), Warnings: append([]string{}, value.Warnings...),
+		Summary:              planSummaryDTO{IssueCount: value.Summary.IssueCount, RelationCount: value.Summary.RelationCount, DecisionCount: value.Summary.DecisionCount, LabelAssignmentCount: value.Summary.LabelAssignmentCount},
+		PlanFingerprint:      fmt.Sprintf("%x", fingerprint),
+		NormalizationChanged: !bytes.Equal(inputJSON, normalizedJSON),
+	}
+	if includeNormalizedPlan {
+		plan := issuePlanInputFromDomain(value.NormalizedPlan)
+		result.NormalizedPlan = &normalizedPlanDTO{Issues: plan.Issues, Relations: plan.Relations, Decisions: plan.Decisions}
+	}
+	return result, nil
 }
 func issuePlanInputFromDomain(value domain.IssuePlan) issuePlanInput {
 	result := issuePlanInput{Issues: make([]planIssueInput, len(value.Issues)), Relations: make([]planRelationInput, len(value.Relations)), Decisions: make([]planDecisionInput, len(value.Decisions))}
@@ -1430,6 +1519,10 @@ func changesOutputFromDomain(page domain.ChangesPage) changesOutput {
 }
 
 func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
+	decisionContent := make(map[string]domain.Decision, len(value.DecisionContent))
+	for _, decision := range value.DecisionContent {
+		decisionContent[decision.ID] = decision
+	}
 	result := workContextOutput{
 		Issue:                       workContextIssueDTOFromDomain(value.Issue),
 		Blockers:                    make([]workContextIssueDTO, len(value.Blockers)),
@@ -1438,10 +1531,9 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		Warnings:                    make([]string, len(value.Warnings)),
 		ParentEpic:                  workContextIssueDTOFromDomainPointer(value.ParentEpic),
 		Relations:                   make([]relationDTO, len(value.Relations)),
-		RelatedIssueSummaries:       make([]workContextIssueDTO, len(value.RelatedIssueSummaries)),
+		RelatedIssueSummaries:       make([]workContextIssueDTO, 0, len(value.RelatedIssueSummaries)),
 		RecentComments:              make([]commentDTO, len(value.RecentComments)),
 		RecentAttemptNotes:          make([]attemptNoteDTO, len(value.RecentAttemptNotes)),
-		DecisionContent:             make([]recordDecisionDecisionDTO, len(value.DecisionContent)),
 		AttemptHistory:              make([]attemptDTO, len(value.AttemptHistory)),
 		Artifacts:                   make([]artifactDTO, len(value.Artifacts)),
 		ChangesSincePreviousAttempt: make([]issueEventDTO, len(value.ChangesSincePreviousAttempt)),
@@ -1452,7 +1544,7 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		result.Blockers[index] = workContextIssueDTOFromDomain(blocker)
 	}
 	for index, decision := range value.Decisions {
-		result.Decisions[index] = workContextDecisionSummaryDTOFromDomain(decision)
+		result.Decisions[index] = workContextDecisionSummaryDTOFromDomain(decision, decisionContent[decision.ID])
 	}
 	for index, review := range value.Reviews {
 		result.Reviews[index] = workContextReviewDTOFromDomain(review)
@@ -1461,8 +1553,11 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 	for index, relation := range value.Relations {
 		result.Relations[index] = relationDTOFromDomain(relation)
 	}
-	for index, issue := range value.RelatedIssueSummaries {
-		result.RelatedIssueSummaries[index] = workContextIssueDTOFromDomain(issue)
+	for _, issue := range value.RelatedIssueSummaries {
+		if value.ParentEpic != nil && issue.ID == value.ParentEpic.ID {
+			continue
+		}
+		result.RelatedIssueSummaries = append(result.RelatedIssueSummaries, workContextIssueDTOFromDomain(issue))
 	}
 	for index, comment := range value.RecentComments {
 		result.RecentComments[index] = commentDTOFromDomain(comment)
@@ -1470,9 +1565,6 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 	for index, note := range value.RecentAttemptNotes {
 		noteDTO := attemptNoteDTOFromDomain(note)
 		result.RecentAttemptNotes[index] = noteDTO
-	}
-	for index, decision := range value.DecisionContent {
-		result.DecisionContent[index] = recordDecisionDTOFromDomain(decision)
 	}
 	for index, attempt := range value.AttemptHistory {
 		result.AttemptHistory[index] = attemptDTOFromDomain(attempt)
@@ -1518,14 +1610,20 @@ func workContextIssueDTOFromDomainPointer(value *domain.WorkContextIssue) *workC
 	return &issue
 }
 
-func workContextDecisionSummaryDTOFromDomain(value domain.WorkContextDecisionSummary) workContextDecisionSummaryDTO {
-	return workContextDecisionSummaryDTO{
+func workContextDecisionSummaryDTOFromDomain(value domain.WorkContextDecisionSummary, detail domain.Decision) workContextDecisionSummaryDTO {
+	result := workContextDecisionSummaryDTO{
 		ID:        value.ID,
 		Title:     value.Title,
 		Summary:   value.Summary,
 		Status:    string(value.Status),
 		CreatedAt: value.CreatedAt,
 	}
+	if detail.ID != "" {
+		result.Content = &detail.Content
+		result.SupersedesID = copyString(detail.SupersedesID)
+		result.CreatedBySessionID = copyString(detail.CreatedBySessionID)
+	}
+	return result
 }
 
 func workContextReviewDTOFromDomain(value domain.WorkContextReview) workContextReviewDTO {
@@ -1577,25 +1675,54 @@ func activityItemDTOFromDomain(item domain.ActivityItem) activityItemDTO {
 		OccurredAt: item.OccurredAt,
 	}
 	if item.Comment != nil {
-		comment := commentDTOFromDomain(*item.Comment)
+		comment := activityCommentDTO{
+			Content: item.Comment.Content, CreatedBySessionID: copyString(item.Comment.CreatedBySessionID),
+			AuthorLabel: copyString(item.Comment.AuthorLabel), EditedAt: copyTime(item.Comment.EditedAt),
+		}
 		result.Comment = &comment
 	} else if item.Decision != nil {
-		decision := recordDecisionDTOFromDomain(*item.Decision)
+		decision := activityDecisionDTO{
+			Title: item.Decision.Title, Summary: item.Decision.Summary, Content: item.Decision.Content,
+			Status: string(item.Decision.Status), SupersedesID: copyString(item.Decision.SupersedesID),
+			CreatedBySessionID: copyString(item.Decision.CreatedBySessionID),
+		}
 		result.Decision = &decision
 	} else if item.Review != nil {
-		review := reviewRequestDTOFromDomain(*item.Review, item.Review.Status == domain.ReviewRequestStatusOpen)
+		review := activityReviewDTO{
+			TargetIssueVersion: item.Review.TargetIssueVersion, TargetEventID: item.Review.TargetEventID,
+			ArtifactIDs: append([]string{}, item.Review.ArtifactIDs...), Status: string(item.Review.Status),
+			SupersedesID: copyString(item.Review.SupersedesID), ActiveAttemptID: copyString(item.Review.ActiveAttemptID),
+			Claimable: item.Review.Status == domain.ReviewRequestStatusOpen, Version: item.Review.Version,
+			ResolvedAt: copyTime(item.Review.ResolvedAt),
+		}
 		result.Review = &review
 	} else if item.Attempt != nil {
-		attempt := attemptDTOFromDomain(*item.Attempt)
+		attempt := activityAttemptDTO{
+			Kind: string(item.Attempt.Kind), Status: string(item.Attempt.Status), IssueVersionAtStart: item.Attempt.IssueVersionAtStart,
+			ContextEventIDAtStart: item.Attempt.ContextEventIDAtStart, LeaseExpiresAt: item.Attempt.LeaseExpiresAt,
+			LastHeartbeatAt: item.Attempt.LastHeartbeatAt, FinishedAt: copyTime(item.Attempt.FinishedAt),
+			ResultSummary: copyString(item.Attempt.ResultSummary), NextSteps: append([]string{}, item.Attempt.NextSteps...),
+			Verification: append([]string{}, item.Attempt.Verification...), FailureReasonCode: stringPointer(item.Attempt.FailureReasonCode),
+			InterruptionReasonCode: stringPointer(item.Attempt.InterruptionReasonCode), ReasonDetails: copyString(item.Attempt.ReasonDetails),
+		}
 		result.Attempt = &attempt
 	} else if item.AttemptNote != nil {
-		note := attemptNoteDTOFromDomain(*item.AttemptNote)
+		note := activityAttemptNoteDTO{
+			AttemptID: item.AttemptNote.AttemptID, Kind: string(item.AttemptNote.Kind), Content: item.AttemptNote.Content,
+			NextSteps: append([]string{}, item.AttemptNote.NextSteps...), Important: item.AttemptNote.Important,
+		}
 		result.AttemptNote = &note
 	} else if item.Event != nil {
-		event := issueEventDTOFromDomain(*item.Event)
+		event := activityEventDTO{
+			EventType: item.Event.EventType, SessionID: copyString(item.Event.SessionID),
+			AttemptID: copyString(item.Event.AttemptID), Payload: append(json.RawMessage(nil), item.Event.Payload...),
+		}
 		result.Event = &event
 	} else if item.Artifact != nil {
-		artifact := artifactDTOFromDomain(*item.Artifact)
+		artifact := activityArtifactDTO{
+			AttemptID: copyString(item.Artifact.AttemptID), Type: string(item.Artifact.Type), URI: item.Artifact.URI,
+			Title: copyString(item.Artifact.Title), Metadata: append(json.RawMessage(nil), item.Artifact.Metadata...),
+		}
 		result.Artifact = &artifact
 	}
 	return result

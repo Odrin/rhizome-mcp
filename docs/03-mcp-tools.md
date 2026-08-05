@@ -1317,7 +1317,8 @@ Input:
 {
   "issues": [],
   "relations": [],
-  "decisions": []
+  "decisions": [],
+  "include_normalized_plan": false
 }
 ```
 
@@ -1348,8 +1349,19 @@ valid
 errors
 warnings
 summary
-normalized_plan
+plan_fingerprint
+normalization_changed
+normalized_plan (only when requested)
+next_actions
 ```
+
+`include_normalized_plan` defaults to `false`. The compact default returns
+diagnostics, counts, whether normalization changed the submitted plan, and a
+stable lowercase SHA-256 fingerprint of the normalized plan's deterministic
+JSON encoding. Set `include_normalized_plan: true` when a caller needs the full
+normalized plan, including before passing that exact result to
+`apply_issue_plan`. The fingerprint is identical for an input and its already
+normalized equivalent.
 
 Errors are deterministically sorted by:
 
@@ -1499,9 +1511,12 @@ next_cursor
 has_more
 ```
 
-Every item contains `entity_type` and exactly one matching typed payload among
-`comment`, `decision`, `review`, `attempt`, `attempt_note`, `event`, and
-`artifact`.
+Every item contains `entity_type`, `entity_id`, `issue_id`, `occurred_at`, and
+exactly one matching typed payload among `comment`, `decision`, `review`,
+`attempt`, `attempt_note`, `event`, and `artifact`. The envelope owns entity
+identity, issue scope, and occurrence time. Typed payloads omit their repeated
+entity ID, issue ID, and occurrence timestamp while preserving their other
+category-specific fields.
 
 The `types` input is optional; when omitted or empty, all categories are
 returned. Supported categories are exactly `comments`, `decisions`, `reviews`,
@@ -1510,8 +1525,7 @@ returned. Supported categories are exactly `comments`, `decisions`, `reviews`,
 
 Pagination uses an opaque, versioned cursor; invalid cursors fail with
 structured invalid-argument errors. The response includes `items`,
-`next_cursor`, and `has_more`. Each item carries wrapper identity, scope, and
-occurrence fields plus the typed payload. Attempts do not expose lease tokens
+`next_cursor`, and `has_more`. Attempts do not expose lease tokens
 or lease hashes. Event payloads preserve durable activity metadata. Results are
 returned from one consistent read snapshot and are ordered deterministically by
 `occurred_at` descending, then a fixed category rank, then source ID. Global or
@@ -1793,12 +1807,20 @@ truncated_sections
 next_actions
 ```
 
+Optional detail enriches existing records rather than creating parallel
+copies. When `decision_content` is requested, matching entries in `decisions`
+gain `content`, `supersedes_id`, and `created_by_session_id`; no separate
+`decision_content` output collection is emitted. When both `parent_epic` and
+`related_issue_summaries` are requested, the parent appears only in
+`parent_epic`, even if an explicit relation would also select it as a related
+issue.
+
 **Response budget.** `get_work_context` is scoped to one issue, so its full
 `description`/`acceptance_criteria` bodies (needed to actually work the
 issue) are an intentional, expected part of the default response — this is
 unlike `list_issues`, where the same fields were being repeated once per
 backlog item for no benefit. Every optional list section (`related_issue_summaries`,
-`recent_comments`, `recent_attempt_notes`, `decision_content`,
+`recent_comments`, `recent_attempt_notes`, decision details selected by `decision_content`,
 `attempt_history`, `artifacts`, `changes_since_previous_attempt`) is capped at
 1–20 items via `limits` (default varies per section; see the audited request
 schema), and at most 10 sections can be requested at once
@@ -1901,6 +1923,15 @@ next_event_id
 ```
 
 This tool supports incremental refresh instead of repeatedly reading full state.
+
+Relation writes retain one durable event per endpoint so an `issue_id`-scoped
+feed observes every relation that affects that issue. An unfiltered global feed
+returns one canonical event for each matching `relation_added` or
+`relation_removed` endpoint pair. Consequently, global event IDs are strictly
+increasing but may contain gaps where the redundant endpoint copy was hidden.
+Clients must advance with `next_event_id` and `has_more`, not by assuming event
+IDs are contiguous. Event-type filtering, ordering, pagination, and
+`latest_event_id` semantics are otherwise unchanged.
 
 ## 13. Error codes
 

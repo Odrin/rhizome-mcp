@@ -179,6 +179,9 @@ func (repository *SearchRepository) GetChanges(ctx context.Context, command port
 			}
 			where = append(where, "issue_id = ?")
 			args = append(args, issueID)
+		} else {
+			where = append(where, `(source_rank != 0 OR event_type NOT IN ('relation_added', 'relation_removed')
+				OR issue_id = json_extract(payload, '$.source_issue_id'))`)
 		}
 		appendSearchInFilter(&where, &args, "event_type", input.EventTypes)
 		args = append(args, input.Limit+1)

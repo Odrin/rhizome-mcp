@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -174,6 +175,10 @@ func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
+	otherIssue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "other change target"})
+	if err != nil {
+		t.Fatalf("create other issue: %v", err)
+	}
 	var since int64
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
 		return query.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM issue_events").Scan(&since)
@@ -181,14 +186,28 @@ func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {
 		t.Fatalf("read baseline event ID: %v", err)
 	}
 	timestamp := now.Add(time.Second).Format(time.RFC3339Nano)
+	relationPayload, err := json.Marshal(map[string]any{
+		"relation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "source_issue_id": issue.ID,
+		"target_issue_id": otherIssue.ID, "relation_type": "related_to",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		for _, event := range []struct {
 			issueID   any
 			eventType string
-		}{{issue.ID, "comment_added"}, {nil, "project_event"}, {issue.ID, "status_changed"}} {
+			payload   string
+		}{
+			{issue.ID, "comment_added", "{}"},
+			{issue.ID, "relation_added", string(relationPayload)},
+			{otherIssue.ID, "relation_added", string(relationPayload)},
+			{nil, "project_event", "{}"},
+			{issue.ID, "status_changed", "{}"},
+		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
 				issue_id, event_type, payload, created_at
-			) VALUES (?, ?, '{}', ?)`, event.issueID, event.eventType, timestamp); err != nil {
+			) VALUES (?, ?, ?, ?)`, event.issueID, event.eventType, event.payload, timestamp); err != nil {
 				return err
 			}
 		}
@@ -217,6 +236,27 @@ func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {
 	if len(filtered.Events) != 1 || filtered.Events[0].EventType != "status_changed" ||
 		filtered.NextEventID != filtered.LatestEventID {
 		t.Fatalf("filtered changes = %#v", filtered)
+	}
+	relationType := []string{"relation_added"}
+	globalRelations, err := repository.GetChanges(ctx, portsChanges(domain.GetChangesInput{
+		SinceEventID: since, EventTypes: relationType,
+	}))
+	if err != nil {
+		t.Fatalf("GetChanges() global relations error = %v", err)
+	}
+	if len(globalRelations.Events) != 1 || globalRelations.Events[0].IssueID == nil || *globalRelations.Events[0].IssueID != issue.ID {
+		t.Fatalf("global relation changes = %#v, want one source event", globalRelations.Events)
+	}
+	for _, scopedIssue := range []string{issue.ID, otherIssue.ID} {
+		scopedRelations, err := repository.GetChanges(ctx, portsChanges(domain.GetChangesInput{
+			SinceEventID: since, IssueID: &scopedIssue, EventTypes: relationType,
+		}))
+		if err != nil {
+			t.Fatalf("GetChanges() scoped relations error = %v", err)
+		}
+		if len(scopedRelations.Events) != 1 || scopedRelations.Events[0].IssueID == nil || *scopedRelations.Events[0].IssueID != scopedIssue {
+			t.Fatalf("scoped relation changes for %s = %#v", scopedIssue, scopedRelations.Events)
+		}
 	}
 }
 
