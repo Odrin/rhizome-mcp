@@ -60,7 +60,7 @@ func TestIntegrationMigrationProfileExportValidateApply(t *testing.T) {
 		}
 	}
 
-	sourceExport := callIntegrationTool(t, sourceSession, "export_project", map[string]any{})
+	sourceExport := callIntegrationTool(t, sourceSession, "export_project", map[string]any{"delivery": "inline"})
 	if sourceExport.IsError {
 		t.Fatalf("export_project on source result = %#v", sourceExport)
 	}
@@ -96,7 +96,7 @@ func TestIntegrationMigrationProfileExportValidateApply(t *testing.T) {
 	var applyOutcome domain.LogicalProjectImportApplyResult
 	decodeIntegrationResult(t, applyResult, &applyOutcome)
 
-	destExport := callIntegrationTool(t, destSession, "export_project", map[string]any{})
+	destExport := callIntegrationTool(t, destSession, "export_project", map[string]any{"delivery": "inline"})
 	if destExport.IsError {
 		t.Fatalf("export_project on destination result = %#v", destExport)
 	}
@@ -120,7 +120,7 @@ func TestIntegrationMigrationProfileValidateImportRejectsInvalidDocument(t *test
 
 	invalidDocument := `{"schema_version": "v1"}`
 
-	beforeExport := callIntegrationTool(t, session, "export_project", map[string]any{})
+	beforeExport := callIntegrationTool(t, session, "export_project", map[string]any{"delivery": "inline"})
 	var beforeDoc domain.LogicalProjectDocument
 	decodeIntegrationResult(t, beforeExport, &beforeDoc)
 
@@ -131,7 +131,7 @@ func TestIntegrationMigrationProfileValidateImportRejectsInvalidDocument(t *test
 		t.Fatalf("validate_import should reject invalid document but result = %#v", validateResult)
 	}
 
-	afterExport := callIntegrationTool(t, session, "export_project", map[string]any{})
+	afterExport := callIntegrationTool(t, session, "export_project", map[string]any{"delivery": "inline"})
 	var afterDoc domain.LogicalProjectDocument
 	decodeIntegrationResult(t, afterExport, &afterDoc)
 

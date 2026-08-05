@@ -94,6 +94,10 @@ func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.
 	return router
 }
 
+func (router *projectRouter) DataRoot() string {
+	return router.dataRoot
+}
+
 func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (mcpadapter.ProjectLease, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()

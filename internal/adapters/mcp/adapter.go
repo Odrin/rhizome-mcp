@@ -15,10 +15,11 @@ import (
 
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
-	ProjectRouter ProjectRouter
-	ServerName    string
-	ServerVersion string
-	ConfigVersion int
+	ProjectRouter   ProjectRouter
+	ServerName      string
+	ServerVersion   string
+	ConfigVersion   int
+	ExportDirectory string
 	// ToolProfile selects which capability groups of the tool catalog this
 	// server instance advertises. Blank defaults to domain.ToolProfileFull.
 	ToolProfile string
@@ -42,6 +43,7 @@ type adapter struct {
 	appVersion    string
 	configVersion int
 	toolProfile   domain.ToolProfile
+	exports       *exportArtifactStore
 }
 
 // Server owns the MCP SDK server and its adapter lifecycle tracking.
@@ -64,6 +66,10 @@ func NewServer(options Options) (*Server, error) {
 	toolProfile, err := domain.ParseToolProfile(options.ToolProfile)
 	if err != nil {
 		return nil, err
+	}
+	exports, err := newExportArtifactStore(options.ExportDirectory)
+	if err != nil {
+		return nil, domain.WrapError(err, domain.CodeStorageConfiguration, "managed export artifacts could not be initialized", false)
 	}
 	services := ProjectServices{}
 	if lease, err := options.ProjectRouter.Acquire(context.Background(), nil); err != nil {
@@ -114,6 +120,7 @@ func NewServer(options Options) (*Server, error) {
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 		toolProfile:   toolProfile,
+		exports:       exports,
 	}
 	server := sdkmcp.NewServer(
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
@@ -664,19 +671,41 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 }
 
 func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallToolRequest, input exportProjectInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.Delivery != "" && input.Delivery != "artifact" && input.Delivery != "inline" {
+		return adapter.failure(domain.NewError(domain.CodeInvalidArgument, "delivery must be artifact or inline", false, domain.Detail{Field: "delivery", Code: "INVALID_ENUM"}))
+	}
 	data, err := adapter.projects.ExportLogicalProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
+	}
+	if input.Delivery == "inline" {
+		if len(data) > maxInlineExportBytes {
+			return adapter.failure(domain.NewError(domain.CodeLimitExceeded, "inline export exceeds the maximum size of 65536 bytes", false, domain.Detail{Field: "delivery", Code: "MAX_INLINE_EXPORT_BYTES"}))
+		}
+		var document domain.LogicalProjectDocument
+		if err := json.Unmarshal(data, &document); err != nil {
+			return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
+		}
+		return success(document, "project export returned")
+	}
+	artifact, err := adapter.exports.write(data)
+	if err != nil {
+		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export artifact could not be written", false))
 	}
 	var document domain.LogicalProjectDocument
 	if err := json.Unmarshal(data, &document); err != nil {
 		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
 	}
-	return success(document, "project export returned")
+	artifact.Format, artifact.Version, artifact.ExportedAt = document.Format, document.Version, document.ExportedAt
+	return success(artifact, "project export artifact returned")
 }
 
 func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.CallToolRequest, input validateImportInput) (*sdkmcp.CallToolResult, any, error) {
-	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, []byte(input.Document))
+	document, err := adapter.importDocument(input.Document, input.SourceURI)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, document)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -684,11 +713,27 @@ func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToolRequest, input applyImportInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.projects.ApplyLogicalProjectImport(ctx, []byte(input.Document))
+	document, err := adapter.importDocument(input.Document, input.SourceURI)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	result, err := adapter.projects.ApplyLogicalProjectImport(ctx, document)
 	if err != nil {
 		return adapter.failure(err)
 	}
 	return success(result, "import apply result returned")
+}
+
+func (adapter *adapter) importDocument(document *string, sourceURI *string) ([]byte, error) {
+	if (document == nil) == (sourceURI == nil) {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "exactly one of document or source_uri is required", false,
+			domain.Detail{Field: "document", Code: "EXACTLY_ONE_SOURCE_REQUIRED"},
+			domain.Detail{Field: "source_uri", Code: "EXACTLY_ONE_SOURCE_REQUIRED"})
+	}
+	if document != nil {
+		return []byte(*document), nil
+	}
+	return adapter.exports.read(*sourceURI)
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {

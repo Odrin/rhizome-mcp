@@ -11,14 +11,27 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
-type exportProjectInput struct{}
+type exportProjectInput struct {
+	Delivery string `json:"delivery,omitempty"`
+}
 
 type validateImportInput struct {
-	Document string `json:"document"`
+	Document  *string `json:"document,omitempty"`
+	SourceURI *string `json:"source_uri,omitempty"`
 }
 
 type applyImportInput struct {
-	Document string `json:"document"`
+	Document  *string `json:"document,omitempty"`
+	SourceURI *string `json:"source_uri,omitempty"`
+}
+
+type exportArtifactOutput struct {
+	Format      string `json:"format"`
+	Version     int    `json:"version"`
+	ExportedAt  string `json:"exported_at"`
+	ByteCount   int    `json:"byte_count"`
+	SHA256      string `json:"sha256"`
+	ArtifactURI string `json:"artifact_uri"`
 }
 
 type getProjectInput struct {

@@ -143,15 +143,15 @@ func schemaEndAgentSession() *jsonschema.Schema {
 }
 
 func schemaExportProject() *jsonschema.Schema {
-	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{}))
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"delivery": enumSchema("artifact", "inline")}))
 }
 
 func schemaExportProjectOutput() *jsonschema.Schema {
-	return typedSchema[domain.LogicalProjectDocument]()
+	return &jsonschema.Schema{AnyOf: []*jsonschema.Schema{typedSchema[domain.LogicalProjectDocument](), typedSchema[exportArtifactOutput]()}}
 }
 
 func schemaValidateImport() *jsonschema.Schema {
-	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"document": boundedStringSchema(domain.MaxLogicalProjectImportBytes)}))
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"document": nullableBoundedStringSchema(domain.MaxLogicalProjectImportBytes), "source_uri": nullableBoundedStringSchema(4096)}))
 }
 
 func schemaValidateImportOutput() *jsonschema.Schema {
@@ -159,7 +159,7 @@ func schemaValidateImportOutput() *jsonschema.Schema {
 }
 
 func schemaApplyImport() *jsonschema.Schema {
-	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"document": boundedStringSchema(domain.MaxLogicalProjectImportBytes)}))
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"document": nullableBoundedStringSchema(domain.MaxLogicalProjectImportBytes), "source_uri": nullableBoundedStringSchema(4096)}))
 }
 
 func schemaApplyImportOutput() *jsonschema.Schema {

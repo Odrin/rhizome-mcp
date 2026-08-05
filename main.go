@@ -563,12 +563,17 @@ func newMCPServer(cfg *config.Config, router mcpadapter.ProjectRouter) (*mcpadap
 	if router == nil {
 		return nil, errors.New("project router is required")
 	}
+	exportDirectory := ""
+	if rootedRouter, ok := router.(interface{ DataRoot() string }); ok {
+		exportDirectory = filepath.Join(rootedRouter.DataRoot(), "exports")
+	}
 	return mcpadapter.NewServer(mcpadapter.Options{
-		ProjectRouter: router,
-		ServerName:    cfg.ServerName,
-		ServerVersion: cfg.Version,
-		ConfigVersion: projectconfig.CurrentIdentityVersion,
-		ToolProfile:   cfg.ToolProfile,
+		ProjectRouter:   router,
+		ServerName:      cfg.ServerName,
+		ServerVersion:   cfg.Version,
+		ConfigVersion:   projectconfig.CurrentIdentityVersion,
+		ToolProfile:     cfg.ToolProfile,
+		ExportDirectory: exportDirectory,
 	})
 }
 

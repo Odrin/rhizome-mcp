@@ -149,7 +149,7 @@ func TestToolRequestsRouteThroughLeaseServicesAndReleaseLease(t *testing.T) {
 	}
 }
 
-func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
+func TestExportProjectToolReturnsArtifactByDefault(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
 	defer db.Close(ctx)
@@ -168,10 +168,26 @@ func TestExportProjectToolReturnsStructuredDocument(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("export_project result = %#v", result)
 	}
+	var artifact struct {
+		Format      string `json:"format"`
+		Version     int    `json:"version"`
+		ByteCount   int    `json:"byte_count"`
+		SHA256      string `json:"sha256"`
+		ArtifactURI string `json:"artifact_uri"`
+	}
+	decodeStructured(t, result, &artifact)
+	if artifact.Format != "rhizome-logical-project" || artifact.Version != 1 || artifact.ByteCount == 0 || len(artifact.SHA256) != 64 || !strings.HasPrefix(artifact.ArtifactURI, "rhizome-export://sha256/") {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+
+	inline := call(t, client, "export_project", map[string]any{"delivery": "inline"})
+	if inline.IsError {
+		t.Fatalf("inline export_project result = %#v", inline)
+	}
 	var document domain.LogicalProjectDocument
-	decodeStructured(t, result, &document)
+	decodeStructured(t, inline, &document)
 	if document.Format != "rhizome-logical-project" || document.Version != 1 || document.Project.ID == "" || len(document.Issues) != 0 {
-		t.Fatalf("document = %#v", document)
+		t.Fatalf("inline document = %#v", document)
 	}
 }
 
@@ -220,6 +236,38 @@ func TestValidateImportToolReturnsDryRunSummary(t *testing.T) {
 	decodeStructured(t, result, &dryRun)
 	if dryRun.Counts.Project != 1 || dryRun.Writes.Count != 0 || len(dryRun.Conflicts) != 0 {
 		t.Fatalf("dryRun = %#v", dryRun)
+	}
+}
+
+func TestValidateImportAcceptsManagedExportArtifactOnly(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	export := call(t, client, "export_project", map[string]any{})
+	if export.IsError {
+		t.Fatalf("export_project result = %#v", export)
+	}
+	var artifact struct {
+		ArtifactURI string `json:"artifact_uri"`
+	}
+	decodeStructured(t, export, &artifact)
+
+	fromArtifact := call(t, client, "validate_import", map[string]any{"source_uri": artifact.ArtifactURI})
+	if fromArtifact.IsError {
+		t.Fatalf("validate_import from artifact = %#v", fromArtifact)
+	}
+	for _, input := range []map[string]any{
+		{},
+		{"document": `{}`, "source_uri": artifact.ArtifactURI},
+		{"source_uri": "file:///etc/passwd"},
+	} {
+		result := call(t, client, "validate_import", input)
+		if !result.IsError {
+			t.Fatalf("validate_import(%#v) unexpectedly succeeded", input)
+		}
 	}
 }
 
@@ -3499,10 +3547,11 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		WorkContextService: workContexts,
 	}
 	return mcpadapter.Options{
-		ProjectRouter: mcpadapter.NewStaticProjectRouter(projectID, "", services),
-		ServerName:    "test-server",
-		ServerVersion: "test-version",
-		ConfigVersion: 1,
+		ProjectRouter:   mcpadapter.NewStaticProjectRouter(projectID, "", services),
+		ServerName:      "test-server",
+		ServerVersion:   "test-version",
+		ConfigVersion:   1,
+		ExportDirectory: t.TempDir(),
 	}
 }
 

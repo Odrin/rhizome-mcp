@@ -7,6 +7,11 @@ Rhizome project. It is a UTF-8 JSON document, intended for inspection and
 transfer between installations. It is not a SQLite backup and does not
 preserve database implementation details.
 
+MCP delivery is separate from this logical format: `export_project` normally
+returns a managed artifact URI, while `delivery: "inline"` returns the document
+when it is within the MCP inline limit. Artifact URIs are local runtime
+capabilities and are not fields in this version 1 document.
+
 The top-level document is:
 
 ```json

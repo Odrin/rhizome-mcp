@@ -550,16 +550,24 @@ Input:
 
 ```json
 {
-  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "delivery": "artifact"
 }
 ```
 
 Output:
 
-The structured content is the full logical project document with the required
-`format`, `version`, `exported_at`, `project`, and entity arrays. The tool
-returns the document directly as structured content and does not duplicate it as
-text.
+`artifact` is the default delivery. Its structured content is a bounded
+acknowledgement containing `format`, `version`, `exported_at`, `byte_count`,
+`sha256`, and an opaque `artifact_uri`. The URI names an owner-only file in the
+server's managed export directory and is valid only to a server using that same
+directory; clients must treat it as a short-lived local capability rather than a
+portable file path.
+
+Pass `delivery: "inline"` only when a caller needs the document in the response.
+Inline delivery returns the full logical project document, but fails with
+`LIMIT_EXCEEDED` when it exceeds 64 KiB. The default artifact file is retained
+for at most 24 hours and its digest is verified whenever it is read.
 
 ### 6.4. `validate_import`
 
@@ -572,9 +580,15 @@ Input:
 ```json
 {
   "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+  "source_uri": "rhizome-export://sha256/<sha256>/<opaque-file>"
 }
 ```
+
+Supply exactly one of `document` or `source_uri`. `document` is for a portable
+JSON payload; `source_uri` is for a managed export artifact and rejects foreign
+paths, symlinks, traversal, oversized files, and digest mismatches. A source URI
+cannot be used by a separately configured server. Use explicit inline export or
+an external transfer mechanism when moving a document between installations.
 
 Output:
 
@@ -591,9 +605,11 @@ Input:
 ```json
 {
   "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-  "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
+  "source_uri": "rhizome-export://sha256/<sha256>/<opaque-file>"
 }
 ```
+
+As with `validate_import`, supply exactly one of `document` or `source_uri`.
 
 Output:
 
