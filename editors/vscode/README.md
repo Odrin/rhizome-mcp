@@ -17,7 +17,7 @@ AI coding agents are concurrent, context-limited, and interruptible. A checklist
 
 1. **Install** the extension from the VS Code Marketplace.
 2. **Initialize** a project: run `Rhizome: Initialize Project` from the Command Palette. This creates a `.agent-tracker.json` file at your workspace root.
-3. **Use it** in Copilot's agent mode. The rhizome MCP tools (`get_project`, `list_issues`, `claim_issue`, etc.) appear automatically.
+3. **Use it** in Copilot's agent mode. Start with `open_project`, retain its `project_ref`, and pass that reference to later rhizome MCP tools (`get_project`, `list_issues`, `claim_issue`, etc.).
 
 That's it. The database lives outside your repo, in your OS's standard application-data directory (e.g. `~/Library/Application Support/rhizome-mcp` on macOS, `~/.local/share/rhizome-mcp` on Linux, `%LOCALAPPDATA%\rhizome-mcp` on Windows), and all data stays local.
 

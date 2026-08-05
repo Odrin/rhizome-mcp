@@ -1,5 +1,9 @@
 # Issue lifecycle
 
+## Project routing
+
+Call `open_project` with the absolute repository root before using lifecycle tools. Retain its `project_ref` and pass it to every subsequent project-scoped call. Routing is stateless, so an earlier call does not establish an implicit current project; omission is valid only when intentionally using a configured default project.
+
 ## Types and structure
 
 Issues are `epic`, `task`, or `bug`. Use parent relationships for decomposition. A `blocks` relation means the source blocks the target; `related_to` adds non-scheduling context and `duplicates` identifies equivalent work.

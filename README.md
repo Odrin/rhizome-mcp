@@ -113,7 +113,7 @@ or, via `npx`, without installing a binary at all:
 
 Run `serve` with the repository as its working directory. Stdio is the default transport; protocol output goes to stdout, logs to stderr.
 
-That's it — connected agents discover the workflow through the server itself: `get_project` links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
+That's it — connected agents start with `open_project` using the absolute repository root, retain its `project_ref`, and pass that reference to later project-scoped calls. The returned metadata links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
 
 #### Install the agent workflow skill
 

@@ -128,8 +128,8 @@ func TestToolProfileReadOnlyContainsOnlyReadOnlyHintedTools(t *testing.T) {
 }
 
 // TestToolProfileMigrationIsMinimalTransferWorkflow asserts the migration
-// profile is exactly the documented minimal set: project metadata plus
-// export/validate/apply import.
+// profile is exactly the documented minimal set: project opening and
+// metadata plus export/validate/apply import.
 func TestToolProfileMigrationIsMinimalTransferWorkflow(t *testing.T) {
 	names := toolNamesFor(t, "migration")
 	want := []string{"apply_import", "export_project", "get_project", "open_project", "validate_import"}
@@ -212,8 +212,9 @@ func TestToolProfileRejectsUnknownName(t *testing.T) {
 
 // TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool is the
 // ISSUE-99 regression test for toolProfileIncludes itself: groupCore's
-// "always advertised" rule (so get_project is never excluded, letting a
-// client always diagnose a missing tool) must not let a hypothetical
+// "always advertised" rule (so open_project and get_project are never
+// excluded, letting a client route explicitly and diagnose a missing tool)
+// must not let a hypothetical
 // future mutating core tool into the read-only profile. Every other
 // profile still treats groupCore as unconditional.
 func TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool(t *testing.T) {

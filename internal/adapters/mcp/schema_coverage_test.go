@@ -122,6 +122,9 @@ func TestProjectRefDecorationIsOptionalAndStructural(t *testing.T) {
 		if len(prop.Types) != 2 || prop.Types[0] != "string" || prop.Types[1] != "null" {
 			t.Fatalf("%s project_ref types = %v, want [string null]", name, prop.Types)
 		}
+		if !strings.Contains(prop.Description, "open_project") || !strings.Contains(prop.Description, "stateless routing") {
+			t.Fatalf("%s project_ref description = %q", name, prop.Description)
+		}
 		required := make(map[string]bool, len(schema.Required))
 		for _, field := range schema.Required {
 			required[field] = true

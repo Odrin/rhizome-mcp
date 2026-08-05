@@ -2,9 +2,11 @@
 
 ## Orient and select
 
-Call `get_project` once per session. Honor project instructions, supported values, limits, and the returned latest event ID.
+Call `open_project` with the absolute repository root. Retain the returned `project_ref` and pass it to every subsequent project-scoped tool call. Routing is stateless: `open_project` does not select a project for later requests. Omit `project_ref` only when intentionally relying on a server configured with a default project.
 
-Use `get_planning_graph` for dependency-aware selection. Entry points are executable roots; blocking nodes explain stalled work. For a narrow queue, call `list_issues` with `is_claimable: true`. Use `search` for historical knowledge, not as authoritative current state. Follow cursors when `has_more` is true.
+Call `get_project` with that `project_ref` when project instructions are needed. Honor project instructions, supported values, limits, and the latest event ID returned by `open_project` or `get_project`.
+
+Use `get_planning_graph` with the retained `project_ref` for dependency-aware selection. Entry points are executable roots; blocking nodes explain stalled work. For a narrow queue, call `list_issues` with `project_ref` and `is_claimable: true`. Use `search` for historical knowledge, not as authoritative current state. Follow cursors when `has_more` is true.
 
 Select one coherent issue. Do not begin blocked work or duplicate an active attempt.
 
@@ -35,7 +37,7 @@ During execution:
 
 ## Finish
 
-Call `finish_attempt` exactly once when work completes, fails, blocks, or is handed off. Include a concise result, checks actually run, artifacts, and actionable next steps.
+Call `finish_attempt` with the retained `project_ref` exactly once when work completes, fails, blocks, or is handed off. Include a concise result, checks actually run, artifacts, and actionable next steps.
 
 - Successful implementation normally targets `review` or `done` according to project policy.
 - Failed work includes a stable failure reason and truthful details.

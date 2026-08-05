@@ -6,12 +6,13 @@ By default, clients should use the stdio transport. If you need a local HTTP end
 
 ## The recommended loop
 
-1. Call `get_project` to learn the current project metadata and capabilities.
-2. Review the planning graph with `get_planning_graph`, or use `list_issues` with `is_claimable=true` to find claimable entry points.
-3. Call `get_work_context` for the issue you want to act on so you can review blockers, prior results, and pending next steps.
-4. Claim the issue with `claim_issue`. That creates an attempt and returns a lease token.
-5. While the attempt is active, call `renew_attempt` and `save_attempt_note` as needed. The lease token is required for these attempt calls and must remain private.
-6. Finish the attempt once with `finish_attempt` after you have a result summary, verification, and any follow-up steps.
+1. Call `open_project` with the absolute repository root. Retain the returned `project_ref`; calling the tool does not select a project in transport or session state.
+2. Pass that `project_ref` to every later project-scoped call. Use `get_project` with `include_instructions=true` when you need project instructions.
+3. Review the planning graph with `get_planning_graph`, or use `list_issues` with `is_claimable=true` to find claimable entry points.
+4. Call `get_work_context` for the issue you want to act on so you can review blockers, prior results, and pending next steps.
+5. Claim the issue with `claim_issue`. That creates an attempt and returns a lease token.
+6. While the attempt is active, call `renew_attempt` and `save_attempt_note` as needed. Pass both `project_ref` and the private lease token to these attempt calls.
+7. Finish the attempt once with `finish_attempt`, again passing `project_ref`, after you have a result summary, verification, and any follow-up steps.
 
 ## Logical interchange and recovery
 

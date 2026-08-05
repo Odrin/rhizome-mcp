@@ -6,7 +6,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const initializeInstructions = "Start with get_project, then use get_planning_graph or list_issues to find claimable work. Read get_work_context before claim_issue. While working, renew the lease and save restartable checkpoints; always finish_attempt on completion, failure, or handoff. Use expected_version for issue writes. Detailed guides: rhizome://guides/agent-workflow."
+const initializeInstructions = "Start with open_project using the absolute project root. Retain its project_ref and pass it to every subsequent project-scoped tool call; routing is stateless. Then use get_planning_graph or list_issues to find claimable work. Read get_work_context before claim_issue. While working, renew the lease and save restartable checkpoints; always finish_attempt on completion, failure, or handoff. Use expected_version for issue writes. Detailed guides: rhizome://guides/agent-workflow."
 
 type guide struct {
 	URI         string
@@ -26,7 +26,9 @@ var guides = []guide{
 
 ## 1. Orient
 
-Call ` + "`get_project`" + ` once per session. Use its limits, supported values, latest event ID, project instructions, and guide links. Read only the guide needed for the current operation.
+Call ` + "`open_project`" + ` with the absolute repository root. Retain the returned ` + "`project_ref`" + ` and pass it to every subsequent project-scoped tool call, including ` + "`get_project`" + `. Project routing is stateless: ` + "`open_project`" + ` does not select a project for later requests. Omit ` + "`project_ref`" + ` only when intentionally relying on a server configured with a default project.
+
+Call ` + "`get_project`" + ` with that ` + "`project_ref`" + ` when project instructions are needed. Use the metadata returned by ` + "`open_project`" + ` or ` + "`get_project`" + ` for limits, supported values, the latest event ID, and guide links. Read only the guide needed for the current operation.
 
 ## 2. Find work
 
@@ -35,7 +37,7 @@ Call ` + "`get_project`" + ` once per session. Use its limits, supported values,
 - Use ` + "`search`" + ` for historical knowledge, not as the authoritative current state.
 - Follow cursors or event IDs when a result says more data exists.
 
-Select one coherent issue. Do not begin blocked work or duplicate an active attempt.
+Pass the retained ` + "`project_ref`" + ` on discovery calls. Select one coherent issue. Do not begin blocked work or duplicate an active attempt.
 
 ## 3. Load context
 
@@ -59,7 +61,7 @@ For long work, call ` + "`renew_attempt`" + ` before expiry. A lost or expired l
 
 ## 6. Finish every attempt
 
-Call ` + "`finish_attempt`" + ` exactly once when work completes, fails, becomes blocked, or is handed off. Include a concise result, verification actually performed, artifacts, and actionable next steps.
+Call ` + "`finish_attempt`" + ` with the retained ` + "`project_ref`" + ` exactly once when work completes, fails, becomes blocked, or is handed off. Include a concise result, verification actually performed, artifacts, and actionable next steps.
 
 - Completed implementation normally targets ` + "`review`" + ` or ` + "`done`" + ` according to project policy.
 - Failed work records a failure reason and truthful details.
@@ -74,6 +76,10 @@ Never leave an attempt active merely because the agent is stopping.`,
 		Title:       "Rhizome Issue Lifecycle",
 		Description: "Status, dependency, review, versioning, and archival rules for issues.",
 		Content: `# Issue lifecycle
+
+## Project routing
+
+Call ` + "`open_project`" + ` with the absolute repository root before using lifecycle tools. Retain its ` + "`project_ref`" + ` and pass it to every subsequent project-scoped call. Routing is stateless, so an earlier call does not establish an implicit current project; omission is valid only when intentionally using a configured default project.
 
 ## Types and hierarchy
 
@@ -123,6 +129,10 @@ Archival hides obsolete records from normal lists without deleting history. Arch
 		Description: "Durable checkpoint, interruption, recovery, and review guidance across agents.",
 		Content: `# Multi-agent handoff
 
+## Project routing
+
+Each agent calls ` + "`open_project`" + ` with the absolute repository root, retains the returned ` + "`project_ref`" + `, and passes it to every subsequent project-scoped call. Project selection is not stored in MCP transport or session state. The ` + "`project_ref`" + ` is a routing token, not a lease token or secret.
+
 ## Before handing off
 
 Preserve enough state for another agent to continue without reconstructing your session:
@@ -137,11 +147,12 @@ Keep notes factual and restartable. Avoid raw transcripts, speculative status, a
 
 ## Receiving a handoff
 
-1. Refetch the issue and confirm it is claimable.
-2. Call ` + "`get_work_context`" + ` with checkpoint, recent attempt notes, attempt history, artifacts, decisions, relations, and changes since the previous attempt as needed.
-3. Inspect referenced artifacts and verify the repository state; do not trust a summary as proof.
-4. Use ` + "`get_changes`" + ` from the prior context event ID or ` + "`get_issue_activity`" + ` when concurrent work may have changed assumptions.
-5. Claim a new attempt. Never reuse another agent's attempt ID or lease token.
+1. Call ` + "`open_project`" + ` for the target repository and retain its ` + "`project_ref`" + `.
+2. Refetch the issue with that ` + "`project_ref`" + ` and confirm it is claimable.
+3. Call ` + "`get_work_context`" + ` with the ` + "`project_ref`" + ` and request checkpoint, recent attempt notes, attempt history, artifacts, decisions, relations, and changes since the previous attempt as needed.
+4. Inspect referenced artifacts and verify the repository state; do not trust a summary as proof.
+5. Use ` + "`get_changes`" + ` from the prior context event ID or ` + "`get_issue_activity`" + ` when concurrent work may have changed assumptions.
+6. Claim a new attempt with the ` + "`project_ref`" + `. Never reuse another agent's attempt ID or lease token.
 
 ## Concurrent changes
 

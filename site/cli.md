@@ -43,7 +43,7 @@ rhizome-mcp serve --profile agent
 rhizome-mcp serve --http-address 127.0.0.1:0 --profile read-only
 ```
 
-Supported profiles are `full` (default), `agent` (ordinary issue/planning/review/knowledge/lifecycle work, excluding bulk project transfer and incremental sync), `read-only` (only operations guaranteed not to write durable state), and `migration` (the minimal project metadata/export/validate/apply transfer workflow). An unrecognized profile name fails startup immediately with the list of valid names. `get_project`'s `tool_profile` field reports the active profile so a client can diagnose a missing tool. **Profiles are an exposure and prompt-size control, not an authorization boundary** — every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. The full membership matrix is documented in [docs/03-mcp-tools.md](../docs/03-mcp-tools.md).
+Supported profiles are `full` (default), `agent` (ordinary issue/planning/review/knowledge/lifecycle work, excluding bulk project transfer and incremental sync), `read-only` (only operations guaranteed not to write durable state), and `migration` (the minimal project opening/metadata/export/validate/apply transfer workflow). An unrecognized profile name fails startup immediately with the list of valid names. `get_project`'s `tool_profile` field reports the active profile so a client can diagnose a missing tool. **Profiles are an exposure and prompt-size control, not an authorization boundary** — every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. The full membership matrix is documented in [docs/03-mcp-tools.md](../docs/03-mcp-tools.md).
 
 ### `backup`
 

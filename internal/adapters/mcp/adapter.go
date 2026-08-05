@@ -179,15 +179,15 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupLifecycle, tool("end_agent_session", "End one explicitly created durable agent session handle.", schemaEndAgentSession(), schemaEndAgentSessionOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[endAgentSessionInput, any](target, t, (*adapter).endAgentSession))
 	})
-	target.registerTool(server, groupCore, tool("get_project", "Get project metadata, limits, supported values, event position, and guide links.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupCore, tool("get_project", "Get metadata, limits, supported values, event position, and guide links for a project_ref or configured default.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getProjectInput, any](target, t, (*adapter).getProject))
 	})
-	target.registerTool(server, groupCore, tool("open_project", "Open a project by absolute root and return its metadata, limits, supported values, event position, and guide links.", schemaOpenProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupCore, tool("open_project", "Open a project by absolute root and return its project_ref, metadata, limits, supported values, event position, and guide links.", schemaOpenProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, func(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
 			return target.openProject(ctx, request, input)
 		})
 	})
-	target.registerTool(server, groupMigration, tool("export_project", "Export the current project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupMigration, tool("export_project", "Export the selected project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[exportProjectInput, any](target, t, (*adapter).exportProject))
 	})
 	target.registerTool(server, groupMigration, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
@@ -687,7 +687,7 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
 		LatestEventID:          project.LatestEventID,
 		Guides:                 guideLinks(),
-		NextActions:            []string{"Read rhizome://guides/agent-workflow; then find claimable work."},
+		NextActions:            []string{"Retain project_ref and pass it to later project-scoped calls; read rhizome://guides/agent-workflow."},
 	}
 	return success(output, "project metadata returned")
 }
@@ -722,7 +722,7 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
 		LatestEventID:          project.LatestEventID,
 		Guides:                 guideLinks(),
-		NextActions:            []string{"Read rhizome://guides/agent-workflow; then find claimable work."},
+		NextActions:            []string{"Retain project_ref and pass it to later project-scoped calls; read rhizome://guides/agent-workflow."},
 	}
 	return success(output, "project opened")
 }

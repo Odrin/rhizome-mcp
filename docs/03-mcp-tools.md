@@ -95,44 +95,67 @@ attempts, entities, and events have NULL session attribution. A handle provides
 audit attribution only; it neither authenticates the caller nor replaces an
 attempt's `lease_token`.
 
+### 2.2. Stateless project routing
+
+`open_project` is the only projectless tool. Call it with an absolute
+`project_root`, retain the returned canonical `project_ref`, and pass that value
+to every subsequent project-scoped tool call. Calling `open_project` does not
+select a project in MCP transport or session state.
+
+Every other tool input schema includes an optional nullable `project_ref`.
+Omission is supported only when the server was started with a configured default
+project. Portable agent workflows pass the reference explicitly, including on
+`get_project`, attempt lifecycle calls, and `finish_attempt`. A `project_ref` is
+a routing token, not authentication or authorization.
+
+For readability, later input snippets focus on tool-specific fields. Unless the
+snippet is for `open_project`, add the retained value:
+
+```json
+{
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+}
+```
+
 ## 3. Tool inventory
 
 The catalog exposes 35 full tools, 31 agent tools, 5 migration tools, and 16 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
-3. `get_project`
-4. `export_project`
-5. `validate_import`
-6. `apply_import`
-7. `list_labels`
-8. `create_issue`
-9. `update_issue`
-10. `get_issue`
-11. `list_issues`
-12. `archive_issue`
-13. `create_review_request` (deprecated — see section 7.6)
-14. `get_review_request`
-15. `list_review_requests`
-16. `cancel_review_request`
-17. `supersede_review_request` (deprecated — see section 7.6)
-18. `replace_review_request`
-19. `manage_issue_relation`
-20. `get_issue_graph`
-21. `get_planning_graph`
-22. `validate_issue_plan`
-23. `apply_issue_plan`
-24. `add_comment`
-25. `record_decision`
-26. `list_decisions`
-27. `get_issue_activity`
-28. `claim_issue`
-29. `renew_attempt`
-30. `save_attempt_note`
-31. `finish_attempt`
-32. `get_work_context`
-33. `search`
-34. `get_changes`
+3. `open_project`
+4. `get_project`
+5. `export_project`
+6. `validate_import`
+7. `apply_import`
+8. `list_labels`
+9. `create_issue`
+10. `update_issue`
+11. `get_issue`
+12. `list_issues`
+13. `archive_issue`
+14. `create_review_request` (deprecated — see section 7.6)
+15. `get_review_request`
+16. `list_review_requests`
+17. `cancel_review_request`
+18. `supersede_review_request` (deprecated — see section 7.6)
+19. `replace_review_request`
+20. `manage_issue_relation`
+21. `get_issue_graph`
+22. `get_planning_graph`
+23. `validate_issue_plan`
+24. `apply_issue_plan`
+25. `add_comment`
+26. `record_decision`
+27. `list_decisions`
+28. `get_issue_activity`
+29. `claim_issue`
+30. `renew_attempt`
+31. `save_attempt_note`
+32. `finish_attempt`
+33. `get_work_context`
+34. `search`
+35. `get_changes`
 
 ### 3.1. `create_agent_session`
 
@@ -304,6 +327,7 @@ rather than the tool's read/write split alone:
 
 | Tool | readOnly | destructive | idempotent | openWorld |
 | --- | --- | --- | --- | --- |
+| `open_project` | ✓ | | ✓ | |
 | `get_project` | ✓ | | ✓ | |
 | `export_project` | ✓ | | ✓ | |
 | `validate_import` | ✓ | | ✓ | |
@@ -406,7 +430,7 @@ annotation matrix.
 
 | Group | Tools | In `agent`? | In `migration`? |
 | --- | --- | --- | --- |
-| core | `get_project` | always | always |
+| core | `open_project`, `get_project` | always | always |
 | migration | `export_project`, `validate_import`, `apply_import` | no | yes |
 | sync | `get_changes` | no | no |
 | issues | `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
@@ -415,8 +439,8 @@ annotation matrix.
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
 | lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context` | yes | no |
 
-- **`full`** (default): every group, all 32 tools.
-- **`agent`** (28 tools): every group except `migration` and `sync` — the
+- **`full`** (default): every group, all 35 tools.
+- **`agent`** (31 tools): every group except `migration` and `sync` — the
   complete ordinary issue discovery, planning, review, knowledge, and
   leased work lifecycle workflow, without bulk project transfer or
   incremental synchronization.
@@ -431,9 +455,11 @@ annotation matrix.
   tool this profile advertises is also verified to perform zero durable
   writes, including MCP session bookkeeping — see section 4's
   `readOnlyHint` note above.
-- **`migration`** (4 tools): `core` + `migration` —
-  `get_project`, `export_project`, `validate_import`, `apply_import`. The
-  minimal metadata/export/validate/apply transfer workflow, nothing else.
+- **`migration`** (5 tools): `core` + `migration` —
+  `open_project`, `get_project`, `export_project`, `validate_import`,
+  `apply_import`. The
+  minimal project opening/metadata/export/validate/apply transfer workflow,
+  nothing else.
 
 `tools/list` output is lexically ordered by the SDK regardless of profile
 or registration order, so it stays deterministic across all four
@@ -453,16 +479,39 @@ same server composition and the same active profile
 
 ## 6. Project and discovery
 
-### 6.1. `get_project`
+### 6.1. `open_project`
 
 Purpose:
 
-Return metadata and server capabilities for the current project.
+Resolve an existing project from an absolute repository root and return its
+canonical `project_ref`, metadata, server capabilities, and guide links. This
+read-only call does not establish state for later requests.
 
 Input:
 
 ```json
 {
+  "project_root": "/absolute/path/to/repository"
+}
+```
+
+Output:
+
+The same metadata envelope as `get_project`, including `project_ref`. Retain
+that reference and pass it to every later project-scoped tool call.
+
+### 6.2. `get_project`
+
+Purpose:
+
+Return metadata and server capabilities for the project selected by
+`project_ref`, or for the configured default when the reference is omitted.
+
+Input:
+
+```json
+{
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "include_instructions": false
 }
 ```
@@ -470,11 +519,13 @@ Input:
 Output:
 
 ```text
+project_ref
 project
 session
 app_version
 schema_version
 config_version
+tool_profile
 limits
 supported_issue_types
 supported_statuses
@@ -488,16 +539,19 @@ next_actions
 The project instructions are returned only when requested. `guides` links the
 three workflow resources advertised by the server.
 
-### 6.2. `export_project`
+### 6.3. `export_project`
 
 Purpose:
 
-Export the current project as the version 1 logical interchange document.
+Export the project selected by `project_ref` as the version 1 logical
+interchange document.
 
 Input:
 
 ```json
-{}
+{
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+}
 ```
 
 Output:
@@ -507,7 +561,7 @@ The structured content is the full logical project document with the required
 returns the document directly as structured content and does not duplicate it as
 text.
 
-### 6.3. `validate_import`
+### 6.4. `validate_import`
 
 Purpose:
 
@@ -517,6 +571,7 @@ Input:
 
 ```json
 {
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
 }
 ```
@@ -525,7 +580,7 @@ Output:
 
 The structured content is the dry-run summary containing deterministic counts, zero writes, and sorted conflicts. The tool does not duplicate the full document payload in text.
 
-### 6.4. `apply_import`
+### 6.5. `apply_import`
 
 Purpose:
 
@@ -535,6 +590,7 @@ Input:
 
 ```json
 {
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "document": "{\"format\": \"rhizome-logical-project\", \"version\": 1, \"project\": {\"id\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}, \"issues\": [], \"labels\": [], \"issue_labels\": [], \"relations\": [], \"comments\": [], \"decisions\": [], \"attempts\": [], \"attempt_notes\": [], \"artifacts\": [], \"events\": []}"
 }
 ```
@@ -543,12 +599,13 @@ Output:
 
 The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
 
-### 6.5. `list_labels`
+### 6.6. `list_labels`
 
 Input:
 
 ```json
 {
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "query": null,
   "limit": 50,
   "cursor": null

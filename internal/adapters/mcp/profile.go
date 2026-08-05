@@ -21,8 +21,8 @@ type toolCapabilityGroup string
 
 const (
 	// groupCore tools are advertised in every profile, including
-	// migration and agent: get_project reports the active profile itself,
-	// so it can never be the tool a client loses when narrowing exposure.
+	// migration and agent: open_project establishes explicit routing and
+	// get_project reports the active profile, so clients retain both tools.
 	groupCore toolCapabilityGroup = "core"
 	// groupMigration is the bulk project transfer workflow: export,
 	// validate, and apply a logical project document. Excluded from the
@@ -47,8 +47,8 @@ const (
 //
 // The read-only check is evaluated before the groupCore bypass below, on
 // purpose (ISSUE-99): groupCore's "always advertised" rule exists so a
-// client can always reach get_project to diagnose a missing tool, not so
-// a future mutating core tool could slip into the read-only profile
+// client can always open a project and reach get_project to diagnose a
+// missing tool, not so a future mutating core tool could slip into the read-only profile
 // without satisfying ReadOnlyHint. Every other profile still treats
 // groupCore as unconditional.
 func toolProfileIncludes(profile domain.ToolProfile, group toolCapabilityGroup, toolDef *sdkmcp.Tool) bool {

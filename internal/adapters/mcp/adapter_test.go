@@ -37,7 +37,9 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	defer stop()
 
 	initialize := client.InitializeResult()
-	if initialize == nil || !strings.Contains(initialize.Instructions, "get_work_context") ||
+	if initialize == nil || !strings.Contains(initialize.Instructions, "open_project") ||
+		!strings.Contains(initialize.Instructions, "project_ref") ||
+		!strings.Contains(initialize.Instructions, "get_work_context") ||
 		!strings.Contains(initialize.Instructions, "finish_attempt") ||
 		!strings.Contains(initialize.Instructions, "rhizome://guides/agent-workflow") {
 		t.Fatalf("initialize instructions = %#v", initialize)
@@ -73,7 +75,9 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 			t.Fatalf("ReadResource(%q) error = %v", resource.URI, err)
 		}
 		if len(read.Contents) != 1 || !strings.HasPrefix(read.Contents[0].Text, "# ") ||
-			len(read.Contents[0].Text) < 500 {
+			len(read.Contents[0].Text) < 500 ||
+			!strings.Contains(read.Contents[0].Text, "open_project") ||
+			!strings.Contains(read.Contents[0].Text, "project_ref") {
 			t.Errorf("resource contents for %q = %#v", resource.URI, read.Contents)
 		}
 	}
@@ -83,13 +87,15 @@ func TestServerPublishesWorkflowGuidance(t *testing.T) {
 
 	project := call(t, client, "get_project", map[string]any{})
 	var output struct {
-		Guides []struct {
+		ProjectRef string `json:"project_ref"`
+		Guides     []struct {
 			URI string `json:"uri"`
 		} `json:"guides"`
 		NextActions []string `json:"next_actions"`
 	}
 	decodeStructured(t, project, &output)
-	if len(output.Guides) != len(wantURIs) || len(output.NextActions) != 1 {
+	if output.ProjectRef != projectID || len(output.Guides) != len(wantURIs) || len(output.NextActions) != 1 ||
+		!strings.Contains(output.NextActions[0], "project_ref") {
 		t.Fatalf("get_project guidance = %#v", output)
 	}
 	for index, link := range output.Guides {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"rhizome-mcp/internal/application"
@@ -86,6 +87,9 @@ func TestStaticProjectRouterValidationAndErrors(t *testing.T) {
 	zeroRouter := NewStaticProjectRouter("", "", ProjectServices{})
 	if _, err := zeroRouter.Acquire(context.Background(), nil); !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectRequired || domainErr.Retryable {
 		t.Fatalf("zero-project Acquire(nil) error = %#v, want non-retryable PROJECT_REQUIRED", err)
+	}
+	if !strings.Contains(domainErr.Message, "open_project") || !strings.Contains(domainErr.Message, "project_ref") {
+		t.Fatalf("zero-project Acquire(nil) message = %q", domainErr.Message)
 	}
 	if _, err := zeroRouter.Acquire(context.Background(), &ref); !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectNotFound {
 		t.Fatalf("zero-project Acquire(explicit) error = %#v, want PROJECT_NOT_FOUND", err)

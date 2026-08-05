@@ -161,7 +161,7 @@ type StaticProjectRouter struct {
 	services          ProjectServices
 }
 
-const projectRequiredMessage = "project_ref is required; pass project_ref or configure a default project"
+const projectRequiredMessage = "project_ref is required; call open_project and pass its project_ref, or configure a default project"
 
 // NewStaticProjectRouter constructs a temporary static router for one default project.
 func NewStaticProjectRouter(projectRef, projectRoot string, services ProjectServices) *StaticProjectRouter {

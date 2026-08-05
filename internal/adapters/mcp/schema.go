@@ -123,7 +123,7 @@ func withProjectRef(schema *jsonschema.Schema) *jsonschema.Schema {
 }
 
 func nullableProjectRefSchema() *jsonschema.Schema {
-	return &jsonschema.Schema{Types: []string{"string", "null"}, MaxLength: intPointer(26), Pattern: "^[0-9A-HJKMNP-TV-Z]{26}$", Description: "Optional explicit project reference; defaults to the configured project when omitted."}
+	return &jsonschema.Schema{Types: []string{"string", "null"}, MaxLength: intPointer(26), Pattern: "^[0-9A-HJKMNP-TV-Z]{26}$", Description: "Project reference returned by open_project. Pass it explicitly for stateless routing; omit only when using a configured default."}
 }
 
 func schemaOpenProject() *jsonschema.Schema {
