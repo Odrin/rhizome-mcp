@@ -115,14 +115,20 @@ type stubMaintenanceService struct {
 }
 
 type stubBoardService struct {
-	calls int
-	board domain.BoardResult
-	err   error
+	calls  int
+	board  domain.BoardResult
+	detail domain.IssueDetail
+	err    error
 }
 
 func (s *stubBoardService) GetBoard(context.Context) (domain.BoardResult, error) {
 	s.calls++
 	return s.board, s.err
+}
+
+func (s *stubBoardService) GetIssueDetail(context.Context, string) (domain.IssueDetail, error) {
+	s.calls++
+	return s.detail, s.err
 }
 
 func (s *stubMaintenanceService) ForceReleaseAttempt(ctx context.Context, attemptID string) (ports.ForceReleaseAttemptResult, error) {

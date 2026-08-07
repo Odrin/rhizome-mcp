@@ -171,6 +171,7 @@ type composedServices struct {
 	workContextService *application.WorkContextService
 	sessionService     *application.AgentSessionService
 	boardService       *application.BoardService
+	issueDetailService *application.IssueDetailService
 
 	closeOnce sync.Once
 	closeErr  error
@@ -344,10 +345,10 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 				return err
 			}
 		}
-		if bundle == nil || bundle.boardService == nil {
+		if bundle == nil || bundle.boardService == nil || bundle.issueDetailService == nil {
 			return errors.New("board service is not configured")
 		}
-		return runBoardServe(ctx, cfg, stdoutWriter, bundle.boardService)
+		return runBoardServe(ctx, cfg, stdoutWriter, boardServeService{boardService: bundle.boardService, issueDetailService: bundle.issueDetailService})
 	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
 		if project == nil {
@@ -614,6 +615,7 @@ func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, rou
 
 func runBoardServe(ctx context.Context, cfg *config.Config, stdout io.Writer, boardService interface {
 	GetBoard(context.Context) (domain.BoardResult, error)
+	GetIssueDetail(context.Context, string) (domain.IssueDetail, error)
 }) error {
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -631,6 +633,25 @@ func runBoardServe(ctx context.Context, cfg *config.Config, stdout io.Writer, bo
 			_, _ = fmt.Fprintf(stdout, "%s\n", boardServeURL(listener))
 		},
 	})
+}
+
+type boardServeService struct {
+	boardService       *application.BoardService
+	issueDetailService *application.IssueDetailService
+}
+
+func (service boardServeService) GetBoard(ctx context.Context) (domain.BoardResult, error) {
+	if service.boardService == nil {
+		return domain.BoardResult{}, errors.New("board service is not configured")
+	}
+	return service.boardService.GetBoard(ctx)
+}
+
+func (service boardServeService) GetIssueDetail(ctx context.Context, identifier string) (domain.IssueDetail, error) {
+	if service.issueDetailService == nil {
+		return domain.IssueDetail{}, errors.New("issue detail service is not configured")
+	}
+	return service.issueDetailService.GetIssueDetail(ctx, identifier)
 }
 
 func boardServeURL(listener net.Listener) string {
@@ -954,6 +975,10 @@ func newComposedServices(project *projectruntime.Project) (*composedServices, er
 	if err != nil {
 		return nil, err
 	}
+	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService)
+	if err != nil {
+		return nil, err
+	}
 
 	return &composedServices{
 		project:            project,
@@ -972,6 +997,7 @@ func newComposedServices(project *projectruntime.Project) (*composedServices, er
 		workContextService: workContextService,
 		sessionService:     sessionService,
 		boardService:       boardService,
+		issueDetailService: issueDetailService,
 	}, nil
 }
 

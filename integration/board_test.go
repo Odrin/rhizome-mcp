@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -201,6 +202,40 @@ func TestIntegrationBoardCommand(t *testing.T) {
 
 func TestIntegrationBoardServe(t *testing.T) {
 	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+	openIssue := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board serve issue", "status": "open",
+	})
+	readyIssue := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board serve claimed issue", "status": "ready",
+	})
+	relatedIssue := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board serve related issue", "status": "ready",
+	})
+	relationResult := callIntegrationTool(t, session, "manage_issue_relation", map[string]any{
+		"action":          "add",
+		"source_issue_id": relatedIssue.DisplayID,
+		"target_issue_id": openIssue.DisplayID,
+		"relation_type":   "related_to",
+	})
+	if relationResult.IsError {
+		t.Fatalf("manage_issue_relation result = %#v", relationResult)
+	}
+
+	claimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
+		"issue_id":      readyIssue.DisplayID,
+		"lease_seconds": 600,
+	})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+	}
+	decodeIntegrationResult(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" {
+		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimed, claim)
+	}
+
 	server := launchIntegrationBoardServer(t, env, "127.0.0.1:0")
 	t.Cleanup(func() { stopIntegrationBoardServer(t, server) })
 
@@ -239,6 +274,91 @@ func TestIntegrationBoardServe(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "Rhizome status board") {
 		t.Fatalf("board page body missing heading: %s", body)
+	}
+
+	activeHref := findBoardAnchorHref(t, string(body), readyIssue.DisplayID)
+	activeResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + activeHref)
+	if err != nil {
+		t.Fatalf("follow active attempt link: %v", err)
+	}
+	activeBody, err := io.ReadAll(activeResponse.Body)
+	activeResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read active attempt link body: %v", err)
+	}
+	if activeResponse.StatusCode != http.StatusOK {
+		t.Fatalf("active attempt link status = %d, want %d", activeResponse.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(string(activeBody), readyIssue.DisplayID) {
+		t.Fatalf("active attempt link body missing display id %q: %s", readyIssue.DisplayID, activeBody)
+	}
+
+	svgHref, svgLabel := findBoardSVGAnchorHref(t, string(body), relatedIssue.DisplayID)
+	if svgLabel != relatedIssue.DisplayID {
+		t.Fatalf("svg anchor aria-label = %q, want %q", svgLabel, relatedIssue.DisplayID)
+	}
+	svgResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + svgHref)
+	if err != nil {
+		t.Fatalf("follow svg anchor link: %v", err)
+	}
+	svgBody, err := io.ReadAll(svgResponse.Body)
+	svgResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read svg anchor link body: %v", err)
+	}
+	if svgResponse.StatusCode != http.StatusOK {
+		t.Fatalf("svg anchor link status = %d, want %d", svgResponse.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(string(svgBody), relatedIssue.DisplayID) {
+		t.Fatalf("svg anchor link body missing display id %q: %s", relatedIssue.DisplayID, svgBody)
+	}
+
+	detailResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/issues/" + openIssue.DisplayID)
+	if err != nil {
+		t.Fatalf("get issue detail page: %v", err)
+	}
+	detailBody, err := io.ReadAll(detailResponse.Body)
+	detailResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read issue detail page body: %v", err)
+	}
+	if detailResponse.StatusCode != http.StatusOK {
+		t.Fatalf("issue detail page status = %d, want %d", detailResponse.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(string(detailBody), openIssue.DisplayID) {
+		t.Fatalf("issue detail page missing display id: %s", detailBody)
+	}
+
+	malformedResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/issues/")
+	if err != nil {
+		t.Fatalf("get malformed issue path: %v", err)
+	}
+	malformedBody, err := io.ReadAll(malformedResponse.Body)
+	malformedResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read malformed issue path body: %v", err)
+	}
+	if malformedResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed issue path status = %d, want %d", malformedResponse.StatusCode, http.StatusBadRequest)
+	}
+	if len(strings.TrimSpace(string(malformedBody))) == 0 {
+		t.Fatalf("malformed issue path body empty: %s", malformedBody)
+	}
+
+	missingResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/issues/ISSUE-999999")
+	if err != nil {
+		t.Fatalf("get missing issue path: %v", err)
+	}
+	missingBody, err := io.ReadAll(missingResponse.Body)
+	missingResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read missing issue path body: %v", err)
+	}
+	if missingResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing issue path status = %d, want %d", missingResponse.StatusCode, http.StatusNotFound)
+	}
+	if len(strings.TrimSpace(string(missingBody))) == 0 {
+		t.Fatalf("missing issue path body empty: %s", missingBody)
 	}
 
 	apiResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/api/board")
@@ -304,6 +424,30 @@ func TestIntegrationBoardServe(t *testing.T) {
 	if err := server.waitForExit(t); err != nil {
 		t.Fatalf("wait for board server exit: %v", err)
 	}
+}
+
+func findBoardAnchorHref(t *testing.T, body, displayID string) string {
+	t.Helper()
+	re := regexp.MustCompile(`<a[^>]*href="([^"]+)"[^>]*>([^<]*)</a>`)
+	for _, match := range re.FindAllStringSubmatch(body, -1) {
+		if strings.TrimSpace(match[2]) == displayID {
+			return match[1]
+		}
+	}
+	t.Fatalf("missing anchor for display ID %q in HTML body", displayID)
+	return ""
+}
+
+func findBoardSVGAnchorHref(t *testing.T, body, displayID string) (string, string) {
+	t.Helper()
+	re := regexp.MustCompile(`<a[^>]*href="([^"]+)"[^>]*aria-label="([^"]+)"[^>]*>.*?</a>`)
+	for _, match := range re.FindAllStringSubmatch(body, -1) {
+		if match[2] == displayID {
+			return match[1], match[2]
+		}
+	}
+	t.Fatalf("missing svg anchor for display ID %q in HTML body", displayID)
+	return "", ""
 }
 
 type integrationBoardServer struct {

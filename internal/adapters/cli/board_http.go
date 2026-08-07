@@ -3,14 +3,25 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+
+	"rhizome-mcp/internal/domain"
 )
 
 const boardHTTPContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
 
+// BoardHTTPService exposes the board and issue-detail reads used by the served board HTTP adapter.
+type BoardHTTPService interface {
+	GetBoard(context.Context) (domain.BoardResult, error)
+	GetIssueDetail(context.Context, string) (domain.IssueDetail, error)
+}
+
 // NewBoardHTTPHandler serves the board as an interactive loopback-only page and JSON API.
-func NewBoardHTTPHandler(boardService BoardService) http.Handler {
+func NewBoardHTTPHandler(boardService BoardHTTPService) http.Handler {
 	if boardService == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeBoardHTTPResponse(w, http.StatusServiceUnavailable, "text/plain; charset=utf-8", []byte("service unavailable"), true)
@@ -31,24 +42,26 @@ func NewBoardHTTPHandler(boardService BoardService) http.Handler {
 		if request.URL != nil && request.URL.Path != "" {
 			path = request.URL.Path
 		}
-		switch path {
-		case "/":
+		switch {
+		case path == "/":
 			serveBoardPage(w, request.Method, boardService, request.Context())
-		case "/api/board":
+		case path == "/api/board":
 			serveBoardAPI(w, request.Method, boardService, request.Context())
+		case strings.HasPrefix(path, "/issues/"):
+			serveIssueDetailPage(w, request.Method, boardService, request.Context(), path)
 		default:
 			writeBoardHTTPResponse(w, http.StatusNotFound, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusNotFound)), true)
 		}
 	})
 }
 
-func serveBoardPage(w http.ResponseWriter, method string, boardService BoardService, ctx context.Context) {
+func serveBoardPage(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context) {
 	result, err := boardService.GetBoard(ctx)
 	if err != nil {
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
 		return
 	}
-	body := []byte(renderBoardHTML(result))
+	body := []byte(renderServedBoardHTML(result))
 	if method == http.MethodHead {
 		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 		return
@@ -56,7 +69,55 @@ func serveBoardPage(w http.ResponseWriter, method string, boardService BoardServ
 	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
 }
 
-func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardService, ctx context.Context) {
+func serveIssueDetailPage(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, path string) {
+	identifier, statusCode, err := parseIssueDetailRoute(path)
+	if err != nil {
+		writeBoardHTTPResponse(w, statusCode, "text/plain; charset=utf-8", []byte(err.Error()), true)
+		return
+	}
+	result, err := boardService.GetIssueDetail(ctx, identifier)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) {
+			switch domainErr.Code {
+			case domain.CodeIssueNotFound:
+				writeBoardHTTPResponse(w, http.StatusNotFound, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusNotFound)), true)
+				return
+			case domain.CodeInvalidArgument:
+				writeBoardHTTPResponse(w, http.StatusBadRequest, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusBadRequest)), true)
+				return
+			}
+		}
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
+	}
+	body := []byte(renderIssueDetailHTML(result))
+	if method == http.MethodHead {
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
+		return
+	}
+	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+}
+
+func parseIssueDetailRoute(path string) (string, int, error) {
+	if !strings.HasPrefix(path, "/issues/") {
+		return "", http.StatusNotFound, errors.New(http.StatusText(http.StatusNotFound))
+	}
+	rest := strings.TrimPrefix(path, "/issues/")
+	if rest == "" || strings.Contains(rest, "/") {
+		return "", http.StatusBadRequest, errors.New(http.StatusText(http.StatusBadRequest))
+	}
+	identifier, err := url.PathUnescape(rest)
+	if err != nil || identifier == "" || strings.Contains(identifier, "/") {
+		return "", http.StatusBadRequest, errors.New(http.StatusText(http.StatusBadRequest))
+	}
+	if strings.Contains(identifier, "%2F") || strings.Contains(identifier, "%5C") {
+		return "", http.StatusBadRequest, errors.New(http.StatusText(http.StatusBadRequest))
+	}
+	return identifier, http.StatusOK, nil
+}
+
+func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context) {
 	result, err := boardService.GetBoard(ctx)
 	if err != nil {
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
