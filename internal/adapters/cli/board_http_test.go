@@ -102,8 +102,8 @@ func TestBoardHTTPHandlerServesIssueDetailPageAndEscapesText(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "ISSUE-10") {
 		t.Fatalf("body = %q", recorder.Body.String())
 	}
-	if strings.Contains(recorder.Body.String(), "<script>") {
-		t.Fatalf("body unexpectedly contained raw script tag: %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "<script>") {
+		t.Fatalf("body missing inline refresh script: %s", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), "Need &lt;script&gt;alert(1)&lt;/script&gt;") {
 		t.Fatalf("escaped body = %q", recorder.Body.String())
@@ -230,6 +230,138 @@ func TestBoardHTTPHandlerMapsServiceFailuresToInternalServerError(t *testing.T) 
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestBoardHTTPHandlerUsesSemanticETagsForBoardAndDetailAPI(t *testing.T) {
+	initialBoard := boardResultFixture()
+	initialBoard.GeneratedAt = time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	service := &stubBoardService{board: initialBoard, detail: domain.IssueDetail{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1", Title: "Initial title"}}}
+	handler := NewBoardHTTPHandler(service)
+
+	boardRecorder := httptest.NewRecorder()
+	boardRequest := httptest.NewRequest(http.MethodGet, "/api/board", nil)
+	handler.ServeHTTP(boardRecorder, boardRequest)
+	if boardRecorder.Code != http.StatusOK {
+		t.Fatalf("board api status = %d, want %d", boardRecorder.Code, http.StatusOK)
+	}
+	etag := boardRecorder.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected board api ETag header")
+	}
+	if boardRecorder.Body.Len() == 0 {
+		t.Fatal("expected board api body")
+	}
+
+	matchRecorder := httptest.NewRecorder()
+	matchRequest := httptest.NewRequest(http.MethodGet, "/api/board", nil)
+	matchRequest.Header.Set("If-None-Match", etag)
+	handler.ServeHTTP(matchRecorder, matchRequest)
+	if matchRecorder.Code != http.StatusNotModified {
+		t.Fatalf("board api recheck status = %d, want %d", matchRecorder.Code, http.StatusNotModified)
+	}
+	if got := matchRecorder.Header().Get("ETag"); got != etag {
+		t.Fatalf("board api recheck ETag = %q, want %q", got, etag)
+	}
+	if matchRecorder.Body.Len() != 0 {
+		t.Fatalf("board api 304 body length = %d, want 0", matchRecorder.Body.Len())
+	}
+
+	generatedAtOnlyBoard := initialBoard
+	generatedAtOnlyBoard.GeneratedAt = time.Date(2026, 8, 6, 13, 0, 0, 0, time.UTC)
+	service.board = generatedAtOnlyBoard
+	generatedAtOnlyRecorder := httptest.NewRecorder()
+	generatedAtOnlyRequest := httptest.NewRequest(http.MethodGet, "/api/board", nil)
+	handler.ServeHTTP(generatedAtOnlyRecorder, generatedAtOnlyRequest)
+	if generatedAtOnlyRecorder.Code != http.StatusOK {
+		t.Fatalf("board api generated-at-only status = %d, want %d", generatedAtOnlyRecorder.Code, http.StatusOK)
+	}
+	generatedAtOnlyETag := generatedAtOnlyRecorder.Header().Get("ETag")
+	if generatedAtOnlyETag != etag {
+		t.Fatalf("board api generated-at-only ETag = %q, want %q", generatedAtOnlyETag, etag)
+	}
+
+	generatedAtOnlyMatchRecorder := httptest.NewRecorder()
+	generatedAtOnlyMatchRequest := httptest.NewRequest(http.MethodGet, "/api/board", nil)
+	generatedAtOnlyMatchRequest.Header.Set("If-None-Match", generatedAtOnlyETag)
+	handler.ServeHTTP(generatedAtOnlyMatchRecorder, generatedAtOnlyMatchRequest)
+	if generatedAtOnlyMatchRecorder.Code != http.StatusNotModified {
+		t.Fatalf("board api generated-at-only recheck status = %d, want %d", generatedAtOnlyMatchRecorder.Code, http.StatusNotModified)
+	}
+	if generatedAtOnlyMatchRecorder.Body.Len() != 0 {
+		t.Fatalf("board api generated-at-only 304 body length = %d, want 0", generatedAtOnlyMatchRecorder.Body.Len())
+	}
+
+	changedBoard := initialBoard
+	changedBoard.GeneratedAt = time.Date(2026, 8, 6, 14, 0, 0, 0, time.UTC)
+	changedBoard.StatusCounts = []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 2}}
+	service.board = changedBoard
+	changedRecorder := httptest.NewRecorder()
+	changedRequest := httptest.NewRequest(http.MethodGet, "/api/board", nil)
+	handler.ServeHTTP(changedRecorder, changedRequest)
+	if changedRecorder.Code != http.StatusOK {
+		t.Fatalf("board api changed status = %d, want %d", changedRecorder.Code, http.StatusOK)
+	}
+	if got := changedRecorder.Header().Get("ETag"); got == etag {
+		t.Fatalf("board api changed ETag = %q, want different", got)
+	}
+
+	changedDetail := service.detail
+	changedDetail.Issue.Title = "Changed title"
+	service.detail = changedDetail
+	detailRecorder := httptest.NewRecorder()
+	detailRequest := httptest.NewRequest(http.MethodGet, "/api/issues/ISSUE-1", nil)
+	handler.ServeHTTP(detailRecorder, detailRequest)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail api status = %d, want %d", detailRecorder.Code, http.StatusOK)
+	}
+	if detailRecorder.Body.Len() == 0 {
+		t.Fatal("expected detail api body")
+	}
+	detailETag := detailRecorder.Header().Get("ETag")
+	if detailETag == "" {
+		t.Fatal("expected detail api ETag header")
+	}
+
+	detailMatchRecorder := httptest.NewRecorder()
+	detailMatchRequest := httptest.NewRequest(http.MethodHead, "/api/issues/ISSUE-1", nil)
+	detailMatchRequest.Header.Set("If-None-Match", detailETag)
+	handler.ServeHTTP(detailMatchRecorder, detailMatchRequest)
+	if detailMatchRecorder.Code != http.StatusNotModified {
+		t.Fatalf("detail api recheck status = %d, want %d", detailMatchRecorder.Code, http.StatusNotModified)
+	}
+	if detailMatchRecorder.Body.Len() != 0 {
+		t.Fatalf("detail api 304 body length = %d, want 0", detailMatchRecorder.Body.Len())
+	}
+}
+
+func TestBoardHTTPHandlerMapsDetailAPIErrorResponses(t *testing.T) {
+	handler := NewBoardHTTPHandler(&stubBoardService{err: domain.NewError(domain.CodeIssueNotFound, "missing", false)})
+	for _, tc := range []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{name: "bad path", path: "/api/issues/", wantStatus: http.StatusBadRequest},
+		{name: "missing issue", path: "/api/issues/ISSUE-404", wantStatus: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestServedBoardHTMLIncludesLiveRefreshBootstrap(t *testing.T) {
+	html := renderServedBoardHTML(boardResultFixture())
+	for _, want := range []string{"data-board-main", "data-board-endpoint=\"/api/board\"", "data-board-route=\"/\"", "visibilitychange", "pagehide", "If-None-Match"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("served board HTML missing %q: %s", want, html)
+		}
 	}
 }
 

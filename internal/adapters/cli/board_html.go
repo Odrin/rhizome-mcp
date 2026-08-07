@@ -44,6 +44,201 @@ footer { color: #94a3b8; font-size: 0.8rem; margin-top: 3rem; }
 }
 `
 
+const boardLiveRefreshScript = `
+(function(){
+  class BoardLiveClient {
+    constructor(root, options){
+      options = options || {};
+      this.root = root;
+      this.fetchImpl = options.fetch || fetch;
+      this.setTimeoutImpl = options.setTimeout || setTimeout;
+      this.clearTimeoutImpl = options.clearTimeout || clearTimeout;
+      this.randomImpl = options.random || Math.random;
+      this.nowImpl = options.now || (() => new Date());
+      this.documentImpl = options.document || document;
+      this.windowImpl = options.window || window;
+      this.domParserImpl = options.DOMParser || DOMParser;
+      this.endpoint = options.endpoint || "/api/board";
+      this.pageRoute = options.pageRoute || "/";
+      this.intervalMs = options.intervalMs || 15000;
+      this.backoffMs = options.backoffMs || 1000;
+      this.maxBackoffMs = options.maxBackoffMs || 30000;
+      this.timer = null;
+      this.etag = options.etag || "";
+      this.lastSuccessfulRefreshAt = null;
+      this.staleStatus = null;
+      this.isHidden = this.documentImpl.visibilityState === "hidden";
+      this.statusElement = null;
+      this.start();
+    }
+
+    start(){
+      this.stop();
+      this.schedule();
+      this.documentImpl.addEventListener("visibilitychange", this.handleVisibilityChange);
+      this.windowImpl.addEventListener("pagehide", this.handlePageHide);
+    }
+
+    stop(){
+      if (this.timer !== null) {
+        this.clearTimeoutImpl(this.timer);
+        this.timer = null;
+      }
+    }
+
+    schedule(){
+      if (this.isHidden) {
+        return;
+      }
+      this.timer = this.setTimeoutImpl(() => this.refresh(false), this.intervalMs);
+    }
+
+    handleVisibilityChange = () => {
+      if (this.documentImpl.visibilityState === "hidden") {
+        this.isHidden = true;
+        this.stop();
+        return;
+      }
+      this.isHidden = false;
+      this.refresh(true);
+    };
+
+    handlePageHide = () => {
+      this.isHidden = true;
+      this.stop();
+    };
+
+    async refresh(immediate){
+      if (this.isHidden && !immediate) {
+        return;
+      }
+      try {
+        const headers = this.etag ? {"If-None-Match": this.etag} : {};
+        const response = await this.fetchImpl(this.endpoint, {headers, cache: "no-store"});
+        if (response.status === 304) {
+          this.lastSuccessfulRefreshAt = this.nowImpl();
+          this.clearStale();
+          this.backoffMs = 1000;
+          this.schedule();
+          return;
+        }
+        if (!response.ok) {
+          throw new Error("request failed");
+        }
+        this.etag = response.headers.get("ETag") || this.etag;
+        const pageHTML = await this.fetchPageHTML();
+        this.refreshContent(pageHTML);
+        this.clearStale();
+        this.backoffMs = 1000;
+        this.schedule();
+      } catch (error) {
+        this.markStale();
+        this.scheduleWithBackoff();
+      }
+    }
+
+    async fetchPageHTML(){
+      const response = await this.fetchImpl(this.pageRoute, {cache: "no-store"});
+      if (!response.ok) {
+        throw new Error("page fetch failed");
+      }
+      if (typeof response.text === "function") {
+        return response.text();
+      }
+      return response.body;
+    }
+
+    refreshContent(body){
+      const parser = new this.domParserImpl();
+      const doc = parser.parseFromString(body, "text/html");
+      const newMain = doc.querySelector("main[data-board-main]");
+      if (!newMain || !this.root) {
+        return;
+      }
+      const previousOpenDetails = [];
+      this.root.querySelectorAll("details[id]").forEach((detail) => {
+        if (detail.open) {
+          previousOpenDetails.push(detail.id);
+        }
+      });
+      const activeElement = this.documentImpl.activeElement;
+      const focusedID = activeElement && activeElement.id ? activeElement.id : "";
+      const previousScrollY = this.windowImpl.scrollY;
+      this.root.innerHTML = newMain.innerHTML;
+      this.root.querySelectorAll("details[id]").forEach((detail) => {
+        if (previousOpenDetails.includes(detail.id)) {
+          detail.open = true;
+        }
+      });
+      if (focusedID) {
+        const nextFocusTarget = this.root.querySelector("#" + focusedID);
+        if (nextFocusTarget) {
+          nextFocusTarget.focus();
+        }
+      }
+      this.windowImpl.scrollTo(0, previousScrollY);
+      this.lastSuccessfulRefreshAt = this.nowImpl();
+      this.renderStaleStatus();
+    }
+
+    markStale(){
+      this.staleStatus = "stale";
+      this.renderStaleStatus();
+    }
+
+    clearStale(){
+      this.staleStatus = null;
+      this.renderStaleStatus();
+    }
+
+    scheduleWithBackoff(){
+      const baseDelay = this.backoffMs;
+      const nextBackoff = Math.min(baseDelay * 2, this.maxBackoffMs);
+      const jitter = Math.max(0, Math.min(1, this.randomImpl()));
+      const delay = nextBackoff * (0.75 + jitter * 0.5);
+      this.backoffMs = nextBackoff;
+      this.timer = this.setTimeoutImpl(() => this.refresh(false), delay);
+    }
+
+    renderStaleStatus(){
+      if (!this.root) {
+        return;
+      }
+      if (!this.statusElement) {
+        this.statusElement = this.documentImpl.createElement("div");
+        this.statusElement.id = "board-refresh-status";
+        this.statusElement.setAttribute("role", "status");
+        this.statusElement.setAttribute("aria-live", "polite");
+        this.statusElement.style.cssText = "margin-bottom: 0.75rem; color: #b45309; font-size: 0.875rem;";
+        if (this.root.parentNode) {
+          this.root.parentNode.insertBefore(this.statusElement, this.root);
+        }
+      }
+      if (this.staleStatus) {
+        const stamp = this.lastSuccessfulRefreshAt ? this.lastSuccessfulRefreshAt.toLocaleTimeString() : "unknown";
+        this.statusElement.textContent = "stale • last success " + stamp;
+        this.statusElement.hidden = false;
+        return;
+      }
+      this.statusElement.textContent = "";
+      this.statusElement.hidden = true;
+    }
+  }
+
+  const root = document.querySelector("main[data-board-main]");
+  if (root) {
+    const endpoint = root.getAttribute("data-board-endpoint") || "/api/board";
+    const pageRoute = root.getAttribute("data-board-route") || "/";
+    const client = new BoardLiveClient(root, {endpoint: endpoint, pageRoute: pageRoute, intervalMs: 15000});
+    window.__rhizomeBoardLiveClient = client;
+  }
+
+  if (window.__rhizomeBoardLiveTestHooks) {
+    window.__rhizomeBoardLiveTestHooks.BoardLiveClient = BoardLiveClient;
+  }
+})();
+`
+
 // renderBoardHTML renders a fully self-contained HTML status board: no
 // <script src=...>, no <link rel="stylesheet" href=...>, no CDN or network
 // references of any kind. The dependency/planning graph is rendered as
@@ -77,6 +272,7 @@ func renderServedBoardHTML(result domain.BoardResult) string {
 	b.WriteString("<title>Rhizome status board</title>\n<style>")
 	b.WriteString(boardHTMLStyle)
 	b.WriteString("</style>\n</head>\n<body>\n")
+	b.WriteString("<main data-board-main data-board-endpoint=\"/api/board\" data-board-route=\"/\">\n")
 	b.WriteString("<h1>Rhizome status board</h1>\n")
 	b.WriteString(fmt.Sprintf("<p class=\"generated\">Generated %s</p>\n", html.EscapeString(result.GeneratedAt.Format(time.RFC3339))))
 
@@ -86,6 +282,10 @@ func renderServedBoardHTML(result domain.BoardResult) string {
 	writeServedBoardReviewRequestsHTML(&b, result.ReviewRequests, issueDisplayIDMap(result.PlanningGraph.Nodes))
 	writeServedBoardPlanningGraphHTML(&b, result.PlanningGraph)
 
+	b.WriteString("</main>\n")
+	b.WriteString("<script>")
+	b.WriteString(boardLiveRefreshScript)
+	b.WriteString("</script>\n")
 	b.WriteString("<footer>Generated locally by <code>rhizome-mcp board --serve</code>.</footer>\n")
 	b.WriteString("</body>\n</html>\n")
 	return b.String()
@@ -98,6 +298,15 @@ func renderIssueDetailHTML(detail domain.IssueDetail) string {
 	b.WriteString("<title>Rhizome issue detail</title>\n<style>")
 	b.WriteString(boardHTMLStyle)
 	b.WriteString("</style>\n</head>\n<body>\n")
+	identifier := detail.Issue.DisplayID
+	if identifier == "" {
+		identifier = detail.Issue.ID
+	}
+	b.WriteString("<main data-board-main data-board-endpoint=\"/api/issues/")
+	b.WriteString(html.EscapeString(identifier))
+	b.WriteString("\" data-board-route=\"/issues/")
+	b.WriteString(html.EscapeString(identifier))
+	b.WriteString("\">\n")
 	b.WriteString("<p><a href=\"/\">Return to board</a></p>\n")
 
 	label := detail.Issue.DisplayID
@@ -209,6 +418,10 @@ func renderIssueDetailHTML(detail domain.IssueDetail) string {
 		b.WriteString("<section>\n<h2>Recent activity</h2>\n<p class=\"empty\">No activity recorded yet.</p>\n</section>\n")
 	}
 
+	b.WriteString("</main>\n")
+	b.WriteString("<script>")
+	b.WriteString(boardLiveRefreshScript)
+	b.WriteString("</script>\n")
 	b.WriteString("<footer>Generated locally by <code>rhizome-mcp board --serve</code>.</footer>\n")
 	b.WriteString("</body>\n</html>\n")
 	return b.String()

@@ -426,6 +426,113 @@ func TestIntegrationBoardServe(t *testing.T) {
 	}
 }
 
+func TestIntegrationBoardRefresh(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+	issue := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board refresh issue", "status": "open",
+	})
+
+	server := launchIntegrationBoardServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationBoardServer(t, server) })
+	endpoint := server.waitForEndpoint(t)
+	client := &http.Client{Timeout: integrationTimeout}
+	boardURL := strings.TrimSuffix(endpoint, "/") + "/api/board"
+
+	initialResponse, err := client.Get(boardURL)
+	if err != nil {
+		t.Fatalf("get initial board api: %v", err)
+	}
+	initialBody, err := io.ReadAll(initialResponse.Body)
+	initialResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read initial board api body: %v", err)
+	}
+	if initialResponse.StatusCode != http.StatusOK {
+		t.Fatalf("initial board api status = %d, want %d", initialResponse.StatusCode, http.StatusOK)
+	}
+	initialETag := initialResponse.Header.Get("ETag")
+	if initialETag == "" {
+		t.Fatalf("initial board api missing ETag: %s", initialBody)
+	}
+
+	conditionalRequest, err := http.NewRequest(http.MethodGet, boardURL, nil)
+	if err != nil {
+		t.Fatalf("construct initial conditional board request: %v", err)
+	}
+	conditionalRequest.Header.Set("If-None-Match", initialETag)
+	conditionalResponse, err := client.Do(conditionalRequest)
+	if err != nil {
+		t.Fatalf("get initial conditional board api: %v", err)
+	}
+	conditionalBody, err := io.ReadAll(conditionalResponse.Body)
+	conditionalResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read initial conditional body: %v", err)
+	}
+	if conditionalResponse.StatusCode != http.StatusNotModified {
+		t.Fatalf("initial conditional board api status = %d, want %d", conditionalResponse.StatusCode, http.StatusNotModified)
+	}
+	if len(conditionalBody) != 0 {
+		t.Fatalf("initial conditional board api body length = %d, want 0", len(conditionalBody))
+	}
+
+	updateResult := callIntegrationTool(t, session, "update_issue", map[string]any{
+		"issue_id":         issue.DisplayID,
+		"expected_version": 1,
+		"changes":          map[string]any{"title": "Board refresh issue revised"},
+	})
+	if updateResult.IsError {
+		t.Fatalf("update_issue result = %#v", updateResult)
+	}
+
+	changedRequest, err := http.NewRequest(http.MethodGet, boardURL, nil)
+	if err != nil {
+		t.Fatalf("construct changed board request: %v", err)
+	}
+	changedRequest.Header.Set("If-None-Match", initialETag)
+	changedResponse, err := client.Do(changedRequest)
+	if err != nil {
+		t.Fatalf("get changed board api: %v", err)
+	}
+	changedBody, err := io.ReadAll(changedResponse.Body)
+	changedResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read changed board api body: %v", err)
+	}
+	if changedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("changed board api status = %d, want %d", changedResponse.StatusCode, http.StatusOK)
+	}
+	changedETag := changedResponse.Header.Get("ETag")
+	if changedETag == "" || changedETag == initialETag {
+		t.Fatalf("changed board api ETag = %q, want changed from %q", changedETag, initialETag)
+	}
+	if len(changedBody) == 0 {
+		t.Fatalf("changed board api body empty")
+	}
+
+	conditionalChangedRequest, err := http.NewRequest(http.MethodGet, boardURL, nil)
+	if err != nil {
+		t.Fatalf("construct conditional changed board request: %v", err)
+	}
+	conditionalChangedRequest.Header.Set("If-None-Match", changedETag)
+	conditionalChangedResponse, err := client.Do(conditionalChangedRequest)
+	if err != nil {
+		t.Fatalf("get conditional changed board api: %v", err)
+	}
+	conditionalChangedBody, err := io.ReadAll(conditionalChangedResponse.Body)
+	conditionalChangedResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read conditional changed board api body: %v", err)
+	}
+	if conditionalChangedResponse.StatusCode != http.StatusNotModified {
+		t.Fatalf("conditional changed board api status = %d, want %d", conditionalChangedResponse.StatusCode, http.StatusNotModified)
+	}
+	if len(conditionalChangedBody) != 0 {
+		t.Fatalf("conditional changed board api body length = %d, want 0", len(conditionalChangedBody))
+	}
+}
+
 func findBoardAnchorHref(t *testing.T, body, displayID string) string {
 	t.Helper()
 	re := regexp.MustCompile(`<a[^>]*href="([^"]+)"[^>]*>([^<]*)</a>`)

@@ -2,17 +2,20 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"rhizome-mcp/internal/domain"
 )
 
-const boardHTTPContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
+const boardHTTPContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
 
 // BoardHTTPService exposes the board and issue-detail reads used by the served board HTTP adapter.
 type BoardHTTPService interface {
@@ -46,9 +49,11 @@ func NewBoardHTTPHandler(boardService BoardHTTPService) http.Handler {
 		case path == "/":
 			serveBoardPage(w, request.Method, boardService, request.Context())
 		case path == "/api/board":
-			serveBoardAPI(w, request.Method, boardService, request.Context())
+			serveBoardAPI(w, request.Method, boardService, request.Context(), request.Header.Get("If-None-Match"))
 		case strings.HasPrefix(path, "/issues/"):
 			serveIssueDetailPage(w, request.Method, boardService, request.Context(), path)
+		case path == "/api/issues" || strings.HasPrefix(path, "/api/issues/"):
+			serveIssueDetailAPI(w, request.Method, boardService, request.Context(), request.Header.Get("If-None-Match"), path)
 		default:
 			writeBoardHTTPResponse(w, http.StatusNotFound, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusNotFound)), true)
 		}
@@ -99,6 +104,47 @@ func serveIssueDetailPage(w http.ResponseWriter, method string, boardService Boa
 	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
 }
 
+func serveIssueDetailAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, ifNoneMatch string, path string) {
+	identifier, statusCode, err := parseIssueDetailRoute(strings.TrimPrefix(path, "/api"))
+	if err != nil {
+		writeBoardHTTPResponse(w, statusCode, "text/plain; charset=utf-8", []byte(err.Error()), true)
+		return
+	}
+	result, err := boardService.GetIssueDetail(ctx, identifier)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) {
+			switch domainErr.Code {
+			case domain.CodeIssueNotFound:
+				writeBoardHTTPResponse(w, http.StatusNotFound, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusNotFound)), true)
+				return
+			case domain.CodeInvalidArgument:
+				writeBoardHTTPResponse(w, http.StatusBadRequest, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusBadRequest)), true)
+				return
+			}
+		}
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
+		return
+	}
+	etag := semanticETag(payload)
+	if etagMatches(ifNoneMatch, etag) {
+		w.Header().Set("ETag", etag)
+		writeBoardHTTPResponse(w, http.StatusNotModified, "application/json; charset=utf-8", nil, false)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	if method == http.MethodHead {
+		writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", nil, false)
+		return
+	}
+	writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", payload, true)
+}
+
 func parseIssueDetailRoute(path string) (string, int, error) {
 	if !strings.HasPrefix(path, "/issues/") {
 		return "", http.StatusNotFound, errors.New(http.StatusText(http.StatusNotFound))
@@ -117,7 +163,7 @@ func parseIssueDetailRoute(path string) (string, int, error) {
 	return identifier, http.StatusOK, nil
 }
 
-func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context) {
+func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, ifNoneMatch string) {
 	result, err := boardService.GetBoard(ctx)
 	if err != nil {
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
@@ -128,11 +174,109 @@ func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPS
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
 		return
 	}
+	etag := semanticBoardETag(result)
+	if etagMatches(ifNoneMatch, etag) {
+		w.Header().Set("ETag", etag)
+		writeBoardHTTPResponse(w, http.StatusNotModified, "application/json; charset=utf-8", nil, false)
+		return
+	}
+	w.Header().Set("ETag", etag)
 	if method == http.MethodHead {
 		writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", nil, false)
 		return
 	}
 	writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", payload, true)
+}
+
+func semanticBoardETag(result domain.BoardResult) string {
+	payload := boardETagPayload{StatusCounts: make([]boardETagStatusCount, len(result.StatusCounts)), ActiveAttempts: make([]boardETagActiveAttempt, len(result.ActiveAttempts)), BlockedIssues: make([]IssueSummary, len(result.BlockedIssues)), ReviewRequests: make([]boardETagReviewRequest, len(result.ReviewRequests)), PlanningGraph: boardETagGraph{Nodes: make([]IssueSummary, len(result.PlanningGraph.Nodes)), Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints, BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated}}
+	for index, item := range result.StatusCounts {
+		payload.StatusCounts[index] = boardETagStatusCount{EffectiveStatus: string(item.EffectiveStatus), Count: item.Count}
+	}
+	for index, item := range result.ActiveAttempts {
+		payload.ActiveAttempts[index] = boardETagActiveAttempt{AttemptID: item.AttemptID, IssueID: item.IssueID, IssueDisplayID: item.IssueDisplayID, IssueTitle: item.IssueTitle, Kind: string(item.Kind), SessionID: copyOptionalString(item.SessionID), SessionLabel: copyOptionalString(item.SessionLabel), StartedAt: item.StartedAt.UTC(), LeaseExpiresAt: item.LeaseExpiresAt.UTC()}
+	}
+	for index, item := range result.BlockedIssues {
+		payload.BlockedIssues[index] = issueFromDomainProjection(item)
+	}
+	for index, item := range result.ReviewRequests {
+		payload.ReviewRequests[index] = boardETagReviewRequest{ID: item.ID, IssueID: item.IssueID, Status: string(item.Status), TargetIssueVersion: item.TargetIssueVersion, CreatedAt: item.CreatedAt.UTC()}
+	}
+	for index, item := range result.PlanningGraph.Nodes {
+		payload.PlanningGraph.Nodes[index] = issueFromDomainProjection(item)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return semanticETag(nil)
+	}
+	return semanticETag(body)
+}
+
+func semanticETag(payload []byte) string {
+	if len(payload) == 0 {
+		return fmt.Sprintf("\"%x\"", sha256.Sum256(nil))
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("\"%x\"", sum)
+}
+
+func etagMatches(candidate string, actual string) bool {
+	if candidate == "" || actual == "" {
+		return false
+	}
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "*" {
+		return true
+	}
+	actual = strings.TrimSpace(actual)
+	if strings.HasPrefix(candidate, "W/\"") || strings.HasPrefix(candidate, "w/\"") {
+		candidate = strings.TrimPrefix(strings.TrimPrefix(candidate, "W/"), "w/")
+	}
+	candidate = strings.Trim(candidate, `"`)
+	actual = strings.Trim(actual, `"`)
+	return candidate == actual
+}
+
+type boardETagPayload struct {
+	StatusCounts   []boardETagStatusCount   `json:"status_counts"`
+	ActiveAttempts []boardETagActiveAttempt `json:"active_attempts"`
+	BlockedIssues  []IssueSummary           `json:"blocked_issues"`
+	ReviewRequests []boardETagReviewRequest `json:"review_requests"`
+	PlanningGraph  boardETagGraph           `json:"planning_graph"`
+}
+
+type boardETagStatusCount struct {
+	EffectiveStatus string `json:"effective_status"`
+	Count           int64  `json:"count"`
+}
+
+type boardETagActiveAttempt struct {
+	AttemptID      string    `json:"attempt_id"`
+	IssueID        string    `json:"issue_id"`
+	IssueDisplayID string    `json:"issue_display_id"`
+	IssueTitle     string    `json:"issue_title"`
+	Kind           string    `json:"kind"`
+	SessionID      *string   `json:"session_id,omitempty"`
+	SessionLabel   *string   `json:"session_label,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+type boardETagReviewRequest struct {
+	ID                 string    `json:"id"`
+	IssueID            string    `json:"issue_id"`
+	Status             string    `json:"status"`
+	TargetIssueVersion int64     `json:"target_issue_version"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type boardETagGraph struct {
+	Nodes         []IssueSummary      `json:"nodes"`
+	Edges         []domain.GraphEdge  `json:"edges"`
+	EntryPoints   []string            `json:"entry_points"`
+	BlockingNodes []string            `json:"blocking_nodes"`
+	Summary       domain.GraphSummary `json:"summary"`
+	Truncated     bool                `json:"truncated"`
 }
 
 func setBoardHTTPHeaders(w http.ResponseWriter) {
@@ -146,7 +290,7 @@ func writeBoardHTTPResponse(w http.ResponseWriter, statusCode int, contentType s
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	if body != nil && len(body) > 0 {
+	if len(body) > 0 {
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	}
 	w.WriteHeader(statusCode)
