@@ -45,6 +45,7 @@ type projectRouter struct {
 
 	openingCount int
 	activeCount  int
+	useCounter   int64
 }
 
 type projectRouterEntry struct {
@@ -83,12 +84,13 @@ func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.
 		if defaultBundle.project != nil {
 			router.defaultRoot = defaultBundle.project.Root
 		}
+		router.useCounter = 1
 		router.entries[router.defaultRef] = &projectRouterEntry{
 			ref:      router.defaultRef,
 			pinned:   true,
 			state:    "ready",
 			bundle:   defaultBundle,
-			lastUsed: time.Now().UnixNano(),
+			lastUsed: router.useCounter,
 		}
 	}
 	return router
@@ -126,7 +128,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	if entry, ok := router.entries[ref]; ok {
 		if entry.state == "opening" {
 			entry.active++
-			entry.lastUsed = time.Now().UnixNano()
+			entry.lastUsed = router.nextUseLocked()
 			router.activeCount++
 			router.mu.Unlock()
 			select {
@@ -151,7 +153,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 		}
 		if entry.state == "ready" {
 			entry.active++
-			entry.lastUsed = time.Now().UnixNano()
+			entry.lastUsed = router.nextUseLocked()
 			router.activeCount++
 			router.mu.Unlock()
 			return router.wrapLease(entry), nil
@@ -166,11 +168,11 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 		}
 	}
 
-	entry := &projectRouterEntry{ref: ref, state: "opening", done: make(chan struct{}), lastUsed: time.Now().UnixNano()}
+	entry := &projectRouterEntry{ref: ref, state: "opening", done: make(chan struct{}), lastUsed: router.nextUseLocked()}
 	router.entries[ref] = entry
 	router.openingCount++
 	entry.active++
-	entry.lastUsed = time.Now().UnixNano()
+	entry.lastUsed = router.nextUseLocked()
 	router.activeCount++
 	router.mu.Unlock()
 	if evicted != nil && evicted.bundle != nil {
@@ -196,7 +198,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 		}
 		entry.state = "ready"
 		entry.bundle = result.bundle
-		entry.lastUsed = time.Now().UnixNano()
+		entry.lastUsed = router.nextUseLocked()
 		router.openingCount--
 		close(entry.done)
 		router.cond.Broadcast()
@@ -278,6 +280,11 @@ func (router *projectRouter) wrapLease(entry *projectRouterEntry) mcpadapter.Pro
 	}
 	baseLease := mcpadapter.NewStaticLease(entry.ref, entry.bundle.ProjectServices())
 	return &projectRouterLease{baseLease: baseLease, router: router, entry: entry}
+}
+
+func (router *projectRouter) nextUseLocked() int64 {
+	router.useCounter++
+	return router.useCounter
 }
 
 func (router *projectRouter) evictIdleEntryLocked() *projectRouterEntry {
