@@ -2,52 +2,120 @@
  * Thin `vscode`-facing glue registering the `rhizome-mcp.showBoard` command
  * ("Rhizome: Open Status Board" in the Command Palette): resolves the
  * target workspace folder (see `./workspaceTarget.ts`), spawns
- * `<binary> board --output <tempFile>` with `cwd` set to that folder, and
- * on success opens the generated HTML in the OS default browser.
- *
- * Deliberately not VS Code's built-in Simple Browser: it only loads local
- * files that live inside a trusted workspace root, and the board's HTML is
- * written to the OS temp directory, so Simple Browser always rejects it
- * with "Forbidden. File does not reside within a trusted folder." — a
- * webview-rendered error our extension has no way to detect (the
- * `simpleBrowser.show` command itself resolves successfully before that
- * error ever renders), so a try/catch fallback around it can never fire.
+ * `<binary> board --serve --http-address 127.0.0.1:0` with `cwd` set to that
+ * folder, reads the canonical loopback URL from stdout, and opens it in the
+ * OS default browser while keeping the child process alive for the extension
+ * session.
  */
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import * as os from 'node:os';
 import * as vscode from 'vscode';
 import { getLastResolution, getOutputChannel, showResolutionFailure } from './activation';
-import { generateBoardTempFilePath } from './commandTarget';
+import { extractBoardServeURL } from './commandTarget';
 import { resolveTargetWorkspaceFolder } from './workspaceTarget';
 
-/** Runs `<binaryPath> board --output <outputPath>` in `cwd`, streaming stderr into `outputChannel` line-by-line as it arrives. Resolves with the process's exit code (or `null` if it terminated via signal); rejects if the process could not be spawned at all. */
+interface BoardProcessState {
+  child: ReturnType<typeof spawn>;
+  url: string | null;
+  disposed: boolean;
+}
+
+let activeBoardProcess: BoardProcessState | undefined;
+
+/** Runs `<binaryPath> board --serve --http-address 127.0.0.1:0` in `cwd`, streaming stderr and the canonical URL line from stdout into `outputChannel`. */
 function runBoardProcess(
   binaryPath: string,
   cwd: string,
-  outputPath: string,
   outputChannel: vscode.OutputChannel,
-): Promise<number | null> {
+): Promise<BoardProcessState> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binaryPath, ['board', '--output', outputPath], { cwd, shell: false });
+    const child = spawn(binaryPath, ['board', '--serve', '--http-address', '127.0.0.1:0'], { cwd, shell: false });
+    const state: BoardProcessState = { child, url: null, disposed: false };
+    let bufferedLine = '';
+    let settled = false;
+
+    const finishWithError = (message: string): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(message));
+    };
+
+    const resolveOnce = (resolvedState: BoardProcessState): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(resolvedState);
+    };
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const text = chunk.toString();
+      const parts = `${bufferedLine}${text}`.split(/\r?\n/);
+      bufferedLine = parts.pop() ?? '';
+
+      for (const line of parts) {
+        const trimmedLine = line.trim();
+        if (trimmedLine === '') {
+          continue;
+        }
+        const url = extractBoardServeURL(trimmedLine);
+        if (url !== null) {
+          state.url = url;
+          resolveOnce(state);
+          return;
+        }
+        outputChannel.appendLine(trimmedLine);
+      }
+    });
 
     child.stderr?.on('data', (chunk: Buffer | string) => {
       outputChannel.append(chunk.toString());
     });
-    child.once('error', (err) => reject(err));
-    child.once('close', (code) => resolve(code));
+    child.once('error', (err) => finishWithError(err.message));
+    child.once('close', (code) => {
+      if (settled) {
+        return;
+      }
+
+      if (bufferedLine !== '') {
+        const url = extractBoardServeURL(bufferedLine);
+        if (url !== null) {
+          state.url = url;
+          resolveOnce(state);
+          return;
+        }
+        outputChannel.appendLine(bufferedLine.trim());
+      }
+
+      if (!state.disposed && state.url === null) {
+        finishWithError(`board process exited before reporting a startup URL (code ${code ?? 'null'})`);
+      }
+    });
   });
 }
 
-/** Opens the generated board HTML for the user in the OS default browser. */
-async function openBoard(fileUri: vscode.Uri): Promise<void> {
-  await vscode.env.openExternal(fileUri);
+async function openBoard(url: string): Promise<void> {
+  await vscode.env.openExternal(vscode.Uri.parse(url));
+}
+
+function stopActiveBoardProcess(): void {
+  if (activeBoardProcess === undefined) {
+    return;
+  }
+  activeBoardProcess.disposed = true;
+  if (!activeBoardProcess.child.killed) {
+    activeBoardProcess.child.kill('SIGTERM');
+  }
+  activeBoardProcess = undefined;
 }
 
 /** Registers the `rhizome-mcp.showBoard` command. */
 export function registerShowBoardCommand(): vscode.Disposable {
   return vscode.commands.registerCommand('rhizome-mcp.showBoard', async () => {
+    stopActiveBoardProcess();
+
     const target = await resolveTargetWorkspaceFolder();
 
     if (target.kind === 'no-folders-open') {
@@ -55,8 +123,6 @@ export function registerShowBoardCommand(): vscode.Disposable {
       return;
     }
     if (target.kind === 'cancelled') {
-      // Unlike init, there's no meaningful project context to fall back to
-      // quietly here — surface it as an error.
       await vscode.window.showErrorMessage('Select a workspace folder to view the Rhizome status board.');
       return;
     }
@@ -70,25 +136,24 @@ export function registerShowBoardCommand(): vscode.Disposable {
     }
 
     const outputChannel = getOutputChannel();
-    const outputPath = generateBoardTempFilePath(os.tmpdir(), randomUUID());
-    outputChannel.appendLine(`[info] Running "rhizome-mcp board" in ${folder.uri.fsPath}`);
+    outputChannel.appendLine(`[info] Running "rhizome-mcp board --serve" in ${folder.uri.fsPath}`);
 
     try {
-      const code = await runBoardProcess(resolution.binaryPath, folder.uri.fsPath, outputPath, outputChannel);
-      if (code === 0) {
-        await openBoard(vscode.Uri.file(outputPath));
-      } else {
-        outputChannel.appendLine(`[error] "rhizome-mcp board" exited with code ${code}`);
-        await vscode.window.showErrorMessage(
-          `rhizome-mcp board failed (exit code ${code}). See the "Rhizome MCP" output channel for details.`,
-        );
+      const state = await runBoardProcess(resolution.binaryPath, folder.uri.fsPath, outputChannel);
+      activeBoardProcess = state;
+      if (state.url !== null) {
+        await openBoard(state.url);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      outputChannel.appendLine(`[error] failed to run "rhizome-mcp board": ${message}`);
+      outputChannel.appendLine(`[error] failed to run "rhizome-mcp board --serve": ${message}`);
       await vscode.window.showErrorMessage(
         'Failed to run rhizome-mcp board. See the "Rhizome MCP" output channel for details.',
       );
     }
   });
+}
+
+export function disposeBoardProcess(): void {
+  stopActiveBoardProcess();
 }

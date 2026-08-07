@@ -10,6 +10,10 @@ Install "Rhizome MCP" (publisher `odrin`) from the [Visual Studio Marketplace](h
 
 The extension watches each open workspace folder's root for `.agent-tracker.json` (the same marker file `rhizome-mcp init` writes). A folder's MCP server is registered only once that file exists; the extension reacts to it being created or removed without requiring a window reload.
 
+## Status board UI
+
+The extension can also launch a local status board for human inspection. When the extension opens the board, it starts `rhizome-mcp board --serve`, opens the reported loopback URL, keeps the child process alive for extension use, and terminates it again when the board is reopened or the extension is deactivated. The manual `rhizome-mcp board --output` flow remains available as an offline snapshot for cases where the user wants a self-contained HTML file without a running server.
+
 ## Binary resolution
 
 Resolution order, implemented in `editors/vscode/src/binaryResolver.ts`:

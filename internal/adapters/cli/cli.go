@@ -79,6 +79,9 @@ type InitHandler func(context.Context, string) error
 // configured default).
 type ServeHandler func(context.Context, string, string) error
 
+// BoardServeHandler runs CLI board serve logic after the adapter parses the command.
+type BoardServeHandler func(context.Context, string, io.Writer) error
+
 // BackupReport summarizes a validated backup database artifact for CLI output.
 type BackupReport struct {
 	OutputPath    string
@@ -131,20 +134,26 @@ type ConnectHandler func(context.Context, string, bool) error
 
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
-	services       Services
-	stdout         io.Writer
-	stderr         io.Writer
-	initHandler    InitHandler
-	serveHandler   ServeHandler
-	backupHandler  BackupHandler
-	doctorHandler  DoctorHandler
-	connectHandler ConnectHandler
-	appVersion     string
+	services          Services
+	stdout            io.Writer
+	stderr            io.Writer
+	initHandler       InitHandler
+	serveHandler      ServeHandler
+	boardServeHandler BoardServeHandler
+	backupHandler     BackupHandler
+	doctorHandler     DoctorHandler
+	connectHandler    ConnectHandler
+	appVersion        string
 }
 
 // New constructs a CLI adapter around application services and output writers.
 func New(services Services, stdout, stderr io.Writer, initHandler InitHandler, serveHandler ServeHandler) *CLI {
 	return &CLI{services: services, stdout: stdout, stderr: stderr, initHandler: initHandler, serveHandler: serveHandler}
+}
+
+// SetBoardServeHandler installs a handler for the board serve command.
+func (c *CLI) SetBoardServeHandler(handler BoardServeHandler) {
+	c.boardServeHandler = handler
 }
 
 // SetBackupHandler installs a handler for the backup command.
@@ -720,12 +729,11 @@ func (c *CLI) runGraph(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) runBoard(ctx context.Context, args []string) error {
-	if c.services.BoardService == nil {
-		return fmt.Errorf("board service is not configured")
-	}
 	fs := flag.NewFlagSet("board", flag.ContinueOnError)
 	format := fs.String("format", "table", "output format")
 	output := fs.String("output", "", "write a fully self-contained HTML status board to this path")
+	serve := fs.Bool("serve", false, "serve the board over loopback HTTP")
+	httpAddress := fs.String("http-address", "127.0.0.1:0", "loopback HTTP address for served board mode")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -735,6 +743,18 @@ func (c *CLI) runBoard(ctx context.Context, args []string) error {
 	}
 	if *format != "table" && *format != "json" {
 		return fmt.Errorf("unsupported format %q", *format)
+	}
+	if *serve && *output != "" {
+		return fmt.Errorf("--serve and --output are mutually exclusive")
+	}
+	if *serve {
+		if c.boardServeHandler == nil {
+			return fmt.Errorf("board serve handler is not configured")
+		}
+		return c.boardServeHandler(ctx, *httpAddress, c.stdoutWriter())
+	}
+	if c.services.BoardService == nil {
+		return fmt.Errorf("board service is not configured")
 	}
 
 	result, err := c.services.BoardService.GetBoard(ctx)
@@ -1074,7 +1094,7 @@ func (c *CLI) usage() string {
   rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
   rhizome-mcp [--data-root PATH] search QUERY [--format table|json] [--limit N] [--cursor CURSOR] [--entity-type TYPE ...] [--issue ISSUE-ID] [--epic EPIC-ID] [--status STATUS ...] [--label LABEL ...] [--include-archived] [--snippet-length N]
   rhizome-mcp [--data-root PATH] graph ISSUE-ID [--format table|json|mermaid] [--depth N] [--max-nodes N] [--direction outgoing|incoming|both] [--relation-type TYPE ...] [--include-hierarchy] [--include-terminal]
-  rhizome-mcp [--data-root PATH] board [--format table|json] [--output PATH]
+  rhizome-mcp [--data-root PATH] board [--format table|json] [--output PATH] [--serve [--http-address ADDR]]
   rhizome-mcp [--data-root PATH] maintenance release-attempt ATTEMPT-ID [--format table|json]
   rhizome-mcp [--data-root PATH] maintenance rebuild-search-index [--format table|json]
 `

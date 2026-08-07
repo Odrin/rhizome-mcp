@@ -197,15 +197,18 @@ Show a local, read-only status board: issue counts by effective status, currentl
 ```bash
 rhizome-mcp board
 rhizome-mcp board --format json
+rhizome-mcp board --serve --http-address 127.0.0.1:0
 rhizome-mcp board --output board.html
 ```
 
 Supported flags:
 
 - `--format table|json`
-- `--output PATH` (also write a fully self-contained HTML board to this path)
+- `--serve` (serve the board as a loopback-only local UI over HTTP)
+- `--output PATH` (write a fully self-contained HTML board to this path)
+- `--http-address HOST:PORT` (default `127.0.0.1:0` when `--serve` is used)
 
-`--format table|json` controls the terminal summary, which is always printed. Adding `--output PATH` additionally writes a static HTML file with the same summary rendered as tables, an inline SVG rendering of the planning graph (plain rectangles and lines, no JavaScript), and the graph's Mermaid source in a collapsible section for pasting into any Mermaid renderer. The HTML file has no external stylesheets, scripts, fonts, or other network dependencies, so it opens correctly straight from `file://` with no network access.
+`--format table|json` controls the terminal summary, which is always printed for the offline board command. `--serve` and `--output` are mutually exclusive. When `--serve` is selected, the process prints a canonical loopback URL such as `http://127.0.0.1:<port>/` to stdout and stays alive until you stop it with Ctrl+C or SIGTERM. The served page and `/api/board` provide the same read-only board data over HTTP; the listener is loopback-only and rejects mismatched Host/Origin requests, and the page returns the same security headers as the offline snapshot. `--output` remains the offline, self-contained snapshot mode: it writes a static HTML file with the same summary rendered as tables, an inline SVG rendering of the planning graph (plain rectangles and lines, no JavaScript), and the graph's Mermaid source in a collapsible section for pasting into any Mermaid renderer. The HTML file has no external stylesheets, scripts, fonts, or other network dependencies, so it opens correctly straight from `file://` with no network access.
 
 ### `maintenance release-attempt`
 

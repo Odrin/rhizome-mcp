@@ -18,6 +18,21 @@
 
 import * as path from 'node:path';
 
+/** Validates and extracts the canonical loopback board URL from a single stdout line emitted by the child process. */
+export function extractBoardServeURL(line: string): string | null {
+  const trimmed = line.trim();
+  if (!/^http:\/\/127\.0\.0\.1:(\d{1,5})\/$/.test(trimmed)) {
+    return null;
+  }
+
+  const port = Number(trimmed.slice('http://127.0.0.1:'.length, -1));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+
+  return trimmed;
+}
+
 /** Name of the marker file `rhizome-mcp init` writes at a workspace/repo root. Mirrors `./mcpProvider.ts`'s constant of the same name/value. */
 export const TRACKER_FILENAME = '.agent-tracker.json';
 

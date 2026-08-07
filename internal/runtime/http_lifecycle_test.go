@@ -59,6 +59,43 @@ func TestValidateLoopbackAddress(t *testing.T) {
 	}
 }
 
+func TestServeHTTPServerInvokesListenerCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	notified := make(chan net.Listener, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeHTTPServer(ctx, HTTPServerOptions{Address: "127.0.0.1:0", Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), OnListener: func(listener net.Listener) { notified <- listener }})
+	}()
+
+	select {
+	case listener := <-notified:
+		defer listener.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for listener callback")
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("shutdown returned %v, want context.Canceled", err)
+	}
+}
+
+func TestServeHTTPServerPropagatesListenFailure(t *testing.T) {
+	err := ServeHTTPServer(context.Background(), HTTPServerOptions{
+		Address: "127.0.0.1:0",
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		Listen: func(network, address string) (net.Listener, error) {
+			return nil, errors.New("listen failed")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "listen failed") {
+		t.Fatalf("error = %v, want listen failure", err)
+	}
+}
+
 func TestServeHTTPServerRejectsOccupiedPort(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

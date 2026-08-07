@@ -42,6 +42,8 @@ type HTTPServerOptions struct {
 	IdleTimeout         time.Duration
 	MaxHeaderBytes      int
 	MaxRequestBodyBytes int64
+	OnListener          func(net.Listener)
+	Listen              func(network, address string) (net.Listener, error)
 }
 
 type statusRecorder struct {
@@ -300,9 +302,16 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 		return err
 	}
 
-	listener, err := net.Listen("tcp", address)
+	listen := options.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	listener, err := listen("tcp", address)
 	if err != nil {
 		return err
+	}
+	if options.OnListener != nil {
+		options.OnListener(listener)
 	}
 	options.Logger.Info("http server listening", "endpoint", listener.Addr().String())
 

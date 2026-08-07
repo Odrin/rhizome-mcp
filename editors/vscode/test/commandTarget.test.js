@@ -26,6 +26,7 @@ const {
   selectTargetFolder,
   trackerPathFor,
   generateBoardTempFilePath,
+  extractBoardServeURL,
 } = require('../src/commandTarget.ts');
 
 // ---------------------------------------------------------------------------
@@ -89,4 +90,29 @@ test('generateBoardTempFilePath produces different paths for different unique id
   const first = generateBoardTempFilePath('/tmp', 'id-one');
   const second = generateBoardTempFilePath('/tmp', 'id-two');
   assert.notEqual(first, second);
+});
+
+test('extractBoardServeURL accepts the canonical loopback URL emitted by the child process', () => {
+  assert.equal(extractBoardServeURL('  http://127.0.0.1:4321/  '), 'http://127.0.0.1:4321/');
+  assert.equal(extractBoardServeURL('http://127.0.0.1:1/'), 'http://127.0.0.1:1/');
+  assert.equal(extractBoardServeURL('http://127.0.0.1:65535/'), 'http://127.0.0.1:65535/');
+});
+
+test('extractBoardServeURL rejects non-loopback and malformed served-board URLs', () => {
+  for (const value of [
+    'http://localhost:4321/',
+    'http://0.0.0.0:4321/',
+    'http://[::1]:4321/',
+    'https://127.0.0.1:4321/',
+    'http://127.0.0.1:4321',
+    'http://127.0.0.1:4321/path',
+    'http://127.0.0.1:4321?x=1',
+    'http://127.0.0.1:4321#frag',
+    'http://127.0.0.1:0/',
+    'http://127.0.0.1:65536/',
+    'http://127.0.0.1:notaport/',
+    'info: starting board',
+  ]) {
+    assert.equal(extractBoardServeURL(value), null);
+  }
 });

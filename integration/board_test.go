@@ -3,10 +3,16 @@
 package integration_test
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,6 +197,246 @@ func TestIntegrationBoardCommand(t *testing.T) {
 			t.Fatalf("board HTML missing identifier %q", want)
 		}
 	}
+}
+
+func TestIntegrationBoardServe(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	server := launchIntegrationBoardServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationBoardServer(t, server) })
+
+	endpoint := server.waitForEndpoint(t)
+	if !strings.HasPrefix(endpoint, "http://127.0.0.1:") || !strings.HasSuffix(endpoint, "/") {
+		t.Fatalf("canonical board URL = %q, want loopback URL ending in /", endpoint)
+	}
+
+	client := &http.Client{Timeout: integrationTimeout}
+	response, err := client.Get(endpoint)
+	if err != nil {
+		t.Fatalf("get board page: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read board page body: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("board page status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(response.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("board page content type = %q, want html", response.Header.Get("Content-Type"))
+	}
+	if got := response.Header.Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("board page CSP = %q", got)
+	}
+	if got := response.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("board page nosniff = %q", got)
+	}
+	if got := response.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("board page referrer policy = %q", got)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("board page cache control = %q", got)
+	}
+	if !strings.Contains(string(body), "Rhizome status board") {
+		t.Fatalf("board page body missing heading: %s", body)
+	}
+
+	apiResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/api/board")
+	if err != nil {
+		t.Fatalf("get board api: %v", err)
+	}
+	apiBody, err := io.ReadAll(apiResponse.Body)
+	apiResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read board api body: %v", err)
+	}
+	if apiResponse.StatusCode != http.StatusOK {
+		t.Fatalf("board api status = %d, want %d", apiResponse.StatusCode, http.StatusOK)
+	}
+	var payload struct {
+		GeneratedAt  string `json:"generated_at"`
+		StatusCounts []struct {
+			EffectiveStatus string `json:"effective_status"`
+			Count           int    `json:"count"`
+		} `json:"status_counts"`
+	}
+	if err := json.Unmarshal(apiBody, &payload); err != nil {
+		t.Fatalf("decode board api response: %v\nbody: %s", err, apiBody)
+	}
+	if payload.GeneratedAt == "" {
+		t.Fatalf("board api payload missing generated_at: %s", apiBody)
+	}
+	if payload.StatusCounts == nil {
+		t.Fatalf("board api payload missing status counts: %s", apiBody)
+	}
+
+	postRequest, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		t.Fatalf("construct POST request: %v", err)
+	}
+	postResponse, err := client.Do(postRequest)
+	if err != nil {
+		t.Fatalf("send POST request: %v", err)
+	}
+	postResponse.Body.Close()
+	if postResponse.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want %d", postResponse.StatusCode, http.StatusMethodNotAllowed)
+	}
+	if got := postResponse.Header.Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("POST allow header = %q, want %q", got, "GET, HEAD")
+	}
+
+	hostRequest, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		t.Fatalf("construct hostile request: %v", err)
+	}
+	hostRequest.Host = "example.com:8080"
+	hostResponse, err := client.Do(hostRequest)
+	if err != nil {
+		t.Fatalf("send hostile host request: %v", err)
+	}
+	hostResponse.Body.Close()
+	if hostResponse.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("host mismatch status = %d, want %d", hostResponse.StatusCode, http.StatusMisdirectedRequest)
+	}
+
+	stopIntegrationBoardServer(t, server)
+	if err := server.waitForExit(t); err != nil {
+		t.Fatalf("wait for board server exit: %v", err)
+	}
+}
+
+type integrationBoardServer struct {
+	cmd       *exec.Cmd
+	output    *capturedOutput
+	endpointC chan string
+	doneC     chan error
+
+	exitedMu sync.Mutex
+	exited   bool
+}
+
+func (server *integrationBoardServer) hasExited() bool {
+	server.exitedMu.Lock()
+	defer server.exitedMu.Unlock()
+	return server.exited
+}
+
+func launchIntegrationBoardServer(t *testing.T, env integrationEnvironment, httpAddress string) *integrationBoardServer {
+	t.Helper()
+	args := []string{"--data-root", env.dataRoot, "board", "--serve", "--http-address", httpAddress}
+	cmd := exec.Command(integrationBinary, args...)
+	cmd.Dir = env.repository
+
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+	output := &capturedOutput{}
+	server := &integrationBoardServer{
+		cmd:       cmd,
+		output:    output,
+		endpointC: make(chan string, 1),
+		doneC:     make(chan error, 1),
+	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start integration board server: %v", err)
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(stdoutReader)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			output.WriteString(line + "\n")
+			if endpoint := parseIntegrationBoardServeURL(line); endpoint != "" {
+				select {
+				case server.endpointC <- endpoint:
+				default:
+				}
+			}
+		}
+		_ = scanner.Err()
+		_ = stdoutReader.Close()
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderrReader)
+		for scanner.Scan() {
+			output.WriteString(scanner.Text() + "\n")
+		}
+		_ = scanner.Err()
+		_ = stderrReader.Close()
+	}()
+	go func() {
+		err := cmd.Wait()
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
+		server.exitedMu.Lock()
+		server.exited = true
+		server.exitedMu.Unlock()
+		server.doneC <- err
+	}()
+	return server
+}
+
+func (server *integrationBoardServer) waitForEndpoint(t *testing.T) string {
+	t.Helper()
+	deadline := time.NewTimer(integrationTimeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case endpoint := <-server.endpointC:
+			return endpoint
+		case err := <-server.doneC:
+			t.Fatalf("integration board server exited before listening: %v\noutput:\n%s", err, server.output.String())
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for integration board server endpoint\noutput:\n%s", server.output.String())
+		}
+	}
+}
+
+func (server *integrationBoardServer) waitForExit(t *testing.T) error {
+	t.Helper()
+	if server.hasExited() {
+		return nil
+	}
+	select {
+	case err := <-server.doneC:
+		return err
+	case <-time.After(integrationTimeout):
+		t.Fatalf("timed out waiting for integration board server exit\noutput:\n%s", server.output.String())
+		return nil
+	}
+}
+
+func stopIntegrationBoardServer(t *testing.T, server *integrationBoardServer) {
+	t.Helper()
+	if server == nil || server.cmd == nil || server.cmd.Process == nil {
+		return
+	}
+	if server.hasExited() {
+		return
+	}
+	if err := server.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		_ = server.cmd.Process.Kill()
+	}
+	select {
+	case <-server.doneC:
+	case <-time.After(2 * time.Second):
+		_ = server.cmd.Process.Kill()
+		select {
+		case <-server.doneC:
+		case <-time.After(integrationTimeout):
+		}
+	}
+}
+
+func parseIntegrationBoardServeURL(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return trimmed
+	}
+	return ""
 }
 
 func TestIntegrationGraphProjectionStaysBoundedWithLargeBodies(t *testing.T) {

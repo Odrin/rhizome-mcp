@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -332,6 +333,22 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}()
 		return serveRunner(ctx, cfg, stderr, router)
 	}
+	boardServeHandler := func(ctx context.Context, httpAddress string, stdoutWriter io.Writer) error {
+		if httpAddress == "" {
+			httpAddress = "127.0.0.1:0"
+		}
+		cfg.HTTPAddress = httpAddress
+		if bundle == nil {
+			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
+			if err != nil {
+				return err
+			}
+		}
+		if bundle == nil || bundle.boardService == nil {
+			return errors.New("board service is not configured")
+		}
+		return runBoardServe(ctx, cfg, stdoutWriter, bundle.boardService)
+	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
 		if project == nil {
 			return cliadapter.BackupReport{}, errors.New("project is not open")
@@ -390,6 +407,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	}
 
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
+	adapter.SetBoardServeHandler(boardServeHandler)
 	adapter.SetBackupHandler(backupHandler)
 	adapter.SetDoctorHandler(doctorHandler)
 	adapter.SetConnectHandler(connectHandler)
@@ -592,6 +610,38 @@ func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, rou
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	return projectruntime.ServeHTTPServer(ctx, projectruntime.HTTPServerOptions{Address: cfg.HTTPAddress, Logger: logger, Handler: handler})
+}
+
+func runBoardServe(ctx context.Context, cfg *config.Config, stdout io.Writer, boardService interface {
+	GetBoard(context.Context) (domain.BoardResult, error)
+}) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := cliadapter.NewBoardHTTPHandler(boardService)
+	return projectruntime.ServeHTTPServer(ctx, projectruntime.HTTPServerOptions{
+		Address: cfg.HTTPAddress,
+		Logger:  logger,
+		Handler: handler,
+		OnListener: func(listener net.Listener) {
+			_, _ = fmt.Fprintf(stdout, "%s\n", boardServeURL(listener))
+		},
+	})
+}
+
+func boardServeURL(listener net.Listener) string {
+	if listener == nil {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		return fmt.Sprintf("http://%s/", listener.Addr().String())
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
 func newHTTPHandler(cfg *config.Config, router mcpadapter.ProjectRouter) (http.Handler, error) {

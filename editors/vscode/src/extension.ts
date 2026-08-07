@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { activateRhizome, getOutputChannel } from './activation';
 import { registerInitCommand } from './initCommand';
-import { registerShowBoardCommand } from './boardCommand';
+import { disposeBoardProcess, registerShowBoardCommand } from './boardCommand';
 import { registerRhizomeMcpServerProvider, type RhizomeMcpServerProvider } from './mcpServerProvider';
 
 // Module-level reference to the registered MCP server definition provider
@@ -50,5 +50,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  disposeBoardProcess();
   mcpServerProvider = undefined;
 }

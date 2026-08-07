@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -25,6 +26,39 @@ import (
 	"rhizome-mcp/internal/projectconfig"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
+
+type boardURLTestListener struct {
+	address net.Addr
+}
+
+func (listener boardURLTestListener) Accept() (net.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (listener boardURLTestListener) Close() error {
+	return nil
+}
+
+func (listener boardURLTestListener) Addr() net.Addr {
+	return listener.address
+}
+
+func TestBoardServeURLUsesListenerAddress(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		address net.Addr
+		wantURL string
+	}{
+		{name: "ipv4", address: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43210}, wantURL: "http://127.0.0.1:43210/"},
+		{name: "ipv6", address: &net.TCPAddr{IP: net.ParseIP("::1"), Port: 43210}, wantURL: "http://[::1]:43210/"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := boardServeURL(boardURLTestListener{address: testCase.address}); got != testCase.wantURL {
+				t.Fatalf("boardServeURL() = %q, want %q", got, testCase.wantURL)
+			}
+		})
+	}
+}
 
 func TestSearchCommandReportsInvalidFTSQuery(t *testing.T) {
 	ctx := context.Background()

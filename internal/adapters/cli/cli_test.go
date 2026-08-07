@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -113,6 +114,17 @@ type stubMaintenanceService struct {
 	releaseID     string
 }
 
+type stubBoardService struct {
+	calls int
+	board domain.BoardResult
+	err   error
+}
+
+func (s *stubBoardService) GetBoard(context.Context) (domain.BoardResult, error) {
+	s.calls++
+	return s.board, s.err
+}
+
 func (s *stubMaintenanceService) ForceReleaseAttempt(ctx context.Context, attemptID string) (ports.ForceReleaseAttemptResult, error) {
 	s.calledRelease = true
 	s.releaseID = attemptID
@@ -210,6 +222,43 @@ func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read-write") || !strings.Contains(err.Error(), "valid profiles") {
 		t.Fatalf("error = %v, want an actionable message naming the value and valid profiles", err)
+	}
+}
+
+func TestBoardCommandRejectsServeAndOutputCombination(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{BoardService: &stubBoardService{}}, &stdout, &stderr, nil, nil)
+	cli.SetBoardServeHandler(func(context.Context, string, io.Writer) error {
+		t.Fatal("board serve handler unexpectedly invoked")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"board", "--serve", "--output", "/tmp/board.html"})
+	if err == nil {
+		t.Fatal("expected an error for mutually exclusive board flags")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want a mutually exclusive flag error", err)
+	}
+}
+
+func TestBoardCommandServesWithConfiguredHandler(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, nil)
+	var capturedAddress string
+	var capturedWriter io.Writer
+	cli.SetBoardServeHandler(func(_ context.Context, httpAddress string, writer io.Writer) error {
+		capturedAddress = httpAddress
+		capturedWriter = writer
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"board", "--serve", "--http-address", "127.0.0.1:0"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedAddress != "127.0.0.1:0" {
+		t.Fatalf("captured address = %q, want %q", capturedAddress, "127.0.0.1:0")
+	}
+	if capturedWriter != &stdout {
+		t.Fatalf("captured writer = %T, want %T", capturedWriter, &stdout)
 	}
 }
 

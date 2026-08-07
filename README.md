@@ -129,6 +129,7 @@ Run the command in a project for a project-scoped installation, or add `--global
 
 ```bash
 rhizome-mcp board                        # status counts, active leases, blockers, review queue
+rhizome-mcp board --serve                # interactive local board UI at a loopback URL
 rhizome-mcp board --output board.html    # self-contained HTML snapshot with the planning graph
 rhizome-mcp issue list --status ready
 rhizome-mcp graph ISSUE-42 --format mermaid
