@@ -28,6 +28,18 @@ go test -tags=integration ./...
 
 Both test commands should pass before submitting a pull request.
 
+CI enforces at least 80% coverage independently for each profile. To reproduce
+the checks locally, generate both profiles and run the same checker:
+
+```bash
+go test ./... -covermode=atomic -coverpkg=./... -coverprofile=unit-coverage.out
+go run github.com/vladopajic/go-test-coverage/v2@v2.14.0 --config .testcoverage.unit.yml
+go test -tags=integration ./... -covermode=atomic -coverpkg=./... -coverprofile=integration-coverage.out
+go run github.com/vladopajic/go-test-coverage/v2@v2.14.0 --config .testcoverage.integration.yml
+```
+
+The generated `*.out` profiles are ignored by Git.
+
 ## Code style
 
 - Follow the conventions documented in [AGENTS.md](AGENTS.md) and [AGENT_BRIEF.md](AGENT_BRIEF.md)

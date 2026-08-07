@@ -333,3 +333,53 @@ func TestFinishAttemptIdempotencyKeyValidationAndCanonicalRequest(t *testing.T) 
 		}
 	}
 }
+
+func TestCanonicalFinishAttemptRequestIncludesAcknowledgementAndArtifacts(t *testing.T) {
+	targetStatus := domain.StatusReady
+	reviewOutcome := domain.ReviewOutcomeApproved
+	title := "verification report"
+	metadata := json.RawMessage(`{"suite":"unit"}`)
+	input := domain.FinishAttemptInput{
+		AttemptID:           "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		LeaseToken:          "token",
+		Outcome:             domain.AttemptOutcomeCompleted,
+		ResultSummary:       "completed",
+		NextSteps:           []string{"ship"},
+		Verification:        []string{"go test ./..."},
+		TargetIssueStatus:   &targetStatus,
+		ReviewOutcome:       &reviewOutcome,
+		AcknowledgedChanges: &domain.AttemptAcknowledgement{IssueVersion: 3, LatestEventID: 12},
+		Artifacts: []domain.ArtifactInput{{
+			Type: domain.ArtifactTypeFile, URI: "reports/unit.txt", Title: &title, Metadata: metadata,
+		}},
+	}
+
+	request, err := domain.CanonicalFinishAttemptRequest(input)
+	if err != nil {
+		t.Fatalf("CanonicalFinishAttemptRequest() error = %v", err)
+	}
+	metadata[2] = 'X'
+	title = "changed"
+
+	var decoded struct {
+		AcknowledgedChanges *struct {
+			IssueVersion  int64 `json:"issue_version"`
+			LatestEventID int64 `json:"latest_event_id"`
+		} `json:"acknowledged_changes"`
+		Artifacts []struct {
+			Type     domain.ArtifactType `json:"type"`
+			URI      string              `json:"uri"`
+			Title    *string             `json:"title"`
+			Metadata json.RawMessage     `json:"metadata"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(request, &decoded); err != nil {
+		t.Fatalf("decode canonical request: %v", err)
+	}
+	if decoded.AcknowledgedChanges == nil || decoded.AcknowledgedChanges.IssueVersion != 3 || decoded.AcknowledgedChanges.LatestEventID != 12 {
+		t.Fatalf("acknowledged changes = %#v", decoded.AcknowledgedChanges)
+	}
+	if len(decoded.Artifacts) != 1 || decoded.Artifacts[0].Type != domain.ArtifactTypeFile || decoded.Artifacts[0].URI != "reports/unit.txt" || decoded.Artifacts[0].Title == nil || *decoded.Artifacts[0].Title != "verification report" || string(decoded.Artifacts[0].Metadata) != `{"suite":"unit"}` {
+		t.Fatalf("artifacts = %#v", decoded.Artifacts)
+	}
+}

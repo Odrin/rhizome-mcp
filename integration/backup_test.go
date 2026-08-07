@@ -446,14 +446,20 @@ func restoreBackupAndAssertQueryable(t *testing.T, sourceEnv integrationEnvironm
 	}
 
 	restoredSession := restoredEnv.connect(t)
-	exportResult := callIntegrationTool(t, restoredSession, "export_project", map[string]any{"delivery": "inline"})
+	exportResult := callIntegrationTool(t, restoredSession, "export_project", map[string]any{"delivery": "artifact"})
 	if exportResult.IsError {
 		t.Fatalf("export_project on restored backup result = %#v", exportResult)
 	}
-	var document domain.LogicalProjectDocument
-	decodeIntegrationResult(t, exportResult, &document)
-	if document.Format == "" || len(document.Issues) == 0 {
-		t.Fatalf("export_project on restored backup returned an unparseable or empty document: format=%q issues=%d", document.Format, len(document.Issues))
+	var artifact struct {
+		ArtifactURI string `json:"artifact_uri"`
+	}
+	decodeIntegrationResult(t, exportResult, &artifact)
+	if artifact.ArtifactURI == "" {
+		t.Fatalf("export_project on restored backup returned no artifact URI: %#v", artifact)
+	}
+	validateResult := callIntegrationTool(t, restoredSession, "validate_import", map[string]any{"source_uri": artifact.ArtifactURI})
+	if validateResult.IsError {
+		t.Fatalf("validate_import on restored backup export result = %#v", validateResult)
 	}
 }
 
