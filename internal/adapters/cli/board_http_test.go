@@ -178,7 +178,10 @@ func TestRenderServedBoardHTMLUsesDisplayIDLinks(t *testing.T) {
 		}}},
 	}
 
-	html := renderServedBoardHTML(result)
+	html, err := renderServedBoardHTML(result)
+	if err != nil {
+		t.Fatalf("renderServedBoardHTML: %v", err)
+	}
 	for _, want := range []string{`<a href="/issues/ISSUE-10">ISSUE-10</a>`, `<a href="/issues/ISSUE-20">ISSUE-20</a>`} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("served board HTML missing %q:\n%s", want, html)
@@ -199,12 +202,18 @@ func TestRenderServedBoardHTMLUsesDisplayIDLinks(t *testing.T) {
 		RootIssueProjection: &domain.IssueProjection{Issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV2", DisplayID: "ISSUE-60"}},
 		Graph:               domain.GraphResult{Nodes: []domain.IssueProjection{{Issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV2", DisplayID: "ISSUE-60"}}}},
 	}
-	detailHTML := renderIssueDetailHTML(detail)
+	detailHTML, err := renderIssueDetailHTML(detail)
+	if err != nil {
+		t.Fatalf("renderIssueDetailHTML: %v", err)
+	}
 	if !strings.Contains(detailHTML, `<a href="/issues/ISSUE-60">ISSUE-60</a>`) {
 		t.Fatalf("detail page missing root projection link: %s", detailHTML)
 	}
 
-	staticHTML := renderBoardHTML(result)
+	staticHTML, err := renderBoardHTML(result)
+	if err != nil {
+		t.Fatalf("renderBoardHTML: %v", err)
+	}
 	if strings.Contains(staticHTML, "/issues/") {
 		t.Fatalf("static board HTML unexpectedly contained issue path: %s", staticHTML)
 	}
@@ -294,7 +303,7 @@ func TestBoardHTTPHandlerServesSearchPageStateAndLinks(t *testing.T) {
 	if !strings.Contains(body, "No owning issue") {
 		t.Fatalf("body missing orphan marker: %s", body)
 	}
-	if !strings.Contains(body, "Showing 2 result(s) for \"alpha\".") {
+	if !strings.Contains(body, "Showing 2 result(s) for \"alpha\".") && !strings.Contains(body, "Showing 2 result(s) for &#34;alpha&#34;.") {
 		t.Fatalf("body missing rendered status: %s", body)
 	}
 }
@@ -433,7 +442,10 @@ func TestBoardHTTPHandlerMapsDetailAPIErrorResponses(t *testing.T) {
 }
 
 func TestServedBoardHTMLIncludesLiveRefreshBootstrap(t *testing.T) {
-	html := renderServedBoardHTML(boardResultFixture())
+	html, err := renderServedBoardHTML(boardResultFixture())
+	if err != nil {
+		t.Fatalf("renderServedBoardHTML: %v", err)
+	}
 	for _, want := range []string{"data-board-main", "data-board-endpoint=\"/api/board\"", "data-board-route=\"/\"", "visibilitychange", "pagehide", "If-None-Match"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("served board HTML missing %q: %s", want, html)

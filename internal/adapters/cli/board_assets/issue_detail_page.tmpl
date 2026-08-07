@@ -1,0 +1,69 @@
+{{define "boardIssueDetailPage"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{.Style}}</style>
+</head>
+<body>
+<main data-board-main data-board-endpoint="{{.BoardEndpoint}}" data-board-route="{{.BoardRoute}}">
+<p><a href="{{.ReturnHref}}">Return to board</a></p>
+<h1>{{.IssueHeading}}</h1>
+<p class="generated">{{.StatusLine}}</p>
+<section>
+<h2>Metadata</h2>
+{{range .Metadata}}<p><strong>{{.Label}}:</strong> {{.Value}}</p>
+{{end}}
+</section>
+<section>
+<h2>Labels</h2>
+{{if .HasLabels}}<p>{{range $index, $label := .Labels}}{{if $index}}, {{end}}{{$label}}{{end}}</p>{{else}}<p class="empty">No labels assigned.</p>{{end}}
+</section>
+<section>
+<h2>{{.Description.Heading}}</h2>
+{{if .Description.IsEmpty}}<p class="empty">{{.Description.EmptyMessage}}</p>{{else}}<pre>{{.Description.Value}}</pre>{{end}}
+</section>
+<section>
+<h2>{{.AcceptanceCriteria.Heading}}</h2>
+{{if .AcceptanceCriteria.IsEmpty}}<p class="empty">{{.AcceptanceCriteria.EmptyMessage}}</p>{{else}}<pre>{{.AcceptanceCriteria.Value}}</pre>{{end}}
+</section>
+<section>
+<h2>{{.BlockedReason.Heading}}</h2>
+{{if .BlockedReason.IsEmpty}}<p class="empty">{{.BlockedReason.EmptyMessage}}</p>{{else}}<pre>{{.BlockedReason.Value}}</pre>{{end}}
+</section>
+{{if .RootIssue}}<section>
+<h2>Root issue</h2>
+<p><a href="{{.RootIssue.Href}}">{{.RootIssue.Label}}</a></p>
+</section>{{end}}
+{{if .LatestAttempt}}<section>
+<h2>Latest attempt</h2>
+<p>{{.LatestAttempt.ID}}{{if .LatestAttempt.HasStarted}} — {{.LatestAttempt.StartedAt}}{{end}}</p>
+</section>{{end}}
+{{if .OpenReview}}<section>
+<h2>Open review</h2>
+<p>{{.OpenReview.ID}}{{if .OpenReview.HasStatus}} — {{.OpenReview.Status}}{{end}}</p>
+</section>{{end}}
+{{if .LatestDecision}}<section>
+<h2>Latest decision</h2>
+<p>{{.LatestDecision.Title}}{{if .LatestDecision.HasSummary}} — {{.LatestDecision.Summary}}{{end}}</p>
+</section>{{end}}
+{{if .GraphSVG}}<section>
+<h2>Related graph</h2>
+{{.GraphSVG}}
+</section>{{end}}
+<section>
+<h2>Recent activity</h2>
+{{if .Activity.Items}}
+{{if .Activity.HasMore}}<p class="empty">Additional activity is available.</p>{{end}}
+<ul>
+{{range .Activity.Items}}<li>{{.Summary}}{{if .HasDate}} <span class="generated">{{.OccurredAt}}</span>{{end}}</li>
+{{end}}</ul>
+{{else}}<p class="empty">No activity recorded yet.</p>{{end}}
+</section>
+</main>
+<script>{{.LiveRefreshScript}}</script>
+<footer>Generated locally by <code>rhizome-mcp board --serve</code>.</footer>
+</body>
+</html>
+{{end}}

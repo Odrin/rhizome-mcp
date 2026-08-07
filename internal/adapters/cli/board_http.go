@@ -71,12 +71,16 @@ func serveBoardPage(w http.ResponseWriter, method string, boardService BoardHTTP
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
 		return
 	}
-	body := []byte(renderServedBoardHTML(result))
+	body, err := renderServedBoardHTML(result)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
+	}
 	if method == http.MethodHead {
 		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 		return
 	}
-	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 }
 
 func serveIssueDetailPage(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, path string) {
@@ -101,12 +105,16 @@ func serveIssueDetailPage(w http.ResponseWriter, method string, boardService Boa
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
 		return
 	}
-	body := []byte(renderIssueDetailHTML(result))
+	body, err := renderIssueDetailHTML(result)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
+	}
 	if method == http.MethodHead {
 		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 		return
 	}
-	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 }
 
 func serveSearchPage(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, requestURL *url.URL) {
@@ -119,13 +127,17 @@ func serveSearchPage(w http.ResponseWriter, method string, boardService BoardHTT
 	input, err := parseBoardSearchRequest(requestURL)
 	if err != nil {
 		state.Invalid = true
-		state.StatusMessage = "Invalid search query."
-		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		state.StatusMessage = buildBoardSearchStatusMessage(state.Query, 0, false, true, false)
+		body, err := renderServedBoardHTMLWithSearchState(result, state)
+		if err != nil {
+			writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+			return
+		}
 		if method == http.MethodHead {
 			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 			return
 		}
-		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 		return
 	}
 	state.Query = strings.TrimSpace(input.Query)
@@ -133,13 +145,17 @@ func serveSearchPage(w http.ResponseWriter, method string, boardService BoardHTT
 		state.EntityType = string(input.EntityTypes[0])
 	}
 	if state.Query == "" {
-		state.StatusMessage = "Initial search: enter a query to find issues, comments, decisions, reviews, and attempt notes."
-		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		state.StatusMessage = buildBoardSearchStatusMessage(state.Query, 0, false, false, false)
+		body, err := renderServedBoardHTMLWithSearchState(result, state)
+		if err != nil {
+			writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+			return
+		}
 		if method == http.MethodHead {
 			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 			return
 		}
-		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 		return
 	}
 	page, err := boardService.Search(ctx, input)
@@ -148,38 +164,40 @@ func serveSearchPage(w http.ResponseWriter, method string, boardService BoardHTT
 		if errors.As(err, &domainErr) {
 			if domainErr.Code == domain.CodeInvalidArgument {
 				state.Invalid = true
-				state.StatusMessage = "Invalid search query."
+				state.StatusMessage = buildBoardSearchStatusMessage(state.Query, 0, false, true, false)
 			} else {
 				state.Error = true
-				state.StatusMessage = "Search temporarily unavailable."
+				state.StatusMessage = buildBoardSearchStatusMessage(state.Query, 0, false, false, true)
 			}
 		} else {
 			state.Error = true
-			state.StatusMessage = "Search temporarily unavailable."
+			state.StatusMessage = buildBoardSearchStatusMessage(state.Query, 0, false, false, true)
 		}
-		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		body, err := renderServedBoardHTMLWithSearchState(result, state)
+		if err != nil {
+			writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+			return
+		}
 		if method == http.MethodHead {
 			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 			return
 		}
-		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 		return
 	}
 	state.Results = page.Results
 	state.HasMore = page.HasMore
-	if len(state.Results) == 0 {
-		state.StatusMessage = fmt.Sprintf("No results found for %q.", state.Query)
-	} else if state.HasMore {
-		state.StatusMessage = fmt.Sprintf("Showing %d results for %q.", len(state.Results), state.Query)
-	} else {
-		state.StatusMessage = fmt.Sprintf("Showing %d result(s) for %q.", len(state.Results), state.Query)
+	state.StatusMessage = buildBoardSearchStatusMessage(state.Query, len(state.Results), state.HasMore, false, false)
+	body, err := renderServedBoardHTMLWithSearchState(result, state)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
 	}
-	body := []byte(renderServedBoardHTMLWithSearchState(result, state))
 	if method == http.MethodHead {
 		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
 		return
 	}
-	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", []byte(body), true)
 }
 
 func serveSearchAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, requestURL *url.URL) {

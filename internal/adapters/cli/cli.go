@@ -769,7 +769,11 @@ func (c *CLI) runBoard(ctx context.Context, args []string) error {
 		return err
 	}
 	if *output != "" {
-		if err := os.WriteFile(*output, []byte(renderBoardHTML(result)), 0o644); err != nil {
+		html, err := renderBoardHTML(result)
+		if err != nil {
+			return fmt.Errorf("render board HTML: %w", err)
+		}
+		if err := os.WriteFile(*output, []byte(html), 0o644); err != nil {
 			return fmt.Errorf("write board HTML: %w", err)
 		}
 	}

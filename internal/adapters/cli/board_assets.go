@@ -5,6 +5,7 @@ import "embed"
 //go:embed board_assets/board.css
 //go:embed board_assets/board_live.js
 //go:embed board_assets/board_search.js
+//go:embed board_assets/*.tmpl
 var boardAssetsFS embed.FS
 
 var (

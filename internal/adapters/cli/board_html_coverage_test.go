@@ -58,7 +58,10 @@ func TestRenderBoardHTMLCoverage(t *testing.T) {
 	}
 
 	t.Run("static board", func(t *testing.T) {
-		html := renderBoardHTML(result)
+		html, err := renderBoardHTML(result)
+		if err != nil {
+			t.Fatalf("renderBoardHTML: %v", err)
+		}
 		for _, want := range []string{"Rhizome status board", "Status counts", "ISSUE-120", "Waiting on umbrella issue", "attempt-work"} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("static board missing %q:\n%s", want, html)
@@ -73,7 +76,10 @@ func TestRenderBoardHTMLCoverage(t *testing.T) {
 	})
 
 	t.Run("served board", func(t *testing.T) {
-		html := renderServedBoardHTML(result)
+		html, err := renderServedBoardHTML(result)
+		if err != nil {
+			t.Fatalf("renderServedBoardHTML: %v", err)
+		}
 		for _, want := range []string{"data-board-main", "Search", "data-board-search-form", "board-search-query", "ISSUE-100", "ISSUE-120", "ISSUE-200", "ISSUE-201", "(truncated)", "href=\"/issues/ISSUE-200\"", "href=\"/issues/ISSUE-201\"", "href=\"/issues/ISSUE-100\""} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("served board missing %q:\n%s", want, html)
@@ -138,7 +144,10 @@ func TestRenderIssueDetailHTMLCoverage(t *testing.T) {
 	sparseDetail := domain.IssueDetail{Issue: domain.Issue{ID: issueID, DisplayID: "ISSUE-301", Title: "Sparse detail", Status: domain.StatusOpen, Priority: domain.PriorityMedium, Type: domain.TypeBug, Version: 1, CreatedAt: fixedAt, UpdatedAt: fixedAt.Add(1 * time.Minute)}}
 
 	t.Run("rich detail", func(t *testing.T) {
-		html := renderIssueDetailHTML(richDetail)
+		html, err := renderIssueDetailHTML(richDetail)
+		if err != nil {
+			t.Fatalf("renderIssueDetailHTML: %v", err)
+		}
 		for _, want := range []string{"ISSUE-300", "Archived:", "alpha, beta", "Need &lt;script&gt;alert(1)&lt;/script&gt;", "Approval &lt;b&gt;required&lt;/b&gt;", "Blocked by &lt;script&gt;alert(2)&lt;/script&gt;", "Latest attempt", "attempt-777", "Open review", "review-open", "Latest decision", "Decision summary", "Related graph", "aria-label=\"Planning graph\"", "Additional activity is available.", "Comment &lt;script&gt;alert(3)&lt;/script&gt;", "Work done &lt;b&gt;today&lt;/b&gt;"} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("rich detail missing %q:\n%s", want, html)
@@ -150,7 +159,10 @@ func TestRenderIssueDetailHTMLCoverage(t *testing.T) {
 	})
 
 	t.Run("sparse detail", func(t *testing.T) {
-		html := renderIssueDetailHTML(sparseDetail)
+		html, err := renderIssueDetailHTML(sparseDetail)
+		if err != nil {
+			t.Fatalf("renderIssueDetailHTML: %v", err)
+		}
 		for _, want := range []string{"ISSUE-301", "Not archived.", "No labels assigned.", "No description provided.", "No acceptance criteria provided.", "No blocked reason provided.", "No activity recorded yet.", "Rhizome issue detail"} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("sparse detail missing %q:\n%s", want, html)

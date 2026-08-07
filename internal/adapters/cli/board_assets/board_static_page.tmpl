@@ -1,0 +1,72 @@
+{{define "boardStaticPage"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{.Style}}</style>
+</head>
+<body>
+<h1>{{.Title}}</h1>
+<p class="generated">Generated {{.GeneratedAt}}</p>
+<section>
+<h2>Status counts</h2>
+{{if .StatusCounts}}
+<div class="table-scroll"><table>
+<thead><tr><th>Effective status</th><th>Count</th></tr></thead>
+<tbody>
+{{range .StatusCounts}}<tr><td>{{.Status}}</td><td>{{.Count}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No issues yet.</p>
+{{end}}
+</section>
+<section>
+<h2>Active (leased) attempts</h2>
+{{if .ActiveAttempts}}
+<div class="table-scroll"><table>
+<thead><tr><th>Attempt</th><th>Issue</th><th>Title</th><th>Kind</th><th>Session label</th><th>Started</th><th>Lease expires</th></tr></thead>
+<tbody>
+{{range .ActiveAttempts}}<tr><td>{{.AttemptID}}</td><td>{{.IssueLabel}}</td><td>{{.IssueTitle}}</td><td>{{.Kind}}</td><td>{{.SessionLabel}}</td><td>{{.StartedAt}}</td><td>{{.LeaseExpiresAt}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No active attempts.</p>
+{{end}}
+</section>
+<section>
+<h2>Blocked issues</h2>
+{{if .BlockedIssues}}
+<div class="table-scroll"><table>
+<thead><tr><th>Issue</th><th>Title</th><th>Blocked reason</th></tr></thead>
+<tbody>
+{{range .BlockedIssues}}<tr><td>{{.Label}}</td><td>{{.Title}}</td><td>{{.BlockedReason}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No blocked issues.</p>
+{{end}}
+</section>
+<section>
+<h2>Open review requests</h2>
+{{if .ReviewRequests}}
+<div class="table-scroll"><table>
+<thead><tr><th>Request</th><th>Issue</th><th>Status</th><th>Target version</th><th>Created</th></tr></thead>
+<tbody>
+{{range .ReviewRequests}}<tr><td>{{.ID}}</td><td>{{.IssueLabel}}</td><td>{{.Status}}</td><td>{{.TargetVersion}}</td><td>{{.CreatedAt}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No open review requests.</p>
+{{end}}
+</section>
+<section>
+<h2>Planning graph</h2>
+<p>{{.PlanningGraphSummary}}</p>
+<div class="graph">{{.PlanningGraphSVG}}</div>
+<details>
+<summary>Mermaid source (copy into any Mermaid renderer)</summary>
+<pre>{{.PlanningGraphMermaid}}</pre>
+</details>
+</section>
+<footer>Generated locally by <code>rhizome-mcp board --output</code>. No network access is required to view this file.</footer>
+</body>
+</html>
+{{end}}
