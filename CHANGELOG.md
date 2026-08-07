@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-07
+
+### Added
+
+- **Interactive local board** — `rhizome-mcp board --serve` launches a loopback-only web UI for monitoring project status, active leases, blockers, reviews, and the planning graph.
+- **Live board updates** — The served board refreshes its state without a page reload.
+- **Issue detail pages and search** — Browse board issues in detail and search the served board for project work.
+
+### Fixed
+
+- **Shared project routing** — Correctly tracks active use of routed projects so idle cleanup does not close entries while requests still use them.
+
 ## [1.1.0] - 2026-08-05
 
 ### Added
