@@ -223,6 +223,82 @@ func TestBoardHTTPHandlerHandlesHeadAndContext(t *testing.T) {
 	}
 }
 
+func TestBoardHTTPHandlerSearchAPIMapsParamsAndErrors(t *testing.T) {
+	t.Run("invalid params return 400 json", func(t *testing.T) {
+		handler := NewBoardHTTPHandler(&stubBoardService{})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/search?q=alpha&limit=abc", nil)
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+		if !strings.Contains(recorder.Header().Get("Content-Type"), "application/json") {
+			t.Fatalf("content type = %q, want json", recorder.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(recorder.Body.String(), `"error":"invalid search request"`) {
+			t.Fatalf("body = %q", recorder.Body.String())
+		}
+	})
+
+	t.Run("valid search returns dto and head bodyless", func(t *testing.T) {
+		handler := NewBoardHTTPHandler(&stubBoardService{searchPage: domain.SearchPage{Results: []domain.SearchResult{{EntityType: domain.SearchEntityTypeIssue, EntityID: "issue-1", IssueID: strPtr("ISSUE-1"), Title: "First", Snippet: "match [alpha]", Score: 1.5}}, NextCursor: strPtr("next"), HasMore: true}})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/search?q=alpha&entity_type=issue&limit=2&snippet_length=11&include_archived=true", nil)
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+		var payload struct {
+			Results []struct {
+				EntityType string  `json:"entity_type"`
+				EntityID   string  `json:"entity_id"`
+				IssueID    *string `json:"issue_id"`
+				Title      string  `json:"title"`
+				Snippet    string  `json:"snippet"`
+				Score      float64 `json:"score"`
+			} `json:"results"`
+			NextCursor *string `json:"next_cursor"`
+			HasMore    bool    `json:"has_more"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if payload.Results[0].EntityType != "issue" || payload.NextCursor == nil || !payload.HasMore || payload.Results[0].Snippet != "match [alpha]" {
+			t.Fatalf("payload = %#v", payload)
+		}
+	})
+
+	t.Run("invalid fts error maps 400", func(t *testing.T) {
+		handler := NewBoardHTTPHandler(&stubBoardService{searchErr: domain.NewError(domain.CodeInvalidArgument, "invalid fts", false)})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/search?q=bad", nil)
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+func TestBoardHTTPHandlerServesSearchPageStateAndLinks(t *testing.T) {
+	handler := NewBoardHTTPHandler(&stubBoardService{board: boardResultFixture(), searchPage: domain.SearchPage{Results: []domain.SearchResult{{EntityType: domain.SearchEntityTypeIssue, EntityID: "issue-1", IssueID: strPtr("ISSUE-1"), Title: "Alpha", Snippet: "match"}, {EntityType: domain.SearchEntityTypeComment, EntityID: "comment-1", Title: "Comment", Snippet: "match"}}}})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/search?q=alpha&entity_type=issue", nil)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `href="/issues/ISSUE-1"`) {
+		t.Fatalf("body missing owning issue link: %s", body)
+	}
+	if !strings.Contains(body, "No owning issue") {
+		t.Fatalf("body missing orphan marker: %s", body)
+	}
+	if !strings.Contains(body, "Showing 2 result(s) for \"alpha\".") {
+		t.Fatalf("body missing rendered status: %s", body)
+	}
+}
+
 func TestBoardHTTPHandlerMapsServiceFailuresToInternalServerError(t *testing.T) {
 	handler := NewBoardHTTPHandler(&stubBoardService{err: context.Canceled})
 	recorder := httptest.NewRecorder()

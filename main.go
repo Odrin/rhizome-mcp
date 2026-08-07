@@ -348,7 +348,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		if bundle == nil || bundle.boardService == nil || bundle.issueDetailService == nil {
 			return errors.New("board service is not configured")
 		}
-		return runBoardServe(ctx, cfg, stdoutWriter, boardServeService{boardService: bundle.boardService, issueDetailService: bundle.issueDetailService})
+		return runBoardServe(ctx, cfg, stdoutWriter, boardServeService{boardService: bundle.boardService, issueDetailService: bundle.issueDetailService, searchService: bundle.searchService})
 	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
 		if project == nil {
@@ -616,6 +616,7 @@ func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, rou
 func runBoardServe(ctx context.Context, cfg *config.Config, stdout io.Writer, boardService interface {
 	GetBoard(context.Context) (domain.BoardResult, error)
 	GetIssueDetail(context.Context, string) (domain.IssueDetail, error)
+	Search(context.Context, domain.SearchInput) (domain.SearchPage, error)
 }) error {
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -638,6 +639,7 @@ func runBoardServe(ctx context.Context, cfg *config.Config, stdout io.Writer, bo
 type boardServeService struct {
 	boardService       *application.BoardService
 	issueDetailService *application.IssueDetailService
+	searchService      *application.SearchService
 }
 
 func (service boardServeService) GetBoard(ctx context.Context) (domain.BoardResult, error) {
@@ -652,6 +654,13 @@ func (service boardServeService) GetIssueDetail(ctx context.Context, identifier 
 		return domain.IssueDetail{}, errors.New("issue detail service is not configured")
 	}
 	return service.issueDetailService.GetIssueDetail(ctx, identifier)
+}
+
+func (service boardServeService) Search(ctx context.Context, input domain.SearchInput) (domain.SearchPage, error) {
+	if service.searchService == nil {
+		return domain.SearchPage{}, errors.New("search service is not configured")
+	}
+	return service.searchService.Search(ctx, input)
 }
 
 func boardServeURL(listener net.Listener) string {

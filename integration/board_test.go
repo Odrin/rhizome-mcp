@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -423,6 +425,208 @@ func TestIntegrationBoardServe(t *testing.T) {
 	stopIntegrationBoardServer(t, server)
 	if err := server.waitForExit(t); err != nil {
 		t.Fatalf("wait for board server exit: %v", err)
+	}
+}
+
+func TestIntegrationBoardServeSearch(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	issue := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board search issue", "status": "ready",
+	})
+	commentResult := callIntegrationTool(t, session, "add_comment", map[string]any{
+		"issue_id": issue.DisplayID,
+		"content":  "board_search_comment_token",
+	})
+	if commentResult.IsError {
+		t.Fatalf("add_comment result = %#v", commentResult)
+	}
+	decisionResult := callIntegrationTool(t, session, "record_decision", map[string]any{
+		"issue_id": issue.DisplayID,
+		"title":    "board_search_decision_token",
+		"summary":  "board search decision summary",
+		"content":  "board_search_decision_content",
+		"status":   "active",
+	})
+	if decisionResult.IsError {
+		t.Fatalf("record_decision result = %#v", decisionResult)
+	}
+	reviewResult := callIntegrationTool(t, session, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": 1,
+		"target_event_id":      0,
+		"artifact_ids":         []string{"board_search_review_token"},
+	})
+	var review struct {
+		ID string `json:"id"`
+	}
+	decodeIntegrationResult(t, reviewResult, &review)
+	if reviewResult.IsError || review.ID == "" {
+		t.Fatalf("create_review_request result = %#v, decoded = %#v", reviewResult, review)
+	}
+	claimResult := callIntegrationTool(t, session, "claim_issue", map[string]any{
+		"issue_id":      issue.DisplayID,
+		"lease_seconds": 60,
+	})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeIntegrationResult(t, claimResult, &claim)
+	if claimResult.IsError || claim.Attempt.ID == "" {
+		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimResult, claim)
+	}
+	noteResult := callIntegrationTool(t, session, "save_attempt_note", map[string]any{
+		"attempt_id":  claim.Attempt.ID,
+		"lease_token": claim.LeaseToken,
+		"kind":        "checkpoint",
+		"content":     "board_search_attempt_note_token",
+	})
+	if noteResult.IsError {
+		t.Fatalf("save_attempt_note result = %#v", noteResult)
+	}
+
+	server := launchIntegrationBoardServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationBoardServer(t, server) })
+	endpoint := server.waitForEndpoint(t)
+	client := &http.Client{Timeout: integrationTimeout}
+
+	searchURL := strings.TrimSuffix(endpoint, "/") + "/api/search?q=board_search_comment_token&entity_type=comment"
+	searchResponse, err := client.Get(searchURL)
+	if err != nil {
+		t.Fatalf("get comment search api: %v", err)
+	}
+	searchBody, err := io.ReadAll(searchResponse.Body)
+	searchResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read comment search api body: %v", err)
+	}
+	if searchResponse.StatusCode != http.StatusOK {
+		t.Fatalf("comment search api status = %d, want %d, body: %s", searchResponse.StatusCode, http.StatusOK, string(searchBody))
+	}
+	var searchPayload struct {
+		Results []struct {
+			EntityType string  `json:"entity_type"`
+			EntityID   string  `json:"entity_id"`
+			IssueID    *string `json:"issue_id"`
+			Title      string  `json:"title"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(searchBody, &searchPayload); err != nil {
+		t.Fatalf("decode comment search api response: %v\nbody: %s", err, string(searchBody))
+	}
+	if len(searchPayload.Results) == 0 || searchPayload.Results[0].EntityType != "comment" {
+		t.Fatalf("comment search payload = %#v", searchPayload)
+	}
+
+	pageURL := strings.TrimSuffix(endpoint, "/") + "/search?q=board_search_decision_token"
+	pageResponse, err := client.Get(pageURL)
+	if err != nil {
+		t.Fatalf("get search page: %v", err)
+	}
+	pageBody, err := io.ReadAll(pageResponse.Body)
+	pageResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read search page body: %v", err)
+	}
+	if pageResponse.StatusCode != http.StatusOK {
+		t.Fatalf("search page status = %d, want %d", pageResponse.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(string(pageBody), `href="/issues/`+issue.DisplayID+`"`) {
+		t.Fatalf("search page missing issue link for %q: %s", issue.DisplayID, string(pageBody))
+	}
+	if !strings.Contains(string(pageBody), "board_search_decision_token") {
+		t.Fatalf("search page missing decision token output: %s", string(pageBody))
+	}
+
+	invalidSearchResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/api/search?q=multi-project")
+	if err != nil {
+		t.Fatalf("get invalid search api: %v", err)
+	}
+	invalidBody, err := io.ReadAll(invalidSearchResponse.Body)
+	invalidSearchResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read invalid search api body: %v", err)
+	}
+	if invalidSearchResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid search api status = %d, want %d, body: %s", invalidSearchResponse.StatusCode, http.StatusBadRequest, string(invalidBody))
+	}
+
+	issue2 := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board search issue 2", "status": "ready",
+	})
+	issue3 := mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Board search issue 3", "status": "ready",
+	})
+	for _, issueRef := range []boardIssueRef{issue2, issue3} {
+		if result := callIntegrationTool(t, session, "add_comment", map[string]any{"issue_id": issueRef.DisplayID, "content": "board_search_cursor_token"}); result.IsError {
+			t.Fatalf("add_comment for cursor token failed: %#v", result)
+		}
+	}
+
+	cursorSearchURL := strings.TrimSuffix(endpoint, "/") + "/api/search?q=board_search_cursor_token&entity_type=comment&limit=1"
+	cursorResponse, err := client.Get(cursorSearchURL)
+	if err != nil {
+		t.Fatalf("get cursor search api: %v", err)
+	}
+	cursorBody, err := io.ReadAll(cursorResponse.Body)
+	cursorResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read cursor search api body: %v", err)
+	}
+	if cursorResponse.StatusCode != http.StatusOK {
+		t.Fatalf("cursor search api status = %d, want %d, body: %s", cursorResponse.StatusCode, http.StatusOK, string(cursorBody))
+	}
+	var cursorPayload struct {
+		Results    []map[string]any `json:"results"`
+		NextCursor *string          `json:"next_cursor"`
+		HasMore    bool             `json:"has_more"`
+	}
+	if err := json.Unmarshal(cursorBody, &cursorPayload); err != nil {
+		t.Fatalf("decode cursor search api response: %v\nbody: %s", err, string(cursorBody))
+	}
+	if len(cursorPayload.Results) == 0 || cursorPayload.NextCursor == nil || !cursorPayload.HasMore {
+		t.Fatalf("cursor search payload = %#v", cursorPayload)
+	}
+	cursorFollowURL := strings.TrimSuffix(endpoint, "/") + "/api/search?q=board_search_cursor_token&entity_type=comment&limit=1&cursor=" + url.QueryEscape(*cursorPayload.NextCursor)
+	cursorFollowResponse, err := client.Get(cursorFollowURL)
+	if err != nil {
+		t.Fatalf("get cursor follow-up search api: %v", err)
+	}
+	cursorFollowBody, err := io.ReadAll(cursorFollowResponse.Body)
+	cursorFollowResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read cursor follow-up search api body: %v", err)
+	}
+	if cursorFollowResponse.StatusCode != http.StatusOK {
+		t.Fatalf("cursor follow-up search api status = %d, want %d, body: %s", cursorFollowResponse.StatusCode, http.StatusOK, string(cursorFollowBody))
+	}
+
+	newCommentToken := fmt.Sprintf("board_search_live_%d", time.Now().UnixNano())
+	newCommentResult := callIntegrationTool(t, session, "add_comment", map[string]any{"issue_id": issue.DisplayID, "content": newCommentToken})
+	if newCommentResult.IsError {
+		t.Fatalf("add_comment for live token failed: %#v", newCommentResult)
+	}
+	liveSearchResponse, err := client.Get(strings.TrimSuffix(endpoint, "/") + "/api/search?q=" + url.QueryEscape(newCommentToken) + "&entity_type=comment")
+	if err != nil {
+		t.Fatalf("get live search api: %v", err)
+	}
+	liveSearchBody, err := io.ReadAll(liveSearchResponse.Body)
+	liveSearchResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read live search api body: %v", err)
+	}
+	if liveSearchResponse.StatusCode != http.StatusOK {
+		t.Fatalf("live search status = %d, want %d, body: %s", liveSearchResponse.StatusCode, http.StatusOK, string(liveSearchBody))
+	}
+	var livePayload struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(liveSearchBody, &livePayload); err != nil || len(livePayload.Results) == 0 {
+		t.Fatalf("live search payload = %s, decode error = %v", string(liveSearchBody), err)
 	}
 }
 

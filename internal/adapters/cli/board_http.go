@@ -21,6 +21,7 @@ const boardHTTPContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-in
 type BoardHTTPService interface {
 	GetBoard(context.Context) (domain.BoardResult, error)
 	GetIssueDetail(context.Context, string) (domain.IssueDetail, error)
+	Search(context.Context, domain.SearchInput) (domain.SearchPage, error)
 }
 
 // NewBoardHTTPHandler serves the board as an interactive loopback-only page and JSON API.
@@ -50,6 +51,10 @@ func NewBoardHTTPHandler(boardService BoardHTTPService) http.Handler {
 			serveBoardPage(w, request.Method, boardService, request.Context())
 		case path == "/api/board":
 			serveBoardAPI(w, request.Method, boardService, request.Context(), request.Header.Get("If-None-Match"))
+		case path == "/api/search":
+			serveSearchAPI(w, request.Method, boardService, request.Context(), request.URL)
+		case path == "/search":
+			serveSearchPage(w, request.Method, boardService, request.Context(), request.URL)
 		case strings.HasPrefix(path, "/issues/"):
 			serveIssueDetailPage(w, request.Method, boardService, request.Context(), path)
 		case path == "/api/issues" || strings.HasPrefix(path, "/api/issues/"):
@@ -102,6 +107,113 @@ func serveIssueDetailPage(w http.ResponseWriter, method string, boardService Boa
 		return
 	}
 	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+}
+
+func serveSearchPage(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, requestURL *url.URL) {
+	result, err := boardService.GetBoard(ctx)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(http.StatusText(http.StatusInternalServerError)), true)
+		return
+	}
+	state := servedBoardSearchState{}
+	input, err := parseBoardSearchRequest(requestURL)
+	if err != nil {
+		state.Invalid = true
+		state.StatusMessage = "Invalid search query."
+		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		if method == http.MethodHead {
+			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
+			return
+		}
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		return
+	}
+	state.Query = strings.TrimSpace(input.Query)
+	if len(input.EntityTypes) > 0 {
+		state.EntityType = string(input.EntityTypes[0])
+	}
+	if state.Query == "" {
+		state.StatusMessage = "Initial search: enter a query to find issues, comments, decisions, reviews, and attempt notes."
+		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		if method == http.MethodHead {
+			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
+			return
+		}
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		return
+	}
+	page, err := boardService.Search(ctx, input)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) {
+			if domainErr.Code == domain.CodeInvalidArgument {
+				state.Invalid = true
+				state.StatusMessage = "Invalid search query."
+			} else {
+				state.Error = true
+				state.StatusMessage = "Search temporarily unavailable."
+			}
+		} else {
+			state.Error = true
+			state.StatusMessage = "Search temporarily unavailable."
+		}
+		body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+		if method == http.MethodHead {
+			writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
+			return
+		}
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+		return
+	}
+	state.Results = page.Results
+	state.HasMore = page.HasMore
+	if len(state.Results) == 0 {
+		state.StatusMessage = fmt.Sprintf("No results found for %q.", state.Query)
+	} else if state.HasMore {
+		state.StatusMessage = fmt.Sprintf("Showing %d results for %q.", len(state.Results), state.Query)
+	} else {
+		state.StatusMessage = fmt.Sprintf("Showing %d result(s) for %q.", len(state.Results), state.Query)
+	}
+	body := []byte(renderServedBoardHTMLWithSearchState(result, state))
+	if method == http.MethodHead {
+		writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", nil, true)
+		return
+	}
+	writeBoardHTTPResponse(w, http.StatusOK, "text/html; charset=utf-8", body, true)
+}
+
+func serveSearchAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, requestURL *url.URL) {
+	input, err := parseBoardSearchRequest(requestURL)
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusBadRequest, "application/json; charset=utf-8", []byte(`{"error":"invalid search request"}`), true)
+		return
+	}
+	if strings.TrimSpace(input.Query) == "" {
+		writeBoardHTTPResponse(w, http.StatusBadRequest, "application/json; charset=utf-8", []byte(`{"error":"invalid search request"}`), true)
+		return
+	}
+	page, err := boardService.Search(ctx, input)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) {
+			if domainErr.Code == domain.CodeInvalidArgument {
+				writeBoardHTTPResponse(w, http.StatusBadRequest, "application/json; charset=utf-8", []byte(`{"error":"invalid search request"}`), true)
+				return
+			}
+		}
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
+		return
+	}
+	payload, err := json.Marshal(boardSearchResponseFromDomain(page))
+	if err != nil {
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "application/json; charset=utf-8", []byte(`{"error":"internal server error"}`), true)
+		return
+	}
+	if method == http.MethodHead {
+		writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", nil, false)
+		return
+	}
+	writeBoardHTTPResponse(w, http.StatusOK, "application/json; charset=utf-8", payload, true)
 }
 
 func serveIssueDetailAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, ifNoneMatch string, path string) {
@@ -161,6 +273,80 @@ func parseIssueDetailRoute(path string) (string, int, error) {
 		return "", http.StatusBadRequest, errors.New(http.StatusText(http.StatusBadRequest))
 	}
 	return identifier, http.StatusOK, nil
+}
+
+func parseBoardSearchRequest(requestURL *url.URL) (domain.SearchInput, error) {
+	input := domain.SearchInput{}
+	if requestURL == nil {
+		return input, nil
+	}
+	values := requestURL.Query()
+	if query := strings.TrimSpace(values.Get("q")); query != "" {
+		input.Query = query
+	}
+	for _, raw := range values["entity_type"] {
+		entityType := domain.SearchEntityType(strings.TrimSpace(raw))
+		if entityType == "" {
+			continue
+		}
+		input.EntityTypes = append(input.EntityTypes, entityType)
+	}
+	if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 100 {
+			return domain.SearchInput{}, fmt.Errorf("invalid limit")
+		}
+		input.Limit = parsed
+	}
+	input.Cursor = strings.TrimSpace(values.Get("cursor"))
+	if raw := strings.TrimSpace(values.Get("snippet_length")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 1000 {
+			return domain.SearchInput{}, fmt.Errorf("invalid snippet_length")
+		}
+		input.SnippetLength = parsed
+	}
+	if raw := strings.TrimSpace(values.Get("include_archived")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return domain.SearchInput{}, fmt.Errorf("invalid include_archived")
+		}
+		input.IncludeArchived = parsed
+	}
+	for key := range values {
+		switch key {
+		case "q", "entity_type", "limit", "cursor", "snippet_length", "include_archived":
+			continue
+		default:
+			return domain.SearchInput{}, fmt.Errorf("unsupported parameter")
+		}
+	}
+	return input, nil
+}
+
+func boardSearchResponseFromDomain(page domain.SearchPage) map[string]any {
+	results := make([]map[string]any, len(page.Results))
+	for index, item := range page.Results {
+		result := map[string]any{
+			"entity_type": string(item.EntityType),
+			"entity_id":   item.EntityID,
+			"title":       item.Title,
+			"snippet":     item.Snippet,
+			"score":       item.Score,
+		}
+		if item.IssueID != nil {
+			result["issue_id"] = *item.IssueID
+		}
+		results[index] = result
+	}
+	response := map[string]any{"results": results}
+	if page.NextCursor != nil {
+		response["next_cursor"] = *page.NextCursor
+	} else {
+		response["next_cursor"] = nil
+	}
+	response["has_more"] = page.HasMore
+	return response
 }
 
 func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPService, ctx context.Context, ifNoneMatch string) {
