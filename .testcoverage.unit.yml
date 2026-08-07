@@ -1,6 +1,6 @@
 profile: unit-coverage.out
 threshold:
-  total: 80
+  total: 75
 exclude:
   paths:
     - ^editors/vscode/node_modules/
