@@ -427,6 +427,45 @@ test("failed responses keep the old content, mark stale, and retry with jittered
   assert.equal(harness.timerDelays[harness.timerDelays.length - 1], 1700);
 });
 
+test("default window timers are bound to window", () => {
+  const harness = createHarness({ initialTestHooks: {} });
+  const scriptSource = extractBoardLiveRefreshScript();
+  const root = new FakeElement("main", { id: "root-main", "data-board-main": "" });
+  root.ownerDocument = harness.document;
+  harness.document.children = [root];
+  harness.document.querySelector = (selector) => {
+    if (selector === "main[data-board-main]") {
+      return root;
+    }
+    return null;
+  };
+  harness.document.querySelectorAll = () => [];
+
+  let scheduled = false;
+  harness.window.setTimeout = function (fn, delay) {
+    if (this !== harness.window) {
+      throw new TypeError("Illegal invocation");
+    }
+    scheduled = true;
+    return harness.setTimeoutImpl(fn, delay);
+  };
+  harness.window.clearTimeout = function (id) {
+    if (this !== harness.window) {
+      throw new TypeError("Illegal invocation");
+    }
+    return harness.clearTimeoutImpl(id);
+  };
+
+  const Client = loadClient(scriptSource, harness);
+  new Client(root, {
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  assert.equal(scheduled, true);
+});
+
 test("a later success clears stale state and restores the normal interval", async () => {
   const harness = createHarness({ initialTestHooks: {}, randomValue: 0.2, boardResponses: [
     { status: 500, ok: false, headers: { get: () => "ETAG-1" } },

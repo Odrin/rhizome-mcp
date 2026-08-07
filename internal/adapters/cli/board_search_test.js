@@ -333,9 +333,64 @@ test("handles empty, error, and paginated append states without mixing cursors",
 
   await client.runSearch("broken", { append: false });
   assert.match(status.textContent, /error/i);
+  assert.equal(results.textContent, "");
 
   await client.runSearch("one", { append: false });
   await client.runSearch("one", { append: true, cursor: "cursor-1" });
   assert.equal(client.activeCursor, "cursor-1");
   assert.ok(client.results.length >= 1);
+});
+
+test("default window fetch is bound to window to avoid illegal invocation", async () => {
+  const harness = createHarness();
+  harness.context.window.__rhizomeBoardSearchTestHooks = {};
+  const scriptSource = extractBoardSearchScript();
+  const context = vm.createContext(harness.context);
+  vm.runInContext(scriptSource, context, { filename: "board_html.go" });
+  const Client = context.window.__rhizomeBoardSearchTestHooks?.BoardSearchClient;
+  assert.ok(Client);
+
+  const root = new FakeElement("div");
+  root.ownerDocument = harness.document;
+  const form = new FakeElement("form", { "data-board-search-form": "" });
+  const input = new FakeElement("input", { name: "search" });
+  const submit = new FakeElement("button", { type: "submit" });
+  const results = new FakeElement("div", { "data-board-search-results": "" });
+  const status = new FakeElement("div", { "data-board-search-status": "" });
+  form.ownerDocument = harness.document;
+  input.ownerDocument = harness.document;
+  submit.ownerDocument = harness.document;
+  results.ownerDocument = harness.document;
+  status.ownerDocument = harness.document;
+  form.appendChild(input);
+  form.appendChild(submit);
+  root.appendChild(form);
+  root.appendChild(results);
+  root.appendChild(status);
+  harness.document.children = [root];
+
+  let invoked = false;
+  harness.context.window.fetch = async function () {
+    if (this !== harness.context.window) {
+      throw new TypeError("Illegal invocation");
+    }
+    invoked = true;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "" },
+      json: async () => ({ results: [], next_cursor: null, has_more: false }),
+    };
+  };
+
+  const client = new Client(root, {
+    fetch: harness.context.window.fetch,
+    document: harness.document,
+    window: harness.context.window,
+    history: harness.history,
+  });
+
+  await client.runSearch("alpha", { append: false });
+  assert.equal(invoked, true);
+  assert.match(results.textContent, /no results/i);
 });

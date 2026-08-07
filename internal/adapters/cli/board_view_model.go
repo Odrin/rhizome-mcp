@@ -349,7 +349,7 @@ func newIssueDetailPageViewModel(detail domain.IssueDetail) issueDetailPageViewM
 	} else {
 		vm.BlockedReason.IsEmpty = true
 	}
-	if detail.RootIssueProjection != nil {
+	if detail.RootIssueProjection != nil && !sameIssueIdentity(detail.Issue, detail.RootIssueProjection.Issue) {
 		mapping := issueDisplayIDMap(detail.Graph.Nodes)
 		label := issueDisplayLabel(detail.RootIssueProjection.Issue.ID, detail.RootIssueProjection.Issue.DisplayID, mapping)
 		vm.RootIssue = &issueDetailLinkViewModel{Label: label, Href: boardIssuePath(detail.RootIssueProjection.Issue.ID, label)}
@@ -441,4 +441,15 @@ func ptrString(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func sameIssueIdentity(left domain.Issue, right domain.Issue) bool {
+	leftID := strings.TrimSpace(left.ID)
+	rightID := strings.TrimSpace(right.ID)
+	if leftID != "" && rightID != "" {
+		return leftID == rightID
+	}
+	leftDisplay := strings.TrimSpace(left.DisplayID)
+	rightDisplay := strings.TrimSpace(right.DisplayID)
+	return leftDisplay != "" && rightDisplay != "" && leftDisplay == rightDisplay
 }

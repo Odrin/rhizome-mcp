@@ -3,13 +3,16 @@
     constructor(root, options){
       options = options || {};
       this.root = root;
-      this.fetchImpl = options.fetch || fetch;
-      this.setTimeoutImpl = options.setTimeout || setTimeout;
-      this.clearTimeoutImpl = options.clearTimeout || clearTimeout;
-      this.randomImpl = options.random || Math.random;
-      this.nowImpl = options.now || (() => new Date());
       this.documentImpl = options.document || document;
       this.windowImpl = options.window || window;
+      this.fetchImpl = options.fetch
+        || (this.windowImpl && typeof this.windowImpl.fetch === "function" ? this.windowImpl.fetch.bind(this.windowImpl) : fetch);
+      this.setTimeoutImpl = options.setTimeout
+        || (this.windowImpl && typeof this.windowImpl.setTimeout === "function" ? this.windowImpl.setTimeout.bind(this.windowImpl) : setTimeout);
+      this.clearTimeoutImpl = options.clearTimeout
+        || (this.windowImpl && typeof this.windowImpl.clearTimeout === "function" ? this.windowImpl.clearTimeout.bind(this.windowImpl) : clearTimeout);
+      this.randomImpl = options.random || Math.random;
+      this.nowImpl = options.now || (() => new Date());
       this.domParserImpl = options.DOMParser || DOMParser;
       this.endpoint = options.endpoint || "/api/board";
       this.pageRoute = options.pageRoute || "/";

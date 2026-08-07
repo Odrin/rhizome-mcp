@@ -3,10 +3,15 @@
     constructor(root, options){
       options = options || {};
       this.root = root;
-      this.fetchImpl = options.fetch || fetch;
       this.documentImpl = options.document || document;
       this.windowImpl = options.window || window;
       this.historyImpl = options.history || this.windowImpl.history;
+      const windowFetch = this.windowImpl && typeof this.windowImpl.fetch === "function" ? this.windowImpl.fetch : null;
+      if (options.fetch && windowFetch && options.fetch === windowFetch) {
+        this.fetchImpl = windowFetch.bind(this.windowImpl);
+      } else {
+        this.fetchImpl = options.fetch || (windowFetch ? windowFetch.bind(this.windowImpl) : fetch);
+      }
       this.requestId = 0;
       this.activeController = null;
       this.currentQuery = "";
@@ -186,14 +191,13 @@
     renderErrorState(){
       this.setLoading(false);
       this.renderStatus("Search error. Please try again.");
-      this.renderResults([]);
+      this.clearResultsContainer();
     }
 
-    renderResults(results){
-      this.setLoading(false);
+    clearResultsContainer(){
       const container = this.root ? this.root.querySelector("[data-board-search-results]") : null;
       if (!container) {
-        return;
+        return null;
       }
       if (typeof container.replaceChildren === "function") {
         container.replaceChildren();
@@ -201,6 +205,15 @@
         container.children = [];
       }
       container.textContent = "";
+      return container;
+    }
+
+    renderResults(results){
+      this.setLoading(false);
+      const container = this.clearResultsContainer();
+      if (!container) {
+        return;
+      }
       if (!results || results.length === 0) {
         const empty = this.documentImpl.createElement("p");
         empty.className = "empty";
@@ -338,7 +351,7 @@
     window.__rhizomeBoardSearchTestHooks.BoardSearchClient = BoardSearchClient;
   }
   if (root) {
-    const client = new BoardSearchClient(root, {fetch: fetch, document: document, window: window, history: window.history});
+    const client = new BoardSearchClient(root, {document: document, window: window, history: window.history});
     window.__rhizomeBoardSearchClient = client;
   }
 })();

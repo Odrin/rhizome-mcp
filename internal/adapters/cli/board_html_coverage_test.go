@@ -148,13 +148,28 @@ func TestRenderIssueDetailHTMLCoverage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderIssueDetailHTML: %v", err)
 		}
-		for _, want := range []string{"ISSUE-300", "Archived:", "alpha, beta", "Need &lt;script&gt;alert(1)&lt;/script&gt;", "Approval &lt;b&gt;required&lt;/b&gt;", "Blocked by &lt;script&gt;alert(2)&lt;/script&gt;", "Latest attempt", "attempt-777", "Open review", "review-open", "Latest decision", "Decision summary", "Related graph", "aria-label=\"Planning graph\"", "Additional activity is available.", "Comment &lt;script&gt;alert(3)&lt;/script&gt;", "Work done &lt;b&gt;today&lt;/b&gt;"} {
+		for _, want := range []string{"ISSUE-300", "Archived:", "alpha, beta", "Need &lt;script&gt;alert(1)&lt;/script&gt;", "Approval &lt;b&gt;required&lt;/b&gt;", "Blocked by &lt;script&gt;alert(2)&lt;/script&gt;", "Root issue", "href=\"/issues/ISSUE-301\"", "Latest attempt", "attempt-777", "Open review", "review-open", "Latest decision", "Decision summary", "Related graph", "aria-label=\"Planning graph\"", "Additional activity is available.", "Comment &lt;script&gt;alert(3)&lt;/script&gt;", "Work done &lt;b&gt;today&lt;/b&gt;"} {
 			if !strings.Contains(html, want) {
 				t.Fatalf("rich detail missing %q:\n%s", want, html)
 			}
 		}
 		if strings.Contains(html, "<script>alert(1)</script>") || strings.Contains(html, "Blocked by <script>") {
 			t.Fatalf("rich detail rendered raw script-like content: %s", html)
+		}
+	})
+
+	t.Run("self root issue is omitted", func(t *testing.T) {
+		selfRootDetail := sparseDetail
+		selfRootDetail.RootIssueProjection = &domain.IssueProjection{Issue: domain.Issue{ID: issueID, DisplayID: "ISSUE-301"}}
+		html, err := renderIssueDetailHTML(selfRootDetail)
+		if err != nil {
+			t.Fatalf("renderIssueDetailHTML: %v", err)
+		}
+		if strings.Contains(html, "<h2>Root issue</h2>") {
+			t.Fatalf("self root section should be omitted: %s", html)
+		}
+		if strings.Contains(html, "href=\"/issues/ISSUE-301\"") {
+			t.Fatalf("self root link should be omitted: %s", html)
 		}
 	})
 
