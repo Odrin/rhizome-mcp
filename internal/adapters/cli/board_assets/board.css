@@ -1,0 +1,28 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  margin: 2rem auto; max-width: 980px; padding: 0 1rem; line-height: 1.5;
+  color: #0f172a; background: #ffffff;
+}
+h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+h2 { font-size: 1.125rem; margin-top: 2rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25rem; }
+.generated { color: #64748b; font-size: 0.875rem; margin-top: 0; }
+table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+th { color: #475569; font-weight: 600; }
+.empty { color: #64748b; font-style: italic; }
+.table-scroll { overflow-x: auto; }
+.graph { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.5rem; margin-top: 0.75rem; }
+.graph svg { display: block; }
+pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
+details summary { cursor: pointer; color: #2563eb; margin-top: 0.5rem; }
+footer { color: #94a3b8; font-size: 0.8rem; margin-top: 3rem; }
+
+@media (prefers-color-scheme: dark) {
+  body { background: #0b1220; color: #e2e8f0; }
+  h2 { border-bottom-color: #1e293b; }
+  th, td { border-bottom-color: #1e293b; }
+  th { color: #94a3b8; }
+  .graph { border-color: #1e293b; }
+}

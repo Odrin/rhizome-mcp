@@ -5,12 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 function extractBoardSearchScript() {
-  const source = fs.readFileSync(path.join(__dirname, "board_html.go"), "utf8");
-  const match = source.match(/const boardSearchScript = `([\s\S]*?)`/);
-  if (!match) {
-    throw new Error("boardSearchScript not found");
-  }
-  return match[1];
+  return fs.readFileSync(path.join(__dirname, "board_assets", "board_search.js"), "utf8");
 }
 
 class FakeElement {
