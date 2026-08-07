@@ -360,11 +360,7 @@ func TestMergeAndWriteJSONConfigReportsParseAndWriteErrors(t *testing.T) {
 		t.Fatalf("mergeAndWriteJSONConfig(malformed) error = %v, want parse config file", err)
 	}
 
-	blockedDir := filepath.Join(t.TempDir(), "blocked")
-	if err := os.MkdirAll(blockedDir, 0o500); err != nil {
-		t.Fatalf("create blocked dir: %v", err)
-	}
-	writePath := filepath.Join(blockedDir, "config.json")
+	writePath := filepath.Join(t.TempDir(), "missing", "config.json")
 	if err := mergeAndWriteJSONConfig(writePath, map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "write config file") {
 		t.Fatalf("mergeAndWriteJSONConfig(write fail) error = %v, want write config file", err)
 	}
