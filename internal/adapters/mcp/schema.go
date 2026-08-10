@@ -147,7 +147,7 @@ func schemaExportProject() *jsonschema.Schema {
 }
 
 func schemaExportProjectOutput() *jsonschema.Schema {
-	return &jsonschema.Schema{AnyOf: []*jsonschema.Schema{typedSchema[domain.LogicalProjectDocument](), typedSchema[exportArtifactOutput]()}}
+	return &jsonschema.Schema{Type: "object", AnyOf: []*jsonschema.Schema{typedSchema[domain.LogicalProjectDocument](), typedSchema[exportArtifactOutput]()}}
 }
 
 func schemaValidateImport() *jsonschema.Schema {
@@ -555,23 +555,23 @@ func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workCo
 func schemaUpdateOutput() *jsonschema.Schema         { return schemaUpdateIssueUnion() }
 
 func schemaCreateIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[createIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[createIssueCompactOutput]()}}
 }
 
 func schemaUpdateIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[updateIssueOutput](), typedSchema[updateIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[updateIssueOutput](), typedSchema[updateIssueCompactOutput]()}}
 }
 
 func schemaArchiveIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[archiveIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[archiveIssueCompactOutput]()}}
 }
 
 func schemaClaimIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[claimIssueOutput](), typedSchema[claimIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[claimIssueOutput](), typedSchema[claimIssueCompactOutput]()}}
 }
 
 func schemaFinishAttemptUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{typedSchema[finishAttemptOutput](), typedSchema[finishAttemptCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[finishAttemptOutput](), typedSchema[finishAttemptCompactOutput]()}}
 }
 
 // schemaIssueListItem describes one list_issues item. list_issues returns one

@@ -23,6 +23,34 @@ var placeholderULIDs = []string{
 	"01ARZ3NDEKTSV4RRFFQ69G5FAZ",
 }
 
+func TestAdvertisedOutputSchemasAreTopLevelObjects(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "output-schema-coverage.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	for _, tool := range tools.Tools {
+		data, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s output schema: %v", tool.Name, err)
+		}
+		var schema struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &schema); err != nil {
+			t.Fatalf("unmarshal %s output schema: %v", tool.Name, err)
+		}
+		if schema.Type != "object" {
+			t.Errorf("%s output schema type = %q, want object", tool.Name, schema.Type)
+		}
+	}
+}
+
 // TestAdvertisedSchemaPropertiesAreNeverRejectedAsUnsupported iterates every
 // tool in the advertised catalog and, for every optional input schema
 // property, calls the tool with a minimal schema-valid input plus that one

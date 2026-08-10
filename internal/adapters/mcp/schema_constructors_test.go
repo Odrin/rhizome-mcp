@@ -89,3 +89,22 @@ func TestSchemaConstructorsProduceMarshalableSchemas(t *testing.T) {
 		})
 	}
 }
+
+func TestOutputSchemaConstructorsProduceTopLevelObjects(t *testing.T) {
+	constructors := map[string]func() *jsonschema.Schema{
+		"export project": schemaExportProjectOutput,
+		"create issue":   schemaCreateIssueOutput,
+		"update issue":   schemaUpdateOutput,
+		"archive issue":  schemaArchiveIssueOutput,
+		"claim issue":    schemaClaimIssueOutput,
+		"finish attempt": schemaFinishAttemptOutput,
+	}
+
+	for name, constructor := range constructors {
+		t.Run(name, func(t *testing.T) {
+			if schema := constructor(); schema.Type != "object" {
+				t.Fatalf("output schema type = %q, want object", schema.Type)
+			}
+		})
+	}
+}
