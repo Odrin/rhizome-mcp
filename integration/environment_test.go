@@ -175,7 +175,12 @@ func assertDirectoryEntryNames(t *testing.T, path string, want []string) {
 
 func callIntegrationTool(t *testing.T, session *mcp.ClientSession, name string, arguments map[string]any) *mcp.CallToolResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	return callIntegrationToolWithTimeout(t, session, name, arguments, integrationTimeout)
+}
+
+func callIntegrationToolWithTimeout(t *testing.T, session *mcp.ClientSession, name string, arguments map[string]any, timeout time.Duration) *mcp.CallToolResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
 	if err != nil {

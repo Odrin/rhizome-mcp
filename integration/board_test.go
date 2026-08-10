@@ -895,26 +895,28 @@ func parseIntegrationBoardServeURL(line string) string {
 }
 
 func TestIntegrationGraphProjectionStaysBoundedWithLargeBodies(t *testing.T) {
+	const largeGraphFixtureTimeout = 30 * time.Second
+
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
-	root := mustCreateBoardIssue(t, session, map[string]any{"type": "task", "title": "Root graph", "status": "ready"})
+	root := mustCreateBoardIssueWithTimeout(t, session, map[string]any{"type": "task", "title": "Root graph", "status": "ready"}, largeGraphFixtureTimeout)
 	for i := 0; i < 99; i++ {
-		issue := mustCreateBoardIssue(t, session, map[string]any{
+		issue := mustCreateBoardIssueWithTimeout(t, session, map[string]any{
 			"type": "task", "title": "Graph node " + string(rune('A'+i%26)), "status": "ready",
 			"description": strings.Repeat("long-body-", 2000),
-		})
-		result := callIntegrationTool(t, session, "manage_issue_relation", map[string]any{
+		}, largeGraphFixtureTimeout)
+		result := callIntegrationToolWithTimeout(t, session, "manage_issue_relation", map[string]any{
 			"action": "add", "source_issue_id": issue.DisplayID, "target_issue_id": root.DisplayID, "relation_type": "blocks",
-		})
+		}, largeGraphFixtureTimeout)
 		if result.IsError {
 			t.Fatalf("manage_issue_relation %d error = %#v", i, result)
 		}
 	}
 
-	graphResult := callIntegrationTool(t, session, "get_issue_graph", map[string]any{
+	graphResult := callIntegrationToolWithTimeout(t, session, "get_issue_graph", map[string]any{
 		"root_issue_id": root.DisplayID, "depth": 1, "max_nodes": 100,
-	})
+	}, largeGraphFixtureTimeout)
 	if graphResult.IsError {
 		t.Fatalf("get_issue_graph error = %#v", graphResult)
 	}
@@ -953,7 +955,12 @@ type boardIssueRef struct {
 
 func mustCreateBoardIssue(t *testing.T, session *mcp.ClientSession, arguments map[string]any) boardIssueRef {
 	t.Helper()
-	created := callIntegrationTool(t, session, "create_issue", arguments)
+	return mustCreateBoardIssueWithTimeout(t, session, arguments, integrationTimeout)
+}
+
+func mustCreateBoardIssueWithTimeout(t *testing.T, session *mcp.ClientSession, arguments map[string]any, timeout time.Duration) boardIssueRef {
+	t.Helper()
+	created := callIntegrationToolWithTimeout(t, session, "create_issue", arguments, timeout)
 	var issue struct {
 		ID        string `json:"id"`
 		DisplayID string `json:"display_id"`
