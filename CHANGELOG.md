@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-13
+
+### Fixed
+
+- **Output schema compatibility** — Added explicit `Type: "object"` to union schemas in MCP tool outputs (`export_project`, `create_issue`, `update_issue`, `archive_issue`, `claim_issue`, `finish_attempt`). Ensures strict compatibility with MCP clients that enforce schema validation. Adds test coverage for output schema types.
+
+- **Timeout handling in integration tools** — Added timeout context handling to integration tool calls and board issue creation to improve reliability and prevent indefinite hangs during long-running operations.
+
+### Changed
+
+- **Improved documentation** — Enhanced MCP tool documentation with clearer descriptions of lifecycle tool inputs and side effects.
+
+### Internal
+
+- Updated Rhizome Implementer agent model version.
+
 ## [1.2.0] - 2026-08-07
 
 ### Added
