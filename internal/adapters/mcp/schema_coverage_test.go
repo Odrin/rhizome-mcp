@@ -172,6 +172,40 @@ func TestProjectRefDecorationIsOptionalAndStructural(t *testing.T) {
 	}
 }
 
+func TestNamedToolInputPropertiesAreDescribed(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "schema-descriptions.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	toolMap := make(map[string]*sdkmcp.Tool, len(tools.Tools))
+	for _, tool := range tools.Tools {
+		toolMap[tool.Name] = tool
+	}
+	want := map[string][]string{
+		"claim_issue":          {"issue_id", "lease_seconds", "project_ref", "idempotency_key", "view", "agent_session_handle"},
+		"search":               {"query", "entity_types", "issue_id", "epic_id", "statuses", "labels", "include_archived", "limit", "cursor", "snippet_length", "project_ref", "agent_session_handle"},
+		"save_attempt_note":    {"attempt_id", "lease_token", "kind", "content", "artifacts", "important", "next_steps", "idempotency_key", "project_ref", "agent_session_handle"},
+		"create_agent_session": {"client_name", "model", "agent_label", "instance_key", "client_version", "project_ref"},
+		"get_issue_graph":      {"root_issue_id", "depth", "direction", "relation_types", "include_hierarchy", "include_terminal", "max_nodes", "view", "project_ref", "agent_session_handle"},
+		"get_work_context":     {"issue_id", "include", "limits", "project_ref", "agent_session_handle"},
+	}
+	for toolName, propertyNames := range want {
+		schema := decodeInputSchema(t, toolMap[toolName])
+		for _, propertyName := range propertyNames {
+			property := schema.Properties[propertyName]
+			if property == nil || strings.TrimSpace(property.Description) == "" {
+				t.Errorf("%s %s description = %#v", toolName, propertyName, property)
+			}
+		}
+	}
+}
+
 // decodeInputSchema decodes the client-side JSON representation of a tool's
 // input schema (a map[string]any, per the SDK's Tool.InputSchema contract)
 // back into a typed jsonschema.Schema for property introspection.

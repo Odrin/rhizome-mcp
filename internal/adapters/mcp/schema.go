@@ -85,6 +85,10 @@ func boundedStringSchema(maximum int) *jsonschema.Schema {
 func boundedStringsSchema(maximum, itemMaximum int) *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "array", Items: boundedStringSchema(itemMaximum), MaxItems: &maximum}
 }
+func withDescription(schema *jsonschema.Schema, description string) *jsonschema.Schema {
+	schema.Description = description
+	return schema
+}
 func enumSchema(values ...string) *jsonschema.Schema {
 	enum := make([]any, len(values))
 	for index, value := range values {
@@ -104,7 +108,7 @@ func withAgentSessionHandle(schema *jsonschema.Schema) *jsonschema.Schema {
 	if schema.Properties == nil {
 		schema.Properties = map[string]*jsonschema.Schema{}
 	}
-	schema.Properties["agent_session_handle"] = nullableBoundedStringSchema(256)
+	schema.Properties["agent_session_handle"] = withDescription(nullableBoundedStringSchema(256), "Optional durable session handle for request attribution.")
 	return schema
 }
 
@@ -132,9 +136,11 @@ func schemaOpenProject() *jsonschema.Schema {
 
 func schemaCreateAgentSession() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"client_name": stringSchema(), "client_version": nullableBoundedStringSchema(256),
-		"agent_label": nullableBoundedStringSchema(256), "model": nullableBoundedStringSchema(256),
-		"instance_key": nullableBoundedStringSchema(256),
+		"client_name":    withDescription(stringSchema(), "Required client identity."),
+		"client_version": withDescription(nullableBoundedStringSchema(256), "Optional client version."),
+		"agent_label":    withDescription(nullableBoundedStringSchema(256), "Optional human-readable agent identity."),
+		"model":          withDescription(nullableBoundedStringSchema(256), "Optional model identifier."),
+		"instance_key":   withDescription(nullableBoundedStringSchema(256), "Optional stable key for this client instance."),
 	}, "client_name")
 }
 
@@ -215,16 +221,16 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 
 func schemaSearch() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"query":            boundedStringSchema(domain.MaxSearchQueryRunes),
-		"entity_types":     &jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true},
-		"issue_id":         nullableIssueIdentifierSchema(),
-		"epic_id":          nullableIssueIdentifierSchema(),
-		"statuses":         &jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true},
-		"labels":           boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes),
-		"include_archived": booleanSchema(),
-		"limit":            boundedIntegerSchema(0, domain.MaxSearchResults),
-		"cursor":           nullableBoundedStringSchema(4096),
-		"snippet_length":   boundedIntegerSchema(0, domain.MaxSearchSnippetRunes),
+		"query":            withDescription(boundedStringSchema(domain.MaxSearchQueryRunes), "Required full-text terms."),
+		"entity_types":     withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true}, "Optional result types; empty includes all."),
+		"issue_id":         withDescription(nullableIssueIdentifierSchema(), "Optional issue scope (ULID or ISSUE-N)."),
+		"epic_id":          withDescription(nullableIssueIdentifierSchema(), "Optional epic scope (ULID or ISSUE-N)."),
+		"statuses":         withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true}, "Optional issue-status filter."),
+		"labels":           withDescription(boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes), "Optional label filter."),
+		"include_archived": withDescription(booleanSchema(), "Include archived issue records."),
+		"limit":            withDescription(boundedIntegerSchema(0, domain.MaxSearchResults), "0 uses the default; 1-100 caps results."),
+		"cursor":           withDescription(nullableBoundedStringSchema(4096), "Cursor from a previous page."),
+		"snippet_length":   withDescription(boundedIntegerSchema(0, domain.MaxSearchSnippetRunes), "0 uses the default; 1-1000 caps excerpts in runes."),
 	}, "query"))
 }
 
@@ -243,9 +249,9 @@ func schemaGetWorkContext() *jsonschema.Schema {
 		includeValues[index] = string(include)
 	}
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"issue_id": issueIdentifierSchema(),
-		"include":  &jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(10), UniqueItems: true},
-		"limits":   schemaWorkContextLimits(),
+		"issue_id": withDescription(issueIdentifierSchema(), "Issue whose work context to load."),
+		"include":  withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(10), UniqueItems: true}, "Optional unique context sections; empty returns the compact default."),
+		"limits":   withDescription(schemaWorkContextLimits(), "Optional 1-20 bounds for requested list sections only."),
 	}, "issue_id"))
 }
 
@@ -383,11 +389,14 @@ func schemaManageIssueRelation() *jsonschema.Schema {
 
 func schemaGetIssueGraph() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"root_issue_id": issueIdentifierSchema(), "depth": boundedIntegerSchema(0, 5),
-		"direction":         enumSchema("outgoing", "incoming", "both"),
-		"relation_types":    &jsonschema.Schema{Type: "array", Items: enumSchema("blocks", "related_to", "duplicates"), UniqueItems: true},
-		"include_hierarchy": booleanSchema(), "include_terminal": booleanSchema(),
-		"max_nodes": boundedIntegerSchema(1, 500), "view": enumSchema("compact"),
+		"root_issue_id":     withDescription(issueIdentifierSchema(), "Issue at the graph traversal root."),
+		"depth":             withDescription(boundedIntegerSchema(0, 5), "Relation hops from root; default 2."),
+		"direction":         withDescription(enumSchema("outgoing", "incoming", "both"), "Relation traversal direction."),
+		"relation_types":    withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("blocks", "related_to", "duplicates"), UniqueItems: true}, "Optional relation kinds; empty includes all."),
+		"include_hierarchy": withDescription(booleanSchema(), "Include derived epic hierarchy edges."),
+		"include_terminal":  withDescription(booleanSchema(), "Include terminal issue nodes."),
+		"max_nodes":         withDescription(boundedIntegerSchema(1, 500), "Maximum returned nodes; default 100."),
+		"view":              withDescription(enumSchema("compact"), "Only compact graph nodes are available."),
 	}, "root_issue_id"))
 }
 
@@ -438,8 +447,10 @@ func schemaApplyIssuePlan() *jsonschema.Schema {
 
 func schemaClaimIssue() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"issue_id": issueIdentifierSchema(), "lease_seconds": boundedIntegerSchema(60, 3600),
-		"idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
+		"issue_id":        withDescription(issueIdentifierSchema(), "Claimable ready or review issue (ULID or ISSUE-N)."),
+		"lease_seconds":   withDescription(boundedIntegerSchema(60, 3600), "Requested lease duration in seconds."),
+		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same claim request."),
+		"view":            withDescription(enumSchema("compact", "full"), "Response shape; compact is the default."),
 	}, "issue_id"))
 }
 
@@ -466,14 +477,14 @@ func schemaArtifacts() *jsonschema.Schema {
 
 func schemaSaveAttemptNote() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"attempt_id":      boundedStringSchema(26),
-		"lease_token":     boundedStringSchema(512),
-		"kind":            enumSchema("progress", "finding", "warning", "checkpoint"),
-		"content":         boundedStringSchema(50_000),
-		"next_steps":      boundedStringsSchema(20, 1_000),
-		"important":       booleanSchema(),
-		"artifacts":       schemaArtifacts(),
-		"idempotency_key": nullableBoundedStringSchema(128),
+		"attempt_id":      withDescription(boundedStringSchema(26), "Active attempt receiving the note."),
+		"lease_token":     withDescription(boundedStringSchema(512), "Secret proof of the active attempt lease."),
+		"kind":            withDescription(enumSchema("progress", "finding", "warning", "checkpoint"), "How the note should be classified."),
+		"content":         withDescription(boundedStringSchema(50_000), "Required restartable note content."),
+		"next_steps":      withDescription(boundedStringsSchema(20, 1_000), "Optional concrete actions after this note."),
+		"important":       withDescription(booleanSchema(), "Marks the note as important."),
+		"artifacts":       withDescription(schemaArtifacts(), "Optional artifacts created or referenced by this work."),
+		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same note request."),
 	}, "attempt_id", "lease_token", "kind", "content"))
 }
 
