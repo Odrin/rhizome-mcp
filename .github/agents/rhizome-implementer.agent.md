@@ -4,7 +4,7 @@ description: "Use only when delegated a bounded rhizome-mcp implementation brief
 argument-hint: Provide Goal, Files, Existing Contracts, Required Behavior, Acceptance Criteria, and Tests and Commands.
 tools: [execute, read, edit, search, todo]
 agents: []
-model: MAI-Code-1-Flash (copilot)
+model: MAI-Code-1.1-Flash (copilot)
 user-invocable: false
 disable-model-invocation: false
 ---
