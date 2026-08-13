@@ -180,7 +180,7 @@ func isContextCancellation(err error) bool {
 // Every call below is required to name a group — there is no path to
 // sdkmcp.AddTool that skips this decision.
 func (target *adapter) register(server *sdkmcp.Server) {
-	target.registerTool(server, groupLifecycle, tool("create_agent_session", "Create a durable agent session handle for explicit tool attribution.", schemaCreateAgentSession(), schemaCreateAgentSessionOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupLifecycle, tool("create_agent_session", "Create a durable attribution session and one unrecoverable handle; writes a new session on every call (non-idempotent).", schemaCreateAgentSession(), schemaCreateAgentSessionOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[createAgentSessionInput, any](target, t, (*adapter).createAgentSession))
 	})
 	target.registerTool(server, groupLifecycle, tool("end_agent_session", "End one explicitly created durable agent session handle.", schemaEndAgentSession(), schemaEndAgentSessionOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
@@ -301,7 +301,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	})
 	// claimability gates every claim: once claimed, a bare repeat fails with
 	// no further effect. Claiming does not destroy prior state.
-	target.registerTool(server, groupLifecycle, tool("claim_issue", "Claim claimable ready or review work and receive a renewable lease token.", schemaClaimIssue(), schemaClaimIssueOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupLifecycle, tool("claim_issue", "Atomically acquire exclusive ready/review work for a 60-3600s renewable lease; already claimed work fails; keyed retries replay.", schemaClaimIssue(), schemaClaimIssueOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[claimIssueInput, any](target, t, (*adapter).claimIssue))
 	})
 	// unlike claim/finish, renew_attempt has no gate: each repeat pushes the
@@ -321,7 +321,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getWorkContextInput, any](target, t, (*adapter).getWorkContext))
 	})
-	target.registerTool(server, groupKnowledge, tool("search", "Full-text search issues, comments, decisions, and attempt notes.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupKnowledge, tool("search", "Full-text search with cursor pagination; default limit 20; archived records are excluded unless requested; results are relevance ordered.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[searchInput, any](target, t, (*adapter).search))
 	})
 	target.registerTool(server, groupSync, tool("get_changes", "Get ordered issue events after an event ID for incremental synchronization.", schemaGetChanges(), schemaChangesOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
