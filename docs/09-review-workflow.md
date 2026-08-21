@@ -41,8 +41,12 @@ when its request content is identical; otherwise it fails with
 | approved, changes_requested, blocked, cancelled, superseded | request re-review | open | creates a new request with a new exact target |
 
 `claimed` is derived from its active review attempt and is not a persisted
-general workflow status. Attempt expiry returns a claimed request to `open`
-unless it has become stale. No table stores `in_progress`.
+general workflow status. Any path that ends the claiming review attempt
+without it completing — lease expiry, `finish_attempt` with outcome `failed`
+or `interrupted`, or an administrative force-release — returns the request
+to `open`, unless it has become stale. Only a completed attempt (`approved`,
+`changes_requested`, or `blocked`) resolves the request instead. No table
+stores `in_progress`.
 
 ## Operational guide: request, discover, claim, complete, follow-up, and re-request
 
@@ -57,6 +61,8 @@ Use the review workflow in this order when you need a durable review handoff:
 Recovery examples:
 
 - If a session disappears after claim, the review request returns to `open` when the lease expires. Re-discover the request and repeat the claim step with a fresh review attempt.
+- If the review attempt is finished with outcome `failed` or `interrupted` (e.g. a handoff or context limit) instead of a review outcome, the request returns to `open` the same way — the caller does not need to wait for the lease to expire. Re-discover and re-claim.
+- If the attempt is administratively force-released (a stuck or abandoned session, released via the CLI), the request likewise returns to `open` immediately rather than staying `claimed` against a session that will never return.
 - If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Create a new review request against the new target instead of reusing the stale one.
 - If two agents race to claim the same request, one wins and the other gets `VERSION_CONFLICT` or `ACTIVE_ATTEMPT_EXISTS`. Re-discover the request and retry the claim with the new state.
 

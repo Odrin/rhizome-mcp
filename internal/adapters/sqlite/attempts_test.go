@@ -641,6 +641,120 @@ func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
 	}
 }
 
+// claimedReviewFixture creates a review-status issue, claims it (producing a
+// review-kind attempt), creates a review request, and claims that request
+// against the attempt. It's the shared setup for the three
+// ISSUE-187 AC2/AC3 regression tests below: a review attempt that ends
+// without completing (failed, interrupted, force-released) must return its
+// claimed review request to open, exactly like lease expiry already does.
+func claimedReviewFixture(t *testing.T, fixture *attemptTestFixture, name string) (issue application.CreateIssueResult, claim application.ClaimIssueResult, reviewRepository *sqlite.ReviewRepository, requestID string) {
+	t.Helper()
+	issue = createAttemptIssue(t, fixture, name, domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewRepository, err = sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: 0,
+		OccurredAt: fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: created.Request.ID, ExpectedVersion: created.Request.Version,
+		ActiveAttemptID: &claim.Attempt.ID, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return issue, claim, reviewRepository, created.Request.ID
+}
+
+// assertReviewRequestReleasedToOpen is the shared assertion for the three
+// tests below: the request must be open with no active claim, exactly one
+// new review_requested event recorded for the ended attempt, and a fresh
+// claim (against a new review attempt) must succeed -- proving the request
+// isn't merely marked open but is genuinely claimable again.
+func assertReviewRequestReleasedToOpen(t *testing.T, fixture *attemptTestFixture, issue application.CreateIssueResult, reviewRepository *sqlite.ReviewRepository, requestID, endedAttemptID string) {
+	t.Helper()
+	var requestStatus string
+	var activeAttemptID, resolvedAt sql.NullString
+	var requestVersion int64
+	var reviewEventCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status, active_attempt_id, resolved_at, version FROM review_requests WHERE id = ?`, requestID).
+			Scan(&requestStatus, &activeAttemptID, &resolvedAt, &requestVersion); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ? AND attempt_id = ? AND event_type = 'review_requested'`,
+			requestID, endedAttemptID).Scan(&reviewEventCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// version 1 at creation, 2 after the initial claim, 3 after this release.
+	if requestStatus != string(domain.ReviewRequestStatusOpen) || activeAttemptID.Valid || resolvedAt.Valid || requestVersion != 3 {
+		t.Fatalf("released review request state = status %q active_attempt_id %#v resolved_at %#v version %d",
+			requestStatus, activeAttemptID, resolvedAt, requestVersion)
+	}
+	if reviewEventCount != 1 {
+		t.Fatalf("review_requested events for the ended attempt = %d, want 1", reviewEventCount)
+	}
+	freshClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("claim_issue for a fresh review attempt: %v", err)
+	}
+	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: requestID, ExpectedVersion: requestVersion, ActiveAttemptID: &freshClaim.Attempt.ID, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatalf("ClaimReviewRequest() with a fresh attempt = %v, want success", err)
+	}
+}
+
+func TestReviewAttemptFailedReturnsClaimedRequestToOpen(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-failed")
+	defer fixture.close()
+
+	issue, claim, reviewRepository, requestID := claimedReviewFixture(t, fixture, "review failed")
+	input := finishInput(claim, domain.AttemptOutcomeFailed)
+	input.FailureReasonCode = failurePointer(domain.FailureReasonTestsFailed)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("finish failed review attempt: %v", err)
+	}
+	assertReviewRequestReleasedToOpen(t, fixture, issue, reviewRepository, requestID, claim.Attempt.ID)
+}
+
+func TestReviewAttemptInterruptedReturnsClaimedRequestToOpen(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-interrupted")
+	defer fixture.close()
+
+	issue, claim, reviewRepository, requestID := claimedReviewFixture(t, fixture, "review interrupted")
+	input := finishInput(claim, domain.AttemptOutcomeInterrupted)
+	input.InterruptionReasonCode = interruptionPointer(domain.InterruptionReasonHandoff)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("finish interrupted review attempt: %v", err)
+	}
+	assertReviewRequestReleasedToOpen(t, fixture, issue, reviewRepository, requestID, claim.Attempt.ID)
+}
+
+func TestReviewAttemptForceReleasedReturnsClaimedRequestToOpen(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-force-released")
+	defer fixture.close()
+
+	issue, claim, reviewRepository, requestID := claimedReviewFixture(t, fixture, "review force released")
+	repository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{AttemptID: claim.Attempt.ID, OccurredAt: fixture.clock.Now()}); err != nil {
+		t.Fatalf("force-release review attempt: %v", err)
+	}
+	assertReviewRequestReleasedToOpen(t, fixture, issue, reviewRepository, requestID, claim.Attempt.ID)
+}
+
 func TestFinishAttemptCorruptStoredResponses(t *testing.T) {
 	tests := []struct {
 		name        string

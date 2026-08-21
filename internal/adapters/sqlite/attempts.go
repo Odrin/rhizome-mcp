@@ -34,6 +34,153 @@ func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
 	return &AttemptRepository{db: database}, nil
 }
 
+// authenticateActiveAttempt is the lease-authenticated attempt gate shared
+// by RenewAttempt, SaveAttemptNote, FinishAttempt and ForceReleaseAttempt.
+// It loads the attempt's current issue_id, kind, status and lease, verifies
+// the attempt is still active, lazily expires it (via expireAttempt, in
+// this same transaction) if its lease has already passed now, and verifies
+// the caller's token against the stored hash in constant time. If
+// requireKind is non-nil, the attempt's kind must match it exactly.
+//
+// On success, returns the attempt's issueID and kind with expired=false. If
+// the lease had already expired, expireAttempt has already run in this
+// transaction (status is now 'expired', any claimed review request already
+// released) and this returns expired=true — the caller must treat the
+// overall operation as a no-op and report LEASE_EXPIRED, exactly like the
+// three call sites this centralizes already did.
+func authenticateActiveAttempt(ctx context.Context, tx Executor, attemptID string, tokenHash []byte, now time.Time, requireKind *domain.AttemptKind) (issueID string, kind domain.AttemptKind, expired bool, err error) {
+	var status, leaseExpiresAt, kindText string
+	var storedHash []byte
+	err = tx.QueryRowContext(ctx, `SELECT issue_id, kind, status, lease_token_hash, lease_expires_at FROM work_attempts WHERE id = ?`, attemptID).
+		Scan(&issueID, &kindText, &status, &storedHash, &leaseExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if status != string(domain.AttemptStatusActive) {
+		return "", "", false, domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
+	}
+	expiry, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
+	if err != nil {
+		return "", "", false, err
+	}
+	if !expiry.After(now) {
+		wasExpired, err := expireAttempt(ctx, tx, attemptID, now)
+		if err != nil {
+			return "", "", false, err
+		}
+		if !wasExpired {
+			return "", "", false, domain.NewError(domain.CodeStorageCorrupt,
+				"attempt lease expiry state disagreed between the caller's read and expireAttempt's own guard", false)
+		}
+		return "", "", true, nil
+	}
+	if subtle.ConstantTimeCompare(storedHash, tokenHash) != 1 {
+		return "", "", false, domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
+	}
+	kind = domain.AttemptKind(kindText)
+	if requireKind != nil && kind != *requireKind {
+		return "", "", false, domain.NewError(domain.CodeInvalidArgument, "attempt kind does not match the required kind", false,
+			domain.Detail{Field: "attempt_id", Code: "WRONG_KIND"})
+	}
+	return issueID, kind, false, nil
+}
+
+// terminateAttemptReason carries the optional failure/interruption reason
+// codes terminateAttempt persists alongside a terminal status.
+type terminateAttemptReason struct {
+	FailureReasonCode      *domain.FailureReasonCode
+	InterruptionReasonCode *domain.InterruptionReasonCode
+}
+
+// terminateAttempt is the shared terminal-status primitive used by
+// ForceReleaseAttempt and FinishAttempt (for all three outcomes: the
+// completed outcome's review resolution is already handled separately by
+// resolveReviewRequestForAttempt/supersedeReviewRequestForAttempt before
+// this runs, so this is a correct no-op on review_requests for completed).
+// expireAttempt keeps its own UPDATE, since it additionally guards on
+// lease_expires_at rather than relying on a prior authenticateActiveAttempt
+// call, but shares releaseClaimedReviewRequest below.
+//
+// Sets work_attempts to finalStatus with the given reason codes and, for a
+// status that abandons a review claim (failed, interrupted, expired --
+// never completed or cancelled), returns any claimed review request back
+// to open (docs/09's promise that losing the review attempt returns the
+// request to open, previously true only for lease expiry). Returns whether
+// the attempt was found active and terminated.
+func terminateAttempt(ctx context.Context, tx Executor, attemptID string, finalStatus domain.AttemptStatus, reason terminateAttemptReason, now time.Time) (bool, error) {
+	timestamp := now.UTC().Format(time.RFC3339Nano)
+	var failure, interruption any
+	if reason.FailureReasonCode != nil {
+		failure = string(*reason.FailureReasonCode)
+	}
+	if reason.InterruptionReasonCode != nil {
+		interruption = string(*reason.InterruptionReasonCode)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = ?, finished_at = ?, failure_reason_code = ?, interruption_reason_code = ?
+		WHERE id = ? AND status = 'active'`, string(finalStatus), timestamp, failure, interruption, attemptID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if !terminalStatusAbandonsReviewClaim(finalStatus) {
+		return true, nil
+	}
+	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func terminalStatusAbandonsReviewClaim(status domain.AttemptStatus) bool {
+	switch status {
+	case domain.AttemptStatusFailed, domain.AttemptStatusInterrupted, domain.AttemptStatusExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseClaimedReviewRequest returns attemptID's claimed review request (if
+// any) to open and appends a review_requested event -- the recovery
+// expireAttempt already performed on lease expiry, now shared by every path
+// that ends a review attempt without it completing (failed, interrupted,
+// force-released).
+func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID string, now time.Time) error {
+	request, err := loadActiveReviewRequestForAttempt(ctx, tx, attemptID)
+	if err != nil {
+		return err
+	}
+	if request == nil {
+		return nil
+	}
+	timestamp := now.UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = NULL, version = version + 1
+		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusOpen, request.ID, attemptID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
+		VALUES (?, ?, ?, 'review_requested', ?, ?)`, request.ID, request.TargetID, attemptID,
+		string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), timestamp)
+	return err
+}
+
 func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
 	if !validAttemptSessionID(command.SessionID) {
 		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
@@ -205,32 +352,13 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 	var result ports.RenewAttemptResult
 	var leaseExpired bool
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
-		var status, leaseExpiresAt string
-		var tokenHash []byte
-		err := tx.QueryRowContext(ctx, `SELECT status, lease_token_hash, lease_expires_at FROM work_attempts WHERE id = ?`, command.AttemptID).
-			Scan(&status, &tokenHash, &leaseExpiresAt)
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
-		}
+		_, _, expired, err := authenticateActiveAttempt(ctx, tx, command.AttemptID, command.TokenHash, now, nil)
 		if err != nil {
 			return err
 		}
-		if status != string(domain.AttemptStatusActive) {
-			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
-		}
-		leaseExpiry, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
-		if err != nil {
-			return err
-		}
-		if !leaseExpiry.After(now) {
-			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
-				return err
-			}
+		if expired {
 			leaseExpired = true
 			return nil
-		}
-		if subtle.ConstantTimeCompare(tokenHash, command.TokenHash) != 1 {
-			return domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE work_attempts
 			SET lease_expires_at = ?, last_heartbeat_at = ?
@@ -436,32 +564,13 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 				return err
 			}
 		}
-		var issueID, status, leaseExpiresAt string
-		var tokenHash []byte
-		err := tx.QueryRowContext(ctx, `SELECT issue_id, status, lease_token_hash, lease_expires_at
-			FROM work_attempts WHERE id = ?`, command.AttemptID).Scan(&issueID, &status, &tokenHash, &leaseExpiresAt)
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
-		}
+		issueID, _, expired, err := authenticateActiveAttempt(ctx, tx, command.AttemptID, command.TokenHash, now, nil)
 		if err != nil {
 			return err
 		}
-		if status != string(domain.AttemptStatusActive) {
-			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
-		}
-		leaseExpiry, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
-		if err != nil {
-			return err
-		}
-		if !leaseExpiry.After(now) {
-			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
-				return err
-			}
+		if expired {
 			leaseExpired = true
 			return nil
-		}
-		if subtle.ConstantTimeCompare(tokenHash, command.TokenHash) != 1 {
-			return domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
 		}
 		var nextStepsJSON *string
 		if command.NextSteps != nil {
@@ -790,41 +899,32 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				return nil
 			}
 		}
-		var issueID, kindText, status, expiry string
-		var tokenHash []byte
+		_, _, expired, err := authenticateActiveAttempt(ctx, tx, command.AttemptID, command.TokenHash, now, nil)
+		if err != nil {
+			return err
+		}
+		if expired {
+			leaseExpired = true
+			return nil
+		}
+		var issueID, kindText, expiry string
 		var version, contextEventID int64
 		var sessionID, agentLabel sql.NullString
 		var started, heartbeat, finished sql.NullString
 		var resultSummary, nextJSON, verificationJSON, failureCode, interruptionCode, reasonDetails sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT issue_id, session_id, agent_label, kind, status,
-				issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at,
+		err = tx.QueryRowContext(ctx, `SELECT issue_id, session_id, agent_label, kind,
+				issue_version_at_start, context_event_id_at_start, lease_expires_at,
 				started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json,
 				failure_reason_code, interruption_reason_code, reason_details
-				FROM work_attempts WHERE id = ?`, command.AttemptID).Scan(&issueID, &sessionID, &agentLabel, &kindText, &status,
-			&version, &contextEventID, &tokenHash, &expiry, &started, &heartbeat, &finished, &resultSummary,
+				FROM work_attempts WHERE id = ?`, command.AttemptID).Scan(&issueID, &sessionID, &agentLabel, &kindText,
+			&version, &contextEventID, &expiry, &started, &heartbeat, &finished, &resultSummary,
 			&nextJSON, &verificationJSON, &failureCode, &interruptionCode, &reasonDetails)
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.NewError(domain.CodeAttemptNotFound, "attempt not found", false)
-		}
 		if err != nil {
 			return err
-		}
-		if status != string(domain.AttemptStatusActive) {
-			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
 		}
 		expiryTime, err := parseIssueTimestamp("lease_expires_at", expiry)
 		if err != nil {
 			return err
-		}
-		if !expiryTime.After(now) {
-			if _, err := expireAttempt(ctx, tx, command.AttemptID, now); err != nil {
-				return err
-			}
-			leaseExpired = true
-			return nil
-		}
-		if subtle.ConstantTimeCompare(tokenHash, command.TokenHash) != 1 {
-			return domain.NewError(domain.CodeInvalidLeaseToken, "lease token is invalid", false)
 		}
 		kind := domain.AttemptKind(kindText)
 		if err := domain.ValidateFinishAttemptForKind(input, kind); err != nil {
@@ -939,26 +1039,17 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			}
 			verificationValue = string(encoded)
 		}
-		var failure, interruption any
-		if input.FailureReasonCode != nil {
-			failure = string(*input.FailureReasonCode)
-		}
-		if input.InterruptionReasonCode != nil {
-			interruption = string(*input.InterruptionReasonCode)
-		}
-		res, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = ?, finished_at = ?, result_summary = ?, next_steps_json = ?,
-				verification_json = ?, failure_reason_code = ?, interruption_reason_code = ?, reason_details = ?
-				WHERE id = ? AND status = 'active'`, input.Outcome, timestamp, input.ResultSummary, nextValue, verificationValue,
-			failure, interruption, nullableStringValuePtr(input.ReasonDetails), command.AttemptID)
+		reason := terminateAttemptReason{FailureReasonCode: input.FailureReasonCode, InterruptionReasonCode: input.InterruptionReasonCode}
+		terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatus(input.Outcome), reason, now)
 		if err != nil {
 			return fmt.Errorf("update work attempt: %w", err)
 		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected != 1 {
+		if !terminated {
 			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE work_attempts SET result_summary = ?, next_steps_json = ?, verification_json = ?, reason_details = ?
+				WHERE id = ?`, input.ResultSummary, nextValue, verificationValue, nullableStringValuePtr(input.ReasonDetails), command.AttemptID); err != nil {
+			return fmt.Errorf("update work attempt: %w", err)
 		}
 		result.Artifacts = make([]domain.Artifact, len(artifacts))
 		for index, artifact := range artifacts {
@@ -1098,17 +1189,13 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 		if status != string(domain.AttemptStatusActive) {
 			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE work_attempts
-			SET status = 'interrupted', finished_at = ?, interruption_reason_code = 'user_request'
-			WHERE id = ? AND status = 'active'`, timestamp, command.AttemptID)
+		reason := domain.InterruptionReasonUserRequest
+		terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatusInterrupted,
+			terminateAttemptReason{InterruptionReasonCode: &reason}, now)
 		if err != nil {
 			return err
 		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected != 1 {
+		if !terminated {
 			return domain.NewError(domain.CodeAttemptNotActive, "attempt is not active", false)
 		}
 		payload, err := json.Marshal(struct {
@@ -1369,8 +1456,13 @@ func expireAttemptsForIssue(ctx context.Context, tx Executor, issueID string, no
 		return err
 	}
 	for _, id := range attemptIDs {
-		if _, err := expireAttempt(ctx, tx, id, now); err != nil {
+		expired, err := expireAttempt(ctx, tx, id, now)
+		if err != nil {
 			return err
+		}
+		if !expired {
+			return domain.NewError(domain.CodeStorageCorrupt,
+				"attempt lease expiry state disagreed between the sweep's own select and expireAttempt's guard", false)
 		}
 	}
 	return nil
@@ -1394,27 +1486,8 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 	if err := tx.QueryRowContext(ctx, `SELECT issue_id FROM work_attempts WHERE id = ?`, attemptID).Scan(&issueID); err != nil {
 		return false, err
 	}
-	request, err := loadActiveReviewRequestForAttempt(ctx, tx, attemptID)
-	if err != nil {
+	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now); err != nil {
 		return false, err
-	}
-	if request != nil {
-		resolvedAt := now.UTC().Format(time.RFC3339Nano)
-		res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = NULL, version = version + 1
-			WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusOpen, request.ID, attemptID)
-		if err != nil {
-			return false, err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return false, err
-		}
-		if affected == 1 {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
-				VALUES (?, ?, ?, 'review_requested', ?, ?)`, request.ID, request.TargetID, attemptID, string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), resolvedAt); err != nil {
-				return false, err
-			}
-		}
 	}
 	payload, err := json.Marshal(struct {
 		AttemptID string `json:"attempt_id"`
