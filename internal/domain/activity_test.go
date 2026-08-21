@@ -22,7 +22,7 @@ func TestGetIssueActivityInputValidateDefaultsAndCopies(t *testing.T) {
 	}
 	if got.IssueID != "ISSUE-7" || got.Limit != 20 || got.Order != ActivityOrderNewestFirst ||
 		!reflect.DeepEqual(got.Types, []ActivityCategory{
-			ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryAttempts,
+			ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryReviews, ActivityCategoryAttempts,
 			ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts,
 		}) {
 		t.Fatalf("normalized input = %#v", got)

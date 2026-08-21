@@ -85,6 +85,45 @@ func TestActivityRepositoryLoadsReviewRequestEntry(t *testing.T) {
 	}
 }
 
+// TestActivityRepositoryUnfilteredFeedIncludesReviews proves the documented
+// default (docs/03 10.4: "when omitted or empty, all categories are
+// returned... reviews" among them) actually matches domain.AllActivityCategories
+// (ISSUE-216 AC2): an unfiltered GetIssueActivity call (no Types) includes a
+// review request alongside another category's entry.
+func TestActivityRepositoryUnfilteredFeedIncludesReviews(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	activityRepository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID: issue.ID, TargetIssueVersion: 1, TargetEventID: 0,
+		ArtifactIDs: []string{}, OccurredAt: now,
+	}); err != nil {
+		t.Fatalf("CreateReviewRequest() error = %v", err)
+	}
+
+	result, err := activityRepository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+		Input: domain.GetIssueActivityInput{IssueID: issue.ID, Limit: 20},
+	})
+	if err != nil {
+		t.Fatalf("GetIssueActivity() error = %v", err)
+	}
+	found := false
+	for _, item := range result.Items {
+		if item.EntityType == domain.ActivityEntityTypeReview {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unfiltered activity feed = %#v, want a review entry included by default", result.Items)
+	}
+}
+
 func TestActivityRepositoryReturnsUnifiedIssueActivity(t *testing.T) {
 	db, _, issue, now := newActivityTestFixture(t)
 	repository, err := sqlite.NewActivityRepository(db)

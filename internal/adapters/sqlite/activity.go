@@ -48,7 +48,7 @@ func (repository *ActivityRepository) GetIssueActivity(ctx context.Context, comm
 	var after *activityCursor
 	if input.Cursor != "" {
 		decoded, err := activityCursorCodec.Decode(input.Cursor)
-		if err != nil || decoded.TypeRank < 1 || decoded.TypeRank > 7 || decoded.OccurredAt == "" || !isValidActivityCursorSortID(decoded.TypeRank, decoded.SortID) {
+		if err != nil || decoded.TypeRank < 1 || decoded.TypeRank > activityMaxRank || decoded.OccurredAt == "" || !isValidActivityCursorSortID(decoded.TypeRank, decoded.SortID) {
 			if err == nil {
 				err = errors.New("activity cursor payload is invalid")
 			}
@@ -171,6 +171,164 @@ func resolveActivityIssueID(ctx context.Context, query Queryer, issueID string) 
 	return id, nil
 }
 
+// activitySortIDKind identifies how a spec's sort_id column is validated and
+// (for the cursor decoder) how its value is shaped.
+type activitySortIDKind int
+
+const (
+	activitySortIDULID activitySortIDKind = iota
+	activitySortIDEventSequence
+)
+
+// activityEntitySpec is the single source of truth for one activity entity
+// kind: its filter category, discriminated payload type, stable rank
+// (persisted in opaque pagination cursors), SQL union arm, sort-id shape, and
+// loader. Every switch that used to enumerate entity kinds separately
+// (buildActivityUnionArms, activityCategoryRank, expectedActivityEntityType,
+// the cursor/scan rank bound, isValidActivityCursorSortID, loadActivityItem)
+// is now driven from activityRegistry below.
+//
+// Rank is append-only and must never be renumbered: it is embedded in the SQL
+// union arm text and round-trips through client-held cursors. New entity
+// kinds (e.g. ISSUE-175's gate/evidence events, ISSUE-182's reservation
+// events) must append new specs with the next unused rank (currently 8, 9,
+// ...) in registration order; existing ranks 1-7 are permanently reserved for
+// the specs below.
+type activityEntitySpec struct {
+	Category   domain.ActivityCategory
+	EntityType domain.ActivityEntityType
+	Rank       int
+	Arm        string
+	SortIDKind activitySortIDKind
+	Load       func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error
+}
+
+var activityRegistry = []activityEntitySpec{
+	{
+		Category:   domain.ActivityCategoryComments,
+		EntityType: domain.ActivityEntityTypeComment,
+		Rank:       1,
+		Arm:        `SELECT 'comment' AS entity_type, comments.id AS entity_id, comments.created_at AS occurred_at, 1 AS type_rank, comments.id AS sort_id FROM comments WHERE comments.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			comment, err := loadActivityComment(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Comment = &comment
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryDecisions,
+		EntityType: domain.ActivityEntityTypeDecision,
+		Rank:       2,
+		Arm:        `SELECT 'decision' AS entity_type, decisions.id AS entity_id, decisions.created_at AS occurred_at, 2 AS type_rank, decisions.id AS sort_id FROM decisions WHERE decisions.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			decision, err := loadActivityDecision(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Decision = &decision
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryReviews,
+		EntityType: domain.ActivityEntityTypeReview,
+		Rank:       3,
+		Arm:        `SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			review, err := loadActivityReview(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Review = &review
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryAttempts,
+		EntityType: domain.ActivityEntityTypeAttempt,
+		Rank:       4,
+		Arm:        `SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 4 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			attempt, err := loadActivityAttempt(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Attempt = &attempt
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryAttemptNotes,
+		EntityType: domain.ActivityEntityTypeAttemptNote,
+		Rank:       5,
+		Arm:        `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			note, err := loadActivityAttemptNote(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.AttemptNote = &note
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryEvents,
+		EntityType: domain.ActivityEntityTypeEvent,
+		Rank:       6,
+		Arm:        `SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 6 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`,
+		SortIDKind: activitySortIDEventSequence,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			event, err := loadActivityEvent(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Event = &event
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryArtifacts,
+		EntityType: domain.ActivityEntityTypeArtifact,
+		Rank:       7,
+		Arm:        `SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 7 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			artifact, err := loadActivityArtifact(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.Artifact = &artifact
+			return nil
+		},
+	},
+}
+
+var (
+	activityByCategory   = make(map[domain.ActivityCategory]activityEntitySpec, len(activityRegistry))
+	activityByRank       = make(map[int]activityEntitySpec, len(activityRegistry))
+	activityByEntityType = make(map[domain.ActivityEntityType]activityEntitySpec, len(activityRegistry))
+	activityMaxRank      int
+)
+
+func init() {
+	for _, spec := range activityRegistry {
+		activityByCategory[spec.Category] = spec
+		activityByRank[spec.Rank] = spec
+		activityByEntityType[spec.EntityType] = spec
+		if spec.Rank > activityMaxRank {
+			activityMaxRank = spec.Rank
+		}
+	}
+}
+
 func buildActivityUnionArms(types []domain.ActivityCategory, issueID string) ([]string, []any, error) {
 	if len(types) == 0 {
 		types = append([]domain.ActivityCategory(nil), domain.AllActivityCategories...)
@@ -188,31 +346,12 @@ func buildActivityUnionArms(types []domain.ActivityCategory, issueID string) ([]
 	arms := make([]string, 0, len(ordered))
 	args := make([]any, 0, len(ordered)+1)
 	for _, category := range ordered {
-		switch category {
-		case domain.ActivityCategoryComments:
-			arms = append(arms, `SELECT 'comment' AS entity_type, comments.id AS entity_id, comments.created_at AS occurred_at, 1 AS type_rank, comments.id AS sort_id FROM comments WHERE comments.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryDecisions:
-			arms = append(arms, `SELECT 'decision' AS entity_type, decisions.id AS entity_id, decisions.created_at AS occurred_at, 2 AS type_rank, decisions.id AS sort_id FROM decisions WHERE decisions.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryReviews:
-			arms = append(arms, `SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryAttempts:
-			arms = append(arms, `SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 4 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryAttemptNotes:
-			arms = append(arms, `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryEvents:
-			arms = append(arms, `SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 6 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`)
-			args = append(args, issueID)
-		case domain.ActivityCategoryArtifacts:
-			arms = append(arms, `SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 7 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`)
-			args = append(args, issueID)
-		default:
+		spec, ok := activityByCategory[category]
+		if !ok {
 			return nil, nil, domain.NewError(domain.CodeInvalidArgument, "activity category is invalid", false)
 		}
+		arms = append(arms, spec.Arm)
+		args = append(args, issueID)
 	}
 	return arms, args, nil
 }
@@ -230,24 +369,7 @@ func sortActivityCategories(values []domain.ActivityCategory) []domain.ActivityC
 }
 
 func activityCategoryRank(category domain.ActivityCategory) int {
-	switch category {
-	case domain.ActivityCategoryComments:
-		return 1
-	case domain.ActivityCategoryDecisions:
-		return 2
-	case domain.ActivityCategoryReviews:
-		return 3
-	case domain.ActivityCategoryAttempts:
-		return 4
-	case domain.ActivityCategoryAttemptNotes:
-		return 5
-	case domain.ActivityCategoryEvents:
-		return 6
-	case domain.ActivityCategoryArtifacts:
-		return 7
-	default:
-		return 0
-	}
+	return activityByCategory[category].Rank
 }
 
 func scanActivityDescriptor(scanner scanner) (activityDescriptor, error) {
@@ -264,7 +386,7 @@ func scanActivityDescriptor(scanner scanner) (activityDescriptor, error) {
 	if !entity.Valid() {
 		return activityDescriptor{}, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
 	}
-	if typeRank < 1 || typeRank > 7 {
+	if typeRank < 1 || typeRank > activityMaxRank {
 		return activityDescriptor{}, activityCorruptField(nil, "type_rank", "INVALID_VALUE")
 	}
 	if entity != expectedActivityEntityType(typeRank) {
@@ -300,31 +422,18 @@ func scanActivityDescriptor(scanner scanner) (activityDescriptor, error) {
 }
 
 func expectedActivityEntityType(rank int) domain.ActivityEntityType {
-	switch rank {
-	case 1:
-		return domain.ActivityEntityTypeComment
-	case 2:
-		return domain.ActivityEntityTypeDecision
-	case 3:
-		return domain.ActivityEntityTypeReview
-	case 4:
-		return domain.ActivityEntityTypeAttempt
-	case 5:
-		return domain.ActivityEntityTypeAttemptNote
-	case 6:
-		return domain.ActivityEntityTypeEvent
-	case 7:
-		return domain.ActivityEntityTypeArtifact
-	default:
-		return ""
-	}
+	return activityByRank[rank].EntityType
 }
 
 func isValidActivityCursorSortID(typeRank int, value string) bool {
 	if value == "" {
 		return false
 	}
-	if typeRank == 6 {
+	spec, ok := activityByRank[typeRank]
+	if !ok {
+		return false
+	}
+	if spec.SortIDKind == activitySortIDEventSequence {
 		if len(value) != 20 {
 			return false
 		}
@@ -341,51 +450,12 @@ func isValidActivityCursorSortID(typeRank int, value string) bool {
 
 func loadActivityItem(ctx context.Context, query Queryer, issueID string, descriptor activityDescriptor) (domain.ActivityItem, error) {
 	item := domain.ActivityItem{EntityType: descriptor.EntityType, EntityID: descriptor.EntityID, IssueID: issueID, OccurredAt: descriptor.OccurredAt}
-	switch descriptor.EntityType {
-	case domain.ActivityEntityTypeComment:
-		comment, err := loadActivityComment(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Comment = &comment
-	case domain.ActivityEntityTypeDecision:
-		decision, err := loadActivityDecision(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Decision = &decision
-	case domain.ActivityEntityTypeAttempt:
-		attempt, err := loadActivityAttempt(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Attempt = &attempt
-	case domain.ActivityEntityTypeAttemptNote:
-		note, err := loadActivityAttemptNote(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.AttemptNote = &note
-	case domain.ActivityEntityTypeEvent:
-		event, err := loadActivityEvent(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Event = &event
-	case domain.ActivityEntityTypeArtifact:
-		artifact, err := loadActivityArtifact(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Artifact = &artifact
-	case domain.ActivityEntityTypeReview:
-		review, err := loadActivityReview(ctx, query, descriptor.EntityID)
-		if err != nil {
-			return domain.ActivityItem{}, err
-		}
-		item.Review = &review
-	default:
+	spec, ok := activityByEntityType[descriptor.EntityType]
+	if !ok {
 		return domain.ActivityItem{}, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
+	}
+	if err := spec.Load(ctx, query, &item, descriptor.EntityID); err != nil {
+		return domain.ActivityItem{}, err
 	}
 	if err := domain.ValidateActivityItem(item); err != nil {
 		return domain.ActivityItem{}, activityCorrupt(err)

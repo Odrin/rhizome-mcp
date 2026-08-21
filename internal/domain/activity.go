@@ -36,6 +36,7 @@ func (value ActivityCategory) Valid() bool {
 var AllActivityCategories = []ActivityCategory{
 	ActivityCategoryComments,
 	ActivityCategoryDecisions,
+	ActivityCategoryReviews,
 	ActivityCategoryAttempts,
 	ActivityCategoryAttemptNotes,
 	ActivityCategoryEvents,
