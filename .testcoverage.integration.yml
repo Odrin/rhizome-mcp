@@ -1,6 +1,6 @@
 profile: integration-coverage.out
 threshold:
-  total: 75
+  total: 80
 exclude:
   paths:
     - ^editors/vscode/node_modules/

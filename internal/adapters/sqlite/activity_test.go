@@ -37,6 +37,54 @@ func TestNewActivityRepositoryRejectsNilDatabase(t *testing.T) {
 	assertDomainCode(t, err, domain.CodeStorageConfiguration)
 }
 
+// TestActivityRepositoryLoadsReviewRequestEntry covers the "review" arm of
+// the unified activity feed (loadActivityReview/scanActivityReview),
+// exercised through a real review_requests row created via
+// ReviewRepository rather than a hand-seeded fixture, since a review
+// request has foreign-key dependencies (review_targets) not otherwise
+// worth reproducing by hand.
+func TestActivityRepositoryLoadsReviewRequestEntry(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	activityRepository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID: issue.ID, TargetIssueVersion: 1, TargetEventID: 0,
+		ArtifactIDs: []string{}, OccurredAt: now,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRequest() error = %v", err)
+	}
+
+	result, err := activityRepository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+		Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryReviews}, Limit: 20},
+	})
+	if err != nil {
+		t.Fatalf("GetIssueActivity() error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].EntityType != domain.ActivityEntityTypeReview {
+		t.Fatalf("items = %#v, want exactly one review entry", result.Items)
+	}
+	review := result.Items[0].Review
+	if review == nil {
+		t.Fatal("Review field is nil")
+	}
+	if review.ID != created.Request.ID || review.IssueID != issue.ID || review.TargetID != created.Target.ID {
+		t.Fatalf("review = %#v, want the created request %s (target %s) on issue %s", review, created.Request.ID, created.Target.ID, issue.ID)
+	}
+	if review.Status != domain.ReviewRequestStatusOpen {
+		t.Fatalf("review status = %q, want open", review.Status)
+	}
+	if review.CreatedAt.IsZero() {
+		t.Fatal("review CreatedAt is zero")
+	}
+}
+
 func TestActivityRepositoryReturnsUnifiedIssueActivity(t *testing.T) {
 	db, _, issue, now := newActivityTestFixture(t)
 	repository, err := sqlite.NewActivityRepository(db)

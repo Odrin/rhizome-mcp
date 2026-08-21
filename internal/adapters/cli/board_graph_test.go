@@ -90,3 +90,83 @@ func TestBoardGraphUnicodeTruncationAndEmptyState(t *testing.T) {
 		t.Fatalf("empty graph SVG missing empty-state aria-label: %s", emptySVG)
 	}
 }
+
+func TestBoardIssueLinkUsesDisplayIDAndEscapesLabel(t *testing.T) {
+	got := boardIssueLink("01ARZ3NDEKTSV4RRFFQ69G5FAV", "ISSUE-<script>")
+	want := `<a href="/issues/ISSUE-%3Cscript%3E">ISSUE-&lt;script&gt;</a>`
+	if got != want {
+		t.Fatalf("boardIssueLink() = %q, want %q", got, want)
+	}
+}
+
+func TestBoardIssueLinkForProjectionFallsBackToInternalID(t *testing.T) {
+	node := domain.IssueProjection{Issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
+	got := boardIssueLinkForProjection(node, nil)
+	if !strings.Contains(got, "01ARZ3NDEKTSV4RRFFQ69G5FAV") {
+		t.Fatalf("boardIssueLinkForProjection() = %q, want it to fall back to the internal ID when no display ID or mapping is available", got)
+	}
+}
+
+func TestIssueDisplayIDForProjectionPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		node    domain.IssueProjection
+		mapping map[string]string
+		want    string
+	}{
+		{
+			name: "uses the issue's DisplayID when set",
+			node: domain.IssueProjection{Issue: domain.Issue{ID: "id-1", DisplayID: "ISSUE-2"}},
+			want: "ISSUE-2",
+		},
+		{
+			name: "trims surrounding whitespace from the DisplayID",
+			node: domain.IssueProjection{Issue: domain.Issue{ID: "id-1", DisplayID: "  ISSUE-2  "}},
+			want: "ISSUE-2",
+		},
+		{
+			name:    "falls back to the mapping by internal ID",
+			node:    domain.IssueProjection{Issue: domain.Issue{ID: "id-1"}},
+			mapping: map[string]string{"id-1": " ISSUE-3 "},
+			want:    "ISSUE-3",
+		},
+		{
+			name: "empty when nothing resolves",
+			node: domain.IssueProjection{Issue: domain.Issue{ID: "id-1"}},
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := issueDisplayIDForProjection(test.node, test.mapping); got != test.want {
+				t.Errorf("issueDisplayIDForProjection() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestIssueDisplayIDName(t *testing.T) {
+	if got := issueDisplayIDName("id-1", nil); got != "" {
+		t.Errorf("issueDisplayIDName(nil mapping) = %q, want empty", got)
+	}
+	if got := issueDisplayIDName("id-1", map[string]string{"id-2": "ISSUE-2"}); got != "" {
+		t.Errorf("issueDisplayIDName(missing key) = %q, want empty", got)
+	}
+	if got := issueDisplayIDName("id-1", map[string]string{"id-1": " ISSUE-1 "}); got != "ISSUE-1" {
+		t.Errorf("issueDisplayIDName() = %q, want trimmed ISSUE-1", got)
+	}
+}
+
+func TestBoardGraphNodeSVGRendersNonLinkableNode(t *testing.T) {
+	node := domain.IssueProjection{
+		EffectiveStatus: domain.EffectiveStatusInProgress,
+		Issue:           domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-9", Title: "A title"},
+	}
+	svg := boardGraphNodeSVG(node, 10, 20)
+	if !strings.Contains(svg, "<rect") || !strings.Contains(svg, "ISSUE-9") || !strings.Contains(svg, "A title") {
+		t.Fatalf("boardGraphNodeSVG() = %q, want a rect containing the display ID and title", svg)
+	}
+	if strings.Contains(svg, "<a href") {
+		t.Fatalf("boardGraphNodeSVG() = %q, want no link wrapper (boardGraphNodeSVG is never linkable)", svg)
+	}
+}

@@ -1153,6 +1153,86 @@ func TestExpireAttemptsCleansAllIssuesAtBoundaryAndPreservesState(t *testing.T) 
 	}
 }
 
+// TestAttemptRepositoryListActiveAttemptsReturnsOnlyUnexpiredOrderedByLease
+// covers the board's active-attempts projection (application.AttemptService
+// -> AttemptRepository.ListActiveAttempts), never directly exercised by a
+// repository-level test before (board_service_test.go only exercises it
+// through a stub repository).
+func TestAttemptRepositoryListActiveAttemptsReturnsOnlyUnexpiredOrderedByLease(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "list-active-attempts")
+	defer fixture.close()
+
+	soonToExpireIssue := createAttemptIssue(t, fixture, "expires soonest", domain.StatusReady)
+	soonToExpire, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: soonToExpireIssue.ID, LeaseSeconds: intPointer(60)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterExpiryIssue := createAttemptIssue(t, fixture, "expires later", domain.StatusReady)
+	laterExpiry, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: laterExpiryIssue.ID, LeaseSeconds: intPointer(300)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedIssue := createAttemptIssue(t, fixture, "already completed", domain.StatusReady)
+	completedClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: completedIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedFinish := finishInput(completedClaim, domain.AttemptOutcomeCompleted)
+	completedFinish.TargetIssueStatus = statusPointer(domain.StatusDone)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, completedFinish); err != nil {
+		t.Fatal(err)
+	}
+	expiredIssue := createAttemptIssue(t, fixture, "lease expired but not yet swept", domain.StatusReady)
+	expiredClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: expiredIssue.ID, LeaseSeconds: intPointer(60)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Advance(90 * time.Second)
+
+	results, err := fixture.attempts.ListActiveAttempts(fixture.ctx, 0)
+	if err != nil {
+		t.Fatalf("ListActiveAttempts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want exactly the one attempt still within its lease (laterExpiry)", results)
+	}
+	if results[0].AttemptID != laterExpiry.Attempt.ID {
+		t.Fatalf("result attempt id = %q, want %q", results[0].AttemptID, laterExpiry.Attempt.ID)
+	}
+	if results[0].IssueID != laterExpiryIssue.ID || results[0].IssueDisplayID != laterExpiryIssue.DisplayID {
+		t.Fatalf("result issue linkage = %#v, want issue %s (%s)", results[0], laterExpiryIssue.ID, laterExpiryIssue.DisplayID)
+	}
+	if results[0].Kind != domain.AttemptKindWork {
+		t.Fatalf("result kind = %q, want work", results[0].Kind)
+	}
+	_ = soonToExpire
+	_ = expiredClaim
+
+	// Claim a second still-active attempt with a longer lease than
+	// laterExpiry's remaining time, to prove ordering is by lease_expires_at
+	// ascending (soonest-to-expire first), not claim or issue order.
+	soonestIssue := createAttemptIssue(t, fixture, "claimed after, expires soonest of the two", domain.StatusReady)
+	soonest, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: soonestIssue.ID, LeaseSeconds: intPointer(90)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err = fixture.attempts.ListActiveAttempts(fixture.ctx, 0)
+	if err != nil {
+		t.Fatalf("ListActiveAttempts() error = %v", err)
+	}
+	if len(results) != 2 || results[0].AttemptID != soonest.Attempt.ID || results[1].AttemptID != laterExpiry.Attempt.ID {
+		t.Fatalf("results = %#v, want [soonest, laterExpiry] ordered by lease_expires_at ascending", results)
+	}
+
+	limited, err := fixture.attempts.ListActiveAttempts(fixture.ctx, 1)
+	if err != nil {
+		t.Fatalf("ListActiveAttempts(limit=1) error = %v", err)
+	}
+	if len(limited) != 1 || limited[0].AttemptID != soonest.Attempt.ID {
+		t.Fatalf("limited results = %#v, want just the soonest-to-expire attempt", limited)
+	}
+}
+
 // TestExpireAttemptsSweepsFractionalBoundariesAgainstWholeSecondLeases is a
 // regression test for ISSUE-192: SQLite compares the lease_expires_at TEXT
 // column with memcmp, so ExpireAttempts' `lease_expires_at <= ?` predicate

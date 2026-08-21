@@ -115,10 +115,16 @@ func fetchIssueProjection(ctx context.Context, query Queryer, where string, args
 		}
 		return domain.IssueProjection{}, err
 	}
-	if err := loadIssueListLabels(ctx, query, []domain.IssueProjection{projection}); err != nil {
+	// loadIssueListLabels mutates its items slice's elements in place; it
+	// must be the same slice variable we read back from, not a fresh
+	// slice literal wrapping a copy of projection (which would silently
+	// discard the loaded labels -- caught by
+	// TestIssueRepositoryGetIssueProjectionMatchesListIssuesAndReportsNotFound).
+	items := []domain.IssueProjection{projection}
+	if err := loadIssueListLabels(ctx, query, items); err != nil {
 		return domain.IssueProjection{}, err
 	}
-	return projection, nil
+	return items[0], nil
 }
 
 // ListIssues returns a bounded, deterministic issue page. Label filters have
