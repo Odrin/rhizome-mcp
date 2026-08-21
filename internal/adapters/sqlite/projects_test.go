@@ -25,12 +25,12 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO schema_migrations(version, name, checksum, applied_at)
-			VALUES (?, 'later_migration', 'checksum', ?)`, migrations.CurrentVersion()+1, now.Format(time.RFC3339Nano)); err != nil {
+			VALUES (?, 'later_migration', 'checksum', ?)`, migrations.CurrentVersion()+1, sqlite.FormatStorageTime(now)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, payload, created_at)
-			VALUES (NULL, 'project_event', '{}', ?)`, now.Format(time.RFC3339Nano))
+			VALUES (NULL, 'project_event', '{}', ?)`, sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
@@ -38,7 +38,7 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, payload, created_at)
-			VALUES (NULL, 'project_event', '{}', ?)`, now.Format(time.RFC3339Nano))
+			VALUES (NULL, 'project_event', '{}', ?)`, sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatalf("seed latest event: %v", err)
@@ -142,22 +142,22 @@ func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *test
 			query string
 			args  []any
 		}{
-			{query: `INSERT INTO issues(id, sequence_no, type, title, description, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 1, 'task', 'Visible issue', 'desc', 'ready', 'high', 1, ?, ?, NULL)`, args: []any{issueID, now.Add(1 * time.Second).Format(time.RFC3339Nano), now.Add(2 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 2, 'task', 'Archived issue', 'ready', 'high', 1, ?, ?, ?)`, args: []any{archivedIssueID, now.Add(3 * time.Second).Format(time.RFC3339Nano), now.Add(4 * time.Second).Format(time.RFC3339Nano), now.Add(5 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 3, 'task', 'Target issue', 'ready', 'high', 1, ?, ?)`, args: []any{relatedIssueID, now.Add(6 * time.Second).Format(time.RFC3339Nano), now.Add(7 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO labels(id, name, description, created_at) VALUES (?, 'visible', 'label', ?)`, args: []any{labelID, now.Add(8 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issues(id, sequence_no, type, title, description, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 1, 'task', 'Visible issue', 'desc', 'ready', 'high', 1, ?, ?, NULL)`, args: []any{issueID, sqlite.FormatStorageTime(now.Add(1 * time.Second)), sqlite.FormatStorageTime(now.Add(2 * time.Second))}},
+			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at, archived_at) VALUES (?, 2, 'task', 'Archived issue', 'ready', 'high', 1, ?, ?, ?)`, args: []any{archivedIssueID, sqlite.FormatStorageTime(now.Add(3 * time.Second)), sqlite.FormatStorageTime(now.Add(4 * time.Second)), sqlite.FormatStorageTime(now.Add(5 * time.Second))}},
+			{query: `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 3, 'task', 'Target issue', 'ready', 'high', 1, ?, ?)`, args: []any{relatedIssueID, sqlite.FormatStorageTime(now.Add(6 * time.Second)), sqlite.FormatStorageTime(now.Add(7 * time.Second))}},
+			{query: `INSERT INTO labels(id, name, description, created_at) VALUES (?, 'visible', 'label', ?)`, args: []any{labelID, sqlite.FormatStorageTime(now.Add(8 * time.Second))}},
 			{query: `INSERT INTO issue_labels(issue_id, label_id) VALUES (?, ?)`, args: []any{issueID, labelID}},
-			{query: `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, args: []any{relationID, issueID, relatedIssueID, now.Add(9 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'visible comment', ?)`, args: []any{commentID, issueID, now.Add(10 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'archived comment', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAK", archivedIssueID, now.Add(11 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Decision', 'Reason', 'Detail', 'active', ?)`, args: []any{decisionID, issueID, now.Add(12 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Archived decision', 'Reason', 'Detail', 'active', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAL", archivedIssueID, now.Add(13 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'work', 'active', 1, 0, X'00', ?, ?, ?, ?, ?, ?)`, args: []any{attemptID, issueID, now.Add(14 * time.Second).Format(time.RFC3339Nano), now.Add(15 * time.Second).Format(time.RFC3339Nano), now.Add(16 * time.Second).Format(time.RFC3339Nano), "done", `[]`, `[]`}},
-			{query: `INSERT INTO attempt_notes(id, attempt_id, kind, content, next_steps_json, important, created_at) VALUES (?, ?, 'checkpoint', 'note', ?, 1, ?)`, args: []any{attemptNoteID, attemptID, `[]`, now.Add(17 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, 'file', 'docs/example.md', 'artifact', '{"kind":"note"}', ?)`, args: []any{artifactID, issueID, attemptID, now.Add(18 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"created"}', ?)`, args: []any{issueID, now.Add(19 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"archived"}', ?)`, args: []any{archivedIssueID, now.Add(20 * time.Second).Format(time.RFC3339Nano)}},
-			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (NULL, 'project_event', '{"kind":"project"}', ?)`, args: []any{now.Add(21 * time.Second).Format(time.RFC3339Nano)}},
+			{query: `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, args: []any{relationID, issueID, relatedIssueID, sqlite.FormatStorageTime(now.Add(9 * time.Second))}},
+			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'visible comment', ?)`, args: []any{commentID, issueID, sqlite.FormatStorageTime(now.Add(10 * time.Second))}},
+			{query: `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'archived comment', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAK", archivedIssueID, sqlite.FormatStorageTime(now.Add(11 * time.Second))}},
+			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Decision', 'Reason', 'Detail', 'active', ?)`, args: []any{decisionID, issueID, sqlite.FormatStorageTime(now.Add(12 * time.Second))}},
+			{query: `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'Archived decision', 'Reason', 'Detail', 'active', ?)`, args: []any{"01ARZ3NDEKTSV4RRFFQ69G5FAL", archivedIssueID, sqlite.FormatStorageTime(now.Add(13 * time.Second))}},
+			{query: `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'work', 'active', 1, 0, X'00', ?, ?, ?, ?, ?, ?)`, args: []any{attemptID, issueID, sqlite.FormatStorageTime(now.Add(14 * time.Second)), sqlite.FormatStorageTime(now.Add(15 * time.Second)), sqlite.FormatStorageTime(now.Add(16 * time.Second)), "done", `[]`, `[]`}},
+			{query: `INSERT INTO attempt_notes(id, attempt_id, kind, content, next_steps_json, important, created_at) VALUES (?, ?, 'checkpoint', 'note', ?, 1, ?)`, args: []any{attemptNoteID, attemptID, `[]`, sqlite.FormatStorageTime(now.Add(17 * time.Second))}},
+			{query: `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, 'file', 'docs/example.md', 'artifact', '{"kind":"note"}', ?)`, args: []any{artifactID, issueID, attemptID, sqlite.FormatStorageTime(now.Add(18 * time.Second))}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"created"}', ?)`, args: []any{issueID, sqlite.FormatStorageTime(now.Add(19 * time.Second))}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'issue_created', '{"kind":"archived"}', ?)`, args: []any{archivedIssueID, sqlite.FormatStorageTime(now.Add(20 * time.Second))}},
+			{query: `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (NULL, 'project_event', '{"kind":"project"}', ?)`, args: []any{sqlite.FormatStorageTime(now.Add(21 * time.Second))}},
 		} {
 			if _, err := tx.ExecContext(ctx, row.query, row.args...); err != nil {
 				return err
@@ -632,7 +632,7 @@ func TestProjectRepositoryRejectsMissingOrDuplicateProjectRows(t *testing.T) {
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO projects(id, next_issue_number, created_at, updated_at)
 				VALUES (?, 1, ?, ?)`,
-				"01ARZ3NDEKTSV4RRFFQ69G5FAS", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+				"01ARZ3NDEKTSV4RRFFQ69G5FAS", sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 			return err
 		}); err != nil {
 			t.Fatalf("insert duplicate project: %v", err)
@@ -665,7 +665,7 @@ func TestProjectRepositoryReportsDestinationContent(t *testing.T) {
 	t.Run("nonempty destination", func(t *testing.T) {
 		db, _ := openProjectDatabase(t, "name", "instructions")
 		if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-			_, err := tx.ExecContext(ctx, "INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'issue', 'open', 'medium', 1, ?, ?)", "01ARZ3NDEKTSV4RRFFQ69G5FAJ", time.Now().Format(time.RFC3339Nano), time.Now().Format(time.RFC3339Nano))
+			_, err := tx.ExecContext(ctx, "INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'issue', 'open', 'medium', 1, ?, ?)", "01ARZ3NDEKTSV4RRFFQ69G5FAJ", sqlite.FormatStorageTime(time.Now()), sqlite.FormatStorageTime(time.Now()))
 			return err
 		}); err != nil {
 			t.Fatalf("insert issue: %v", err)
@@ -751,7 +751,7 @@ func openProjectDatabase(t *testing.T, name, instructions string) (*sqlite.DB, t
 			INSERT INTO projects(id, name, instructions, next_issue_number, created_at, updated_at)
 			VALUES (?, ?, ?, 7, ?, ?)`,
 			sqliteTestProjectID, nameValue, instructionsValue,
-			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"reflect"
 	"testing"
-	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
@@ -223,7 +222,7 @@ func TestApplyIssuePlanRejectsCycleAcrossExistingAndBatchEdges(t *testing.T) {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_by_session_id, created_at)
-			VALUES (?, ?, ?, 'blocks', NULL, ?)`, "01BX5ZZKBKACTAV9WEVGEMMVRZ", a.ID, b.ID, now.Format(time.RFC3339Nano))
+			VALUES (?, ?, ?, 'blocks', NULL, ?)`, "01BX5ZZKBKACTAV9WEVGEMMVRZ", a.ID, b.ID, sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatal(err)

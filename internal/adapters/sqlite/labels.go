@@ -114,7 +114,7 @@ func resolveIssueLabels(ctx context.Context, tx Executor, names []string, create
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO labels(id, name, created_at) VALUES (?, ?, ?)
-			ON CONFLICT DO NOTHING`, labelIDs[index], name, now.UTC().Format(time.RFC3339Nano)); err != nil {
+			ON CONFLICT DO NOTHING`, labelIDs[index], name, formatStorageTime(now)); err != nil {
 			return nil, err
 		}
 		label, err = loadLabelByName(ctx, tx, name)
@@ -205,13 +205,9 @@ func scanLabel(scanner labelScanner) (domain.Label, error) {
 	if err != nil {
 		return domain.Label{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored label projection is invalid", false)
 	}
-	created, err := time.Parse(time.RFC3339Nano, createdAt)
+	created, err := parseStorageTime(createdAt)
 	if err != nil {
 		return domain.Label{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored label projection is invalid", false,
-			domain.Detail{Field: "created_at", Code: "INVALID_TIMESTAMP"})
-	}
-	if _, offset := created.Zone(); offset != 0 {
-		return domain.Label{}, domain.NewError(domain.CodeStorageCorrupt, "stored label projection is invalid", false,
 			domain.Detail{Field: "created_at", Code: "INVALID_TIMESTAMP"})
 	}
 	return domain.Label{

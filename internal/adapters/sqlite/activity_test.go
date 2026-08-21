@@ -112,13 +112,13 @@ func TestActivityRepositoryFiltersAndSkipsOutOfScopeRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_by_session_id, created_at) VALUES (?, NULL, 'global', 'global', 'global', 'active', NULL, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FBB", now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_by_session_id, created_at) VALUES (?, NULL, 'global', 'global', 'global', 'active', NULL, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FBB", sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (NULL, 'global_event', '{}', ?)`, now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (NULL, 'global_event', '{}', ?)`, sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -237,7 +237,7 @@ func TestActivityRepositoryPaginationAcceptsArtifactCursor(t *testing.T) {
 	}
 	newer := now.Add(time.Hour)
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `UPDATE artifacts SET created_at = ? WHERE id = ?`, newer.Format(time.RFC3339Nano), "01ARZ3NDEKTSV4RRFFQ69G5FA6")
+		_, err := tx.ExecContext(ctx, `UPDATE artifacts SET created_at = ? WHERE id = ?`, sqlite.FormatStorageTime(newer), "01ARZ3NDEKTSV4RRFFQ69G5FA6")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -280,8 +280,8 @@ func TestActivityRepositoryCursorValidation(t *testing.T) {
 	}{
 		{name: "malformed", cursor: "not-base64", wantCode: "MALFORMED_CURSOR", wantField: "cursor"},
 		{name: "oversize", cursor: strings.Repeat("a", 4097), wantCode: "CURSOR_TOO_LARGE", wantField: "cursor"},
-		{name: "unsupported version", cursor: encodeCursor(t, activityTestCursor{OccurredAt: now.Format(time.RFC3339Nano), TypeRank: 1, SortID: "01ARZ3NDEKTSV4RRFFQ69G5FA2"}, 2), wantCode: "UNSUPPORTED_CURSOR_VERSION", wantField: "cursor"},
-		{name: "invalid payload", cursor: encodeCursor(t, activityTestCursor{OccurredAt: now.Format(time.RFC3339Nano), TypeRank: 0, SortID: "01ARZ3NDEKTSV4RRFFQ69G5FA2"}, 1), wantCode: "MALFORMED_CURSOR", wantField: "cursor"},
+		{name: "unsupported version", cursor: encodeCursor(t, activityTestCursor{OccurredAt: sqlite.FormatStorageTime(now), TypeRank: 1, SortID: "01ARZ3NDEKTSV4RRFFQ69G5FA2"}, 2), wantCode: "UNSUPPORTED_CURSOR_VERSION", wantField: "cursor"},
+		{name: "invalid payload", cursor: encodeCursor(t, activityTestCursor{OccurredAt: sqlite.FormatStorageTime(now), TypeRank: 0, SortID: "01ARZ3NDEKTSV4RRFFQ69G5FA2"}, 1), wantCode: "MALFORMED_CURSOR", wantField: "cursor"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -332,7 +332,7 @@ func TestActivityRepositoryReturnsStorageCorruptForInvalidRows(t *testing.T) {
 		rawConn.Close()
 		t.Fatal(err)
 	}
-	if _, err := conn.ExecContext(context.Background(), `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'activity_event', '{bad json', ?)`, issue.ID, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := conn.ExecContext(context.Background(), `INSERT INTO issue_events(issue_id, event_type, payload, created_at) VALUES (?, 'activity_event', '{bad json', ?)`, issue.ID, sqlite.FormatStorageTime(now)); err != nil {
 		conn.Close()
 		rawConn.Close()
 		t.Fatal(err)
@@ -391,7 +391,7 @@ func TestActivityRepositoryPersistsAcrossCloseReopenAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`, activityTestProjectID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`, activityTestProjectID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -458,7 +458,7 @@ func TestActivityRepositoryPersistsAcrossCloseReopenAndSnapshot(t *testing.T) {
 	if _, err := writerConn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writerConn.ExecContext(context.Background(), `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FBC", issueResult.Issue.ID, "uncommitted", now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := writerConn.ExecContext(context.Background(), `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FBC", issueResult.Issue.ID, "uncommitted", sqlite.FormatStorageTime(now)); err != nil {
 		t.Fatal(err)
 	}
 	issueActivity, err = reopenedRepository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{Input: domain.GetIssueActivityInput{IssueID: issueResult.Issue.ID, Limit: 20}})
@@ -473,9 +473,80 @@ func TestActivityRepositoryPersistsAcrossCloseReopenAndSnapshot(t *testing.T) {
 	}
 }
 
+// TestActivityRepositoryOrdersAndPaginatesAcrossFractionalBoundary is a
+// regression test for ISSUE-192 AC4's "activity ... ordering plus cursor
+// continuation" case. GetIssueActivity orders by `occurred_at DESC` and its
+// keyset cursor predicate is `occurred_at < ?` -- both compare the stored
+// TEXT column directly in SQL. Before the fixed-width storage format, a
+// whole-second occurred_at value (no fractional digits) memcmp-sorted AFTER
+// a chronologically later value that carried a fraction, so the newer
+// comment could be ordered behind the older one and cursor continuation
+// could skip or duplicate rows. This seeds one whole-second comment and one
+// 500ms-later comment and checks both single-page ordering and keyset
+// pagination agree with chronological order.
+func TestActivityRepositoryOrdersAndPaginatesAcrossFractionalBoundary(t *testing.T) {
+	db, _, issue, _ := newActivityTestFixture(t)
+	repository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wholeSecond := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	fractionalNewer := wholeSecond.Add(500 * time.Millisecond)
+	olderID := "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+	newerID := "01ARZ3NDEKTSV4RRFFQ69G5FD2"
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'older whole-second comment', ?)`,
+			olderID, issue.ID, sqlite.FormatStorageTime(wholeSecond)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'newer fractional comment', ?)`,
+			newerID, issue.ID, sqlite.FormatStorageTime(fractionalNewer))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	full, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+		Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryComments}, Limit: 20},
+	})
+	if err != nil {
+		t.Fatalf("GetIssueActivity() error = %v", err)
+	}
+	if len(full.Items) != 2 || full.Items[0].Comment == nil || full.Items[0].Comment.ID != newerID || full.Items[1].Comment == nil || full.Items[1].Comment.ID != olderID {
+		t.Fatalf("comment order = %#v, want newer (chronologically later) before older under ORDER BY occurred_at DESC", full.Items)
+	}
+
+	first, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+		Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryComments}, Limit: 1},
+	})
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if len(first.Items) != 1 || first.Items[0].Comment == nil || first.Items[0].Comment.ID != newerID {
+		t.Fatalf("first page = %#v, want the newer fractional comment", first.Items)
+	}
+	if !first.HasMore || first.NextCursor == nil {
+		t.Fatalf("first page has_more=%v next_cursor=%v, want has_more=true and a cursor", first.HasMore, first.NextCursor)
+	}
+
+	second, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+		Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryComments}, Limit: 1, Cursor: *first.NextCursor},
+	})
+	if err != nil {
+		t.Fatalf("second page error = %v", err)
+	}
+	if len(second.Items) != 1 || second.Items[0].Comment == nil || second.Items[0].Comment.ID != olderID {
+		t.Fatalf("second page = %#v, want the older whole-second comment (cursor continuation must not skip or repeat it)", second.Items)
+	}
+	if second.HasMore || second.NextCursor != nil {
+		t.Fatalf("second page has_more=%v next_cursor=%v, want no further page", second.HasMore, second.NextCursor)
+	}
+}
+
 func seedActivityFixture(t *testing.T, db *sqlite.DB, issueID string, now time.Time) error {
 	t.Helper()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := sqlite.FormatStorageTime(now)
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FA2", issueID, "first", timestamp); err != nil {
 			return err
@@ -507,7 +578,7 @@ func newActivityTestFixture(t *testing.T) (*sqlite.DB, string, domain.Issue, tim
 		t.Fatalf("migrate: %v", err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`, activityTestProjectID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`, activityTestProjectID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)

@@ -111,7 +111,7 @@ type terminateAttemptReason struct {
 // request to open, previously true only for lease expiry). Returns whether
 // the attempt was found active and terminated.
 func terminateAttempt(ctx context.Context, tx Executor, attemptID string, finalStatus domain.AttemptStatus, reason terminateAttemptReason, now time.Time) (bool, error) {
-	timestamp := now.UTC().Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var failure, interruption any
 	if reason.FailureReasonCode != nil {
 		failure = string(*reason.FailureReasonCode)
@@ -162,7 +162,7 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 	if request == nil {
 		return nil
 	}
-	timestamp := now.UTC().Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = NULL, version = version + 1
 		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusOpen, request.ID, attemptID)
 	if err != nil {
@@ -189,9 +189,9 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
 	}
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	expires := now.Add(command.LeaseDuration).UTC()
-	expiresTimestamp := expires.Format(time.RFC3339Nano)
+	expiresTimestamp := formatStorageTime(expires)
 	var result ports.ClaimIssueResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
@@ -347,7 +347,7 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 		return ports.RenewAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt renewal command is invalid", false)
 	}
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	expires := now.Add(command.LeaseDuration).UTC()
 	var result ports.RenewAttemptResult
 	var leaseExpired bool
@@ -362,7 +362,7 @@ func (repository *AttemptRepository) RenewAttempt(ctx context.Context, command p
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE work_attempts
 			SET lease_expires_at = ?, last_heartbeat_at = ?
-			WHERE id = ? AND status = 'active'`, expires.Format(time.RFC3339Nano), timestamp, command.AttemptID)
+			WHERE id = ? AND status = 'active'`, formatStorageTime(expires), timestamp, command.AttemptID)
 		if err != nil {
 			return err
 		}
@@ -393,7 +393,7 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 	var result ports.ExpireAttemptsResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM work_attempts
-			WHERE status = 'active' AND lease_expires_at <= ? ORDER BY id ASC`, now.Format(time.RFC3339Nano))
+			WHERE status = 'active' AND lease_expires_at <= ? ORDER BY id ASC`, formatStorageTime(now))
 		if err != nil {
 			return err
 		}
@@ -449,7 +449,7 @@ func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, com
 			LEFT JOIN agent_sessions AS s ON s.id = wa.session_id
 			WHERE wa.status = 'active' AND wa.lease_expires_at > ?
 			ORDER BY wa.lease_expires_at ASC, wa.id ASC
-			LIMIT ?`, now.Format(time.RFC3339Nano), limit)
+			LIMIT ?`, formatStorageTime(now), limit)
 		if err != nil {
 			return err
 		}
@@ -540,7 +540,7 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 	if err != nil {
 		return ports.SaveAttemptNoteResult{}, err
 	}
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var result ports.SaveAttemptNoteResult
 	var leaseExpired bool
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
@@ -884,7 +884,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 	if err != nil {
 		return ports.FinishAttemptResult{}, err
 	}
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var result ports.FinishAttemptResult
 	var leaseExpired bool
 	var staleReviewTargetErr error
@@ -1175,7 +1175,7 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 		return ports.ForceReleaseAttemptResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt release command is invalid", false)
 	}
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var result ports.ForceReleaseAttemptResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		var issueID, status string
@@ -1268,7 +1268,7 @@ func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptI
 }
 
 func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time) error {
-	resolvedAt := occurredAt.UTC().Format(time.RFC3339Nano)
+	resolvedAt := formatStorageTime(occurredAt)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
 		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID, attemptID)
 	if err != nil {
@@ -1290,7 +1290,7 @@ func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request 
 
 func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time, outcome domain.ReviewOutcome, reason *string) error {
 	nextStatus := reviewRequestStatusForOutcome(outcome)
-	resolvedAt := occurredAt.UTC().Format(time.RFC3339Nano)
+	resolvedAt := formatStorageTime(occurredAt)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
 		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, nextStatus, resolvedAt, request.ID, attemptID)
 	if err != nil {
@@ -1435,7 +1435,7 @@ func nullableInterruption(v sql.NullString) *domain.InterruptionReasonCode {
 // update makes repeated lazy cleanup safe and ensures exactly one expiry event.
 func expireAttemptsForIssue(ctx context.Context, tx Executor, issueID string, now time.Time) error {
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM work_attempts
-		WHERE issue_id = ? AND status = 'active' AND lease_expires_at <= ?`, issueID, now.UTC().Format(time.RFC3339Nano))
+		WHERE issue_id = ? AND status = 'active' AND lease_expires_at <= ?`, issueID, formatStorageTime(now))
 	if err != nil {
 		return err
 	}
@@ -1469,7 +1469,7 @@ func expireAttemptsForIssue(ctx context.Context, tx Executor, issueID string, no
 }
 
 func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.Time) (bool, error) {
-	timestamp := now.UTC().Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	res, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = 'expired', finished_at = ?
 		WHERE id = ? AND status = 'active' AND lease_expires_at <= ?`, timestamp, attemptID, timestamp)
 	if err != nil {

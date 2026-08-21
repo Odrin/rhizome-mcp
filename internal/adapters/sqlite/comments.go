@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"strings"
-	"time"
 
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
@@ -76,7 +75,7 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var comment domain.Comment
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {

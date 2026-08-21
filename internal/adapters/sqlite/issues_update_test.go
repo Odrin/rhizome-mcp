@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sync"
 	"testing"
-	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
@@ -180,7 +179,7 @@ func TestIssueUpdateConflictAndFailuresDoNotAppendEvents(t *testing.T) {
 		t.Fatalf("stale update error retryable = %v, want true", staleDomainErr != nil && staleDomainErr.Retryable)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, "UPDATE issues SET archived_at = ? WHERE id = ?", now.Format(time.RFC3339Nano), issue.ID)
+		_, err := tx.ExecContext(ctx, "UPDATE issues SET archived_at = ? WHERE id = ?", sqlite.FormatStorageTime(now), issue.ID)
 		return err
 	}); err != nil {
 		t.Fatal(err)

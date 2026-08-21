@@ -539,7 +539,7 @@ func loadIssueBlockerState(ctx context.Context, query Queryer, issueID string) (
 
 func hasActiveAttempt(ctx context.Context, query Queryer, issueID string, now time.Time) (bool, error) {
 	var attemptID string
-	err := query.QueryRowContext(ctx, `SELECT id FROM work_attempts WHERE issue_id = ? AND status = 'active' AND lease_expires_at > ? LIMIT 1`, issueID, now.UTC().Format(time.RFC3339Nano)).Scan(&attemptID)
+	err := query.QueryRowContext(ctx, `SELECT id FROM work_attempts WHERE issue_id = ? AND status = 'active' AND lease_expires_at > ? LIMIT 1`, issueID, formatStorageTime(now)).Scan(&attemptID)
 	if err == nil {
 		return true, nil
 	}

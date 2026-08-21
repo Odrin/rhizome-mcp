@@ -245,7 +245,7 @@ func TestWorkContextRepositoryReturnsCorruptOnMalformedRelation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rawDB.Close()
-	if _, err := rawDB.ExecContext(context.Background(), `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FB1", "not-a-ulid", target.ID, domain.RelationTypeBlocks, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := rawDB.ExecContext(context.Background(), `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FB1", "not-a-ulid", target.ID, domain.RelationTypeBlocks, sqlite.FormatStorageTime(now)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1574,7 +1574,7 @@ func TestWorkContextRepositoryLoadsChangesSincePreviousAttemptWhenRequested(t *t
 			t.Fatal(err)
 		}
 		if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-			_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'client', ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'client', ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 			return err
 		}); err != nil {
 			t.Fatal(err)
@@ -1740,7 +1740,7 @@ func TestWorkContextRepositoryUsesCommittedSnapshotWhileWriterTransactionIsOpen(
 	defer func() {
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 	}()
-	if _, err := conn.ExecContext(context.Background(), `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'pending', 'pending', 'pending', 'active', ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FA1", target.ID, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := conn.ExecContext(context.Background(), `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, 'pending', 'pending', 'pending', 'active', ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FA1", target.ID, sqlite.FormatStorageTime(now)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1796,6 +1796,86 @@ func TestWorkContextRepositoryClonesReturnedData(t *testing.T) {
 	}
 }
 
+// TestActiveAttemptProjectionsAgreeAtFractionalLeaseBoundary is a regression
+// test for ISSUE-192 AC4's "ListIssues effective status and claimable" and
+// "hasActiveAttempt" cases. Both hasActiveAttempt (used by GetWorkContext)
+// and ListIssues' claimable/active-attempt projection compare the stored
+// lease_expires_at TEXT column against a "now" parameter with SQL's
+// `lease_expires_at > ?`. Before the fixed-width storage format, a
+// whole-second lease_expires_at value (no fractional digits) compared
+// against a fractional "now" via memcmp disagreed with chronological order:
+// 500ms before a whole-second boundary was seen as already-expired, and
+// 500/550ms after it was seen as still-active. This seeds one active
+// attempt with a whole-second lease and checks both call sites agree with
+// chronological order on either side of that boundary.
+func TestActiveAttemptProjectionsAgreeAtFractionalLeaseBoundary(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	workContextRepository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueRepository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaseExpiresAt := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	if leaseExpiresAt.Nanosecond() != 0 {
+		t.Fatalf("precondition: lease expiry has a fraction: %s", leaseExpiresAt)
+	}
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA9"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusActive, leaseExpiresAt, now, nil, now); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		now        time.Time
+		wantActive bool
+	}{
+		{"500ms before whole-second boundary", leaseExpiresAt.Add(-500 * time.Millisecond), true},
+		{"500ms after whole-second boundary", leaseExpiresAt.Add(500 * time.Millisecond), false},
+		{"550ms after whole-second boundary", leaseExpiresAt.Add(550 * time.Millisecond), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wantStatus := domain.EffectiveStatusReady
+			if test.wantActive {
+				wantStatus = domain.EffectiveStatusInProgress
+			}
+
+			workContext, err := workContextRepository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: test.now})
+			if err != nil {
+				t.Fatalf("GetWorkContext() error = %v", err)
+			}
+			if workContext.Issue.EffectiveStatus != wantStatus {
+				t.Fatalf("hasActiveAttempt effective status = %q, want %q", workContext.Issue.EffectiveStatus, wantStatus)
+			}
+
+			list, err := issueRepository.ListIssues(context.Background(), ports.ListIssuesCommand{Input: domain.ListIssuesInput{}, Now: test.now})
+			if err != nil {
+				t.Fatalf("ListIssues() error = %v", err)
+			}
+			var item *domain.IssueProjection
+			for index := range list.Items {
+				if list.Items[index].ID == target.ID {
+					item = &list.Items[index]
+					break
+				}
+			}
+			if item == nil {
+				t.Fatal("target issue missing from ListIssues page")
+			}
+			if item.EffectiveStatus != wantStatus || item.IsClaimable == test.wantActive {
+				t.Fatalf("ListIssues projection = effective status %q claimable %t, want status %q claimable %t",
+					item.EffectiveStatus, item.IsClaimable, wantStatus, !test.wantActive)
+			}
+			if (item.ActiveAttemptID != nil) != test.wantActive {
+				t.Fatalf("ListIssues active attempt id = %v, want present = %t", item.ActiveAttemptID, test.wantActive)
+			}
+		})
+	}
+}
+
 func newWorkContextTestFixture(t *testing.T) (*sqlite.DB, string, time.Time, domain.Issue) {
 	t.Helper()
 	now := time.Date(2026, 7, 14, 10, 11, 12, 123_000_000, time.UTC)
@@ -1806,7 +1886,7 @@ func newWorkContextTestFixture(t *testing.T) (*sqlite.DB, string, time.Time, dom
 		t.Fatalf("migrate: %v", err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 2, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 2, ?, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -1844,7 +1924,7 @@ func seedIssueWithType(t *testing.T, db *sqlite.DB, id string, sequenceNo int64,
 		if status == domain.StatusBlocked {
 			blockedReasonValue = "blocked reason"
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, description, acceptance_criteria, status, priority, blocked_reason, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'medium', ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET sequence_no = excluded.sequence_no, type = excluded.type, title = excluded.title, description = excluded.description, acceptance_criteria = excluded.acceptance_criteria, status = excluded.status, priority = excluded.priority, blocked_reason = excluded.blocked_reason, version = excluded.version, updated_at = excluded.updated_at`, id, sequenceNo, issueType, title, descriptionValue, acceptanceValue, status, blockedReasonValue, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, description, acceptance_criteria, status, priority, blocked_reason, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'medium', ?, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET sequence_no = excluded.sequence_no, type = excluded.type, title = excluded.title, description = excluded.description, acceptance_criteria = excluded.acceptance_criteria, status = excluded.status, priority = excluded.priority, blocked_reason = excluded.blocked_reason, version = excluded.version, updated_at = excluded.updated_at`, id, sequenceNo, issueType, title, descriptionValue, acceptanceValue, status, blockedReasonValue, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		if err != nil {
 			return fmt.Errorf("seed issue %s: %w", id, err)
 		}
@@ -1860,7 +1940,7 @@ func seedIssueWithContent(t *testing.T, db *sqlite.DB, id string, sequenceNo int
 func seedArchivedIssue(t *testing.T, db *sqlite.DB, id string, now time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `UPDATE issues SET archived_at = ? WHERE id = ?`, now.Format(time.RFC3339Nano), id)
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET archived_at = ? WHERE id = ?`, sqlite.FormatStorageTime(now), id)
 		return err
 	})
 }
@@ -1868,7 +1948,7 @@ func seedArchivedIssue(t *testing.T, db *sqlite.DB, id string, now time.Time) er
 func seedBlocksRelation(t *testing.T, db *sqlite.DB, sourceID, targetID string, now time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, sourceID, sourceID, targetID, now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, 'blocks', ?)`, sourceID, sourceID, targetID, sqlite.FormatStorageTime(now))
 		return err
 	})
 }
@@ -1879,7 +1959,7 @@ func seedRelation(t *testing.T, db *sqlite.DB, sourceID, targetID string, relati
 		sourceID, targetID = targetID, sourceID
 	}
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, id, sourceID, targetID, relationType, now.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`, id, sourceID, targetID, relationType, sqlite.FormatStorageTime(now))
 		return err
 	})
 }
@@ -1908,7 +1988,7 @@ func seedIssueEvent(t *testing.T, db *sqlite.DB, id int64, issueID string, event
 		} else {
 			attemptValue = nil
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(id, issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, issueID, eventType, sessionValue, attemptValue, payload, createdAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(id, issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, issueID, eventType, sessionValue, attemptValue, payload, sqlite.FormatStorageTime(createdAt))
 		return err
 	})
 }
@@ -1917,7 +1997,7 @@ func seedAttemptWithBoundary(t *testing.T, db *sqlite.DB, id, issueID string, st
 	t.Helper()
 	var finishedValue any
 	if finishedAt != nil {
-		finishedValue = finishedAt.Format(time.RFC3339Nano)
+		finishedValue = sqlite.FormatStorageTime(*finishedAt)
 	}
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		failureReasonCode := any(nil)
@@ -1928,7 +2008,7 @@ func seedAttemptWithBoundary(t *testing.T, db *sqlite.DB, id, issueID string, st
 		if status == domain.AttemptStatusInterrupted {
 			interruptionReasonCode = domain.InterruptionReasonHandoff
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`, id, issueID, status, boundary, []byte{1, 2, 3}, leaseExpiresAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), finishedValue, failureReasonCode, interruptionReasonCode)
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`, id, issueID, status, boundary, []byte{1, 2, 3}, sqlite.FormatStorageTime(leaseExpiresAt), sqlite.FormatStorageTime(startedAt), sqlite.FormatStorageTime(now), finishedValue, failureReasonCode, interruptionReasonCode)
 		return err
 	})
 }
@@ -1954,7 +2034,7 @@ func seedArtifact(t *testing.T, db *sqlite.DB, id, issueID string, attemptID *st
 		metadataValue = nil
 	}
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, attemptValue, artifactType, uri, titleValue, metadataValue, createdAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, attemptValue, artifactType, uri, titleValue, metadataValue, sqlite.FormatStorageTime(createdAt))
 		return err
 	})
 }
@@ -1963,10 +2043,10 @@ func seedDecision(t *testing.T, db *sqlite.DB, issueID *string, id, title, summa
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		if issueID == nil {
-			_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)`, id, title, summary, content, status, createdAt.Format(time.RFC3339Nano))
+			_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)`, id, title, summary, content, status, sqlite.FormatStorageTime(createdAt))
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, *issueID, title, summary, content, status, createdAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, *issueID, title, summary, content, status, sqlite.FormatStorageTime(createdAt))
 		return err
 	})
 }
@@ -1974,7 +2054,7 @@ func seedDecision(t *testing.T, db *sqlite.DB, issueID *string, id, title, summa
 func seedComment(t *testing.T, db *sqlite.DB, id, issueID, content string, createdAt time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, id, issueID, content, createdAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`, id, issueID, content, sqlite.FormatStorageTime(createdAt))
 		return err
 	})
 }
@@ -1983,7 +2063,7 @@ func seedAttempt(t *testing.T, db *sqlite.DB, id, issueID string, status domain.
 	t.Helper()
 	var finishedValue any
 	if finishedAt != nil {
-		finishedValue = finishedAt.Format(time.RFC3339Nano)
+		finishedValue = sqlite.FormatStorageTime(*finishedAt)
 	}
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		failureReasonCode := any(nil)
@@ -1994,7 +2074,7 @@ func seedAttempt(t *testing.T, db *sqlite.DB, id, issueID string, status domain.
 		if status == domain.AttemptStatusInterrupted {
 			interruptionReasonCode = domain.InterruptionReasonHandoff
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, status, []byte{1, 2, 3}, leaseExpiresAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), finishedValue, nil, failureReasonCode, interruptionReasonCode)
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, status, []byte{1, 2, 3}, sqlite.FormatStorageTime(leaseExpiresAt), sqlite.FormatStorageTime(startedAt), sqlite.FormatStorageTime(now), finishedValue, nil, failureReasonCode, interruptionReasonCode)
 		return err
 	})
 }
@@ -2008,7 +2088,7 @@ func seedAttemptWithResult(t *testing.T, db *sqlite.DB, attemptID string, result
 "step one"
 ]`
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE work_attempts SET result_summary = ?, next_steps_json = ?, finished_at = ? WHERE id = ?`, resultSummary, nextStepsJSON, finishedAt.Format(time.RFC3339Nano), attemptID)
+		_, err := tx.ExecContext(ctx, `UPDATE work_attempts SET result_summary = ?, next_steps_json = ?, finished_at = ? WHERE id = ?`, resultSummary, nextStepsJSON, sqlite.FormatStorageTime(finishedAt), attemptID)
 		return err
 	})
 }
@@ -2016,7 +2096,7 @@ func seedAttemptWithResult(t *testing.T, db *sqlite.DB, attemptID string, result
 func seedActiveAttempt(t *testing.T, db *sqlite.DB, issueID string, leaseExpiresAt, startedAt, finishedAt time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?, NULL, NULL)`, "01ARZ3NDEKTSV4RRFFQ69G5FA9", issueID, []byte{1, 2, 3}, leaseExpiresAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?, NULL, NULL)`, "01ARZ3NDEKTSV4RRFFQ69G5FA9", issueID, []byte{1, 2, 3}, sqlite.FormatStorageTime(leaseExpiresAt), sqlite.FormatStorageTime(startedAt), sqlite.FormatStorageTime(startedAt))
 		return err
 	})
 }
@@ -2024,7 +2104,7 @@ func seedActiveAttempt(t *testing.T, db *sqlite.DB, issueID string, leaseExpires
 func seedNote(t *testing.T, db *sqlite.DB, id, attemptID string, kind domain.AttemptNoteKind, content string, createdAt time.Time) error {
 	t.Helper()
 	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at) VALUES (?, ?, ?, ?, 0, ?)`, id, attemptID, kind, content, createdAt.Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at) VALUES (?, ?, ?, ?, 0, ?)`, id, attemptID, kind, content, sqlite.FormatStorageTime(createdAt))
 		return err
 	})
 }

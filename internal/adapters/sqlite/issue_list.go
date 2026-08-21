@@ -47,7 +47,7 @@ const (
 
 func issueActiveAttemptIDSQL(now time.Time) string {
 	return `(SELECT id FROM work_attempts WHERE issue_id = issues.id AND status = 'active' AND lease_expires_at > '` +
-		now.UTC().Format(time.RFC3339Nano) + `' LIMIT 1)`
+		formatStorageTime(now) + `' LIMIT 1)`
 }
 
 func issueClaimableSQLAt(now time.Time) string {
@@ -296,13 +296,9 @@ func loadIssueListLabels(ctx context.Context, query Queryer, items []domain.Issu
 		if err != nil {
 			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored label projection is invalid", false)
 		}
-		created, err := time.Parse(time.RFC3339Nano, createdAt)
+		created, err := parseStorageTime(createdAt)
 		if err != nil {
 			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored label projection is invalid", false,
-				domain.Detail{Field: "created_at", Code: "INVALID_TIMESTAMP"})
-		}
-		if _, offset := created.Zone(); offset != 0 {
-			return domain.NewError(domain.CodeStorageCorrupt, "stored label projection is invalid", false,
 				domain.Detail{Field: "created_at", Code: "INVALID_TIMESTAMP"})
 		}
 		index, exists := byID[issueID]

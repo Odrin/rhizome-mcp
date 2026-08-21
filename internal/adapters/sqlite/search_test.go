@@ -34,7 +34,7 @@ func TestSearchRanksPaginatesAndFiltersIndexedEntities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create archived issue: %v", err)
 	}
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := sqlite.FormatStorageTime(now)
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at)
 			VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', ?, 'lease comment', ?)`, first.ID, timestamp); err != nil {
@@ -185,7 +185,7 @@ func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("read baseline event ID: %v", err)
 	}
-	timestamp := now.Add(time.Second).Format(time.RFC3339Nano)
+	timestamp := sqlite.FormatStorageTime(now.Add(time.Second))
 	relationPayload, err := json.Marshal(map[string]any{
 		"relation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "source_issue_id": issue.ID,
 		"target_issue_id": otherIssue.ID, "relation_type": "related_to",

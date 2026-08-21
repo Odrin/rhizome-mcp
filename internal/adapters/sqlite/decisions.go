@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"strings"
-	"time"
 
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
@@ -44,7 +43,7 @@ func (repository *DecisionRepository) RecordDecision(ctx context.Context, comman
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var result domain.RecordDecisionResult
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		var issueID *string
@@ -196,7 +195,7 @@ func (repository *DecisionRepository) ListDecisions(ctx context.Context, command
 			result.HasMore = true
 			result.Items = result.Items[:input.Limit]
 			last := result.Items[len(result.Items)-1]
-			cursor, err := decisionCursorCodec.Encode(decisionCursor{CreatedAt: last.CreatedAt.Format(time.RFC3339Nano), ID: last.ID})
+			cursor, err := decisionCursorCodec.Encode(decisionCursor{CreatedAt: formatStorageTime(last.CreatedAt), ID: last.ID})
 			if err != nil {
 				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode decision cursor", false)
 			}

@@ -36,6 +36,9 @@ var agentSessionHandlesSQL string
 //go:embed sql/006_search_index_review_title_sync.sql
 var searchIndexReviewTitleSyncSQL string
 
+//go:embed sql/007_fixed_width_timestamps.sql
+var fixedWidthTimestampsSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
@@ -44,6 +47,7 @@ const reviewWorkflowChecksum = "2377585c091c8a6603b1b5e7dfd7726e2121de08858cfbca
 const reviewContextChecksum = "0790d44675b550e7dddcb54f2a66a80aaa4da02e6462d6d54bb3620763cc76b8"
 const agentSessionHandlesChecksum = "27cc3ecb71160c5d92f1e307f8e5833937b8b89614c01a41c45f56d4030da9c7"
 const searchIndexReviewTitleSyncChecksum = "24d49e7fb1dd774d4303855d846004b0246a4b4f4dcea56de97733333bdf4890"
+const fixedWidthTimestampsChecksum = "b54b2763004d5313af3c451d7a7f0032496bdc45372559a5f3db22358dda17e4"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -83,6 +87,12 @@ var (
 			name:     "search_index_review_title_sync",
 			checksum: searchIndexReviewTitleSyncChecksum,
 			sql:      searchIndexReviewTitleSyncSQL,
+		},
+		{
+			version:  7,
+			name:     "fixed_width_timestamps",
+			checksum: fixedWidthTimestampsChecksum,
+			sql:      fixedWidthTimestampsSQL,
 		},
 	}
 )

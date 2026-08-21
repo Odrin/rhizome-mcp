@@ -336,7 +336,7 @@ func TestFinishAttemptIdempotentReplayAcrossSessionReconnect(t *testing.T) {
 	sessionA := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
 	sessionB := "01BX5ZZKBKACTAV9WEVGEMMVS0"
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := fixture.clock.Now().Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(fixture.clock.Now())
 		for _, id := range []string{sessionA, sessionB} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(
 				id, client_name, started_at, last_seen_at) VALUES (?, 'test', ?, ?)`,
@@ -432,7 +432,7 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 
 	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'review-test', ?, ?)`, sessionID, fixture.clock.Now().Format(time.RFC3339Nano), fixture.clock.Now().Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'review-test', ?, ?)`, sessionID, sqlite.FormatStorageTime(fixture.clock.Now()), sqlite.FormatStorageTime(fixture.clock.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -944,7 +944,7 @@ func TestAttemptClaimRenewExpiryAndTakeover(t *testing.T) {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1153,13 +1153,111 @@ func TestExpireAttemptsCleansAllIssuesAtBoundaryAndPreservesState(t *testing.T) 
 	}
 }
 
+// TestExpireAttemptsSweepsFractionalBoundariesAgainstWholeSecondLeases is a
+// regression test for ISSUE-192: SQLite compares the lease_expires_at TEXT
+// column with memcmp, so ExpireAttempts' `lease_expires_at <= ?` predicate
+// must agree with chronological order even when one side of the comparison
+// is a whole-second value (no fractional digits pre-fix) and the other
+// carries a fraction. It claims one attempt whose lease lands on a whole
+// second, then sweeps 500ms past that boundary (whole-second stored value vs
+// a fractional "now"), and a second attempt whose lease itself carries a
+// .500s fraction, sweeping 550ms past that (two different fractional
+// widths). Both must be swept in one pass; before the fixed-width storage
+// format this predicate silently failed to match past-due whole-second
+// leases against a fractional "now".
+func TestExpireAttemptsSweepsFractionalBoundariesAgainstWholeSecondLeases(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "expire-fractional-boundary")
+	defer fixture.close()
+
+	wholeSecondIssue := createAttemptIssue(t, fixture, "whole-second lease", domain.StatusReady)
+	wholeSecondClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: wholeSecondIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wholeSecondClaim.Attempt.LeaseExpiresAt.Nanosecond() != 0 {
+		t.Fatalf("precondition: first lease expiry has a fraction: %s", wholeSecondClaim.Attempt.LeaseExpiresAt)
+	}
+
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds)*time.Second + 500*time.Millisecond)
+
+	fractionalIssue := createAttemptIssue(t, fixture, "fractional lease", domain.StatusReady)
+	fractionalClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: fractionalIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fractionalClaim.Attempt.LeaseExpiresAt.Nanosecond() != 500_000_000 {
+		t.Fatalf("precondition: second lease expiry lacks a .500s fraction: %s", fractionalClaim.Attempt.LeaseExpiresAt)
+	}
+
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds)*time.Second + 50*time.Millisecond)
+
+	result, err := fixture.attempts.ExpireAttempts(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExpiredAttemptCount != 2 {
+		t.Fatalf("expired attempt count = %d, want 2 (fractional-boundary lease expiry must not be silently skipped)", result.ExpiredAttemptCount)
+	}
+
+	var wholeSecondStatus, fractionalStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, wholeSecondClaim.Attempt.ID).Scan(&wholeSecondStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, fractionalClaim.Attempt.ID).Scan(&fractionalStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wholeSecondStatus != string(domain.AttemptStatusExpired) || fractionalStatus != string(domain.AttemptStatusExpired) {
+		t.Fatalf("attempt statuses = whole-second %q, fractional %q, want both expired", wholeSecondStatus, fractionalStatus)
+	}
+}
+
+// TestRenewAndFinishAttemptDetectExpiryAtFractionalBoundary is a regression
+// test for ISSUE-192 AC4's "Renew/Finish lease-expired paths" case.
+// authenticateActiveAttempt's own expiry check is a Go-native time.Time
+// comparison (immune to the SQL memcmp bug), but it hands off to
+// expireAttempt to persist the expired status via a SQL UPDATE guarded by
+// `lease_expires_at <= ?` -- before the fixed-width format, that guard could
+// disagree with the Go-side check for a whole-second lease compared against
+// a fractional "now", and callers assert (CodeStorageCorrupt) rather than
+// silently misreport. This claims an attempt with a whole-second lease,
+// advances 500ms past expiry, and confirms Renew and Finish both cleanly
+// report CodeLeaseExpired -- not CodeStorageCorrupt, and not success.
+func TestRenewAndFinishAttemptDetectExpiryAtFractionalBoundary(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "renew-finish-fractional-boundary")
+	defer fixture.close()
+
+	renewIssue := createAttemptIssue(t, fixture, "renew past fractional boundary", domain.StatusReady)
+	renewClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: renewIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds)*time.Second + 500*time.Millisecond)
+	if _, err := fixture.attempts.RenewAttempt(fixture.ctx, domain.RenewAttemptInput{
+		AttemptID: renewClaim.Attempt.ID, LeaseToken: renewClaim.LeaseToken,
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
+		t.Fatalf("renew at fractional boundary error = %v, want %s", err, domain.CodeLeaseExpired)
+	}
+
+	finishIssue := createAttemptIssue(t, fixture, "finish past fractional boundary", domain.StatusReady)
+	finishClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: finishIssue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.Advance(time.Duration(domain.DefaultLeaseSeconds)*time.Second + 500*time.Millisecond)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, finishInput(finishClaim, domain.AttemptOutcomeCompleted)); !errors.Is(err, &domain.Error{Code: domain.CodeLeaseExpired}) {
+		t.Fatalf("finish at fractional boundary error = %v, want %s", err, domain.CodeLeaseExpired)
+	}
+}
+
 func TestAttemptSessionAttributionAndExpiryFallback(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "session-attribution")
 	defer fixture.close()
 	sessionA := "01BX5ZZKBKACTAV9WEVGEMMVRZ"
 	sessionB := "01BX5ZZKBKACTAV9WEVGEMMVS0"
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := fixture.clock.Now().Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(fixture.clock.Now())
 		for _, id := range []string{sessionA, sessionB} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'test', ?, ?)`, id, timestamp, timestamp); err != nil {
 				return err
@@ -1272,7 +1370,7 @@ func TestSaveAttemptNoteAuthorizesPersistsEventsAndExpiresAtBoundary(t *testing.
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1434,7 +1532,7 @@ func TestSaveAttemptNoteIdempotencyReplayAndConflict(t *testing.T) {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1518,7 +1616,7 @@ func TestSaveAttemptNotePersistsArtifactsAtomicallyAndSafely(t *testing.T) {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			"01ARZ3NDEKTSV4RRFFQ69G5FAS", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			"01ARZ3NDEKTSV4RRFFQ69G5FAS", sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1623,7 +1721,7 @@ func TestAttemptSimultaneousClaimsHaveOneWinner(t *testing.T) {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			"01ARZ3NDEKTSV4RRFFQ69G5FAV", source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1692,7 +1790,7 @@ func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
-			sqliteTestProjectID, source.Now().Format(time.RFC3339Nano), source.Now().Format(time.RFC3339Nano))
+			sqliteTestProjectID, sqlite.FormatStorageTime(source.Now()), sqlite.FormatStorageTime(source.Now()))
 		return err
 	}); err != nil {
 		_ = db.Close(ctx)
@@ -1998,7 +2096,7 @@ func TestFinishAttemptDuplicateArtifactRollsBackCompletion(t *testing.T) {
 		_, err := tx.ExecContext(ctx, `INSERT INTO artifacts(
 			id, issue_id, attempt_id, type, uri, title, metadata, created_at
 		) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`, existingID, issue.ID, claim.Attempt.ID,
-			domain.ArtifactTypeOther, "existing", fixture.clock.Now().Format(time.RFC3339Nano))
+			domain.ArtifactTypeOther, "existing", sqlite.FormatStorageTime(fixture.clock.Now()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -2128,11 +2226,11 @@ func TestForceReleaseAttemptInterruptsAttemptAndPreservesRecoveryData(t *testing
 	}
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at)
-			VALUES (?, ?, 'progress', 'keep me', 0, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAY", claim.Attempt.ID, fixture.clock.Now().Format(time.RFC3339Nano)); err != nil {
+			VALUES (?, ?, 'progress', 'keep me', 0, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAY", claim.Attempt.ID, sqlite.FormatStorageTime(fixture.clock.Now())); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at)
-			VALUES (?, ?, ?, ?, 'artifact.txt', NULL, NULL, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAZ", issue.ID, claim.Attempt.ID, domain.ArtifactTypeOther, fixture.clock.Now().Format(time.RFC3339Nano)); err != nil {
+			VALUES (?, ?, ?, ?, 'artifact.txt', NULL, NULL, ?)`, "01ARZ3NDEKTSV4RRFFQ69G5FAZ", issue.ID, claim.Attempt.ID, domain.ArtifactTypeOther, sqlite.FormatStorageTime(fixture.clock.Now())); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE work_attempts

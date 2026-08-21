@@ -80,7 +80,7 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 			return err
 		}
 		requestVersion := int64(1)
-		createdAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		createdAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
             id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json,
             status, supersedes_id, active_attempt_id, version, created_at, resolved_at
@@ -231,7 +231,7 @@ func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, com
 		if request.Status != domain.ReviewRequestStatusOpen && request.Status != domain.ReviewRequestStatusClaimed {
 			return domain.NewError(domain.CodeInvalidArgument, "review request cannot be cancelled", false)
 		}
-		resolvedAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		resolvedAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusCancelled, resolvedAt, request.ID, request.Version); err != nil {
 			return err
 		}
@@ -269,7 +269,7 @@ func (repository *ReviewRepository) SupersedeReviewRequest(ctx context.Context, 
 		if request.Status != domain.ReviewRequestStatusOpen && request.Status != domain.ReviewRequestStatusClaimed {
 			return domain.NewError(domain.CodeInvalidArgument, "review request cannot be superseded", false)
 		}
-		resolvedAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		resolvedAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID, request.Version); err != nil {
 			return err
 		}
@@ -384,7 +384,7 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
 		}
 
-		occurredAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		occurredAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
 			domain.ReviewRequestStatusSuperseded, occurredAt, predecessor.ID, predecessor.Version); err != nil {
 			return err
@@ -516,7 +516,7 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 		case !isNoRowsError(err):
 			return err
 		}
-		claimedAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		claimedAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = ?, resolved_at = NULL, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusClaimed, *command.ActiveAttemptID, request.ID, request.Version); err != nil {
 			return err
 		}
@@ -564,7 +564,7 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 			return domain.NewError(domain.CodeInvalidArgument, "attempt_id does not match the active review attempt", false)
 		}
 		nextStatus := reviewRequestStatusForOutcome(command.Outcome)
-		resolvedAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+		resolvedAt := formatStorageTime(command.OccurredAt)
 		outcomeID, err := repository.newID()
 		if err != nil {
 			return err
@@ -598,7 +598,7 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 	if err != nil {
 		return domain.ReviewTarget{}, err
 	}
-	createdAt := command.OccurredAt.UTC().Format(time.RFC3339Nano)
+	createdAt := formatStorageTime(command.OccurredAt)
 
 	var row reviewTargetRow
 	err = tx.QueryRowContext(ctx, `SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
@@ -882,7 +882,7 @@ func parseTimestamp(value string) time.Time {
 	if value == "" {
 		return time.Time{}
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	parsed, err := parseStorageTime(value)
 	if err != nil {
 		return time.Time{}
 	}

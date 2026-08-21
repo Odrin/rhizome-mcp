@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
@@ -104,7 +103,7 @@ func (repository *PlanningRepository) ApplyIssuePlan(ctx context.Context, comman
 		_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
 			idempotency_key, operation, request_hash, response_json, created_at
 		) VALUES (?, 'apply_issue_plan', ?, ?, ?)`,
-			command.IdempotencyKey, command.RequestHash, string(response), command.OccurredAt.UTC().Format(time.RFC3339Nano))
+			command.IdempotencyKey, command.RequestHash, string(response), formatStorageTime(command.OccurredAt))
 		return err
 	})
 	if err != nil {
@@ -308,7 +307,7 @@ func planPathExists(edges []struct{ source, target string }, start, sought strin
 
 func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCommand) (ports.ApplyIssuePlanResult, error) {
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	localIDs := make(map[string]string, len(command.Plan.Issues))
 	for i, issue := range command.Plan.Issues {
 		if issue.Ref != "" {

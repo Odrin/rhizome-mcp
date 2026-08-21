@@ -71,7 +71,7 @@ func TestIssueArchivePersistsProjectionByULIDAndDisplayIDAndEvent(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if eventType != "issue_archived" || payload != `{"version":2,"archived_at":"`+now.Format(time.RFC3339Nano)+`"}` {
+	if eventType != "issue_archived" || payload != `{"version":2,"archived_at":"`+sqlite.FormatStorageTime(now)+`"}` {
 		t.Fatalf("archive event = type %q payload %s", eventType, payload)
 	}
 	if !json.Valid([]byte(payload)) {
@@ -94,7 +94,7 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 	relationID := "01BX5ZZKBKACTAV9WEVGEMMVS0"
 	commentID := "01BX5ZZKBKACTAV9WEVGEMMVS1"
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := now.Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(now)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(id, name, created_at) VALUES (?, 'preserve', ?)`, labelID, timestamp); err != nil {
 			return err
 		}
@@ -115,7 +115,7 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
 		) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?)`,
 			"01BX5ZZKBKACTAV9WEVGEMMVS2", issue.ID, []byte("hash"),
-			now.Add(time.Minute).Format(time.RFC3339Nano), timestamp, timestamp)
+			sqlite.FormatStorageTime(now.Add(time.Minute)), timestamp, timestamp)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -173,7 +173,7 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE work_attempts SET status = 'completed', finished_at = ?
 			WHERE issue_id = ? AND status = 'active'`,
-			now.Format(time.RFC3339Nano), issue.ID)
+			sqlite.FormatStorageTime(now), issue.ID)
 		return err
 	}); err != nil {
 		t.Fatal(err)

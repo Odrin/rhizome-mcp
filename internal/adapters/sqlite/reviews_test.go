@@ -117,7 +117,7 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 		t.Fatalf("changes requested status = %q, want changes_requested", resolved.Request.Status)
 	}
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO review_follow_ups(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, 'changes_requested', ?, 1, ?)`, "00000000000000000000000003", resolved.Request.ID, attemptID, "needs follow-up", time.Date(2026, 7, 17, 17, 3, 0, 0, time.UTC).Format(time.RFC3339Nano))
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_follow_ups(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, 'changes_requested', ?, 1, ?)`, "00000000000000000000000003", resolved.Request.ID, attemptID, "needs follow-up", sqlite.FormatStorageTime(time.Date(2026, 7, 17, 17, 3, 0, 0, time.UTC)))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -736,7 +736,7 @@ func (fixture *reviewRepositoryFixture) insertIssue(t *testing.T, title string) 
 	issueID := "00000000000000000000000001"
 	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
-            VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, title, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+            VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, title, sqlite.FormatStorageTime(time.Now().UTC()), sqlite.FormatStorageTime(time.Now().UTC()))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -751,7 +751,7 @@ func (fixture *reviewRepositoryFixture) insertReviewAttempt(t *testing.T, issueI
 		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
             id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
             lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
-        ) VALUES (?, ?, 'review', 'active', 1, 0, X'01', ?, ?, ?)`, attemptID, issueID, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+        ) VALUES (?, ?, 'review', 'active', 1, 0, X'01', ?, ?, ?)`, attemptID, issueID, sqlite.FormatStorageTime(time.Now().UTC().Add(time.Hour)), sqlite.FormatStorageTime(time.Now().UTC()), sqlite.FormatStorageTime(time.Now().UTC()))
 		return err
 	}); err != nil {
 		t.Fatal(err)

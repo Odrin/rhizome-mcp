@@ -104,10 +104,10 @@ func TestIssueCreationPersistsProjectionEventAndCounter(t *testing.T) {
 		stored.status != "blocked" || stored.priority != "medium" ||
 		stored.parentID != epic.ID || stored.blockedReason != reason || stored.version != 1 ||
 		stored.createdBySessionID != nil || stored.closedAt != nil || stored.archivedAt != nil || stored.archivedBySessionID != nil ||
-		stored.createdAt != now.Format(time.RFC3339Nano) || stored.updatedAt != now.Format(time.RFC3339Nano) {
+		stored.createdAt != sqlite.FormatStorageTime(now) || stored.updatedAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("stored issue = %#v", stored)
 	}
-	if event.eventType != "issue_created" || event.sessionID != nil || event.attemptID != nil || event.createdAt != now.Format(time.RFC3339Nano) {
+	if event.eventType != "issue_created" || event.sessionID != nil || event.attemptID != nil || event.createdAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("event metadata = %#v", event)
 	}
 	const wantPayloadPrefix = `{"sequence_no":2,"type":"task","status":"blocked","priority":"medium","parent_id":`
@@ -189,7 +189,7 @@ func TestIssueReadByInternalAndDisplayIDMapsProjectionWithoutSideEffects(t *test
 	closedAt := now.Add(time.Hour)
 	archivedAt := now.Add(2 * time.Hour)
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := now.Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(now)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(
 			id, client_name, started_at, last_seen_at
 		) VALUES (?, 'test', ?, ?)`, sessionID, timestamp, timestamp); err != nil {
@@ -198,8 +198,8 @@ func TestIssueReadByInternalAndDisplayIDMapsProjectionWithoutSideEffects(t *test
 		_, err := tx.ExecContext(ctx, `UPDATE issues
 			SET created_by_session_id = ?, closed_at = ?, archived_at = ?,
 				archived_by_session_id = ?, updated_at = ?, version = 2
-			WHERE id = ?`, sessionID, closedAt.Format(time.RFC3339Nano),
-			archivedAt.Format(time.RFC3339Nano), sessionID, archivedAt.Format(time.RFC3339Nano),
+			WHERE id = ?`, sessionID, sqlite.FormatStorageTime(closedAt),
+			sqlite.FormatStorageTime(archivedAt), sessionID, sqlite.FormatStorageTime(archivedAt),
 			issueResult.ID)
 		return err
 	}); err != nil {
@@ -312,7 +312,7 @@ func TestIssueCreationPersistsAcrossDatabaseReopen(t *testing.T) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := now.Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(now)
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
 			VALUES (?, 1, ?, ?)`, sqliteTestProjectID, timestamp, timestamp)
 		return err
@@ -388,13 +388,13 @@ func TestIssueCreationPersistsAcrossDatabaseReopen(t *testing.T) {
 
 	if stored.id != result.ID || stored.sequenceNo != 1 || stored.issueType != "task" ||
 		stored.title != "Persist through restart" || stored.status != "open" || stored.priority != "high" ||
-		stored.version != 1 || stored.createdAt != now.Format(time.RFC3339Nano) ||
-		stored.updatedAt != now.Format(time.RFC3339Nano) {
+		stored.version != 1 || stored.createdAt != sqlite.FormatStorageTime(now) ||
+		stored.updatedAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("stored issue after reopen = %#v", stored)
 	}
 	if event.issueID != result.ID || event.eventType != "issue_created" ||
 		event.payload != `{"sequence_no":1,"type":"task","status":"open","priority":"high"}` ||
-		event.createdAt != now.Format(time.RFC3339Nano) {
+		event.createdAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("stored event after reopen = %#v", event)
 	}
 	if nextNumber != 2 {
@@ -425,7 +425,7 @@ func TestIssueCreationRejectsMissingWrongTypeAndArchivedParents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, "UPDATE issues SET archived_at = ? WHERE id = ?", now.Format(time.RFC3339Nano), epic.ID)
+		_, err := tx.ExecContext(ctx, "UPDATE issues SET archived_at = ? WHERE id = ?", sqlite.FormatStorageTime(now), epic.ID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -630,7 +630,7 @@ func openIssueService(t *testing.T) (*application.IssueService, *sqlite.DB, time
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := now.Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(now)
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
 			VALUES (?, 1, ?, ?)`, sqliteTestProjectID, timestamp, timestamp)
 		return err

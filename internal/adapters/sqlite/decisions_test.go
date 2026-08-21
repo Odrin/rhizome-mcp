@@ -148,6 +148,72 @@ func TestDecisionRepositoryListsProjectAndIssueScopedDecisions(t *testing.T) {
 	}
 }
 
+// TestDecisionRepositoryOrdersAndPaginatesAcrossFractionalBoundary is a
+// regression test for ISSUE-192 AC4's "decision ordering plus cursor
+// continuation" case. ListDecisions orders by `created_at DESC, id DESC` and
+// its keyset cursor predicate is `created_at < ? OR (created_at = ? AND id <
+// ?)` -- both compare the stored TEXT column directly in SQL. Before the
+// fixed-width storage format, a whole-second created_at value (no
+// fractional digits) memcmp-sorted AFTER a chronologically later value that
+// carried a fraction, so a newer decision could be ordered behind an older
+// one and cursor continuation could skip or duplicate rows. This records
+// one whole-second decision and one 500ms-later decision and checks both
+// single-page ordering and keyset pagination agree with chronological
+// order.
+func TestDecisionRepositoryOrdersAndPaginatesAcrossFractionalBoundary(t *testing.T) {
+	_, db, _ := openIssueService(t)
+	repository, err := sqlite.NewDecisionRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	wholeSecond := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	fractionalNewer := wholeSecond.Add(500 * time.Millisecond)
+	olderID := "01ARZ3NDEKTSV4RRFFQ69G5FD3"
+	newerID := "01ARZ3NDEKTSV4RRFFQ69G5FD4"
+	if _, err := repository.RecordDecision(ctx, ports.RecordDecisionCommand{
+		ID: olderID, Input: domain.RecordDecisionInput{Title: "older whole-second decision", Summary: "old"}, OccurredAt: wholeSecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RecordDecision(ctx, ports.RecordDecisionCommand{
+		ID: newerID, Input: domain.RecordDecisionInput{Title: "newer fractional decision", Summary: "new"}, OccurredAt: fractionalNewer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	full, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{Limit: 20}})
+	if err != nil {
+		t.Fatalf("ListDecisions() error = %v", err)
+	}
+	if len(full.Items) != 2 || full.Items[0].ID != newerID || full.Items[1].ID != olderID {
+		t.Fatalf("decision order = %#v, want newer (chronologically later) before older under ORDER BY created_at DESC", full.Items)
+	}
+
+	first, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{Limit: 1}})
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if len(first.Items) != 1 || first.Items[0].ID != newerID {
+		t.Fatalf("first page = %#v, want the newer fractional decision", first.Items)
+	}
+	if !first.HasMore || first.NextCursor == nil {
+		t.Fatalf("first page has_more=%v next_cursor=%v, want has_more=true and a cursor", first.HasMore, first.NextCursor)
+	}
+
+	second, err := repository.ListDecisions(ctx, ports.ListDecisionsCommand{Input: domain.ListDecisionsInput{Limit: 1, Cursor: *first.NextCursor}})
+	if err != nil {
+		t.Fatalf("second page error = %v", err)
+	}
+	if len(second.Items) != 1 || second.Items[0].ID != olderID {
+		t.Fatalf("second page = %#v, want the older whole-second decision (cursor continuation must not skip or repeat it)", second.Items)
+	}
+	if second.HasMore || second.NextCursor != nil {
+		t.Fatalf("second page has_more=%v next_cursor=%v, want no further page", second.HasMore, second.NextCursor)
+	}
+}
+
 func TestDecisionRepositoryRejectsPredecessorErrorsAtomically(t *testing.T) {
 	issues, db, now := openIssueService(t)
 	repository, err := sqlite.NewDecisionRepository(db)
@@ -501,7 +567,7 @@ func TestDecisionRepositoryPersistsSupersessionAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := predecessorAt.UTC().Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(predecessorAt.UTC())
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
 			VALUES (?, 1, ?, ?)`, sqliteTestProjectID, timestamp, timestamp)
 		return err
@@ -621,8 +687,8 @@ func TestDecisionRepositoryPersistsSupersessionAcrossReopen(t *testing.T) {
 	if len(decisions) != 2 {
 		t.Fatalf("persisted decisions = %d, want 2", len(decisions))
 	}
-	wantPredecessorAt := predecessorAt.UTC().Format(time.RFC3339Nano)
-	wantReplacementAt := replacementAt.UTC().Format(time.RFC3339Nano)
+	wantPredecessorAt := sqlite.FormatStorageTime(predecessorAt.UTC())
+	wantReplacementAt := sqlite.FormatStorageTime(replacementAt.UTC())
 	if decisions[0] != (storedDecision{
 		id: decisionTestID, issueID: issue.ID, title: "Predecessor title", summary: "Predecessor summary",
 		content: predecessorContent, status: string(domain.DecisionStatusSuperseded),

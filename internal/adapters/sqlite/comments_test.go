@@ -67,7 +67,7 @@ func TestCommentRepositoryPersistsCommentAndCompactAttributedEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	if eventIssueID != issue.ID || eventType != "comment_added" || !eventSessionID.Valid || eventSessionID.String != sessionID ||
-		attemptID.Valid || decoded["comment_id"] != commentTestID || len(decoded) != 1 || createdAt != now.Format(time.RFC3339Nano) {
+		attemptID.Valid || decoded["comment_id"] != commentTestID || len(decoded) != 1 || createdAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("event = issue=%q type=%q session=%q attempt=%q payload=%q created=%q", eventIssueID, eventType, eventSessionID.String, attemptID.String, payload, createdAt)
 	}
 }
@@ -87,7 +87,7 @@ func TestCommentRepositoryPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		timestamp := now.Format(time.RFC3339Nano)
+		timestamp := sqlite.FormatStorageTime(now)
 		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
 			VALUES (?, 1, ?, ?)`, sqliteTestProjectID, timestamp, timestamp)
 		return err
@@ -171,7 +171,7 @@ func TestCommentRepositoryPersistsAcrossReopen(t *testing.T) {
 	}
 	if commentCount != 1 || commentID != commentTestID || issueID != issue.ID || storedContent != content ||
 		!commentSessionID.Valid || commentSessionID.String != sessionID || authorLabel.Valid || editedAt.Valid ||
-		createdAt != now.Format(time.RFC3339Nano) {
+		createdAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("comment = id=%q issue=%q content=%q session=%q author=%q edited=%q created=%q",
 			commentID, issueID, storedContent, commentSessionID.String, authorLabel.String, editedAt.String, createdAt)
 	}
@@ -187,7 +187,7 @@ func TestCommentRepositoryPersistsAcrossReopen(t *testing.T) {
 	}
 	if eventCount != 1 || eventIssueID != issue.ID || eventType != "comment_added" ||
 		!eventSessionID.Valid || eventSessionID.String != sessionID || eventAttemptID.Valid ||
-		len(payload) != 1 || payloadCommentID != commentTestID || eventAt != now.Format(time.RFC3339Nano) {
+		len(payload) != 1 || payloadCommentID != commentTestID || eventAt != sqlite.FormatStorageTime(now) {
 		t.Fatalf("event = issue=%q type=%q session=%q attempt=%q payload=%q created=%q",
 			eventIssueID, eventType, eventSessionID.String, eventAttemptID.String, eventPayload, eventAt)
 	}
@@ -357,7 +357,7 @@ func seedCommentSession(t *testing.T, db *sqlite.DB, id string, now time.Time) {
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(
 			id, client_name, started_at, last_seen_at
-		) VALUES (?, 'comment-test', ?, ?)`, id, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		) VALUES (?, 'comment-test', ?, ?)`, id, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
 		return err
 	}); err != nil {
 		t.Fatal(err)

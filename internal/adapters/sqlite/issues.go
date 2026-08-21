@@ -74,7 +74,7 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 	}
 
 	now := command.CreatedAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var issue domain.Issue
 	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
@@ -267,7 +267,7 @@ func (repository *IssueRepository) LookupUpdateIssue(ctx context.Context, key st
 func (repository *IssueRepository) UpdateIssue(ctx context.Context, command ports.UpdateIssueCommand) (ports.UpdateIssueResult, error) {
 	var result ports.UpdateIssueResult
 	now := command.UpdatedAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
 			var savedHash []byte
@@ -436,7 +436,7 @@ func (repository *IssueRepository) LookupArchiveIssue(ctx context.Context, key s
 func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command ports.ArchiveIssueCommand) (ports.ArchiveIssueResult, error) {
 	var result ports.ArchiveIssueResult
 	now := command.ArchivedAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
 			var savedHash []byte
@@ -739,7 +739,7 @@ func nullableTime(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
-	return value.UTC().Format(time.RFC3339Nano)
+	return formatStorageTime(*value)
 }
 
 func copyOptionalString(value *string) *string {
@@ -759,16 +759,12 @@ func nullableStringPointer(value sql.NullString) *string {
 }
 
 func parseIssueTimestamp(field, value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	parsed, err := parseStorageTime(value)
 	if err != nil {
 		return time.Time{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false,
 			domain.Detail{Field: field, Code: "INVALID_TIMESTAMP"})
 	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		return time.Time{}, domain.NewError(domain.CodeStorageCorrupt, "stored issue projection is invalid", false,
-			domain.Detail{Field: field, Code: "INVALID_TIMESTAMP"})
-	}
-	return parsed.UTC(), nil
+	return parsed, nil
 }
 
 func parseNullableIssueTimestamp(field string, value sql.NullString) (*time.Time, error) {

@@ -24,7 +24,7 @@ func TestLoadAgentSessionMapsMalformedStoredIDToStorageCorrupt(t *testing.T) {
 
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	const sessionID = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	if err := db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if _, err := tx.ExecContext(ctx, `CREATE TABLE agent_sessions(
 			id TEXT PRIMARY KEY,

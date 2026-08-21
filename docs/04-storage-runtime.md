@@ -386,6 +386,52 @@ This is mandatory for deterministic testing of:
 - event timestamps;
 - retry timing.
 
+### 15.1. Storage timestamp format
+
+Every `TEXT` timestamp column is written in one fixed-width canonical form:
+`2006-01-02T15:04:05.000000000Z` — always UTC, always exactly 9 fractional
+digits (30 characters). `internal/adapters/sqlite/timestamps.go`'s
+`formatStorageTime`/`parseStorageTime` are the sole source of this format;
+every write in `internal/adapters/sqlite` goes through `formatStorageTime`
+(or a helper that delegates to it) rather than formatting with
+`time.RFC3339Nano` directly.
+
+This matters because SQLite compares `TEXT` with `memcmp`, and this schema's
+lease and ordering predicates — `lease_expires_at <= ?`, `lease_expires_at >
+?`, `occurred_at`/`created_at` ordering, and keyset pagination cursors —
+compare these strings directly in SQL. `time.RFC3339Nano` trims trailing
+zero fractional digits, producing variable-width strings (a whole-second
+value formats as `...05Z`, a value with a fraction as `...05.5Z` or
+`...05.123456789Z`); under `memcmp`, a whole-second value's `Z` terminator
+sorts *after* a fractional value's `.`, so `"...05Z" > "...05.1Z"` even
+though `05.0` is chronologically earlier. Fixing every value to the same
+width removes the ambiguity.
+
+`parseStorageTime` stays lenient on read: it parses via `time.RFC3339Nano`
+(which accepts 0 to 9 fractional digits, any width) and separately rejects a
+non-UTC offset, so it accepts both the fixed-width form and un-migrated or
+externally authored data (older backups, logical-project interchange
+imports). Only the write side is fixed-width; the parse side is
+permissive by design.
+
+The one deliberate exception is `formatLogicalProjectTimestamp`
+(`internal/adapters/sqlite/projects.go`), which renders timestamps for the
+logical interchange export document (JSON), not a SQLite column. That
+document is never compared via SQL `memcmp`, so it keeps the trimmed
+`time.RFC3339Nano` form; widening it would be an interchange
+format-version change, not a storage-comparison fix.
+
+Migration `007_fixed_width_timestamps` rewrites every existing `TEXT`
+timestamp column (all `NOT NULL` and nullable `_at` columns across the
+schema) to the fixed-width form in place, using a `substr`/`instr`-based
+SQLite expression rather than a Go-side rewrite — this keeps the migration a
+plain, auditable SQL script consistent with every other migration in this
+package, and the expression is idempotent (re-applying it to an
+already-fixed-width value is a no-op). `schema_migrations.applied_at` is
+deliberately left untouched: it is never compared with an inequality
+predicate in SQL, so rewriting the migration bookkeeping table's own
+historical rows was judged unnecessary risk for zero benefit.
+
 ## 16. Lease cleanup
 
 Use both:

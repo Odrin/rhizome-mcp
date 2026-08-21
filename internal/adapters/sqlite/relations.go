@@ -74,7 +74,7 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := formatStorageTime(now)
 	var result ports.ManageIssueRelationResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {

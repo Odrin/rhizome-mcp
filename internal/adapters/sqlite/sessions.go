@@ -401,7 +401,7 @@ func sessionTimePointer(value time.Time) *time.Time {
 }
 
 func formatSessionTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
+	return formatStorageTime(value)
 }
 
 var _ ports.AgentSessionRepository = (*AgentSessionRepository)(nil)

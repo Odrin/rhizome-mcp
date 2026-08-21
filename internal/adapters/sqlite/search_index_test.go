@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"sort"
 	"testing"
-	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
@@ -35,7 +34,7 @@ func TestSearchIndexTracksSourceMutationsTransactionallyAndRebuilds(t *testing.T
 		attemptID  = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
 		noteID     = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
 	)
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := sqlite.FormatStorageTime(now)
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at)
 			VALUES (?, ?, 'searchable comment body', ?)`, commentID, issue.ID, timestamp); err != nil {
@@ -135,7 +134,7 @@ func TestSearchIndexReviewRowFollowsIssueRename(t *testing.T) {
 		targetID = "01ARZ3NDEKTSV4RRFFQ69G5FBV"
 		reviewID = "01ARZ3NDEKTSV4RRFFQ69G5FBW"
 	)
-	timestamp := now.Format(time.RFC3339Nano)
+	timestamp := sqlite.FormatStorageTime(now)
 	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(
 			id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at

@@ -264,7 +264,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			UPDATE projects
 			SET name = ?, instructions = ?, created_at = ?, updated_at = ?
 		`, nullableString(plan.Document.Project.Name), nullableString(plan.Document.Project.Instructions),
-			projectCreatedAt.UTC().Format(time.RFC3339Nano), projectUpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			formatStorageTime(projectCreatedAt), formatStorageTime(projectUpdatedAt)); err != nil {
 			return err
 		}
 
@@ -345,7 +345,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO labels(id, name, description, created_at) VALUES (?, ?, ?, ?)`,
-				labelDestIDs[label.ID], label.Name, nullableString(label.Description), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				labelDestIDs[label.ID], label.Name, nullableString(label.Description), formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -376,7 +376,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			`, issueDestIDs[issue.ID], nextIssueNumber+int64(index), issue.Type, issue.Title,
 				nullableString(issue.Description), nullableString(issue.AcceptanceCriteria), issue.Status,
 				issue.Priority, nullableString(parentID), nullableString(issue.BlockedReason),
-				createdAt.UTC().Format(time.RFC3339Nano), updatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				formatStorageTime(createdAt), formatStorageTime(updatedAt)); err != nil {
 				return err
 			}
 		}
@@ -396,7 +396,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				domain.RelationType(relation.Type), issueDestIDs[relation.SourceIssueID], issueDestIDs[relation.TargetIssueID],
 			)
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_at) VALUES (?, ?, ?, ?, ?)`,
-				relationDestIDs[relation.ID], sourceID, targetID, relation.Type, createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				relationDestIDs[relation.ID], sourceID, targetID, relation.Type, formatStorageTime(createdAt)); err != nil {
 				return logicalImportRelationWriteError(err, index)
 			}
 		}
@@ -412,11 +412,11 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				if err != nil {
 					return err
 				}
-				text := parsedEditedAt.UTC().Format(time.RFC3339Nano)
+				text := formatStorageTime(parsedEditedAt)
 				editedAt = &text
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_by_session_id, author_label, created_at, edited_at) VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
-				commentDestIDs[comment.ID], issueDestIDs[comment.IssueID], comment.Content, createdAt.UTC().Format(time.RFC3339Nano), nullableString(editedAt)); err != nil {
+				commentDestIDs[comment.ID], issueDestIDs[comment.IssueID], comment.Content, formatStorageTime(createdAt), nullableString(editedAt)); err != nil {
 				return err
 			}
 		}
@@ -437,7 +437,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				supersedesID = &mappedID
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-				decisionDestIDs[decision.ID], nullableString(issueID), decision.Title, decision.Summary, decision.Content, decision.Status, nullableString(supersedesID), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				decisionDestIDs[decision.ID], nullableString(issueID), decision.Title, decision.Summary, decision.Content, decision.Status, nullableString(supersedesID), formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -461,7 +461,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				if err != nil {
 					return err
 				}
-				text := parsedFinishedAt.UTC().Format(time.RFC3339Nano)
+				text := formatStorageTime(parsedFinishedAt)
 				finishedAt = &text
 			}
 			var resultSummary *string
@@ -493,8 +493,8 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				failure_reason_code, interruption_reason_code, reason_details
 			) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				attemptDestIDs[attempt.ID], issueDestIDs[attempt.IssueID], nullableString(attempt.AgentLabel), attempt.Kind, attempt.Status,
-				attempt.IssueVersionAtStart, attempt.ContextEventIDAtStart, []byte("logical-import-lease"), leaseExpiresAt.UTC().Format(time.RFC3339Nano),
-				createdAt.UTC().Format(time.RFC3339Nano), lastHeartbeatAt.UTC().Format(time.RFC3339Nano), nullableString(finishedAt),
+				attempt.IssueVersionAtStart, attempt.ContextEventIDAtStart, []byte("logical-import-lease"), formatStorageTime(leaseExpiresAt),
+				formatStorageTime(createdAt), formatStorageTime(lastHeartbeatAt), nullableString(finishedAt),
 				nullableString(resultSummary), nullableString(nextStepsJSON), nullableString(verificationJSON), nullableString(attempt.FailureReasonCode),
 				nullableString(attempt.InterruptionReasonCode), nullableString(attempt.ReasonDetails)); err != nil {
 				return err
@@ -516,7 +516,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				nextStepsJSON = &text
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, next_steps_json, important, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				attemptNoteDestIDs[note.ID], attemptDestIDs[note.AttemptID], note.Kind, note.Content, nullableString(nextStepsJSON), boolToInt(note.Important), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				attemptNoteDestIDs[note.ID], attemptDestIDs[note.AttemptID], note.Kind, note.Content, nullableString(nextStepsJSON), boolToInt(note.Important), formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -532,7 +532,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				attemptID = &mappedID
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, title, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				artifactDestIDs[artifact.ID], issueDestIDs[artifact.IssueID], nullableString(attemptID), artifact.Type, artifact.URI, nullableString(artifact.Title), nullableStringFromRawMessage(artifact.Metadata), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				artifactDestIDs[artifact.ID], issueDestIDs[artifact.IssueID], nullableString(attemptID), artifact.Type, artifact.URI, nullableString(artifact.Title), nullableStringFromRawMessage(artifact.Metadata), formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -553,13 +553,13 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				attemptID = &mappedID
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, NULL, ?, ?, ?)`,
-				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), createdAt.UTC().Format(time.RFC3339Nano)); err != nil {
+				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
 
 		if len(plan.Document.Issues) > 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE projects SET next_issue_number = ?, updated_at = ?`, nextIssueNumber+int64(len(plan.Document.Issues)), projectUpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE projects SET next_issue_number = ?, updated_at = ?`, nextIssueNumber+int64(len(plan.Document.Issues)), formatStorageTime(projectUpdatedAt)); err != nil {
 				return err
 			}
 		}
@@ -1227,16 +1227,20 @@ func parseLogicalStringArray(field, value string) ([]string, error) {
 }
 
 func parseLogicalProjectTimestamp(field, value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	parsed, err := parseStorageTime(value)
 	if err != nil {
 		return time.Time{}, corruptLogicalProjectField(err, field, "INVALID_TIMESTAMP")
 	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		return time.Time{}, corruptLogicalProjectField(nil, field, "INVALID_TIMESTAMP")
-	}
-	return parsed.UTC(), nil
+	return parsed, nil
 }
 
+// formatLogicalProjectTimestamp renders a timestamp for the logical
+// interchange document (export JSON), not a SQLite storage column -- it
+// deliberately keeps the trimmed time.RFC3339Nano form rather than
+// formatStorageTime's fixed width. The document isn't compared via SQL
+// memcmp, and widening it would be an interchange format-version change
+// (docs/07), not a fix for the SQL comparison bug this file's storage
+// writes need.
 func formatLogicalProjectTimestamp(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
@@ -1324,14 +1328,11 @@ func nullableProjectString(value sql.NullString) *string {
 }
 
 func parseProjectTimestamp(field, value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	parsed, err := parseStorageTime(value)
 	if err != nil {
 		return time.Time{}, corruptProjectTimestamp(err, field)
 	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		return time.Time{}, corruptProjectTimestamp(nil, field)
-	}
-	return parsed.UTC(), nil
+	return parsed, nil
 }
 
 func corruptProjectTimestamp(cause error, field string) error {
