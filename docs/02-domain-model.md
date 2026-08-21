@@ -298,6 +298,8 @@ ready
 blocked
 ```
 
+Completing work with `target_issue_status: ready` while the issue is already `ready` succeeds as a no-op: the attempt completes and the issue returns to the queue unchanged (version bumps, blocked_reason clears) rather than being rejected as an invalid transition.
+
 Review outcomes:
 
 ```text

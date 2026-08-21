@@ -79,6 +79,46 @@ func TestApplyStatusTransitionBlockedReason(t *testing.T) {
 	}
 }
 
+func TestApplyFinishTransitionAllowsReadyNoOp(t *testing.T) {
+	tests := []struct {
+		name       string
+		from       domain.Status
+		to         domain.Status
+		reason     string
+		wantReason string
+		wantCode   string
+	}{
+		{name: "ready to ready is a no-op", from: domain.StatusReady, to: domain.StatusReady, reason: "ignored", wantReason: ""},
+		{name: "ready to done still delegates normally", from: domain.StatusReady, to: domain.StatusDone, wantReason: ""},
+		{name: "ready to blocked still requires a reason", from: domain.StatusReady, to: domain.StatusBlocked, reason: "  ", wantCode: domain.CodeInvalidArgument},
+		{name: "ready to blocked with reason still delegates", from: domain.StatusReady, to: domain.StatusBlocked, reason: "external dependency", wantReason: "external dependency"},
+		{name: "invalid transition is still rejected", from: domain.StatusOpen, to: domain.StatusDone, wantCode: "INVALID_STATUS_TRANSITION"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := domain.ApplyFinishTransition(tt.from, tt.to, tt.reason)
+			if tt.wantCode != "" {
+				if !errors.Is(err, &domain.Error{Code: tt.wantCode}) {
+					t.Fatalf("ApplyFinishTransition() error = %v, want code %s", err, tt.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ApplyFinishTransition() error = %v", err)
+			}
+			if got != tt.wantReason {
+				t.Fatalf("ApplyFinishTransition() reason = %q, want %q", got, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestCanTransitionStillRejectsReadyToReady(t *testing.T) {
+	if domain.CanTransition(domain.StatusReady, domain.StatusReady) {
+		t.Fatal("CanTransition(ready, ready) = true, want false — the finish-attempt no-op must not leak into the general transition table")
+	}
+}
+
 func TestStoredStatusRejectsInProgress(t *testing.T) {
 	if _, err := domain.ParseStatus("in_progress"); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("ParseStatus(in_progress) error = %v, want INVALID_ARGUMENT", err)

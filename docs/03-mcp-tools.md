@@ -1757,6 +1757,8 @@ interruption_reason_code
 reason_details
 ```
 
+Completing work with `target_issue_status: ready` while the issue is already `ready` succeeds as a no-op — the issue returns to the queue unchanged rather than being rejected as an invalid transition.
+
 Review completion supplies:
 
 ```text

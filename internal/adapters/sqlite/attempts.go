@@ -893,7 +893,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 					target = domain.StatusBlocked
 				}
 			}
-			blockedReason, err := domain.ApplyStatusTransition(issue.Status, target, stringValue(input.BlockedReason))
+			blockedReason, err := domain.ApplyFinishTransition(issue.Status, target, stringValue(input.BlockedReason))
 			if err != nil {
 				return err
 			}

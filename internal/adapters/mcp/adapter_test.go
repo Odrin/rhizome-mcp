@@ -1678,6 +1678,52 @@ func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
 	}
 }
 
+func TestFinishAttemptCompletedWorkWithReadyTargetSucceeds(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "finish-ready-noop.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "ready noop", "status": "ready"})
+	var createdIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &createdIssue)
+	if created.IsError || createdIssue.ID == "" {
+		t.Fatalf("create_issue = %#v", created)
+	}
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": createdIssue.ID, "lease_seconds": 60})
+	var claim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+		Issue      struct {
+			Version int64 `json:"version"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.ID == "" || claim.LeaseToken == "" {
+		t.Fatalf("claim_issue = %#v", claimed)
+	}
+
+	finished := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken, "outcome": "completed",
+		"result_summary": "checkpoint complete, hand back to the pool", "target_issue_status": "ready",
+	})
+	var finishOutput struct {
+		Issue struct {
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
+		} `json:"issue"`
+	}
+	decodeStructured(t, finished, &finishOutput)
+	if finished.IsError || finishOutput.Issue.Status != "ready" || finishOutput.Issue.Version != claim.Issue.Version+1 {
+		t.Fatalf("finish_attempt with target_issue_status=ready = %#v, output = %#v", finished, finishOutput)
+	}
+}
+
 func TestSearchAndGetChangesTools(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "search-tools.db"))

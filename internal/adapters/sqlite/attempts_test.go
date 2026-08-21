@@ -1748,6 +1748,49 @@ func TestFinishAttemptCompletedWorkPersistsAtomicOutcomeAndSafeEvent(t *testing.
 	requireAttemptInactive(t, fixture, claim)
 }
 
+func TestFinishAttemptCompletedWorkWithReadyTargetIsNoOp(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "ready-noop")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "ready noop", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := fixture.attempts.FinishAttempt(fixture.ctx, domain.FinishAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+		Outcome: domain.AttemptOutcomeCompleted, TargetIssueStatus: statusPointer(domain.StatusReady),
+		ResultSummary: "checkpoint complete, hand back to the pool",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Issue.Status != domain.StatusReady || finished.Issue.Version != claim.Issue.Version+1 || finished.Issue.ClosedAt != nil {
+		t.Fatalf("finished issue = %#v, want status=ready version=%d closed_at=nil", finished.Issue, claim.Issue.Version+1)
+	}
+	if finished.Attempt.Status != domain.AttemptStatusCompleted {
+		t.Fatalf("finished attempt status = %q, want completed", finished.Attempt.Status)
+	}
+	var status, issueStatus string
+	var blockedReason sql.NullString
+	var issueVersion int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&status); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status, blocked_reason, version FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus, &blockedReason, &issueVersion)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(domain.AttemptStatusCompleted) || issueStatus != string(domain.StatusReady) || blockedReason.Valid || issueVersion != claim.Issue.Version+1 {
+		t.Fatalf("stored state = attempt %q issue %q blocked_reason %#v version %d", status, issueStatus, blockedReason, issueVersion)
+	}
+	if countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_completed") != 1 {
+		t.Fatal("completion event count is not exactly one")
+	}
+	requireAttemptInactive(t, fixture, claim)
+}
+
 func finishedAtTimeIs(value string, want time.Time) bool {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	return err == nil && parsed.Equal(want)

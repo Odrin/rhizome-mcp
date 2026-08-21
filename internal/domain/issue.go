@@ -187,6 +187,20 @@ func CanTransition(from, to Status) bool {
 	}
 }
 
+// ApplyFinishTransition validates a work attempt completion's target status,
+// same as ApplyStatusTransition, with one allowance scoped to attempt
+// completion: target_issue_status=ready while the issue is already ready is
+// the documented "hand the issue back to the queue unchanged" outcome, not
+// an invalid transition. This allowance intentionally lives here rather than
+// as a ready->ready entry in CanTransition, so set_issue_status and every
+// other direct status write keep today's semantics.
+func ApplyFinishTransition(from, to Status, blockedReason string) (string, error) {
+	if from == StatusReady && to == StatusReady {
+		return "", nil
+	}
+	return ApplyStatusTransition(from, to, blockedReason)
+}
+
 // ApplyStatusTransition validates a transition and returns the blocked reason to
 // persist. Entering blocked requires a non-blank reason; every other target
 // clears the reason.
