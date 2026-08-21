@@ -399,7 +399,15 @@ func (router *projectRouter) runCleanup(ctx context.Context) error {
 }
 
 // ExpireAttempts sweeps each currently ready project without retaining router
-// locks while project-local expiry performs storage work.
+// locks while project-local expiry performs storage work. It pins entries
+// through pinReadyEntry rather than Acquire: Acquire unconditionally stamps
+// lastUsed and, on a miss, reopens the project from disk, both of which
+// would let this periodic maintenance sweep defeat client-driven LRU
+// eviction (by refreshing every ready entry's recency once a minute) and
+// reopen a project a client had already evicted for capacity. A ref that no
+// longer names a ready, non-removed entry by the time this reaches it
+// (evicted or closed between the snapshot above and this loop) is skipped
+// instead of being reopened.
 func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
 	if router == nil {
 		return ports.ExpireAttemptsResult{}, nil
@@ -416,9 +424,8 @@ func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAt
 	var result ports.ExpireAttemptsResult
 	var errs []error
 	for _, ref := range refs {
-		lease, err := router.Acquire(ctx, &ref)
-		if err != nil {
-			errs = append(errs, err)
+		lease := router.pinReadyEntry(ref)
+		if lease == nil {
 			continue
 		}
 		projectResult, projectErr := lease.AttemptService().ExpireAttempts(ctx)
@@ -432,6 +439,24 @@ func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAt
 		}
 	}
 	return result, errors.Join(errs...)
+}
+
+// pinReadyEntry pins ref for a maintenance operation if it currently names a
+// ready, non-removed entry: it increments the active counts exactly like
+// Acquire's ready-entry fast path, but deliberately does not touch lastUsed,
+// so the caller's use doesn't count as client activity for LRU purposes.
+// Returns nil if ref no longer names such an entry (never Acquire's
+// reopen-from-disk fallback). The caller must Release the returned lease.
+func (router *projectRouter) pinReadyEntry(ref string) mcpadapter.ProjectLease {
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	entry, ok := router.entries[ref]
+	if !ok || entry == nil || entry.state != "ready" || entry.removed {
+		return nil
+	}
+	entry.active++
+	router.activeCount++
+	return router.wrapLease(entry)
 }
 
 type projectRouterLease struct {

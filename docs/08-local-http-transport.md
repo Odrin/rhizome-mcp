@@ -86,8 +86,12 @@ on a LAN, through a reverse proxy, or through a tunnel.
   ignored.
 - Origins are denied by default. Requests with an Origin header must exactly
   match the configured endpoint origin; credentials are never allowed.
-- CORS is not a general browser API: only the required MCP request methods and
-  headers are permitted for the same local origin.
+- The server never emits CORS response headers (no `Access-Control-*`
+  headers, no preflight handling). This is not permissive CORS scoped to the
+  local origin — it is the absence of CORS: only same-origin requests (or
+  requests with no Origin header at all, e.g. from non-browser MCP clients)
+  are accepted; every other origin is rejected outright at the Origin check
+  above, not granted narrowed cross-origin access.
 - The server does not trust `Forwarded` or `X-Forwarded-*` headers.
 - DNS rebinding is mitigated by literal bind validation plus Host and Origin
   checks.

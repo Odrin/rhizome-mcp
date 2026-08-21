@@ -153,6 +153,94 @@ func TestServeHTTPServerUsesEphemeralListenerAndShutdowns(t *testing.T) {
 	}
 }
 
+// TestServeHTTPServerCancelsInFlightRequestContextOnShutdown is the
+// ISSUE-204 regression for the HTTP half of the bug: previously Shutdown
+// only stopped accepting new connections and waited for existing ones to go
+// idle, but never canceled an in-flight handler's request context, so a
+// still-running MCP tool call (and the router lease its context is bound
+// to) stayed live past ServeHTTPServer's own return. The handler here
+// blocks on its request context exactly like a long-running tool call
+// would; it must be canceled once Shutdown's grace period elapses, and
+// ServeHTTPServer must still return within that same grace period rather
+// than hanging on the still-open connection.
+func TestServeHTTPServerCancelsInFlightRequestContextOnShutdown(t *testing.T) {
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const shutdownGrace = 200 * time.Millisecond
+	requestStarted := make(chan struct{})
+	requestContextCanceled := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestContextCanceled)
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeHTTPServer(ctx, HTTPServerOptions{
+			Address: "127.0.0.1:0", Logger: logger, Handler: handler, ShutdownTimeout: shutdownGrace,
+		})
+	}()
+
+	var endpoint string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if logs.Len() > 0 {
+			endpoint = extractEndpoint(logs.String())
+			if endpoint != "" {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if endpoint == "" {
+		t.Fatal("expected endpoint to be logged")
+	}
+
+	clientErrs := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + endpoint + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+		clientErrs <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request never reached the handler")
+	}
+
+	cancel()
+
+	select {
+	case <-requestContextCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler's request context was never canceled by shutdown")
+	}
+
+	// The handler never returns on its own within shutdownGrace (it only
+	// exits once its context is canceled, which — per the fix under test —
+	// happens after Shutdown's own wait gives up), so Shutdown times out
+	// waiting for that connection to go idle and ServeHTTPServer surfaces
+	// that timeout rather than the outer ctx's cancellation. What matters
+	// here is that it returns promptly instead of hanging on the
+	// still-open connection, and that the handler was in fact canceled.
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("ServeHTTPServer() = %v, want a non-nil shutdown-timeout error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTPServer did not return within its shutdown grace period")
+	}
+	<-clientErrs
+}
+
 func TestWrapHTTPHandlerAcceptsLoopbackHostAndOrigin(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

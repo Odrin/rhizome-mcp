@@ -167,6 +167,99 @@ func TestProjectRouterEvictsLeastRecentlyUsedReadyEntries(t *testing.T) {
 	}
 }
 
+// TestProjectRouterExpireAttemptsDoesNotRefreshLRURecency is the ISSUE-204
+// regression for the sweeper/LRU interaction: the periodic attempt-expiry
+// sweep used to call Acquire per ready project, which unconditionally
+// stamps lastUsed, so every sweep flattened client-driven recency and made
+// the true LRU victim unevictable. ExpireAttempts must leave lastUsed alone.
+func TestProjectRouterExpireAttemptsDoesNotRefreshLRURecency(t *testing.T) {
+	oldMax := projectRouterMaxEntries
+	projectRouterMaxEntries = 2
+	defer func() { projectRouterMaxEntries = oldMax }()
+
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		bundle := newTestBundle(projectID)
+		bundle.attemptService = mustNewAttemptService(t, &countingAttemptRepository{})
+		return bundle, &projectruntime.Project{ProjectID: projectID}, nil
+	}
+
+	first := "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+	second := "01ARZ3NDEKTSV4RRFFQ69G5FD2"
+	third := "01ARZ3NDEKTSV4RRFFQ69G5FD3"
+
+	firstLease, err := router.Acquire(context.Background(), &first)
+	if err != nil {
+		t.Fatalf("Acquire(first) error = %v", err)
+	}
+	if err := firstLease.Release(); err != nil {
+		t.Fatalf("Release(first) error = %v", err)
+	}
+	secondLease, err := router.Acquire(context.Background(), &second)
+	if err != nil {
+		t.Fatalf("Acquire(second) error = %v", err)
+	}
+	if err := secondLease.Release(); err != nil {
+		t.Fatalf("Release(second) error = %v", err)
+	}
+
+	// first is now the true LRU victim. A periodic sweep in between must
+	// not disturb that ordering.
+	if _, err := router.ExpireAttempts(context.Background()); err != nil {
+		t.Fatalf("ExpireAttempts() error = %v", err)
+	}
+
+	thirdLease, err := router.Acquire(context.Background(), &third)
+	if err != nil {
+		t.Fatalf("Acquire(third) error = %v", err)
+	}
+	if err := thirdLease.Release(); err != nil {
+		t.Fatalf("Release(third) error = %v", err)
+	}
+
+	if _, ok := router.entries[first]; ok {
+		t.Fatalf("expected entry %q (the true LRU victim) to be evicted after the sweep", first)
+	}
+	if _, ok := router.entries[second]; !ok {
+		t.Fatal("expected entry for second ref to remain: the sweep must not have refreshed its recency past first's")
+	}
+	if _, ok := router.entries[third]; !ok {
+		t.Fatal("expected entry for third ref to remain")
+	}
+}
+
+// TestProjectRouterPinReadyEntryNeverReopensAMissingEntry is the other half
+// of the ISSUE-204 sweeper fix: a ref snapshotted as ready-and-present by
+// ExpireAttempts may no longer name such an entry by the time the sweep
+// reaches it (a concurrent client Acquire may have evicted it for capacity,
+// or it may never have been ready to begin with). pinReadyEntry must skip
+// such a ref rather than falling back to Acquire's reopen-from-disk path,
+// which would resurrect a project nobody asked for. composeFn failing the
+// test if invoked is the proof: pinReadyEntry must never reach it.
+func TestProjectRouterPinReadyEntryNeverReopensAMissingEntry(t *testing.T) {
+	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+		t.Fatal("composeFn should not be called: pinReadyEntry must never reopen a project")
+		return nil, nil, nil
+	}
+
+	if lease := router.pinReadyEntry("01ARZ3NDEKTSV4RRFFQ69G5FD4"); lease != nil {
+		t.Fatalf("pinReadyEntry() for an absent ref = %v, want nil", lease)
+	}
+
+	removedRef := "01ARZ3NDEKTSV4RRFFQ69G5FD5"
+	router.entries[removedRef] = &projectRouterEntry{ref: removedRef, state: "ready", removed: true}
+	if lease := router.pinReadyEntry(removedRef); lease != nil {
+		t.Fatalf("pinReadyEntry() for a removed (evicted) entry = %v, want nil", lease)
+	}
+
+	openingRef := "01ARZ3NDEKTSV4RRFFQ69G5FD6"
+	router.entries[openingRef] = &projectRouterEntry{ref: openingRef, state: "opening", done: make(chan struct{})}
+	if lease := router.pinReadyEntry(openingRef); lease != nil {
+		t.Fatalf("pinReadyEntry() for a not-yet-ready entry = %v, want nil", lease)
+	}
+}
+
 func TestProjectRouterDoesNotEvictActiveEntry(t *testing.T) {
 	oldMax := projectRouterMaxEntries
 	projectRouterMaxEntries = 1

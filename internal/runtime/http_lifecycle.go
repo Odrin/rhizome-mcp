@@ -315,6 +315,17 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 	}
 	options.Logger.Info("http server listening", "endpoint", listener.Addr().String())
 
+	// baseCtx is the parent of every request context this server hands to
+	// handlers (via BaseContext, and per-request from there). It is
+	// canceled once Shutdown returns below — whether because every
+	// connection went idle or because its grace period elapsed — so a
+	// handler still in flight (and the router lease its context is bound
+	// to) unwinds promptly instead of staying blocked past this function's
+	// return, which previously left the caller's own shutdown wait (e.g.
+	// router.Close's activeCount drain) to time out separately.
+	baseCtx, cancelBaseCtx := context.WithCancel(context.Background())
+	defer cancelBaseCtx()
+
 	hardeningHandler := WrapHTTPHandlerWithBodyLimit(options.Handler, listener.Addr().String(), options.Logger, options.MaxRequestBodyBytes)
 	server := &http.Server{
 		Handler:           hardeningHandler,
@@ -323,6 +334,7 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 		WriteTimeout:      options.WriteTimeout,
 		IdleTimeout:       options.IdleTimeout,
 		MaxHeaderBytes:    options.MaxHeaderBytes,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 	}
 	serveErrs := make(chan error, 1)
 	go func() {
@@ -338,8 +350,10 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), options.ShutdownTimeout)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
+		shutdownErr := server.Shutdown(shutdownCtx)
+		cancelBaseCtx()
+		if shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
+			return shutdownErr
 		}
 		if err := <-serveErrs; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
