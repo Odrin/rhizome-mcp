@@ -1022,3 +1022,134 @@ the background cleanup loop (only write `work_attempts.status`, never
 `issues.status` -- an issue whose attempt lease expires keeps its current
 stored status); `ForceReleaseAttempt` (same, plus an `attempt_interrupted`
 event); `doctor` (read-only diagnostics). None of these require a gate hook.
+
+## 18. Resource identity and reservation overlap
+
+Epic ISSUE-176 adds lease-backed, exclusive reservations over project
+resources so concurrent work attempts cannot edit overlapping content. This
+section is the canonical identity, normalization, and overlap contract
+(`internal/domain/reservation.go`, `reservation_glob.go`,
+`reservation_overlap.go`); persistence, acquisition tools, and visibility
+are specified separately by ISSUE-178 through ISSUE-183.
+
+### 18.1. Resource kinds
+
+```text
+file       a single project-relative path
+directory  a project-relative path denoting itself and every descendant
+glob       a project-relative pattern over path segments (§18.3)
+logical    a namespace:name pair naming a non-filesystem resource
+```
+
+All matching is lexical. The database never stats a file, resolves a
+symlink, or inspects git -- a reservation's validity depends only on its
+normalized identity, never on filesystem contents. All reservations are
+exclusive in v1; there is no shared/read mode (docs/06 non-goals).
+
+### 18.2. Path normalization (file, directory, glob)
+
+A path is project-relative, slash-separated, UTF-8, at most 4096 runes.
+Normalization splits on `/`, drops every empty and `.` segment, and joins
+the remainder back with `/` -- this is the only silent repair; nothing
+else is corrected. Every other forbidden form is a hard validation error:
+
+```text
+error detail code               condition
+INVALID_UTF8 / NUL_NOT_ALLOWED  from ValidateText (docs/02 general convention)
+MAX_RUNES                       path exceeds 4096 runes
+BACKSLASH_NOT_ALLOWED           path contains '\'
+ABSOLUTE_PATH_NOT_ALLOWED       path starts with '/'
+VOLUME_FORM_NOT_ALLOWED         path starts with a Windows drive letter and ':'
+PARENT_SEGMENT_NOT_ALLOWED      any segment is '..'
+EMPTY_ROOT_NOT_ALLOWED          every segment was empty or '.' (nothing left)
+```
+
+Case sensitivity: the normalized `Display()` form preserves the caller's
+original spelling. A separate comparison `Key()` ASCII-folds `A-Z` to
+`a-z` per segment; every other byte, including any non-ASCII UTF-8
+sequence, is left byte-exact. This is a deliberate, conservative choice:
+folding only the ASCII range avoids the most common cross-platform false
+negative (a project edited on both a case-sensitive and a case-insensitive
+filesystem) without attempting locale-aware or Unicode case folding, which
+has no single correct answer across filesystems. There is no
+per-project or per-resource override of this rule.
+
+### 18.3. Glob grammar
+
+A glob is a path (§18.2's normalization and forbidden forms apply
+identically) whose segments may additionally be exactly `*` (matches
+exactly one segment) or, only as the final segment and at most once,
+exactly `**` (matches zero or more trailing segments -- so `a/**` matches
+`a` itself as well as every descendant of `a`). No other wildcard form
+exists:
+
+```text
+error detail code            condition
+INVALID_GLOB_SEGMENT         segment contains '?', '[', ']', '{', '}', or '*'/'**'
+                              embedded in a literal (e.g. "a*b") -- there is
+                              no escape syntax to write a literal wildcard
+                              character
+STARSTAR_MUST_BE_LAST        '**' appears more than once, or not as the
+                              final segment
+```
+
+This is a deliberately restricted grammar, not a general glob or regex
+engine -- it exists to keep overlap decidable by exact, finite comparison
+(§18.4), not by sampling, prefix heuristics, or a regex engine's own
+(possibly exponential) matching behavior.
+
+### 18.4. Overlap semantics
+
+Overlap is symmetric, independent of input order, and considers only each
+resource's normalized comparison key:
+
+```text
+file      x file       equal normalized path
+directory x directory  equal, or one is an ancestor of the other
+directory x file       the file equals the directory's path, or is a descendant
+file      x glob       the glob matches the file
+directory x glob       the glob matches the directory's own path, or matches
+                        at least one of its descendants
+glob      x glob       the two patterns' languages intersect (exact finite
+                        segment comparison over the shared fixed-length
+                        prefix, then checking whether the shorter side's
+                        trailing '**', if any, can reach the longer side's
+                        length -- never sampling, never a prefix heuristic)
+logical   x logical    equal normalized namespace and case-sensitive name
+path      x logical    never overlap, regardless of kind or content
+```
+
+`internal/domain.Overlaps(a, b NormalizedResource) bool` implements this
+table; `FuzzOverlapsSymmetric` and `FuzzNormalizePathIdempotent` /
+`FuzzNormalizeLogicalIdempotent` (`internal/domain/reservation_fuzz_test.go`)
+prove symmetry and normalization idempotence respectively.
+
+### 18.5. Logical resources
+
+A logical resource is `namespace:name`. `namespace` must match
+`[a-z][a-z0-9.-]{0,63}` exactly -- lowercase only, no case-folding is
+applied because the grammar simply does not accept uppercase input in the
+first place (`INVALID_NAMESPACE`). `name` is trimmed, 1-256 runes, and
+compared case-sensitively with no folding (`REQUIRED` if blank after trim,
+`MAX_RUNES` over length). Two logical resources overlap only on an exact
+match of both fields; a logical resource never overlaps any path resource.
+
+### 18.6. Limits
+
+```text
+max resources per reservation mutation   50
+max path/glob length                     4096 runes
+max logical namespace length             64 runes ([a-z][a-z0-9.-]{0,63})
+max logical name length                  256 runes
+```
+
+### 18.7. Resolved decisions
+
+No case-sensitivity, symlink, glob, or namespace question is left open by
+this contract: case sensitivity is the ASCII-fold rule in §18.2; symlinks
+are never resolved (§18.1); the glob grammar is exactly §18.3, with no
+escape mechanism and no additional metacharacters; namespace and name
+grammar are exactly §18.5. Anything not fixed here (persistence schema,
+acquisition tools, board/context visibility, interchange) is explicitly the
+responsibility of ISSUE-178 through ISSUE-183, not an oversight of this
+contract.
