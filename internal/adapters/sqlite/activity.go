@@ -48,7 +48,7 @@ func (repository *ActivityRepository) GetIssueActivity(ctx context.Context, comm
 	var after *activityCursor
 	if input.Cursor != "" {
 		decoded, err := activityCursorCodec.Decode(input.Cursor)
-		if err != nil || decoded.TypeRank < 1 || decoded.TypeRank > 6 || decoded.OccurredAt == "" || !isValidActivityCursorSortID(decoded.TypeRank, decoded.SortID) {
+		if err != nil || decoded.TypeRank < 1 || decoded.TypeRank > 7 || decoded.OccurredAt == "" || !isValidActivityCursorSortID(decoded.TypeRank, decoded.SortID) {
 			if err == nil {
 				err = errors.New("activity cursor payload is invalid")
 			}

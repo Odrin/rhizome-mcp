@@ -226,6 +226,43 @@ func TestActivityRepositoryPaginationTraversesEveryItemOnce(t *testing.T) {
 	}
 }
 
+func TestActivityRepositoryPaginationAcceptsArtifactCursor(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	repository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedActivityFixture(t, db, issue.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	newer := now.Add(time.Hour)
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE artifacts SET created_at = ? WHERE id = ?`, newer.Format(time.RFC3339Nano), "01ARZ3NDEKTSV4RRFFQ69G5FA6")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{Input: domain.GetIssueActivityInput{IssueID: issue.ID, Limit: 1}})
+	if err != nil {
+		t.Fatalf("first page error = %v", err)
+	}
+	if len(first.Items) != 1 || first.Items[0].EntityType != domain.ActivityEntityTypeArtifact {
+		t.Fatalf("first page = %#v, want single artifact item", first.Items)
+	}
+	if !first.HasMore || first.NextCursor == nil {
+		t.Fatalf("first page has_more=%v next_cursor=%v, want has_more=true and a cursor", first.HasMore, first.NextCursor)
+	}
+
+	second, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{Input: domain.GetIssueActivityInput{IssueID: issue.ID, Limit: 1, Cursor: *first.NextCursor}})
+	if err != nil {
+		t.Fatalf("second page error = %v, want success (this is the regression)", err)
+	}
+	if len(second.Items) != 1 {
+		t.Fatalf("second page len(items) = %d, want 1", len(second.Items))
+	}
+}
+
 func TestActivityRepositoryCursorValidation(t *testing.T) {
 	db, _, issue, now := newActivityTestFixture(t)
 	repository, err := sqlite.NewActivityRepository(db)
