@@ -67,6 +67,12 @@ func (repository *recordingIssueRepository) GetIssue(_ context.Context, identifi
 	return repository.issue, nil
 }
 
+func (repository *recordingIssueRepository) GetIssueProjection(_ context.Context, command ports.GetIssueProjectionCommand) (domain.IssueProjection, error) {
+	repository.getCalled = true
+	repository.identifier = command.Identifier
+	return domain.IssueProjection{Issue: repository.issue}, nil
+}
+
 func (repository *recordingIssueRepository) ListLabels(_ context.Context, _ ports.ListLabelsCommand) (domain.LabelList, error) {
 	return domain.LabelList{}, nil
 }

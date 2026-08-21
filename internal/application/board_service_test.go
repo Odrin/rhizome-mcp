@@ -263,6 +263,10 @@ func (repository *boardRecordingIssueRepository) GetIssue(context.Context, domai
 	return domain.Issue{}, nil
 }
 
+func (repository *boardRecordingIssueRepository) GetIssueProjection(context.Context, ports.GetIssueProjectionCommand) (domain.IssueProjection, error) {
+	return domain.IssueProjection{}, nil
+}
+
 func (repository *boardRecordingIssueRepository) ListLabels(context.Context, ports.ListLabelsCommand) (domain.LabelList, error) {
 	return domain.LabelList{}, nil
 }
@@ -346,10 +350,6 @@ func (repository *boardRecordingReviewRepository) ListReviewRequests(_ context.C
 }
 
 func (repository *boardRecordingReviewRepository) CancelReviewRequest(context.Context, ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
-	return ports.ReviewMutationResult{}, nil
-}
-
-func (repository *boardRecordingReviewRepository) SupersedeReviewRequest(context.Context, ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
 	return ports.ReviewMutationResult{}, nil
 }
 

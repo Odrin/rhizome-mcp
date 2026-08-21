@@ -71,6 +71,13 @@ type CountIssuesByEffectiveStatusCommand struct {
 	Now time.Time
 }
 
+// GetIssueProjectionCommand carries the current time used to derive one
+// issue's computed projection fields.
+type GetIssueProjectionCommand struct {
+	Identifier domain.IssueIdentifier
+	Now        time.Time
+}
+
 // IssueRepository reads issue projections and persists issue mutations.
 type IssueRepository interface {
 	CreateIssue(context.Context, CreateIssueCommand) (domain.Issue, error)
@@ -80,6 +87,7 @@ type IssueRepository interface {
 	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
 	LookupArchiveIssue(context.Context, string, []byte) (ArchiveIssueResult, bool, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
+	GetIssueProjection(context.Context, GetIssueProjectionCommand) (domain.IssueProjection, error)
 	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)
 	ListIssues(context.Context, ListIssuesCommand) (domain.IssueList, error)
 	CountIssuesByEffectiveStatus(context.Context, CountIssuesByEffectiveStatusCommand) ([]domain.EffectiveStatusCount, error)

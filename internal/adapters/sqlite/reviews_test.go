@@ -69,7 +69,7 @@ func TestReviewRepositoryLifecycleCreatesEventsAndOutcome(t *testing.T) {
 
 	var count int
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ?`, created.Request.ID).Scan(&count)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND json_extract(payload, '$.request_id') = ?`, created.Request.ID).Scan(&count)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 
 	var count int
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ? AND event_type = 'review_claimed'`, created.Request.ID).Scan(&count)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND event_type = 'review_claimed' AND json_extract(payload, '$.request_id') = ?`, created.Request.ID).Scan(&count)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 	// from the replace itself.
 	var eventCount int
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND json_extract(payload, '$.request_id') IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 		t.Fatalf("replay produced a different successor: %+v", replayed.Successor)
 	}
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND json_extract(payload, '$.request_id') IN (?, ?)`, created.Request.ID, replaced.Successor.ID).Scan(&eventCount)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) 
 		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE issue_id = ?`, issueID).Scan(&requestCount); err != nil {
 			return err
 		}
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ?`, created.Request.ID).Scan(&eventCount)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND json_extract(payload, '$.request_id') = ?`, created.Request.ID).Scan(&eventCount)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) 
 		t.Fatalf("review_requests count after rolled-back replace = %d, want 1", requestCount)
 	}
 	if eventCount != 1 {
-		t.Fatalf("review_events count after rolled-back replace = %d, want 1 (only the original review_requested)", eventCount)
+		t.Fatalf("review event count after rolled-back replace = %d, want 1 (only the original review_requested)", eventCount)
 	}
 
 	reloaded, err := fixture.repository.GetReviewRequest(fixture.ctx, created.Request.ID)

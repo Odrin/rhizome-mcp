@@ -335,7 +335,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "create_review_request", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "open_project", "record_decision", "renew_attempt", "replace_review_request", "save_attempt_note", "search", "supersede_review_request", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "open_project", "record_decision", "renew_attempt", "replace_review_request", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -371,10 +371,8 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 		t.Fatalf("get_issue_activity required = %v, want [issue_id]", schema.Required)
 	}
 	assertRequired(t, toolNamed(t, tools.Tools, "archive_issue"), "issue_id", "expected_version")
-	assertRequired(t, toolNamed(t, tools.Tools, "create_review_request"), "issue_id", "target_issue_version", "target_event_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_review_request"), "review_request_id")
 	assertRequired(t, toolNamed(t, tools.Tools, "cancel_review_request"), "review_request_id", "expected_version")
-	assertRequired(t, toolNamed(t, tools.Tools, "supersede_review_request"), "review_request_id", "expected_version")
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
@@ -1486,13 +1484,24 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		t.Fatalf("create issue = %#v", createdIssue)
 	}
 
-	created := call(t, client, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 2,
-		"target_event_id":      7,
-		"artifact_ids":         []string{"artifact-1", "artifact-2"},
+	// Create review request using direct repository access (create_review_request MCP tool is deprecated).
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 2,
+		TargetEventID:      7,
+		ArtifactIDs:        []string{"artifact-1", "artifact-2"},
+		OccurredAt:         time.Now().UTC(),
 	})
-	var createdOutput struct {
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+
+	got := call(t, client, "get_review_request", map[string]any{"review_request_id": createdReview.Request.ID})
+	var gotOutput struct {
 		ID                 string   `json:"id"`
 		IssueID            string   `json:"issue_id"`
 		TargetIssueVersion int64    `json:"target_issue_version"`
@@ -1501,43 +1510,9 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		Status             string   `json:"status"`
 		Claimable          bool     `json:"claimable"`
 	}
-	decodeStructured(t, created, &createdOutput)
-	if created.IsError || createdOutput.Status != "open" || !createdOutput.Claimable || createdOutput.IssueID != issue.ID || len(createdOutput.ArtifactIDs) != 2 {
-		t.Fatalf("create review request = %#v", createdOutput)
-	}
-	activity := call(t, client, "get_issue_activity", map[string]any{
-		"issue_id": issue.DisplayID, "types": []string{"reviews"}, "limit": 20,
-	})
-	var activityOutput struct {
-		Items []struct {
-			EntityType string `json:"entity_type"`
-			EntityID   string `json:"entity_id"`
-			IssueID    string `json:"issue_id"`
-			Review     *struct {
-				Status    string `json:"status"`
-				Claimable bool   `json:"claimable"`
-			} `json:"review"`
-		} `json:"items"`
-	}
-	decodeStructured(t, activity, &activityOutput)
-	if activity.IsError || len(activityOutput.Items) != 1 || activityOutput.Items[0].EntityType != "review" ||
-		activityOutput.Items[0].EntityID != createdOutput.ID || activityOutput.Items[0].IssueID != issue.ID ||
-		activityOutput.Items[0].Review == nil || activityOutput.Items[0].Review.Status != "open" || !activityOutput.Items[0].Review.Claimable {
-		t.Fatalf("review activity = %#v", activityOutput)
-	}
-
-	conflict := call(t, client, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 2,
-		"target_event_id":      7,
-		"artifact_ids":         []string{"artifact-3"},
-	})
-	assertDomainError(t, conflict, "REVIEW_ALREADY_EXISTS", false)
-
-	got := call(t, client, "get_review_request", map[string]any{"review_request_id": createdOutput.ID})
-	decodeStructured(t, got, &createdOutput)
-	if got.IsError || createdOutput.Status != "open" || !createdOutput.Claimable {
-		t.Fatalf("get review request = %#v", createdOutput)
+	decodeStructured(t, got, &gotOutput)
+	if got.IsError || gotOutput.Status != "open" || !gotOutput.Claimable || gotOutput.IssueID != issue.ID || len(gotOutput.ArtifactIDs) != 2 {
+		t.Fatalf("get review request = %#v", gotOutput)
 	}
 
 	listed := call(t, client, "list_review_requests", map[string]any{"status": "open", "claimable": true, "limit": 20})
@@ -1550,11 +1525,11 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		HasMore bool `json:"has_more"`
 	}
 	decodeStructured(t, listed, &listOutput)
-	if listed.IsError || len(listOutput.Items) != 1 || listOutput.Items[0].ID != createdOutput.ID || !listOutput.Items[0].Claimable {
+	if listed.IsError || len(listOutput.Items) != 1 || listOutput.Items[0].ID != createdReview.Request.ID || !listOutput.Items[0].Claimable {
 		t.Fatalf("list review requests = %#v", listOutput)
 	}
 
-	cancelled := call(t, client, "cancel_review_request", map[string]any{"review_request_id": createdOutput.ID, "expected_version": 1})
+	cancelled := call(t, client, "cancel_review_request", map[string]any{"review_request_id": createdReview.Request.ID, "expected_version": 1})
 	var cancelledOutput struct {
 		ID        string `json:"id"`
 		Status    string `json:"status"`
@@ -1565,30 +1540,41 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		t.Fatalf("cancel review request = %#v", cancelledOutput)
 	}
 
-	second := call(t, client, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 3,
-		"target_event_id":      9,
-		"artifact_ids":         []string{"artifact-9"},
+	// Create a third review request using direct repository access to test replace_review_request.
+	thirdCreated, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 3,
+		TargetEventID:      9,
+		ArtifactIDs:        []string{"artifact-9"},
+		OccurredAt:         source.Now().UTC(),
 	})
-	var secondOutput struct {
-		ID        string `json:"id"`
-		Status    string `json:"status"`
-		Claimable bool   `json:"claimable"`
+	if err != nil {
+		t.Fatalf("create third review request via repository: %v", err)
 	}
-	decodeStructured(t, second, &secondOutput)
-	if second.IsError || secondOutput.Status != "open" || !secondOutput.Claimable {
-		t.Fatalf("create second review request = %#v", secondOutput)
+
+	// Test replace_review_request: atomically supersede third and create fourth.
+	replaced := call(t, client, "replace_review_request", map[string]any{
+		"predecessor_request_id":       thirdCreated.Request.ID,
+		"predecessor_expected_version": 1,
+		"target_issue_version":         4,
+		"target_event_id":              11,
+		"artifact_ids":                 []string{"artifact-new"},
+		"idempotency_key":              "replace-key-1",
+	})
+	var replaceOutput struct {
+		Predecessor struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"predecessor"`
+		Successor struct {
+			ID        string `json:"id"`
+			Status    string `json:"status"`
+			Claimable bool   `json:"claimable"`
+		} `json:"successor"`
 	}
-	superseded := call(t, client, "supersede_review_request", map[string]any{"review_request_id": secondOutput.ID, "expected_version": 1})
-	var supersededOutput struct {
-		ID        string `json:"id"`
-		Status    string `json:"status"`
-		Claimable bool   `json:"claimable"`
-	}
-	decodeStructured(t, superseded, &supersededOutput)
-	if superseded.IsError || supersededOutput.Status != "superseded" || supersededOutput.Claimable {
-		t.Fatalf("supersede review request = %#v", supersededOutput)
+	decodeStructured(t, replaced, &replaceOutput)
+	if replaced.IsError || replaceOutput.Predecessor.Status != "superseded" || replaceOutput.Successor.Status != "open" || !replaceOutput.Successor.Claimable {
+		t.Fatalf("replace review request = %#v", replaceOutput)
 	}
 }
 
@@ -1628,23 +1614,24 @@ func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	createdReview := call(t, client, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 1,
-		"target_event_id":      latestEventID,
-		"artifact_ids":         []string{"artifact-1"},
-	})
-	var reviewRequest struct {
-		ID string `json:"id"`
-	}
-	decodeStructured(t, createdReview, &reviewRequest)
-	if createdReview.IsError || reviewRequest.ID == "" {
-		t.Fatalf("create review request = %#v", createdReview)
-	}
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatal(err)
 	}
+	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      latestEventID,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         source.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+	var reviewRequest struct {
+		ID string `json:"id"`
+	}
+	reviewRequest.ID = createdReview.Request.ID
 	if _, err := reviewRepository.ClaimReviewRequest(ctx, ports.ReviewMutationCommand{
 		RequestID:       reviewRequest.ID,
 		ExpectedVersion: 1,

@@ -168,7 +168,7 @@ Audited baselines from prior review work are informative but are not current def
 
 ## 3.1. Tool inventory
 
-The catalog exposes 35 full tools, 31 agent tools, 5 migration tools, and 16 read-only tools:
+The catalog exposes 33 full tools, 29 agent tools, 5 migration tools, and 16 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
@@ -183,28 +183,26 @@ The catalog exposes 35 full tools, 31 agent tools, 5 migration tools, and 16 rea
 11. `get_issue`
 12. `list_issues`
 13. `archive_issue`
-14. `create_review_request` (deprecated — see section 7.6)
-15. `get_review_request`
-16. `list_review_requests`
-17. `cancel_review_request`
-18. `supersede_review_request` (deprecated — see section 7.6)
-19. `replace_review_request`
-20. `manage_issue_relation`
-21. `get_issue_graph`
-22. `get_planning_graph`
-23. `validate_issue_plan`
-24. `apply_issue_plan`
-25. `add_comment`
-26. `record_decision`
-27. `list_decisions`
-28. `get_issue_activity`
-29. `claim_issue`
-30. `renew_attempt`
-31. `save_attempt_note`
-32. `finish_attempt`
-33. `get_work_context`
-34. `search`
-35. `get_changes`
+14. `get_review_request`
+15. `list_review_requests`
+16. `cancel_review_request`
+17. `replace_review_request`
+18. `manage_issue_relation`
+19. `get_issue_graph`
+20. `get_planning_graph`
+21. `validate_issue_plan`
+22. `apply_issue_plan`
+23. `add_comment`
+24. `record_decision`
+25. `list_decisions`
+26. `get_issue_activity`
+27. `claim_issue`
+28. `renew_attempt`
+29. `save_attempt_note`
+30. `finish_attempt`
+31. `get_work_context`
+32. `search`
+33. `get_changes`
 
 ### 3.1. `create_agent_session`
 
@@ -491,8 +489,8 @@ annotation matrix.
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
 | lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context` | yes | no |
 
-- **`full`** (default): every group, all 35 tools.
-- **`agent`** (31 tools): every group except `migration` and `sync` — the
+- **`full`** (default): every group, all 33 tools.
+- **`agent`** (29 tools): every group except `migration` and `sync` — the
   complete ordinary issue discovery, planning, review, knowledge, and
   leased work lifecycle workflow, without bulk project transfer or
   incremental synchronization.
@@ -1039,32 +1037,6 @@ Review requests bind review work to an issue version, event position, and
 optional artifact set. A review request is claimable only while its status is
 `open`.
 
-#### `create_review_request`
-
-**Deprecated.** `supersedes_id` only records a predecessor link; it never
-closes that predecessor. Coordinating creation with a separate
-`supersede_review_request` call leaves the review lifecycle in a partial
-state after a failure or concurrency conflict between the two calls. Prefer
-`replace_review_request` (below), which does both atomically. Retained as a
-compatibility alias for one release; `supersedes_id` retains its current
-(non-closing) semantics for as long as the alias exists.
-
-Input:
-
-```json
-{
-  "issue_id": "ISSUE-42",
-  "target_issue_version": 9,
-  "target_event_id": 1842,
-  "artifact_ids": [],
-  "supersedes_id": null
-}
-```
-
-`issue_id`, `target_issue_version`, and `target_event_id` are required.
-`artifact_ids` may contain at most 20 IDs. Creating another review request for
-the same target returns `REVIEW_ALREADY_EXISTS`.
-
 #### `replace_review_request`
 
 Atomically supersedes a predecessor review request and creates its open
@@ -1165,16 +1137,12 @@ next_cursor
 has_more
 ```
 
-#### `cancel_review_request` and `supersede_review_request`
+#### `cancel_review_request`
 
-**`supersede_review_request` is deprecated** for the same reason as
-`create_review_request.supersedes_id` above: it closes a request without
-creating or identifying a replacement, so a client must coordinate a second
-`create_review_request` call itself. Prefer `replace_review_request`.
-`cancel_review_request` is not deprecated — cancelling with no successor
-remains a distinct, legitimate operation with no atomicity problem to fix.
+Cancels an open or claimed review request with no successor, a distinct and
+legitimate operation.
 
-Both operations require the request ID and its current version:
+The operation requires the request ID and its current version:
 
 ```json
 {
@@ -2008,6 +1976,17 @@ next_event_id
 ```
 
 This tool supports incremental refresh instead of repeatedly reading full state.
+
+All events -- issue lifecycle events and review-lifecycle events alike --
+share one ordered, strictly increasing `id` sequence (the `issue_events`
+table; docs/04 §7, §15). Review events (`review_requested`,
+`review_claimed`, `review_approved`, `review_changes_requested`,
+`review_blocked`, `review_cancelled`, `review_superseded`) fully
+participate in `get_changes`: a review event created after a cursor is
+always delivered, and `latest_event_id` reflects the true maximum across
+every event regardless of origin. There is no separate review event
+sequence to merge, and no risk of colliding or out-of-order IDs across
+event kinds.
 
 Relation writes retain one durable event per endpoint so an `issue_id`-scoped
 feed observes every relation that affects that issue. An unfiltered global feed

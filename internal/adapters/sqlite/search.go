@@ -163,11 +163,7 @@ func (repository *SearchRepository) GetChanges(ctx context.Context, command port
 	}
 	var result domain.ChangesPage
 	err = repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
-		if err := query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM (
-			SELECT id FROM issue_events
-			UNION ALL
-			SELECT id FROM review_events
-		) AS event_ids`).Scan(&result.LatestEventID); err != nil {
+		if err := query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&result.LatestEventID); err != nil {
 			return err
 		}
 		where := []string{"id > ?"}
@@ -180,20 +176,13 @@ func (repository *SearchRepository) GetChanges(ctx context.Context, command port
 			where = append(where, "issue_id = ?")
 			args = append(args, issueID)
 		} else {
-			where = append(where, `(source_rank != 0 OR event_type NOT IN ('relation_added', 'relation_removed')
+			where = append(where, `(event_type NOT IN ('relation_added', 'relation_removed')
 				OR issue_id = json_extract(payload, '$.source_issue_id'))`)
 		}
 		appendSearchInFilter(&where, &args, "event_type", input.EventTypes)
 		args = append(args, input.Limit+1)
 		rows, err := query.QueryContext(ctx, `SELECT id, issue_id, event_type, session_id, attempt_id, payload, created_at
-			FROM (
-				SELECT issue_events.id, issue_events.issue_id, issue_events.event_type, issue_events.session_id, issue_events.attempt_id, issue_events.payload, issue_events.created_at, 0 AS source_rank
-				FROM issue_events
-				UNION ALL
-				SELECT review_events.id, review_requests.issue_id, review_events.event_type, NULL AS session_id, review_events.attempt_id, review_events.payload, review_events.created_at, 1 AS source_rank
-				FROM review_events
-				JOIN review_requests ON review_requests.id = review_events.request_id
-			) AS change_stream
+			FROM issue_events
 			WHERE `+strings.Join(where, " AND ")+` ORDER BY id ASC LIMIT ?`, args...)
 		if err != nil {
 			return err

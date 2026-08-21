@@ -20,8 +20,9 @@ type ClaimIssueCommand struct {
 }
 
 type ClaimIssueResult struct {
-	Issue   domain.Issue
-	Attempt domain.WorkAttempt
+	Issue      domain.Issue
+	Projection domain.IssueProjection
+	Attempt    domain.WorkAttempt
 	// LeaseToken is excluded from JSON encoding: it is the raw attempt
 	// secret and must never be persisted (idempotency_records.response_json
 	// stores this struct verbatim on a fresh claim).

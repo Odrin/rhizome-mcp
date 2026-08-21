@@ -36,6 +36,7 @@ type ProjectService interface {
 type IssueService interface {
 	ListIssues(context.Context, domain.ListIssuesInput) (domain.IssueList, error)
 	GetIssue(context.Context, string) (domain.Issue, error)
+	GetIssueProjection(context.Context, string) (domain.IssueProjection, error)
 }
 
 // SearchService exposes full-text search reads for CLI commands.
@@ -605,14 +606,14 @@ func (c *CLI) runIssueShow(ctx context.Context, args []string) error {
 	if *format != "table" && *format != "json" {
 		return fmt.Errorf("unsupported format %q", *format)
 	}
-	issue, err := c.services.IssueService.GetIssue(ctx, positionals[0])
+	projection, err := c.services.IssueService.GetIssueProjection(ctx, positionals[0])
 	if err != nil {
 		return err
 	}
 	if *format == "json" {
-		return writeJSON(c.stdoutWriter(), IssueResponse{Issue: issueFromDomain(issue)})
+		return writeJSON(c.stdoutWriter(), IssueResponse{Issue: issueFromDomainProjection(projection)})
 	}
-	return c.writeIssueTable(issue)
+	return c.writeIssueTable(projection.Issue)
 }
 
 func (c *CLI) runSearch(ctx context.Context, args []string) error {

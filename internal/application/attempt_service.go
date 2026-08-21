@@ -22,6 +22,7 @@ type AttemptService struct {
 
 type ClaimIssueResult struct {
 	Issue      domain.Issue
+	Projection domain.IssueProjection
 	Attempt    domain.WorkAttempt
 	LeaseToken string
 }
@@ -79,7 +80,7 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 	if err != nil {
 		return ClaimIssueResult{}, err
 	}
-	return ClaimIssueResult{Issue: result.Issue, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
+	return ClaimIssueResult{Issue: result.Issue, Projection: result.Projection, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
 }
 
 func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.RenewAttemptInput) (ports.RenewAttemptResult, error) {

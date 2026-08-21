@@ -108,7 +108,6 @@ type ReviewRepository interface {
 	GetReviewRequest(context.Context, string) (GetReviewRequestResult, error)
 	ListReviewRequests(context.Context, ListReviewRequestsQuery) (ListReviewRequestsResult, error)
 	CancelReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
-	SupersedeReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	ClaimReviewRequest(context.Context, ReviewMutationCommand) (ReviewMutationResult, error)
 	ResolveReviewRequest(context.Context, ResolveReviewRequestCommand) (ResolveReviewRequestResult, error)
 	ReplaceReviewRequest(context.Context, ReplaceReviewRequestCommand) (ReplaceReviewRequestResult, error)

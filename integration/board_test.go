@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/ports"
 )
 
 // TestIntegrationBoardCommand builds a mixed-status scenario (open, ready,
@@ -58,20 +62,35 @@ func TestIntegrationBoardCommand(t *testing.T) {
 		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimed, claim)
 	}
 
-	reviewRequested := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             reviewIssue.DisplayID,
-		"target_issue_version": 1,
-		"target_event_id":      0,
-		"artifact_ids":         []string{},
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            reviewIssue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		OccurredAt:         time.Now().UTC(),
 	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
 	var reviewRequest struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
-	decodeIntegrationResult(t, reviewRequested, &reviewRequest)
-	if reviewRequested.IsError || reviewRequest.ID == "" || reviewRequest.Status != "open" {
-		t.Fatalf("create_review_request result = %#v, decoded = %#v", reviewRequested, reviewRequest)
-	}
+	reviewRequest.ID = reviewCreated.Request.ID
+	reviewRequest.Status = string(reviewCreated.Request.Status)
 
 	// --format table (also exercised as the default with no --format flag).
 	tableOutput := runIntegrationCommand(t, env, "--data-root", env.dataRoot, "board")
@@ -452,19 +471,35 @@ func TestIntegrationBoardServeSearch(t *testing.T) {
 	if decisionResult.IsError {
 		t.Fatalf("record_decision result = %#v", decisionResult)
 	}
-	reviewResult := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 1,
-		"target_event_id":      0,
-		"artifact_ids":         []string{"board_search_review_token"},
+
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"board_search_review_token"},
+		OccurredAt:         time.Now().UTC(),
 	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
 	var review struct {
 		ID string `json:"id"`
 	}
-	decodeIntegrationResult(t, reviewResult, &review)
-	if reviewResult.IsError || review.ID == "" {
-		t.Fatalf("create_review_request result = %#v, decoded = %#v", reviewResult, review)
-	}
+	review.ID = reviewCreated.Request.ID
 	claimResult := callIntegrationTool(t, session, "claim_issue", map[string]any{
 		"issue_id":      issue.DisplayID,
 		"lease_seconds": 60,

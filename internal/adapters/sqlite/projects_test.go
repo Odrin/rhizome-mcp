@@ -719,6 +719,103 @@ func TestProjectRepositoryHasNoWriteSideEffects(t *testing.T) {
 	}
 }
 
+// TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThem
+// is a regression test for ISSUE-190 AC5: before the event log was unified,
+// review-lifecycle events lived in a separate review_events table that
+// ExportLogicalProject never read, so they were silently absent from every
+// logical export. Now that they are ordinary issue_events rows (source =
+// 'review'), they must appear in export like any other event, and survive
+// an import round trip. The interchange document format itself is locked
+// at version 1 with no new fields (docs/07 §1), so the 'source' tag is not
+// part of the export payload and is not expected to survive re-import --
+// only the event's issue_id/event_type/payload/created_at need to.
+func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThem(t *testing.T) {
+	db, now := openProjectDatabase(t, "source project", "instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'reviewed issue', 'review', 'high', 1, ?, ?)`,
+			issueID, sqlite.FormatStorageTime(now.Add(1*time.Second)), sqlite.FormatStorageTime(now.Add(2*time.Second))); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'issue_created', '{"kind":"created"}', ?, 'issue')`,
+			issueID, sqlite.FormatStorageTime(now.Add(3*time.Second))); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'review_requested', '{"request_id":"req-1","target_id":"targ-1"}', ?, 'review')`,
+			issueID, sqlite.FormatStorageTime(now.Add(4*time.Second)))
+		return err
+	}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	sourceRepository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := sourceRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if len(exported.Events) != 2 {
+		t.Fatalf("exported events = %#v, want 2 (both the plain issue event and the review-sourced event)", exported.Events)
+	}
+	var sawReviewRequested bool
+	for _, event := range exported.Events {
+		if event.EventType == "review_requested" {
+			sawReviewRequested = true
+			if !strings.Contains(string(event.Payload), `"request_id":"req-1"`) {
+				t.Fatalf("review event payload = %s, want request_id preserved", event.Payload)
+			}
+		}
+	}
+	if !sawReviewRequested {
+		t.Fatalf("exported events = %#v, want review_requested present (it must not be invisible to export)", exported.Events)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+
+	destinationDB, _ := openProjectDatabase(t, "destination project", "instructions")
+	destinationRepository, err := sqlite.NewProjectRepository(destinationDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := destinationRepository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+
+	var importedCount int
+	var importedSource string
+	if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE event_type = 'review_requested'`).Scan(&importedCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT source FROM issue_events WHERE event_type = 'review_requested'`).Scan(&importedSource)
+	}); err != nil {
+		t.Fatalf("read imported events: %v", err)
+	}
+	if importedCount != 1 {
+		t.Fatalf("imported review_requested event count = %d, want 1", importedCount)
+	}
+	if importedSource != "issue" {
+		t.Fatalf("imported event source = %q, want the default 'issue' -- the v1 interchange format carries no source tag (docs/07 §1), so this is the documented, acceptable round-trip behavior, not a bug", importedSource)
+	}
+}
+
 func openProjectDatabase(t *testing.T, name, instructions string) (*sqlite.DB, time.Time) {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "project.db"), sqlite.Options{

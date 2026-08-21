@@ -202,21 +202,6 @@ func (service *ReviewService) CancelReviewRequest(ctx context.Context, input Rev
 	return ReviewMutationResult{Request: result.Request, Claimable: false}, nil
 }
 
-// SupersedeReviewRequest transitions an open or claimed request to superseded.
-func (service *ReviewService) SupersedeReviewRequest(ctx context.Context, input ReviewMutationInput) (ReviewMutationResult, error) {
-	if strings.TrimSpace(input.RequestID) == "" {
-		return ReviewMutationResult{}, domain.NewError(domain.CodeInvalidArgument, "review_request_id is required", false)
-	}
-	if input.ExpectedVersion < 1 {
-		return ReviewMutationResult{}, domain.NewError(domain.CodeInvalidArgument, "expected_version must be >= 1", false)
-	}
-	result, err := service.repository.SupersedeReviewRequest(ctx, ports.ReviewMutationCommand{RequestID: input.RequestID, ExpectedVersion: input.ExpectedVersion, OccurredAt: service.clock.Now().UTC()})
-	if err != nil {
-		return ReviewMutationResult{}, err
-	}
-	return ReviewMutationResult{Request: result.Request, Claimable: false}, nil
-}
-
 // ReplaceReviewRequestInput captures the atomic replacement intent: close
 // predecessor, open successor, in one transaction.
 type ReplaceReviewRequestInput struct {

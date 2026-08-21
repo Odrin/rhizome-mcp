@@ -4,12 +4,16 @@ package integration_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestIntegrationSearchClassifiesParserNoSuchColumnAsInvalidInput(t *testing.T) {
@@ -114,19 +118,34 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 
 	// Create a review request with distinctive token in artifact context.
 	// This will have the updated issue title.
-	reviewCreated := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 2,
-		"target_event_id":      0,
-		"artifact_ids":         []string{"search_reviewtoken_artifact"},
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 2,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"search_reviewtoken_artifact"},
+		OccurredAt:         time.Now().UTC(),
 	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
 	var review struct {
 		ID string `json:"id"`
 	}
-	decodeIntegrationResult(t, reviewCreated, &review)
-	if reviewCreated.IsError || review.ID == "" {
-		t.Fatalf("create_review_request failed: %#v", reviewCreated)
-	}
+	review.ID = reviewCreated.Request.ID
 
 	// Claim the issue to create an attempt, then save an attempt note.
 	claimResult := callIntegrationTool(t, session, "claim_issue", map[string]any{

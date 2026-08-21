@@ -58,6 +58,69 @@ func issueEffectiveStatusSQL(now time.Time) string {
 	return `(CASE WHEN ` + issueActiveAttemptIDSQL(now) + ` IS NOT NULL THEN 'in_progress' ELSE issues.status END)`
 }
 
+// GetIssueProjection returns a single issue with computed projection fields
+// (effective_status, unresolved_blocker_count, is_blocked, is_claimable, active_attempt_id).
+// Archived issues remain visible. now comes from the caller's injected
+// clock (docs/04 §15), never the wall clock, so results stay deterministic
+// under tests.
+func (repository *IssueRepository) GetIssueProjection(ctx context.Context, command ports.GetIssueProjectionCommand) (domain.IssueProjection, error) {
+	var where string
+	var args []any
+	if command.Identifier.Kind == domain.IssueIdentifierInternalID {
+		where = "id = ?"
+		args = []any{command.Identifier.Value}
+	} else {
+		where = "sequence_no = ?"
+		args = []any{command.Identifier.SequenceNo}
+	}
+	var result domain.IssueProjection
+	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
+		projection, err := fetchIssueProjection(ctx, query, where, args, command.Now)
+		if err != nil {
+			return err
+		}
+		result = projection
+		return nil
+	})
+	return result, err
+}
+
+// queryIssueProjectionByID loads the projection for one issue by internal
+// ID, usable from either a read-only snapshot or an open write transaction
+// (both satisfy Queryer) -- e.g. ClaimIssue reading the post-claim
+// projection inside its own claim transaction, rather than hardcoding
+// values that are only correct under today's claim preconditions.
+func queryIssueProjectionByID(ctx context.Context, query Queryer, issueID string, now time.Time) (domain.IssueProjection, error) {
+	return fetchIssueProjection(ctx, query, "id = ?", []any{issueID}, now)
+}
+
+func fetchIssueProjection(ctx context.Context, query Queryer, where string, args []any, now time.Time) (domain.IssueProjection, error) {
+	statement := `SELECT id, sequence_no, type, title, description, acceptance_criteria,
+		status, priority, parent_id, blocked_reason, version,
+		created_by_session_id, created_at, updated_at, closed_at,
+		archived_at, archived_by_session_id,
+		` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
+		` + issueBlockedSQL + ` AS is_blocked,
+		` + issueClaimableSQLAt(now) + ` AS is_claimable,
+		` + issueEffectiveStatusSQL(now) + ` AS effective_status,
+		` + issueActiveAttemptIDSQL(now) + ` AS active_attempt_id,
+		` + issuePriorityRankSQL + ` AS priority_rank
+		FROM issues WHERE ` + where
+
+	row := query.QueryRowContext(ctx, statement, args...)
+	projection, err := scanIssueListProjection(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.IssueProjection{}, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+		}
+		return domain.IssueProjection{}, err
+	}
+	if err := loadIssueListLabels(ctx, query, []domain.IssueProjection{projection}); err != nil {
+		return domain.IssueProjection{}, err
+	}
+	return projection, nil
+}
+
 // ListIssues returns a bounded, deterministic issue page. Label filters have
 // any-label semantics, and the base projection plus batched labels are read
 // inside one SQLite snapshot.

@@ -690,8 +690,8 @@ func assertReviewRequestReleasedToOpen(t *testing.T, fixture *attemptTestFixture
 			Scan(&requestStatus, &activeAttemptID, &resolvedAt, &requestVersion); err != nil {
 			return err
 		}
-		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_events WHERE request_id = ? AND attempt_id = ? AND event_type = 'review_requested'`,
-			requestID, endedAttemptID).Scan(&reviewEventCount)
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND attempt_id = ? AND event_type = 'review_requested' AND json_extract(payload, '$.request_id') = ?`,
+			endedAttemptID, requestID).Scan(&reviewEventCount)
 	}); err != nil {
 		t.Fatal(err)
 	}

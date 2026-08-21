@@ -175,10 +175,8 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 	if affected != 1 {
 		return nil
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
-		VALUES (?, ?, ?, 'review_requested', ?, ?)`, request.ID, request.TargetID, attemptID,
-		string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), timestamp)
-	return err
+	return appendReviewEvent(ctx, tx, request.IssueID, "review_requested", &attemptID,
+		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), timestamp)
 }
 
 func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
@@ -319,6 +317,14 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 			LeaseExpiresAt: expires, StartedAt: now, LastHeartbeatAt: now,
 		}
 		result.LeaseToken = command.LeaseToken
+		// Read the real post-claim projection inside this same transaction
+		// rather than asserting values that are merely true under today's
+		// claim preconditions -- see ISSUE-208.
+		projection, err := queryIssueProjectionByID(ctx, tx, issue.ID, now)
+		if err != nil {
+			return err
+		}
+		result.Projection = projection
 		if command.IdempotencyKey != "" {
 			response, err := json.Marshal(result)
 			if err != nil {
@@ -947,8 +953,17 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		if blockers > 0 {
 			return domain.NewError(domain.CodeUnresolvedBlockersAdded, "unresolved blockers were added during attempt", true, domain.Detail{Field: "issue_id", Code: "BLOCKED"})
 		}
+		// Excludes source='review' rows deliberately: a review's own
+		// lifecycle (its own claim, in particular) always advances the
+		// shared issue_events sequence past whatever event position was
+		// captured when the review target was created, so counting review
+		// events here would make every review appear stale from the
+		// moment it is claimed. Staleness and the change-acknowledgment
+		// check both mean "did the reviewed work change," not "did the
+		// review's own workflow progress" -- see docs/02 for the
+		// unification contract and this exclusion's rationale.
 		var latestEventID int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review'`).Scan(&latestEventID); err != nil {
 			return err
 		}
 		var reviewRequest *domain.ReviewRequest
@@ -1281,8 +1296,8 @@ func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request 
 	if affected == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
-		VALUES (?, ?, ?, 'review_superseded', ?, ?)`, request.ID, request.TargetID, attemptID, string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil)), resolvedAt); err != nil {
+	if err := appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", &attemptID,
+		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), resolvedAt); err != nil {
 		return err
 	}
 	return nil
@@ -1307,8 +1322,8 @@ func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request do
 		VALUES (?, ?, ?, ?, ?, 1, ?)`, attemptID, request.ID, attemptID, outcome, stringOrNil(reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review outcome: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, attempt_id, event_type, payload, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, request.ID, request.TargetID, attemptID, reviewEventTypeForOutcome(outcome), string(payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason)), resolvedAt); err != nil {
+	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), &attemptID,
+		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review event: %w", err)
 	}
 	return nil

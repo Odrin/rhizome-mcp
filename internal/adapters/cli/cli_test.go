@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -57,14 +58,15 @@ func (s *stubProjectService) ApplyLogicalProjectImport(context.Context, []byte) 
 }
 
 type stubIssueService struct {
-	listInput domain.ListIssuesInput
-	listPage  domain.IssueList
-	showID    string
-	showIssue domain.Issue
-	listErr   error
-	showErr   error
-	listCalls int
-	showCalls int
+	listInput      domain.ListIssuesInput
+	listPage       domain.IssueList
+	showID         string
+	showIssue      domain.Issue
+	showProjection domain.IssueProjection
+	listErr        error
+	showErr        error
+	listCalls      int
+	showCalls      int
 }
 
 func (s *stubIssueService) ListIssues(ctx context.Context, input domain.ListIssuesInput) (domain.IssueList, error) {
@@ -77,6 +79,12 @@ func (s *stubIssueService) GetIssue(ctx context.Context, identifier string) (dom
 	s.showCalls++
 	s.showID = identifier
 	return s.showIssue, s.showErr
+}
+
+func (s *stubIssueService) GetIssueProjection(ctx context.Context, identifier string) (domain.IssueProjection, error) {
+	s.showCalls++
+	s.showID = identifier
+	return s.showProjection, s.showErr
 }
 
 type stubSearchService struct {
@@ -783,6 +791,129 @@ func TestRunPropagatesServiceErrors(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("expected no successful output, got %q", stdout.String())
 	}
+}
+
+func TestIssueShowAndListComputedFieldsMatch(t *testing.T) {
+	// Create one issue and claim it (active lease)
+	activeIssue := domain.Issue{
+		ID:        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		DisplayID: "ISSUE-1",
+		Title:     "Active Issue",
+		Type:      domain.TypeTask,
+		Status:    domain.StatusReady,
+		Priority:  domain.PriorityHigh,
+	}
+	activeAttemptID := "attempt-001"
+	activeProjection := domain.IssueProjection{
+		Issue:                  activeIssue,
+		EffectiveStatus:        domain.EffectiveStatusInProgress,
+		UnresolvedBlockerCount: 0,
+		IsBlocked:              false,
+		IsClaimable:            false,
+		ActiveAttemptID:        &activeAttemptID,
+	}
+
+	// Create one issue with a blocker (is_blocked = true)
+	blockedIssue := domain.Issue{
+		ID:        "01ARZ3NDEKTSV4RRFFQ69G5FBV",
+		DisplayID: "ISSUE-2",
+		Title:     "Blocked Issue",
+		Type:      domain.TypeTask,
+		Status:    domain.StatusReady,
+		Priority:  domain.PriorityHigh,
+	}
+	blockedProjection := domain.IssueProjection{
+		Issue:                  blockedIssue,
+		EffectiveStatus:        domain.EffectiveStatusBlocked,
+		UnresolvedBlockerCount: 1,
+		IsBlocked:              true,
+		IsClaimable:            false,
+		ActiveAttemptID:        nil,
+	}
+
+	// Set up the stub service
+	issueService := &stubIssueService{
+		listPage: domain.IssueList{
+			Items: []domain.IssueProjection{activeProjection, blockedProjection},
+		},
+	}
+
+	// Test issue show for the active issue
+	t.Run("issue show returns computed fields for active issue", func(t *testing.T) {
+		issueService.showProjection = activeProjection
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+
+		if err := cli.Run(context.Background(), []string{"issue", "show", "ISSUE-1", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		output := stdout.String()
+		if !strings.Contains(output, `"effective_status": "in_progress"`) {
+			t.Fatalf("expected effective_status to be 'in_progress', got %q", output)
+		}
+		if !strings.Contains(output, `"is_blocked": false`) {
+			t.Fatalf("expected is_blocked to be false, got %q", output)
+		}
+		if !strings.Contains(output, `"is_claimable": false`) {
+			t.Fatalf("expected is_claimable to be false, got %q", output)
+		}
+		if !strings.Contains(output, `"unresolved_blocker_count": 0`) {
+			t.Fatalf("expected unresolved_blocker_count to be 0, got %q", output)
+		}
+		if !strings.Contains(output, fmt.Sprintf(`"active_attempt_id": "%s"`, activeAttemptID)) {
+			t.Fatalf("expected active_attempt_id to be set, got %q", output)
+		}
+	})
+
+	// Test issue show for the blocked issue
+	t.Run("issue show returns computed fields for blocked issue", func(t *testing.T) {
+		issueService.showProjection = blockedProjection
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+
+		if err := cli.Run(context.Background(), []string{"issue", "show", "ISSUE-2", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		output := stdout.String()
+		if !strings.Contains(output, `"effective_status": "blocked"`) {
+			t.Fatalf("expected effective_status to be 'blocked', got %q", output)
+		}
+		if !strings.Contains(output, `"is_blocked": true`) {
+			t.Fatalf("expected is_blocked to be true, got %q", output)
+		}
+		if !strings.Contains(output, `"is_claimable": false`) {
+			t.Fatalf("expected is_claimable to be false, got %q", output)
+		}
+		if !strings.Contains(output, `"unresolved_blocker_count": 1`) {
+			t.Fatalf("expected unresolved_blocker_count to be 1, got %q", output)
+		}
+		// When active_attempt_id is nil, it should be omitted from JSON (omitempty tag)
+		if strings.Contains(output, `"active_attempt_id"`) {
+			t.Fatalf("expected active_attempt_id to be omitted from JSON when nil, got %q", output)
+		}
+	})
+
+	// Test that issue list returns the same fields
+	t.Run("issue list returns same computed fields", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		cli := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+
+		if err := cli.Run(context.Background(), []string{"issue", "list", "--format", "json"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		output := stdout.String()
+		// Verify active issue fields in list
+		if !strings.Contains(output, `"effective_status": "in_progress"`) {
+			t.Fatalf("expected active issue to have effective_status 'in_progress' in list, got %q", output)
+		}
+		// Verify blocked issue fields in list
+		if !strings.Contains(output, `"effective_status": "blocked"`) {
+			t.Fatalf("expected blocked issue to have effective_status 'blocked' in list, got %q", output)
+		}
+	})
 }
 
 func strPtr(value string) *string {

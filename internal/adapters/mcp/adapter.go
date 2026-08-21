@@ -232,14 +232,6 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[cancelReviewRequestInput, any](target, t, (*adapter).cancelReviewRequest))
 	})
-	// create_review_request only records a supersedes_id link; it never
-	// closes the predecessor (that split is exactly what replace_review_request
-	// fixes), so it is purely additive and has no idempotency_key at all.
-	// Deprecated: supersedes_id is retained as a compatibility alias for one
-	// release; prefer replace_review_request for atomic supersession.
-	target.registerTool(server, groupReview, tool("create_review_request", "Create a review request for an exact issue version, event position, and artifact set. Deprecated: prefer replace_review_request.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, routeProjectRequest[createReviewRequestInput, any](target, t, (*adapter).createReviewRequest))
-	})
 	target.registerTool(server, groupReview, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getReviewRequestInput, any](target, t, (*adapter).getReviewRequest))
 	})
@@ -251,13 +243,6 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	// an existing relation.
 	target.registerTool(server, groupIssues, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[manageIssueRelationInput, any](target, t, (*adapter).manageIssueRelation))
-	})
-	// Deprecated: retained as a compatibility alias for one release; prefer
-	// replace_review_request, which closes the predecessor and opens its
-	// successor atomically instead of leaving the review lifecycle partial
-	// between two separate calls.
-	target.registerTool(server, groupReview, tool("supersede_review_request", "Supersede an open or claimed review request using its current version. Deprecated: prefer replace_review_request.", schemaSupersedeReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
-		sdkmcp.AddTool(server, t, routeProjectRequest[supersedeReviewRequestInput, any](target, t, (*adapter).supersedeReviewRequest))
 	})
 	// idempotency_key is required (not optional) and the repository replays
 	// the original result for a repeated key, so idempotentHint is
@@ -428,8 +413,14 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 	if view == "full" {
 		attempt := attemptDTOFromDomain(result.Attempt)
 		return success(claimIssueOutput{
-			Issue: issueListItemDTO{issueDTO: issueDTOFromDomain(result.Issue), EffectiveStatus: string(domain.EffectiveStatusInProgress),
-				UnresolvedBlockerCount: 0, IsBlocked: false, IsClaimable: false, ActiveAttemptID: &result.Attempt.ID},
+			Issue: issueListItemDTO{
+				issueDTO:               issueDTOFromDomain(result.Projection.Issue),
+				EffectiveStatus:        string(result.Projection.EffectiveStatus),
+				UnresolvedBlockerCount: result.Projection.UnresolvedBlockerCount,
+				IsBlocked:              result.Projection.IsBlocked,
+				IsClaimable:            result.Projection.IsClaimable,
+				ActiveAttemptID:        result.Projection.ActiveAttemptID,
+			},
 			Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
 			MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
 			NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
@@ -1001,20 +992,6 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	return success(archiveIssueCompactOutputFromDomain(result.Issue), "issue archived")
 }
 
-func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
-		IssueID:            input.IssueID,
-		TargetIssueVersion: input.TargetIssueVersion,
-		TargetEventID:      input.TargetEventID,
-		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
-		SupersedesID:       copyReviewOptionalString(input.SupersedesID),
-	})
-	if err != nil {
-		return adapter.failure(err)
-	}
-	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request created")
-}
-
 func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
 	result, err := adapter.reviews.GetReviewRequest(ctx, input.ReviewRequestID)
 	if err != nil {
@@ -1050,14 +1027,6 @@ func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp
 		return adapter.failure(err)
 	}
 	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request cancelled")
-}
-
-func (adapter *adapter) supersedeReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input supersedeReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.SupersedeReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
-	if err != nil {
-		return adapter.failure(err)
-	}
-	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request superseded")
 }
 
 func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input replaceReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {

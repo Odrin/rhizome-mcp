@@ -241,17 +241,6 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 		if !reviewRepo.lastMutationCommand.OccurredAt.Equal(fixedTime.UTC()) {
 			t.Fatalf("cancel occurred at = %v", reviewRepo.lastMutationCommand.OccurredAt)
 		}
-
-		superseded, err := service.SupersedeReviewRequest(context.Background(), ReviewMutationInput{RequestID: "req-2", ExpectedVersion: 3})
-		if err != nil {
-			t.Fatalf("SupersedeReviewRequest returned error: %v", err)
-		}
-		if superseded.Claimable {
-			t.Fatal("superseded result should not be claimable")
-		}
-		if !reviewRepo.lastMutationCommand.OccurredAt.Equal(fixedTime.UTC()) {
-			t.Fatalf("supersede occurred at = %v", reviewRepo.lastMutationCommand.OccurredAt)
-		}
 	})
 
 	t.Run("uses canonical hash for replace and replays writes", func(t *testing.T) {
@@ -444,6 +433,15 @@ func (r *recordingIssueRepository) GetIssue(_ context.Context, identifier domain
 	return r.resolvedIssue, nil
 }
 
+func (r *recordingIssueRepository) GetIssueProjection(_ context.Context, command ports.GetIssueProjectionCommand) (domain.IssueProjection, error) {
+	r.calls++
+	r.lastIdentifier = command.Identifier
+	if r.resolveErr != nil {
+		return domain.IssueProjection{}, r.resolveErr
+	}
+	return domain.IssueProjection{Issue: r.resolvedIssue}, nil
+}
+
 func (r *recordingIssueRepository) ListLabels(context.Context, ports.ListLabelsCommand) (domain.LabelList, error) {
 	return domain.LabelList{}, nil
 }
@@ -493,12 +491,6 @@ func (r *recordingReviewRepository) CancelReviewRequest(_ context.Context, comma
 	r.mutationCalls++
 	r.lastMutationCommand = command
 	return ports.ReviewMutationResult{Request: domain.ReviewRequest{ID: command.RequestID, Status: domain.ReviewRequestStatusCancelled, Version: command.ExpectedVersion + 1}}, nil
-}
-
-func (r *recordingReviewRepository) SupersedeReviewRequest(_ context.Context, command ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
-	r.mutationCalls++
-	r.lastMutationCommand = command
-	return ports.ReviewMutationResult{Request: domain.ReviewRequest{ID: command.RequestID, Status: domain.ReviewRequestStatusSuperseded, Version: command.ExpectedVersion + 1}}, nil
 }
 
 func (r *recordingReviewRepository) ClaimReviewRequest(context.Context, ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {

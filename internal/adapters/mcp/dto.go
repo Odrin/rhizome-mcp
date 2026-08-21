@@ -185,14 +185,6 @@ type endAgentSessionInput struct {
 	AgentSessionHandle string `json:"agent_session_handle"`
 }
 
-type createReviewRequestInput struct {
-	IssueID            string   `json:"issue_id"`
-	TargetIssueVersion int64    `json:"target_issue_version"`
-	TargetEventID      int64    `json:"target_event_id"`
-	ArtifactIDs        []string `json:"artifact_ids,omitempty"`
-	SupersedesID       *string  `json:"supersedes_id,omitempty"`
-}
-
 type getReviewRequestInput struct {
 	ReviewRequestID string `json:"review_request_id"`
 }
@@ -205,11 +197,6 @@ type listReviewRequestsInput struct {
 }
 
 type cancelReviewRequestInput struct {
-	ReviewRequestID string `json:"review_request_id"`
-	ExpectedVersion int64  `json:"expected_version"`
-}
-
-type supersedeReviewRequestInput struct {
 	ReviewRequestID string `json:"review_request_id"`
 	ExpectedVersion int64  `json:"expected_version"`
 }

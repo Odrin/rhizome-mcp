@@ -168,6 +168,26 @@ Exact column layout for policies, requirements, snapshots, evidence
 (ISSUE-171), and review approval records (ISSUE-173) is decided by those
 implementation tasks, not by this document.
 
+### 7.1. `issue_events` is the single ordered event log
+
+Every durable event -- issue lifecycle and review lifecycle alike -- is one
+row in `issue_events`, sharing its single `INTEGER PRIMARY KEY
+AUTOINCREMENT` sequence. A `source TEXT NOT NULL DEFAULT 'issue' CHECK
+(source IN ('issue', 'review'))` column (migration `008_unify_event_log`)
+records provenance only; no query branches on it. A review event's
+`issue_id` is populated directly from its review request at insert time
+(there is no join to derive it), and its `request_id`/`target_id` remain
+available in the JSON `payload`, the same place they were always recorded.
+`internal/adapters/sqlite`'s `appendReviewEvent` helper is the single
+insertion point every review event append site uses; there was previously
+a second, independently-sequenced `review_events` table, which is why
+`GetChanges`, `context_event_id_at_start`, the review-target staleness
+comparison, and the activity feed's events arm could each disagree about
+what "the latest event" meant. Any future event-producing feature (workflow
+policy audit events, ISSUE-170; reservation events, ISSUE-178) appends
+through this same table and helper pattern rather than introducing another
+independently-sequenced `AUTOINCREMENT` table.
+
 ## 8. Constraints
 
 All ordinary tables should use `STRICT`.

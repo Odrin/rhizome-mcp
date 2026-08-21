@@ -59,14 +59,6 @@ func TestReviewServiceCreatesAndMutatesRequests(t *testing.T) {
 	if cancelled.Request.Status != domain.ReviewRequestStatusCancelled || cancelled.Claimable {
 		t.Fatalf("CancelReviewRequest() = %#v", cancelled)
 	}
-
-	superseded, err := service.SupersedeReviewRequest(context.Background(), ReviewMutationInput{RequestID: created.Request.ID, ExpectedVersion: created.Request.Version + 1})
-	if err != nil {
-		t.Fatalf("SupersedeReviewRequest() error = %v", err)
-	}
-	if superseded.Request.Status != domain.ReviewRequestStatusSuperseded || superseded.Claimable {
-		t.Fatalf("SupersedeReviewRequest() = %#v", superseded)
-	}
 }
 
 func TestReviewServiceReplaceReviewRequestDelegatesAndValidates(t *testing.T) {
@@ -176,6 +168,10 @@ func (stub *issueRepositoryStub) GetIssue(_ context.Context, identifier domain.I
 	return stub.issue, nil
 }
 
+func (stub *issueRepositoryStub) GetIssueProjection(_ context.Context, command ports.GetIssueProjectionCommand) (domain.IssueProjection, error) {
+	return domain.IssueProjection{Issue: stub.issue}, nil
+}
+
 func (stub *issueRepositoryStub) ListLabels(context.Context, ports.ListLabelsCommand) (domain.LabelList, error) {
 	return domain.LabelList{}, nil
 }
@@ -213,12 +209,6 @@ func (stub *reviewRepositoryStub) ListReviewRequests(_ context.Context, query po
 
 func (stub *reviewRepositoryStub) CancelReviewRequest(_ context.Context, command ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
 	stub.request.Status = domain.ReviewRequestStatusCancelled
-	stub.request.Version = command.ExpectedVersion + 1
-	return ports.ReviewMutationResult{Request: stub.request}, nil
-}
-
-func (stub *reviewRepositoryStub) SupersedeReviewRequest(_ context.Context, command ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
-	stub.request.Status = domain.ReviewRequestStatusSuperseded
 	stub.request.Version = command.ExpectedVersion + 1
 	return ports.ReviewMutationResult{Request: stub.request}, nil
 }

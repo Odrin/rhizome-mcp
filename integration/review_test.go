@@ -64,25 +64,27 @@ func TestIntegrationReviewWorkflow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("read latest issue event id: %v", err)
 	}
-	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 1,
-		"target_event_id":      latestEventID,
-		"artifact_ids":         []string{"artifact-1"},
-	})
-	var reviewRequest struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	decodeIntegrationResult(t, requested, &reviewRequest)
-	if requested.IsError || reviewRequest.ID == "" || reviewRequest.Status != "open" {
-		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, reviewRequest)
-	}
 
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      latestEventID,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+	var reviewRequest struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	reviewRequest.ID = requested.Request.ID
+	reviewRequest.Status = string(requested.Request.Status)
 	if _, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
 		RequestID:       reviewRequest.ID,
 		ExpectedVersion: 1,
@@ -145,20 +147,41 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
 	}
 
-	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id": issue.DisplayID, "target_issue_version": 1, "target_event_id": 0,
-		"artifact_ids": []string{"artifact-1"},
+	databasePath := mustProjectDatabasePath(t, env)
+	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close project database: %v", closeErr)
+		}
+	}()
+
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	predecessorCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      0,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         time.Now().UTC(),
 	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
 	var predecessor struct {
 		ID                 string `json:"id"`
 		Version            int64  `json:"version"`
 		Status             string `json:"status"`
 		TargetIssueVersion int64  `json:"target_issue_version"`
 	}
-	decodeIntegrationResult(t, requested, &predecessor)
-	if requested.IsError || predecessor.ID == "" || predecessor.Status != "open" {
-		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, predecessor)
-	}
+	predecessor.ID = predecessorCreated.Request.ID
+	predecessor.Version = predecessorCreated.Request.Version
+	predecessor.Status = string(predecessorCreated.Request.Status)
+	predecessor.TargetIssueVersion = predecessorCreated.Request.TargetIssueVersion
 
 	replaced := callIntegrationTool(t, session, "replace_review_request", map[string]any{
 		"predecessor_request_id":       predecessor.ID,
@@ -208,16 +231,6 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("replayed replace_review_request result = %#v, decoded = %#v", replayed, replayOutput)
 	}
 
-	databasePath := mustProjectDatabasePath(t, env)
-	db, err := sqlite.Open(context.Background(), databasePath, sqlite.Options{})
-	if err != nil {
-		t.Fatalf("open project database: %v", err)
-	}
-	defer func() {
-		if closeErr := db.Close(context.Background()); closeErr != nil {
-			t.Fatalf("close project database: %v", closeErr)
-		}
-	}()
 	var successorCount int
 	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
 		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_requests WHERE supersedes_id = ?`, predecessor.ID).Scan(&successorCount)
@@ -241,10 +254,6 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimedIssue, claim)
 	}
 
-	reviewRepository, err := sqlite.NewReviewRepository(db)
-	if err != nil {
-		t.Fatalf("new review repository: %v", err)
-	}
 	claimedSuccessor, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
 		RequestID: replaceOutput.Successor.ID, ExpectedVersion: 1, ActiveAttemptID: &claim.Attempt.ID,
 		OccurredAt: time.Now().UTC().Add(-time.Second),
@@ -333,24 +342,24 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 		t.Fatalf("read latest issue event id: %v", err)
 	}
 
-	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": 1,
-		"target_event_id":      latestEventID,
-		"artifact_ids":         []string{"artifact-1"},
-	})
-	var initialRequest struct {
-		ID string `json:"id"`
-	}
-	decodeIntegrationResult(t, requested, &initialRequest)
-	if requested.IsError || initialRequest.ID == "" {
-		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, initialRequest)
-	}
-
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: 1,
+		TargetEventID:      latestEventID,
+		ArtifactIDs:        []string{"artifact-1"},
+		OccurredAt:         time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+	var initialRequest struct {
+		ID string `json:"id"`
+	}
+	initialRequest.ID = requested.Request.ID
 	if _, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
 		RequestID:       initialRequest.ID,
 		ExpectedVersion: 1,
@@ -418,19 +427,20 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 		t.Fatalf("read latest issue event id after second claim: %v", err)
 	}
 
-	requestedAgain := callIntegrationTool(t, session, "create_review_request", map[string]any{
-		"issue_id":             issue.DisplayID,
-		"target_issue_version": updatedIssue.Issue.Version,
-		"target_event_id":      latestEventIDAfterSecondClaim,
-		"artifact_ids":         []string{"artifact-2"},
+	requestedAgainRes, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		IssueID:            issue.ID,
+		TargetIssueVersion: updatedIssue.Issue.Version,
+		TargetEventID:      latestEventIDAfterSecondClaim,
+		ArtifactIDs:        []string{"artifact-2"},
+		OccurredAt:         time.Now().UTC(),
 	})
+	if err != nil {
+		t.Fatalf("create second review request: %v", err)
+	}
 	var secondRequest struct {
 		ID string `json:"id"`
 	}
-	decodeIntegrationResult(t, requestedAgain, &secondRequest)
-	if requestedAgain.IsError || secondRequest.ID == "" {
-		t.Fatalf("create second review request result = %#v, decoded = %#v", requestedAgain, secondRequest)
-	}
+	secondRequest.ID = requestedAgainRes.Request.ID
 
 	if _, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
 		RequestID:       secondRequest.ID,

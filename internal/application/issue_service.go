@@ -258,3 +258,14 @@ func (service *IssueService) GetIssue(ctx context.Context, identifier string) (d
 	}
 	return service.repository.GetIssue(ctx, normalized)
 }
+
+// GetIssueProjection validates an internal or display issue identifier and returns the
+// issue projection with computed fields (effective_status, unresolved_blocker_count, etc).
+// Archived issues remain visible.
+func (service *IssueService) GetIssueProjection(ctx context.Context, identifier string) (domain.IssueProjection, error) {
+	normalized, err := domain.ParseIssueIdentifier(identifier)
+	if err != nil {
+		return domain.IssueProjection{}, err
+	}
+	return service.repository.GetIssueProjection(ctx, ports.GetIssueProjectionCommand{Identifier: normalized, Now: service.clock.Now().UTC()})
+}

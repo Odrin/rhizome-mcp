@@ -208,6 +208,7 @@ func TestRunCommandFlowsAndParsing(t *testing.T) {
 		}
 		stdout.Reset()
 		stub.showIssue = domain.Issue{DisplayID: "ISSUE-42", Title: "Shown"}
+		stub.showProjection = domain.IssueProjection{Issue: stub.showIssue}
 		if err := cli.Run(context.Background(), []string{"issue", "show", "ISSUE-42", "--format", "json"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
