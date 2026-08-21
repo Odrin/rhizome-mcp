@@ -78,9 +78,15 @@ mutating operation opens its business transaction. It passes the resolved
 durable `session_id` to the existing domain command; domain and SQLite layers
 continue to store only that nullable ULID in attempts and audit records. A
 read-only tool may validate a supplied handle but never updates
-`last_seen_at`. A mutating tool atomically validates the active session, writes
-its ordinary domain changes and audit records with the resolved `session_id`,
-and advances `last_seen_at`; an error leaves all of these writes unchanged.
+`last_seen_at`. A mutating tool validates the active session and advances
+`last_seen_at` in its own transaction *before* the business transaction opens,
+not atomically with it: `last_seen_at` is not rolled back if the subsequent
+business mutation fails (e.g. `VERSION_CONFLICT`, `INVALID_ARGUMENT`), and a
+session that ends in the (sub-millisecond) gap between the touch and the
+mutation is still attributed for that one call. This is a deliberate,
+documented best-effort scope, not a bug: making the touch and the mutation
+transactionally atomic requires a unit of work spanning arbitrary repository
+transactions, which does not exist yet.
 
 Handle errors are stable, non-retryable structured errors:
 
@@ -251,20 +257,23 @@ The implementation of this contract is bounded as follows:
   nullable `session_id` fields on existing mutation commands.
 - **Application:** generate a cryptographically random handle, hash it before
   persistence, create, resolve, touch, and end sessions through one service;
-  resolve-and-touch for a mutating call must run in the same SQLite write
-  transaction as its business mutation.
+  resolve-and-touch for a mutating call runs in its own transaction before the
+  business mutation, on a best-effort basis (see section 2.1) rather than
+  atomically with it.
 - **MCP adapter:** add the two lifecycle tools and the optional common input
   property to every existing tool schema; resolve the property before passing
   command inputs. Remove `InitializedHandler`, `ServerSession.ID()`,
   `Mcp-Session-Id`, `connectionSessions`, `sdkSessionIDs`, and HTTP/stdio close
   lifecycle attribution.
 - **SQLite:** migrate `agent_sessions` with a non-null unique `handle_hash`,
-  use indexed hash lookup, and provide atomic active-handle resolution plus
-  touch for existing mutation transactions. Existing nullable attribution
-  foreign keys and historical rows remain unchanged.
+  use indexed hash lookup, and provide active-handle resolution plus touch as
+  its own committed transaction, run before the mutation's transaction rather
+  than inside it. Existing nullable attribution foreign keys and historical
+  rows remain unchanged.
 - **Tests:** cover creation, single-return handle redaction, omitted handles,
-  malformed/unknown/ended errors, idempotent end, read-only no-touch, atomic
-  mutation attribution, concurrent use/end races, reconnect and process-restart
+  malformed/unknown/ended errors, idempotent end, read-only no-touch, a failed
+  mutation leaving `last_seen_at` already advanced from its pre-touch (not
+  rolled back), concurrent use/end races, reconnect and process-restart
   recovery, and both MCP protocol eras over stdio and HTTP.
 - **Documentation:** update examples and operational guidance after the runtime
   implementation lands; do not describe HTTP `DELETE` or SDK session closure as

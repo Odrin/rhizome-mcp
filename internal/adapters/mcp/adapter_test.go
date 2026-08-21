@@ -2399,6 +2399,47 @@ func TestExplicitAgentSessionHandleAttribution(t *testing.T) {
 	assertDomainError(t, invalid, domain.CodeSessionNotActive, false)
 }
 
+// TestAgentSessionTouchIsBestEffortNotAtomicWithMutation locks in the
+// ISSUE-198 decision: resolve-and-touch runs in its own transaction before
+// the business mutation opens, so a business-side failure (VERSION_CONFLICT
+// here) does not roll back an already-advanced last_seen_at. See docs/03
+// section 2.1.
+func TestAgentSessionTouchIsBestEffortNotAtomicWithMutation(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "best-effort-touch.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createdSession := call(t, client, "create_agent_session", map[string]any{"client_name": "test-agent"})
+	var sessionOutput struct {
+		Handle string `json:"agent_session_handle"`
+	}
+	decodeStructured(t, createdSession, &sessionOutput)
+	if createdSession.IsError || sessionOutput.Handle == "" {
+		t.Fatalf("create_agent_session = %#v", createdSession)
+	}
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "conflict target"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue = %#v", created)
+	}
+
+	initial := readAgentSession(t, db)
+	source.Advance(time.Minute)
+	conflicted := call(t, client, "update_issue", map[string]any{
+		"issue_id": issue.ID, "expected_version": int64(999), "changes": map[string]any{"title": "won't apply"},
+		"agent_session_handle": sessionOutput.Handle,
+	})
+	assertDomainError(t, conflicted, domain.CodeVersionConflict, true)
+	if touched := readAgentSession(t, db); !touched.LastSeenAt.Equal(source.Now()) || touched.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("failed mutation left last_seen_at untouched = %#v, want it advanced (best-effort pre-touch)", touched)
+	}
+}
+
 func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {
 	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	ctx := context.Background()
