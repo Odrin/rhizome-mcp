@@ -34,35 +34,6 @@ func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
 	return &AttemptRepository{db: database}, nil
 }
 
-// LookupClaimIssue serves a replay before the lease token is generated and the
-// attempt ID is allocated. Claim still repeats the lookup in the writer transaction to close the race.
-func (repository *AttemptRepository) LookupClaimIssue(ctx context.Context, key string, hash []byte) (ports.ClaimIssueResult, bool, error) {
-	var result ports.ClaimIssueResult
-	var found bool
-	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
-		var savedHash []byte
-		var savedResponse string
-		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
-			WHERE operation = ? AND idempotency_key = ?`, claimIssueOperation, key).Scan(&savedHash, &savedResponse)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(savedHash, hash) {
-			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
-				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
-		}
-		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
-			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
-		}
-		found = true
-		return nil
-	})
-	return result, found, err
-}
-
 func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command ports.ClaimIssueCommand) (ports.ClaimIssueResult, error) {
 	if !validAttemptSessionID(command.SessionID) {
 		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
@@ -90,6 +61,37 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
 					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
 				}
+				// The persisted response never carries a lease token (see
+				// ports.ClaimIssueResult.LeaseToken), so replay cannot serve
+				// the original secret. If the attempt is still active,
+				// rotate the lease and issue this call's freshly generated
+				// token instead; the previous token, if the original caller
+				// ever received it, stops working the moment this succeeds.
+				var attemptStatus string
+				scanErr := tx.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, result.Attempt.ID).Scan(&attemptStatus)
+				if scanErr == sql.ErrNoRows {
+					return domain.WrapError(scanErr, domain.CodeStorageCorrupt, "idempotency record references a missing attempt", false)
+				}
+				if scanErr != nil {
+					return scanErr
+				}
+				if attemptStatus != string(domain.AttemptStatusActive) {
+					return domain.NewError(domain.CodeAttemptNotActive, "claimed attempt is no longer active; the original claim response was not retained", false,
+						domain.Detail{Field: "attempt_id", Code: "NOT_ACTIVE"})
+				}
+				res, updateErr := tx.ExecContext(ctx, `UPDATE work_attempts SET lease_token_hash = ?, lease_expires_at = ?
+						WHERE id = ? AND status = 'active'`, command.TokenHash, expiresTimestamp, result.Attempt.ID)
+				if updateErr != nil {
+					return updateErr
+				}
+				if affected, rowsErr := res.RowsAffected(); rowsErr != nil {
+					return rowsErr
+				} else if affected != 1 {
+					return domain.NewError(domain.CodeAttemptNotActive, "claimed attempt is no longer active; the original claim response was not retained", false,
+						domain.Detail{Field: "attempt_id", Code: "NOT_ACTIVE"})
+				}
+				result.Attempt.LeaseExpiresAt = expires
+				result.LeaseToken = command.LeaseToken
 				return nil
 			case err == sql.ErrNoRows:
 			default:

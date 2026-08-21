@@ -20,9 +20,12 @@ type ClaimIssueCommand struct {
 }
 
 type ClaimIssueResult struct {
-	Issue      domain.Issue
-	Attempt    domain.WorkAttempt
-	LeaseToken string
+	Issue   domain.Issue
+	Attempt domain.WorkAttempt
+	// LeaseToken is excluded from JSON encoding: it is the raw attempt
+	// secret and must never be persisted (idempotency_records.response_json
+	// stores this struct verbatim on a fresh claim).
+	LeaseToken string `json:"-"`
 }
 
 type RenewAttemptCommand struct {
@@ -104,8 +107,11 @@ type ListActiveAttemptsCommand struct {
 
 // AttemptRepository executes all attempt lifecycle mutations atomically.
 type AttemptRepository interface {
+	// ClaimIssue is the sole entry point for both a fresh claim and an
+	// idempotent replay: with LeaseToken never persisted, a replay of a
+	// still-active attempt rotates the lease and returns a fresh token, so
+	// replay must always go through the write path. See ClaimIssueCommand.
 	ClaimIssue(context.Context, ClaimIssueCommand) (ClaimIssueResult, error)
-	LookupClaimIssue(context.Context, string, []byte) (ClaimIssueResult, bool, error)
 	RenewAttempt(context.Context, RenewAttemptCommand) (RenewAttemptResult, error)
 	SaveAttemptNote(context.Context, SaveAttemptNoteCommand) (SaveAttemptNoteResult, error)
 	LookupSaveAttemptNote(context.Context, string, []byte) (SaveAttemptNoteResult, bool, error)

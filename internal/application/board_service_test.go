@@ -290,10 +290,6 @@ func (repository *boardRecordingAttemptRepository) ClaimIssue(context.Context, p
 	return ports.ClaimIssueResult{}, nil
 }
 
-func (repository *boardRecordingAttemptRepository) LookupClaimIssue(context.Context, string, []byte) (ports.ClaimIssueResult, bool, error) {
-	return ports.ClaimIssueResult{}, false, nil
-}
-
 func (repository *boardRecordingAttemptRepository) RenewAttempt(context.Context, ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
 	return ports.RenewAttemptResult{}, nil
 }

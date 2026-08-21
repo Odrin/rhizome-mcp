@@ -52,14 +52,11 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 		hash := sha256.Sum256(canonical)
 		requestHash = append([]byte(nil), hash[:]...)
 		idempotencyKey = *normalized.IdempotencyKey
-		result, found, err := service.repository.LookupClaimIssue(ctx, idempotencyKey, requestHash)
-		if err != nil {
-			return ClaimIssueResult{}, err
-		}
-		if found {
-			return ClaimIssueResult{Issue: result.Issue, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
-		}
 	}
+	// No read-only fast path here: the persisted idempotency response never
+	// carries a lease token, so a replay of a still-active attempt must
+	// always go through the write path below to rotate the lease and issue
+	// a fresh one (see ports.AttemptRepository.ClaimIssue).
 	id, err := service.ids.New()
 	if err != nil {
 		return ClaimIssueResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt identifier", false)

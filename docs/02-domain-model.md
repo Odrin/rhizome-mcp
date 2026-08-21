@@ -262,7 +262,14 @@ lease_token
 lease_expires_at
 ```
 
-The raw lease token is returned once. Only a hash is stored.
+The raw lease token is returned once. Only a hash is stored: neither
+`work_attempts` (which stores `lease_token_hash`) nor `idempotency_records`
+(section 13) ever persists the raw value. If `claim_issue` is retried with
+the same `idempotency_key` while the attempt is still active, the server
+rotates the lease and returns a freshly generated token rather than
+replaying the original — the previous token stops working the moment the
+retry succeeds. If the attempt is no longer active, the retry fails with
+`ATTEMPT_NOT_ACTIVE` instead of fabricating a lease for a finished attempt.
 
 Operations on an active attempt require:
 
@@ -538,6 +545,10 @@ Rules:
 - Same key and same request return the saved result.
 - Same key and different request return `IDEMPOTENCY_CONFLICT`.
 - Records are not automatically deleted in the first version.
+- `response_json` never contains a raw secret. `claim_issue`'s stored
+  response omits the lease token entirely (see section 5.1); a replay
+  rotates the lease and returns a fresh token computed at replay time,
+  never a persisted one.
 
 ## 14. SearchIndex
 

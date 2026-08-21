@@ -1266,8 +1266,13 @@ func TestClaimIssueAcceptsIdempotencyKey(t *testing.T) {
 		LeaseToken string `json:"lease_token"`
 	}
 	decodeStructured(t, replayed, &replayOutput)
-	if replayed.IsError || replayOutput.Attempt.ID != firstOutput.Attempt.ID || replayOutput.LeaseToken != firstOutput.LeaseToken {
-		t.Fatalf("claim replay = %#v", replayed)
+	// The idempotency record never persists the raw lease token, so replay
+	// of a still-active attempt rotates the lease and returns a fresh one
+	// rather than resupplying the original secret; the attempt identity is
+	// unchanged.
+	if replayed.IsError || replayOutput.Attempt.ID != firstOutput.Attempt.ID ||
+		replayOutput.LeaseToken == "" || replayOutput.LeaseToken == firstOutput.LeaseToken {
+		t.Fatalf("claim replay = %#v, want same attempt id and a fresh distinct lease token", replayed)
 	}
 }
 

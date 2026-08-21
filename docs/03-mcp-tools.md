@@ -1625,7 +1625,7 @@ Behavior:
 - creates attempt atomically;
 - records issue version and event ID;
 - creates an opaque lease token;
-- accepts an optional `idempotency_key` that replays the original claim response for the same normalized request and returns `IDEMPOTENCY_CONFLICT` for a different request with the same key.
+- accepts an optional `idempotency_key` that, for the same normalized request, either rotates the lease and returns a fresh `lease_token` for the same attempt (if it is still active) or fails with `ATTEMPT_NOT_ACTIVE` (if it has since finished, expired, or been force-released); a different request with the same key returns `IDEMPOTENCY_CONFLICT`. The original raw token is never persisted or replayed — only its hash is stored, so a repeated claim always supplies a fresh secret rather than resupplying the first one.
 
 `view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete claim response with the full issue projection, the full attempt payload, and the same workflow context fields.
 

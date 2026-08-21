@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -37,8 +38,28 @@ func TestClaimIssueIdempotentReplayAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	if !reflect.DeepEqual(first.Attempt, second.Attempt) || first.LeaseToken != second.LeaseToken {
-		t.Fatalf("replay = %#v, want %#v", second, first)
+	// The persisted idempotency response never carries the raw lease token
+	// (it is excluded from JSON), so replay cannot resupply the original
+	// secret; instead it rotates the lease and issues a fresh one. Every
+	// other field of the response is identical to the first call.
+	if second.LeaseToken == "" || second.LeaseToken == first.LeaseToken {
+		t.Fatalf("replay lease token = %q, want a fresh non-empty token distinct from %q", second.LeaseToken, first.LeaseToken)
+	}
+	firstWithRotatedToken := first
+	firstWithRotatedToken.LeaseToken = second.LeaseToken
+	firstWithRotatedToken.Attempt.LeaseExpiresAt = second.Attempt.LeaseExpiresAt
+	if !reflect.DeepEqual(firstWithRotatedToken, second) {
+		t.Fatalf("replay = %#v, want %#v (token and lease_expires_at rotated, everything else unchanged)", second, firstWithRotatedToken)
+	}
+	var storedHash []byte
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT lease_token_hash FROM work_attempts WHERE id = ?`, second.Attempt.ID).Scan(&storedHash)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rotatedHash := sha256.Sum256([]byte(second.LeaseToken))
+	if !bytes.Equal(storedHash, rotatedHash[:]) {
+		t.Fatal("stored lease_token_hash does not match the rotated token")
 	}
 	changed := input
 	changed.LeaseSeconds = intPointer(60)
@@ -59,6 +80,59 @@ func TestClaimIssueIdempotentReplayAndConflict(t *testing.T) {
 	}
 	if attempts != 1 || events != 1 || records != 1 {
 		t.Fatalf("durable state = attempts %d events %d records %d", attempts, events, records)
+	}
+}
+
+// TestClaimIssueIdempotencyRecordNeverStoresRawLeaseToken is a value-level
+// guard (ISSUE-193 AC2): the raw secret must never appear in the persisted
+// idempotency response, not merely be absent under its usual JSON key name.
+func TestClaimIssueIdempotencyRecordNeverStoresRawLeaseToken(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-idempotency-no-secret")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "claim retry secret", domain.StatusReady)
+	key := "claim-retry-secret"
+	claimed, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID, IdempotencyKey: &key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.LeaseToken == "" {
+		t.Fatal("claim did not return a lease token")
+	}
+	var storedResponse string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT response_json FROM idempotency_records WHERE operation = 'claim_issue' AND idempotency_key = ?`, key).Scan(&storedResponse)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(storedResponse, claimed.LeaseToken) {
+		t.Fatalf("idempotency_records.response_json contains the raw lease token: %s", storedResponse)
+	}
+}
+
+// TestClaimIssueIdempotentReplayAfterAttemptEndedReturnsNotActive covers the
+// other half of the rotate-on-replay contract: once the attempt referenced
+// by a stored idempotency record is no longer active, there is nothing to
+// rotate a lease onto, so replay reports ATTEMPT_NOT_ACTIVE instead of
+// fabricating a lease for a finished attempt.
+func TestClaimIssueIdempotentReplayAfterAttemptEndedReturnsNotActive(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-idempotency-ended")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "claim retry ended", domain.StatusReady)
+	key := "claim-retry-ended"
+	input := domain.ClaimIssueInput{IssueID: issue.ID, IdempotencyKey: &key}
+	claimed, err := fixture.attempts.ClaimIssue(fixture.ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, domain.FinishAttemptInput{
+		AttemptID: claimed.Attempt.ID, LeaseToken: claimed.LeaseToken,
+		Outcome: domain.AttemptOutcomeCompleted, TargetIssueStatus: statusPointer(domain.StatusDone),
+		ResultSummary: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.attempts.ClaimIssue(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("replay after finish = %v, want ATTEMPT_NOT_ACTIVE", err)
 	}
 }
 

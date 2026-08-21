@@ -190,10 +190,6 @@ func (repo *countingAttemptRepository) ClaimIssue(context.Context, ports.ClaimIs
 	return ports.ClaimIssueResult{}, nil
 }
 
-func (repo *countingAttemptRepository) LookupClaimIssue(context.Context, string, []byte) (ports.ClaimIssueResult, bool, error) {
-	return ports.ClaimIssueResult{}, false, nil
-}
-
 func (repo *countingAttemptRepository) RenewAttempt(context.Context, ports.RenewAttemptCommand) (ports.RenewAttemptResult, error) {
 	return ports.RenewAttemptResult{}, nil
 }
