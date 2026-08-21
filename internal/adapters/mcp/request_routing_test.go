@@ -48,6 +48,43 @@ func TestRouteProjectRequestPropagatesSharedProjectRequired(t *testing.T) {
 	}
 }
 
+func TestRouteProjectRequestPropagatesProjectNotFound(t *testing.T) {
+	router := &requestRouter{err: NewProjectNotFoundError("01ARZ3NDEKTSV4RRFFQ69G5FAV")}
+	target := &adapter{router: router}
+	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
+		t.Fatal("handler ran")
+		return nil, nil, nil
+	})
+
+	request := requestWithArguments(t, map[string]any{"project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	result, _, err := handler(context.Background(), request, struct{}{})
+	if err != nil {
+		t.Fatalf("handler error = %v, want nil (domain errors route through the structured envelope)", err)
+	}
+	output, ok := result.StructuredContent.(errorOutput)
+	if result == nil || !result.IsError || !ok || output.Code != domain.CodeProjectNotFound {
+		t.Fatalf("result = %#v, want project not found", result)
+	}
+}
+
+func TestRouteProjectRequestPropagatesProjectCapacityExceededAsRetryable(t *testing.T) {
+	router := &requestRouter{err: NewProjectCapacityExceededError()}
+	target := &adapter{router: router}
+	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
+		t.Fatal("handler ran")
+		return nil, nil, nil
+	})
+
+	result, _, err := handler(context.Background(), requestWithArguments(t, map[string]any{}), struct{}{})
+	if err != nil {
+		t.Fatalf("handler error = %v, want nil (domain errors route through the structured envelope)", err)
+	}
+	output, ok := result.StructuredContent.(errorOutput)
+	if result == nil || !result.IsError || !ok || output.Code != domain.CodeProjectCapacityExceeded || !output.Retryable {
+		t.Fatalf("result = %#v, want project capacity exceeded/retryable", result)
+	}
+}
+
 func TestRouteProjectRequestReleasesLeaseAfterHandlerFailure(t *testing.T) {
 	releases := 0
 	lease := &staticLease{projectRef: projectID, services: completeProjectServices(), releaseFn: func() error {

@@ -82,6 +82,25 @@ func TestToolSessionResolutionUsesRoutedBundle(t *testing.T) {
 	}
 }
 
+// TestTouchSessionForMutatingToolRejectsUnknownHandleAsStructuredError proves
+// an unknown agent_session_handle reaches the client as the documented
+// SESSION_NOT_FOUND structured code rather than a raw error, end-to-end
+// through touchSessionForMutatingTool's ResolveAndTouch call.
+func TestTouchSessionForMutatingToolRejectsUnknownHandleAsStructuredError(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "profile-session-not-found.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	client, stop := newClient(t, options)
+	defer stop()
+
+	result := call(t, client, "create_issue", map[string]any{
+		"agent_session_handle": "unknown-handle",
+		"title":                "test issue",
+		"type":                 "task",
+	})
+	assertDomainError(t, result, "SESSION_NOT_FOUND", false)
+}
+
 func TestToolProfileFullMatchesUnfilteredCatalog(t *testing.T) {
 	defaultNames := toolNamesFor(t, "")
 	fullNames := toolNamesFor(t, "full")

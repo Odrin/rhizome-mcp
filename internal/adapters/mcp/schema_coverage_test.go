@@ -116,6 +116,49 @@ func TestAdvertisedSchemaPropertiesAreNeverRejectedAsUnsupported(t *testing.T) {
 	}
 }
 
+// TestNoHandlerErrorLacksStructuredContent iterates every tool in the
+// advertised catalog and calls it with only its required properties filled
+// with schema-conformant placeholder values (typically syntactically valid
+// but non-existent IDs). This is expected to fail domain-level validation for
+// most tools, exercising real handler error paths rather than the SDK's own
+// schema-validation layer. Whenever the result is IsError, it asserts
+// StructuredContent is present — proving no handler error path bypasses the
+// structured MCP error envelope (ISSUE-197 AC5).
+func TestNoHandlerErrorLacksStructuredContent(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "no-raw-handler-errors.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools.Tools) == 0 {
+		t.Fatal("no tools advertised")
+	}
+
+	for _, tool := range tools.Tools {
+		tool := tool
+		t.Run(tool.Name, func(t *testing.T) {
+			schema := decodeInputSchema(t, tool)
+			var counter int
+			base := make(map[string]any, len(schema.Required))
+			for _, name := range schema.Required {
+				base[name] = placeholderValue(schema.Properties[name], &counter)
+			}
+			result := call(t, client, tool.Name, base)
+			if !result.IsError {
+				t.Skipf("%s accepted placeholder required arguments without error", tool.Name)
+			}
+			if result.StructuredContent == nil {
+				t.Fatalf("%s error result has no structuredContent: %#v", tool.Name, result)
+			}
+		})
+	}
+}
+
 func TestProjectRefDecorationIsOptionalAndStructural(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "schema-project-ref.db"))
