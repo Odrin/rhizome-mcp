@@ -85,14 +85,19 @@ rhizome-mcp connect vscode    # VS Code (if using standalone binary instead of e
 rhizome-mcp connect json      # Template for any other client
 ```
 
-Use `--print` for a dry run. The manual equivalent for any MCP client:
+Use `--print` for a dry run. `connect` discovers your project's actual root
+(walking up from the current directory the same way `serve` does) and pins
+it with `--project-root`, so the written config works regardless of which
+subdirectory an MCP client later launches the server from. All four targets
+(`claude`, `codex`, `vscode`, `json`) agree on this. The manual equivalent
+for any MCP client, matching `connect`'s own server key:
 
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "/absolute/path/to/rhizome-mcp",
-      "args": ["serve"]
+      "args": ["serve", "--project-root", "/absolute/path/to/your/repository"]
     }
   }
 }
@@ -103,15 +108,26 @@ or, via `npx`, without installing a binary at all:
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "npx",
-      "args": ["-y", "rhizome-mcp", "serve"]
+      "args": ["-y", "rhizome-mcp", "serve", "--project-root", "/absolute/path/to/your/repository"]
     }
   }
 }
 ```
 
-Run `serve` with the repository as its working directory. Stdio is the default transport; protocol output goes to stdout, logs to stderr.
+`connect` detects when it is itself running through the `npx rhizome-mcp`
+wrapper and automatically emits this `npx` form instead of the wrapper's
+resolved binary path, which lives in the npx cache and goes stale on
+eviction or a version bump. A config written with a resolved absolute path
+(the default otherwise) is machine-specific and not meant to be checked in
+and shared across machines; pass `connect TARGET --command` to instead emit
+a bare `rhizome-mcp` command name that relies on `PATH`, for a portable
+config you do intend to share, provided every machine that uses it has
+`rhizome-mcp` on `PATH`.
+
+Stdio is the default transport; protocol output goes to stdout, logs to
+stderr.
 
 That's it — connected agents start with `open_project` using the absolute repository root, retain its `project_ref`, and pass that reference to later project-scoped calls. The returned metadata links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
 

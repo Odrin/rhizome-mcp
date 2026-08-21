@@ -130,8 +130,11 @@ func (report DoctorReport) Healthy() bool {
 // DoctorHandler runs a project doctor check after the adapter parses the command.
 type DoctorHandler func(context.Context, bool) (DoctorReport, error)
 
-// ConnectHandler sets up MCP client configuration after the adapter parses the command.
-type ConnectHandler func(context.Context, string, bool) error
+// ConnectHandler sets up MCP client configuration after the adapter parses
+// the command: target, printOnly, and bareCommand (the --command opt-in for
+// a portable, shareable config that names "rhizome-mcp" on PATH instead of
+// this resolved binary's absolute, machine-specific path).
+type ConnectHandler func(context.Context, string, bool, bool) error
 
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
@@ -320,6 +323,7 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	printFlag := fs.Bool("print", false, "print configuration instead of writing")
+	commandFlag := fs.Bool("command", false, "emit a bare \"rhizome-mcp\" command instead of this binary's absolute path, for a config shareable across machines that have it on PATH")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -341,7 +345,7 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 		return fmt.Errorf("unsupported target %q (valid targets: %s)", target, strings.Join(validTargets, ", "))
 	}
 
-	return c.connectHandler(ctx, target, *printFlag)
+	return c.connectHandler(ctx, target, *printFlag, *commandFlag)
 }
 
 func (c *CLI) runProject(ctx context.Context, args []string) error {
@@ -1090,7 +1094,7 @@ func (c *CLI) usage() string {
 	return `Usage:
   rhizome-mcp [--data-root PATH] init
   rhizome-mcp [--data-root PATH] serve [--http-address ADDR] [--profile full|agent|read-only|migration]
-  rhizome-mcp [--data-root PATH] connect TARGET [--print]
+  rhizome-mcp [--data-root PATH] connect TARGET [--print] [--command]
   rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
   rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]
   rhizome-mcp [--data-root PATH] project info [--format table|json]

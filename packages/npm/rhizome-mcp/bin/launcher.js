@@ -32,7 +32,14 @@ function main() {
     return;
   }
 
-  const child = spawn(result.binaryPath, process.argv.slice(2), { stdio: 'inherit' });
+  // RHIZOME_MCP_NPX tells the server binary it was launched through this
+  // npm wrapper, so e.g. `connect` can emit an `npx rhizome-mcp` command
+  // instead of this resolved binary's absolute path, which points into the
+  // npx cache and goes stale on eviction or a version bump (ISSUE-206).
+  const child = spawn(result.binaryPath, process.argv.slice(2), {
+    stdio: 'inherit',
+    env: { ...process.env, RHIZOME_MCP_NPX: '1' },
+  });
 
   const forwardSignal = (signal) => {
     child.kill(signal);

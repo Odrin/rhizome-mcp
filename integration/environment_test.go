@@ -79,6 +79,17 @@ func newIntegrationEnvironment(t *testing.T) integrationEnvironment {
 	if err := os.Mkdir(env.repository, 0o755); err != nil {
 		t.Fatalf("create test repository: %v", err)
 	}
+	// Resolved so env.repository always matches what projectconfig.Discover
+	// returns (it resolves symlinks in the root it finds, the same way
+	// os.Executable()+EvalSymlinks is resolved elsewhere) -- on macOS
+	// t.TempDir() lives under a /var symlink to /private/var, so leaving
+	// this unresolved would make every --project-root assertion disagree
+	// with the binary's actual (correct) discovered value.
+	resolvedRepository, err := filepath.EvalSymlinks(env.repository)
+	if err != nil {
+		t.Fatalf("resolve repository symlinks: %v", err)
+	}
+	env.repository = resolvedRepository
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "init")
 	return env
 }

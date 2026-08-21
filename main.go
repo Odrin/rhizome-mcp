@@ -374,7 +374,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		report, err := project.Doctor(ctx, projectruntime.DoctorOptions{Full: full, HTTPAddress: cfg.HTTPAddress})
 		return doctorReportFromRuntime(report, cfg.Version), err
 	}
-	connectHandler := func(ctx context.Context, target string, printOnly bool) error {
+	connectHandler := func(ctx context.Context, target string, printOnly bool, bareCommand bool) error {
 		exePath, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("determine binary path: %w", err)
@@ -383,7 +383,8 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		if err != nil {
 			return fmt.Errorf("resolve binary path: %w", err)
 		}
-		return runConnect(ctx, startingPath, target, realPath, printOnly, stdout, stderr)
+		npxLaunched := os.Getenv("RHIZOME_MCP_NPX") == "1"
+		return runConnect(ctx, startingPath, target, realPath, printOnly, bareCommand, npxLaunched, stdout, stderr)
 	}
 
 	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && args[0] != "serve" && (args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
@@ -709,30 +710,83 @@ func newHTTPHandler(cfg *config.Config, router mcpadapter.ProjectRouter) (http.H
 	return mux, nil
 }
 
-func runConnect(ctx context.Context, startingPath string, target string, binaryPath string, printOnly bool, stdout, stderr io.Writer) error {
+// connectServeInvocation is the command/args every connect target agrees
+// on (ISSUE-206 AC2): they all pin --project-root to the discovered
+// project root, and they all resolve to the same command form.
+type connectServeInvocation struct {
+	Command string
+	Args    []string
+}
+
+// resolveConnectServeInvocation is the single shared helper every connect
+// target uses, so claude/vscode/codex/json can never again disagree about
+// whether --project-root is pinned or what command form to use.
+//
+// Precedence: launched via the npm launcher (RHIZOME_MCP_NPX=1) always
+// wins, since the resolved binary path in that case points into the npx
+// cache and goes stale on eviction or a version bump -- "npx rhizome-mcp"
+// is the only portable form there. Otherwise, --command opts into a bare
+// "rhizome-mcp" command name for a config shareable across machines that
+// have it on PATH. The default remains this resolved binary's absolute
+// path, unchanged from before this fix.
+func resolveConnectServeInvocation(binaryPath, projectRoot string, bareCommand, npxLaunched bool) connectServeInvocation {
+	args := []string{"serve", "--project-root", projectRoot}
+	switch {
+	case npxLaunched:
+		return connectServeInvocation{Command: "npx", Args: append([]string{"-y", "rhizome-mcp"}, args...)}
+	case bareCommand:
+		return connectServeInvocation{Command: "rhizome-mcp", Args: args}
+	default:
+		return connectServeInvocation{Command: binaryPath, Args: args}
+	}
+}
+
+func runConnect(ctx context.Context, startingPath string, target string, binaryPath string, printOnly, bareCommand, npxLaunched bool, stdout, stderr io.Writer) error {
+	// Validate the target before touching the filesystem: the CLI layer
+	// already rejects an unsupported target before calling this handler,
+	// but keeping this a cheap, side-effect-free check first (rather than
+	// discovering a project root only to reject the target afterward)
+	// keeps this function's own contract self-sufficient for direct
+	// (non-CLI) callers, including tests.
+	switch target {
+	case "claude", "vscode", "codex", "json":
+	default:
+		return fmt.Errorf("unsupported target %q", target)
+	}
+
+	discovered, err := projectconfig.Discover(startingPath)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) && domainErr.Code == projectconfig.CodeProjectNotFound {
+			return fmt.Errorf("no rhizome-mcp project found at or above %q; run `rhizome-mcp init` first", startingPath)
+		}
+		return fmt.Errorf("discover project root: %w", err)
+	}
+	invocation := resolveConnectServeInvocation(binaryPath, discovered.Root, bareCommand, npxLaunched)
+
 	switch target {
 	case "claude":
-		return connectClaude(ctx, startingPath, binaryPath, printOnly, stdout)
+		return connectClaude(discovered.Root, invocation, printOnly, stdout)
 	case "vscode":
-		return connectVSCode(ctx, startingPath, binaryPath, printOnly, stdout)
+		return connectVSCode(discovered.Root, invocation, printOnly, stdout)
 	case "codex":
-		return connectCodex(ctx, binaryPath, printOnly, stdout, stderr)
+		return connectCodex(ctx, invocation, printOnly, stdout, stderr)
 	case "json":
-		return connectJSON(binaryPath, stdout)
+		return connectJSON(invocation, stdout)
 	default:
 		return fmt.Errorf("unsupported target %q", target)
 	}
 }
 
-func connectClaude(ctx context.Context, startingPath string, binaryPath string, printOnly bool, stdout io.Writer) error {
-	mcpJSONPath := filepath.Join(startingPath, ".mcp.json")
+func connectClaude(projectRoot string, invocation connectServeInvocation, printOnly bool, stdout io.Writer) error {
+	mcpJSONPath := filepath.Join(projectRoot, ".mcp.json")
 
 	config := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"rhizome-mcp": map[string]interface{}{
 				"type":    "stdio",
-				"command": binaryPath,
-				"args":    []string{"serve", "--project-root", startingPath},
+				"command": invocation.Command,
+				"args":    invocation.Args,
 			},
 		},
 	}
@@ -744,16 +798,16 @@ func connectClaude(ctx context.Context, startingPath string, binaryPath string, 
 	return mergeAndWriteJSONConfig(mcpJSONPath, config, "mcpServers", "rhizome-mcp")
 }
 
-func connectVSCode(ctx context.Context, startingPath string, binaryPath string, printOnly bool, stdout io.Writer) error {
-	vscodeDir := filepath.Join(startingPath, ".vscode")
+func connectVSCode(projectRoot string, invocation connectServeInvocation, printOnly bool, stdout io.Writer) error {
+	vscodeDir := filepath.Join(projectRoot, ".vscode")
 	mcpJSONPath := filepath.Join(vscodeDir, "mcp.json")
 
 	config := map[string]interface{}{
 		"servers": map[string]interface{}{
 			"rhizome-mcp": map[string]interface{}{
 				"type":    "stdio",
-				"command": binaryPath,
-				"args":    []string{"serve", "--project-root", startingPath},
+				"command": invocation.Command,
+				"args":    invocation.Args,
 			},
 		},
 	}
@@ -777,11 +831,15 @@ func connectVSCode(ctx context.Context, startingPath string, binaryPath string, 
 	return nil
 }
 
-func connectCodex(ctx context.Context, binaryPath string, printOnly bool, stdout, stderr io.Writer) error {
+func connectCodex(ctx context.Context, invocation connectServeInvocation, printOnly bool, stdout, stderr io.Writer) error {
+	quotedArgs := make([]string, len(invocation.Args))
+	for index, arg := range invocation.Args {
+		quotedArgs[index] = fmt.Sprintf("%q", arg)
+	}
 	tomlSnippet := fmt.Sprintf(`[mcp_servers.rhizome-mcp]
 command = "%s"
-args = ["serve"]
-`, binaryPath)
+args = [%s]
+`, invocation.Command, strings.Join(quotedArgs, ", "))
 
 	if printOnly || !canExecuteCodex() {
 		if printOnly {
@@ -793,18 +851,19 @@ args = ["serve"]
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "codex", "mcp", "add", "rhizome-mcp", "--", binaryPath, "serve")
+	cmdArgs := append([]string{"mcp", "add", "rhizome-mcp", "--", invocation.Command}, invocation.Args...)
+	cmd := exec.CommandContext(ctx, "codex", cmdArgs...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
 }
 
-func connectJSON(binaryPath string, stdout io.Writer) error {
+func connectJSON(invocation connectServeInvocation, stdout io.Writer) error {
 	config := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"rhizome-mcp": map[string]interface{}{
-				"command": binaryPath,
-				"args":    []string{"serve"},
+				"command": invocation.Command,
+				"args":    invocation.Args,
 			},
 		},
 	}

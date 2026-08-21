@@ -59,12 +59,26 @@ This behavior is additive and compatible with existing single-project startup fl
 
 ## 9. Examples
 
+`rhizome-mcp connect TARGET` generates the workspace-specific form below
+automatically for `claude`, `codex`, `vscode`, and `json` alike, discovering
+the actual project root (walking up from the current directory, the same
+resolution `serve` itself falls back to) rather than trusting the directory
+`connect` happened to be invoked from. The written `command` is this
+resolved binary's absolute path by default; when `connect` is itself
+running through the `npx rhizome-mcp` wrapper it emits `npx` instead
+(the wrapper's own resolved path lives in the npx cache and is not stable
+across evictions or version bumps), and `connect TARGET --command` opts
+into a bare `rhizome-mcp` command name for a config meant to be shared
+across machines that have it on `PATH`. An absolute-path config is
+machine-specific and should not be treated as portable or checked into a
+shared repository as-is.
+
 Workspace-specific registration:
 
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "rhizome-mcp",
       "args": ["serve", "--project-root", "/absolute/path/to/workspace"]
     }
@@ -77,7 +91,7 @@ Global registration that does not pin a workspace root:
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "rhizome-mcp",
       "args": ["serve"]
     }

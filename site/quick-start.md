@@ -23,9 +23,9 @@ npx rhizome-mcp serve --project-root /absolute/path/to/workspace
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "npx",
-      "args": ["-y", "rhizome-mcp", "serve"]
+      "args": ["-y", "rhizome-mcp", "serve", "--project-root", "/absolute/path/to/workspace"]
     }
   }
 }
@@ -123,14 +123,18 @@ rhizome-mcp connect vscode    # VS Code (if using standalone binary instead of e
 rhizome-mcp connect json      # Template for any other client
 ```
 
-Use `--print` for a dry run. The manual equivalent for any MCP client:
+Use `--print` for a dry run. `connect` discovers your project's actual root
+and pins it with `--project-root`, and detects when it is running through
+the `npx rhizome-mcp` wrapper to emit an `npx` command instead of a
+resolved path that would go stale in the npx cache. The manual equivalent
+for any MCP client, matching `connect`'s own server key:
 
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "/absolute/path/to/rhizome-mcp",
-      "args": ["serve"]
+      "args": ["serve", "--project-root", "/absolute/path/to/your/repository"]
     }
   }
 }
@@ -141,9 +145,9 @@ or, via `npx`, without installing a binary at all:
 ```json
 {
   "mcpServers": {
-    "rhizome": {
+    "rhizome-mcp": {
       "command": "npx",
-      "args": ["-y", "rhizome-mcp", "serve"]
+      "args": ["-y", "rhizome-mcp", "serve", "--project-root", "/absolute/path/to/your/repository"]
     }
   }
 }

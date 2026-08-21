@@ -19,6 +19,7 @@ import (
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/projectconfig"
 )
 
 type testBoardServeService struct{}
@@ -151,7 +152,7 @@ func TestRunServeHTTPRejectsNilRouter(t *testing.T) {
 }
 
 func TestRunConnectRejectsUnsupportedTargetAndConfigWritersWork(t *testing.T) {
-	if err := runConnect(context.Background(), t.TempDir(), "unsupported", "/tmp/rhizome", false, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unsupported target") {
+	if err := runConnect(context.Background(), t.TempDir(), "unsupported", "/tmp/rhizome", false, false, false, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unsupported target") {
 		t.Fatalf("runConnect() error = %v, want unsupported target", err)
 	}
 
@@ -206,8 +207,18 @@ func TestRunConnectJSONPrintOnlyEmitsStructuredJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	startingPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(startingPath, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write identity file: %v", err)
+	}
+	// Discover resolves symlinks in the root it returns (matching os.Executable
+	// + EvalSymlinks elsewhere); on macOS t.TempDir() lives under a /var
+	// symlink to /private/var, so the expected value must be resolved too.
+	resolvedStartingPath, err := filepath.EvalSymlinks(startingPath)
+	if err != nil {
+		t.Fatalf("resolve starting path symlinks: %v", err)
+	}
 
-	if err := runConnect(context.Background(), startingPath, "json", "/tmp/rhizome", true, &stdout, &stderr); err != nil {
+	if err := runConnect(context.Background(), startingPath, "json", "/tmp/rhizome", true, false, false, &stdout, &stderr); err != nil {
 		t.Fatalf("runConnect(json, printOnly) error = %v", err)
 	}
 	if stderr.Len() != 0 {
@@ -230,11 +241,77 @@ func TestRunConnectJSONPrintOnlyEmitsStructuredJSON(t *testing.T) {
 		t.Fatalf("command = %v, want /tmp/rhizome", entry["command"])
 	}
 	args, ok := entry["args"].([]interface{})
-	if !ok || len(args) != 1 || args[0] != "serve" {
-		t.Fatalf("args = %#v, want [serve]", entry["args"])
+	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != resolvedStartingPath {
+		t.Fatalf("args = %#v, want [serve --project-root %s]", entry["args"], resolvedStartingPath)
 	}
 	if _, err := os.Stat(filepath.Join(startingPath, ".mcp.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("print-only JSON target unexpectedly wrote config at %v", err)
+	}
+}
+
+func TestRunConnectFailsClearlyOutsideProject(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	startingPath := t.TempDir()
+	err := runConnect(context.Background(), startingPath, "json", "/tmp/rhizome", true, false, false, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error outside any project")
+	}
+	if !strings.Contains(err.Error(), "no rhizome-mcp project found") {
+		t.Fatalf("error = %v, want a clear no-project message", err)
+	}
+}
+
+func TestRunConnectEmitsNpxFormWhenLaunchedViaNpmWrapper(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	startingPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(startingPath, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write identity file: %v", err)
+	}
+	resolvedStartingPath, err := filepath.EvalSymlinks(startingPath)
+	if err != nil {
+		t.Fatalf("resolve starting path symlinks: %v", err)
+	}
+	if err := runConnect(context.Background(), startingPath, "json", "/tmp/rhizome", true, false, true, &stdout, &stderr); err != nil {
+		t.Fatalf("runConnect() error = %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal JSON output: %v", err)
+	}
+	servers := got["mcpServers"].(map[string]interface{})
+	entry := servers["rhizome-mcp"].(map[string]interface{})
+	if entry["command"] != "npx" {
+		t.Fatalf("command = %v, want npx", entry["command"])
+	}
+	args, ok := entry["args"].([]interface{})
+	want := []interface{}{"-y", "rhizome-mcp", "serve", "--project-root", resolvedStartingPath}
+	if !ok || len(args) != len(want) {
+		t.Fatalf("args = %#v, want %v", entry["args"], want)
+	}
+	for index := range want {
+		if args[index] != want[index] {
+			t.Fatalf("args = %#v, want %v", entry["args"], want)
+		}
+	}
+}
+
+func TestRunConnectBareCommandOptInEmitsPortableCommandName(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	startingPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(startingPath, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write identity file: %v", err)
+	}
+	if err := runConnect(context.Background(), startingPath, "json", "/tmp/rhizome", true, true, false, &stdout, &stderr); err != nil {
+		t.Fatalf("runConnect() error = %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal JSON output: %v", err)
+	}
+	servers := got["mcpServers"].(map[string]interface{})
+	entry := servers["rhizome-mcp"].(map[string]interface{})
+	if entry["command"] != "rhizome-mcp" {
+		t.Fatalf("command = %v, want the bare portable command name rhizome-mcp", entry["command"])
 	}
 }
 
@@ -256,7 +333,8 @@ func TestConnectClaudeAndVSCodeMergeExistingConfig(t *testing.T) {
 			t.Fatalf("write initial Claude config: %v", err)
 		}
 
-		if err := connectClaude(context.Background(), startingPath, "/tmp/rhizome", false, io.Discard); err != nil {
+		invocation := resolveConnectServeInvocation("/tmp/rhizome", startingPath, false, false)
+		if err := connectClaude(startingPath, invocation, false, io.Discard); err != nil {
 			t.Fatalf("connectClaude() error = %v", err)
 		}
 
@@ -312,7 +390,8 @@ func TestConnectClaudeAndVSCodeMergeExistingConfig(t *testing.T) {
 		}
 
 		var stdout bytes.Buffer
-		if err := connectVSCode(context.Background(), startingPath, "/tmp/rhizome", false, &stdout); err != nil {
+		invocation := resolveConnectServeInvocation("/tmp/rhizome", startingPath, false, false)
+		if err := connectVSCode(startingPath, invocation, false, &stdout); err != nil {
 			t.Fatalf("connectVSCode() error = %v", err)
 		}
 
