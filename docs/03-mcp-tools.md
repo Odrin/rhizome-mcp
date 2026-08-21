@@ -747,6 +747,8 @@ Patch semantics:
 - `null`: clear a nullable field;
 - empty string: an explicit value if allowed.
 
+Changing `type` away from `epic` fails with `INVALID_EPIC_PARENT` (detail field `type`, code `HAS_CHILDREN`) while the epic still has non-archived children.
+
 Input:
 
 ```json
@@ -996,7 +998,8 @@ Rules:
 
 - active attempts prevent archiving;
 - related data remains intact;
-- archived issues are hidden by default.
+- archived issues are hidden by default;
+- archiving an epic with non-archived children fails with `INVALID_EPIC_PARENT` (detail field `id`, code `HAS_CHILDREN`).
 
 `idempotency_key` is optional. When supplied, it must be a non-blank string up
 to 128 runes. Reusing the same key with the same normalized request (`issue_id`

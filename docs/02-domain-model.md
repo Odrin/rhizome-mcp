@@ -72,6 +72,7 @@ External identity:
 - A `task` or `bug` may have one epic parent.
 - Nested epics are not supported.
 - Parent membership is stored in `parent_id`, not as a generic relation.
+- Retyping an epic away from `epic`, or archiving an epic, is rejected while it still has non-archived children (`INVALID_EPIC_PARENT`, detail code `HAS_CHILDREN`); children that are already archived do not block either operation.
 
 ### 3.2. Statuses
 

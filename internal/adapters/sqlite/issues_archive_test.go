@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -441,5 +442,74 @@ func TestIssueArchiveCompetingRequestsAppendOneEvent(t *testing.T) {
 	}
 	if archiveEvents != 1 {
 		t.Fatalf("archive events = %d, want 1", archiveEvents)
+	}
+}
+
+func TestIssueArchiveEpicWithLiveChildrenIsRejected(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:     domain.TypeTask,
+		Title:    "Task",
+		ParentID: &epic.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+		IssueID:         epic.ID,
+		ExpectedVersion: 1,
+	})
+	assertDomainCode(t, err, domain.CodeInvalidEpicParent)
+	var archivedAt sql.NullString
+	var version int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT archived_at, version FROM issues WHERE id = ?", epic.ID).Scan(&archivedAt, &version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if archivedAt.Valid || version != 1 {
+		t.Fatalf("epic changed on archive rejection: archived_at valid=%v version=%d", archivedAt.Valid, version)
+	}
+}
+
+func TestIssueArchiveEpicWithOnlyArchivedChildrenSucceeds(t *testing.T) {
+	service, _, _ := openIssueService(t)
+	ctx := context.Background()
+	epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:     domain.TypeTask,
+		Title:    "Task",
+		ParentID: &epic.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+		IssueID:         task.ID,
+		ExpectedVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+		IssueID:         epic.ID,
+		ExpectedVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("archive epic with archived children failed: %v", err)
+	}
+	if result.Issue.ArchivedAt == nil {
+		t.Fatal("archived epic has nil archived_at")
+	}
+	if result.Issue.Version != 2 {
+		t.Fatalf("archived epic version = %d, want 2", result.Issue.Version)
 	}
 }

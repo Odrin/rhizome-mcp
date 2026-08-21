@@ -303,6 +303,15 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 		if err != nil {
 			return err
 		}
+		if current.Type == domain.TypeEpic && next.Type != domain.TypeEpic {
+			hasChildren, err := epicHasLiveChildren(ctx, tx, current.ID)
+			if err != nil {
+				return err
+			}
+			if hasChildren {
+				return epicHasChildrenError("type")
+			}
+		}
 		if command.Changes.ParentID.Set && next.ParentID != nil {
 			resolved, err := validateParent(ctx, tx, next.ParentID)
 			if err != nil {
@@ -458,6 +467,15 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 		}
 		if current.Version != command.ExpectedVersion {
 			return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
+		}
+		if current.Type == domain.TypeEpic {
+			hasChildren, err := epicHasLiveChildren(ctx, tx, current.ID)
+			if err != nil {
+				return err
+			}
+			if hasChildren {
+				return epicHasChildrenError("id")
+			}
 		}
 		if err := expireAttemptsForIssue(ctx, tx, current.ID, now); err != nil {
 			return err
@@ -829,6 +847,25 @@ func invalidParentError() error {
 		"parent_id must reference a non-archived epic",
 		false,
 		domain.Detail{Field: "parent_id", Code: domain.CodeInvalidEpicParent},
+	)
+}
+
+// epicHasLiveChildren reports whether epicID has any non-archived issue
+// pointing at it as a parent. Enforced from the parent side alongside
+// validateParent's child-side check, so an epic can never end up retyped or
+// archived while a live child still points at it.
+func epicHasLiveChildren(ctx context.Context, tx Queryer, epicID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issues WHERE parent_id = ? AND archived_at IS NULL)`, epicID).Scan(&exists)
+	return exists, err
+}
+
+func epicHasChildrenError(field string) error {
+	return domain.NewError(
+		domain.CodeInvalidEpicParent,
+		"epic has non-archived children",
+		false,
+		domain.Detail{Field: field, Code: "HAS_CHILDREN"},
 	)
 }
 

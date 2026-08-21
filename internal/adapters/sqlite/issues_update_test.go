@@ -241,6 +241,114 @@ func TestIssueUpdateRejectsInvalidParentsWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestIssueUpdateRetypingEpicWithLiveChildrenIsRejected(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:     domain.TypeTask,
+		Title:    "Task",
+		ParentID: &epic.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID:         epic.ID,
+		ExpectedVersion: 1,
+		Changes: domain.IssuePatch{
+			Type: domain.OptionalValue[domain.Type]{Set: true, Value: domain.TypeTask},
+		},
+	})
+	assertDomainCode(t, err, domain.CodeInvalidEpicParent)
+	var epicType string
+	var epicVersion int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT type, version FROM issues WHERE id = ?", epic.ID).Scan(&epicType, &epicVersion)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if epicType != "epic" || epicVersion != 1 {
+		t.Fatalf("epic changed on retype rejection: type=%s version=%d", epicType, epicVersion)
+	}
+	if task.Issue.ParentID == nil || *task.Issue.ParentID != epic.ID {
+		t.Fatalf("task parent changed: %v", task.Issue.ParentID)
+	}
+}
+
+func TestIssueUpdateRetypingEpicWithOnlyArchivedChildrenIsAllowed(t *testing.T) {
+	service, _, _ := openIssueService(t)
+	ctx := context.Background()
+	epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:     domain.TypeTask,
+		Title:    "Task",
+		ParentID: &epic.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+		IssueID:         task.ID,
+		ExpectedVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID:         epic.ID,
+		ExpectedVersion: 1,
+		Changes: domain.IssuePatch{
+			Type: domain.OptionalValue[domain.Type]{Set: true, Value: domain.TypeTask},
+		},
+	})
+	if err != nil {
+		t.Fatalf("retype epic with archived children failed: %v", err)
+	}
+	if result.Issue.Type != domain.TypeTask {
+		t.Fatalf("epic type not updated: %v", result.Issue.Type)
+	}
+}
+
+func TestIssueUpdateNonRetypeChangesToEpicWithChildrenStillSucceed(t *testing.T) {
+	service, _, _ := openIssueService(t)
+	ctx := context.Background()
+	epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:     domain.TypeTask,
+		Title:    "Task",
+		ParentID: &epic.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID:         epic.ID,
+		ExpectedVersion: 1,
+		Changes: domain.IssuePatch{
+			Title: domain.OptionalValue[string]{Set: true, Value: "New title"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("non-retype update to epic with children failed: %v", err)
+	}
+	if result.Issue.Title != "New title" {
+		t.Fatalf("epic title not updated: %v", result.Issue.Title)
+	}
+	if result.Issue.Type != domain.TypeEpic {
+		t.Fatalf("epic type should not change on title update: %v", result.Issue.Type)
+	}
+}
+
 func TestIssueUpdateIdempotencyReplayAndConflict(t *testing.T) {
 	service, db, _ := openIssueService(t)
 	ctx := context.Background()
