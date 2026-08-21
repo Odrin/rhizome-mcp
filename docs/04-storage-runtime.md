@@ -506,6 +506,34 @@ mmap size
 autocheckpoint
 ```
 
+### 17.1. Environment variables
+
+`internal/config.Load` is the single place every external environment
+input is read; no other package under `internal/` reads the process
+environment for these values (enforced by a repo-wide test). Precedence is
+always flag (where a flag exists) > namespaced `RHIZOME_*` variable >
+deprecated unprefixed legacy variable > built-in default.
+
+```text
+RHIZOME_SERVER_NAME    legacy fallback: SERVER_NAME    default: rhizome-mcp
+RHIZOME_LOG_LEVEL      legacy fallback: LOG_LEVEL       default: info
+RHIZOME_HTTP_ADDRESS   legacy fallback: HTTP_ADDRESS    default: unset (stdio only)
+RHIZOME_TOOL_PROFILE   legacy fallback: TOOL_PROFILE    default: full
+RHIZOME_PROJECT_ROOT   no legacy fallback (already namespaced)
+VERSION                overrides the resolved build version; no legacy form
+XDG_DATA_HOME          Linux data-root input; platform-standard name, not namespaced
+LOCALAPPDATA           Windows data-root input; platform-standard name, not namespaced
+```
+
+Using an unprefixed legacy variable (`SERVER_NAME`, `LOG_LEVEL`,
+`HTTP_ADDRESS`, `TOOL_PROFILE`) logs one stderr deprecation warning per
+variable actually used; it will stop working in a future release. Separately,
+`serve` prints its own stderr notice whenever the HTTP transport or the
+tool profile was selected by an environment variable rather than an
+explicit `--http-address` / `--profile` flag (docs/03 §5.1, docs/08),
+since those two inputs can otherwise silently change what a client sees or
+connects to.
+
 ## 18. Logging
 
 Use structured local logging.

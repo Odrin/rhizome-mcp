@@ -189,7 +189,7 @@ Run `rhizome-mcp` without arguments for complete usage, `rhizome-mcp version` fo
 
 The server exposes 33 tools covering the full lifecycle: project discovery, issue CRUD with labels and relations, planning and dependency graphs, batch plan validation/apply, comments and decisions, claim/renew/checkpoint/finish work attempts, work-context assembly, review requests, full-text search, delta changes, and logical project export/import. The complete contract, including the MCP tool annotation matrix and the `full`/`agent`/`read-only`/`migration` exposure profile matrix, is in [docs/03-mcp-tools.md](docs/03-mcp-tools.md).
 
-By default `serve` advertises the complete `full` catalog. Pass `--profile agent|read-only|migration` (or set `TOOL_PROFILE`) to narrow it — for example `serve --profile read-only` for a client that should never see a mutating tool. Profiles are an exposure and prompt-size control, not an authorization boundary: every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`.
+By default `serve` advertises the complete `full` catalog. Pass `--profile agent|read-only|migration` (or set `RHIZOME_TOOL_PROFILE`) to narrow it — for example `serve --profile read-only` for a client that should never see a mutating tool. Profiles are an exposure and prompt-size control, not an authorization boundary: every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. See [docs/04-storage-runtime.md](docs/04-storage-runtime.md) §17.1 for the full environment-variable set and precedence, including the deprecated unprefixed fallback names.
 
 ## Documentation
 
@@ -221,6 +221,13 @@ go test -tags=integration ./...
 The integration tag runs real-process MCP smoke and workflow tests: they build a temporary server binary, initialize a fresh repository and SQLite data root per test, and speak to `serve` over stdio or HTTP. Beyond single-process smoke coverage, the suite also exercises cross-process scenarios on one shared SQLite data root — concurrent claim and update-version races, an ungraceful process kill and restart, and a backup taken while a server is writing — to catch defects a single-process test structurally cannot see. Most live in the dedicated `integration` package; tests that need unexported package-main internals stay at the repository root.
 
 CI runs `go vet`, unit, and integration tests on Ubuntu, macOS, and Windows for every push and pull request targeting `main`. Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
+
+Release verification includes:
+- Full `go test ./...` suite runs before binary upload
+- Built binaries are smoke-tested (e.g., `./rhizome-mcp --version` verifies version string matches tag)
+- npm launcher test suite runs before npm publish (catches regressions in the Node.js launcher wrapper)
+- VS Code extension binaries are checked out from the tagged source (not `main`) on workflow_dispatch re-publish, ensuring version lockstep
+- Aggregate release-status job fails the workflow if any publish step (npm, MCP Registry, Marketplace, Open VSX) fails, making partial failures visible
 
 This repository tracks its own backlog in rhizome-mcp: work is selected, claimed, and finished through the MCP server, and durable choices are recorded as decisions. Markdown holds specification only, not task status. See [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 

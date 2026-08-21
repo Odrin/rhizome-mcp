@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"os"
@@ -15,11 +18,11 @@ import (
 	"testing"
 	"time"
 
-	"rhizome-mcp/config"
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
@@ -342,7 +345,6 @@ func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
 		{name: "shared fallback", args: []string{"serve"}, startingDir: sharedRoot, wantShared: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("RHIZOME_PROJECT_ROOT", tc.env)
 			var captured mcpadapter.ProjectRouter
 			originalServeRunner := serveRunner
 			serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
@@ -355,7 +357,7 @@ func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
 			if startingDir == "" {
 				startingDir = projectRoot
 			}
-			if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, tc.args, startingDir, pathInputs); err != nil {
+			if err := runCLI(ctx, &config.Config{ProjectRoot: tc.env}, &stdout, &stderr, tc.args, startingDir, pathInputs); err != nil {
 				t.Fatalf("runCLI(%s) error = %v", tc.name, err)
 			}
 			if captured == nil {
@@ -955,5 +957,191 @@ func TestAttemptSweeperNoGoroutineLeakOnStop(t *testing.T) {
 
 	if finalGoroutines > initialGoroutines {
 		t.Fatalf("goroutine leak detected: started %d, ended %d", initialGoroutines, finalGoroutines)
+	}
+}
+
+// TestResolveServeProjectRootPrecedence is a focused unit test on
+// resolveServeProjectRoot's own precedence logic (flag > env > cwd
+// discovery), independent of the full CLI. resolveServeProjectRoot takes
+// its inputs as plain parameters rather than reading the environment
+// itself specifically so this is possible without t.Setenv.
+func TestResolveServeProjectRootPrecedence(t *testing.T) {
+	tempDir := t.TempDir()
+
+	flagRoot := filepath.Join(tempDir, "flag-root")
+	if err := os.MkdirAll(flagRoot, 0o755); err != nil {
+		t.Fatalf("create flag root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(flagRoot, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write flag identity: %v", err)
+	}
+	envRoot := filepath.Join(tempDir, "env-root")
+	if err := os.MkdirAll(envRoot, 0o755); err != nil {
+		t.Fatalf("create env root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(envRoot, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW"}`), 0o644); err != nil {
+		t.Fatalf("write env identity: %v", err)
+	}
+	cwdRoot := filepath.Join(tempDir, "cwd-root")
+	if err := os.MkdirAll(cwdRoot, 0o755); err != nil {
+		t.Fatalf("create cwd root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwdRoot, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAX"}`), 0o644); err != nil {
+		t.Fatalf("write cwd identity: %v", err)
+	}
+	sharedRoot := filepath.Join(tempDir, "shared-root")
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatalf("create shared root: %v", err)
+	}
+
+	t.Run("flag wins over env and cwd", func(t *testing.T) {
+		root, shared, err := resolveServeProjectRoot(flagRoot, envRoot, cwdRoot)
+		if err != nil {
+			t.Fatalf("resolveServeProjectRoot() error = %v", err)
+		}
+		if shared {
+			t.Fatal("shared = true, want false")
+		}
+		resolved, err := projectconfig.Discover(root)
+		if err != nil {
+			t.Fatalf("Discover(%q) error = %v", root, err)
+		}
+		if resolved.Identity.ProjectID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+			t.Fatalf("project id = %q, want the flag root's identity", resolved.Identity.ProjectID)
+		}
+	})
+
+	t.Run("env wins over cwd when flag is empty", func(t *testing.T) {
+		root, shared, err := resolveServeProjectRoot("", envRoot, cwdRoot)
+		if err != nil {
+			t.Fatalf("resolveServeProjectRoot() error = %v", err)
+		}
+		if shared {
+			t.Fatal("shared = true, want false")
+		}
+		resolved, err := projectconfig.Discover(root)
+		if err != nil {
+			t.Fatalf("Discover(%q) error = %v", root, err)
+		}
+		if resolved.Identity.ProjectID != "01ARZ3NDEKTSV4RRFFQ69G5FAW" {
+			t.Fatalf("project id = %q, want the env root's identity", resolved.Identity.ProjectID)
+		}
+	})
+
+	t.Run("falls back to cwd discovery when flag and env are both empty", func(t *testing.T) {
+		root, shared, err := resolveServeProjectRoot("", "", cwdRoot)
+		if err != nil {
+			t.Fatalf("resolveServeProjectRoot() error = %v", err)
+		}
+		if shared {
+			t.Fatal("shared = true, want false")
+		}
+		resolved, err := projectconfig.Discover(root)
+		if err != nil {
+			t.Fatalf("Discover(%q) error = %v", root, err)
+		}
+		if resolved.Identity.ProjectID != "01ARZ3NDEKTSV4RRFFQ69G5FAX" {
+			t.Fatalf("project id = %q, want the cwd root's identity", resolved.Identity.ProjectID)
+		}
+	})
+
+	t.Run("reports shared fallback when nothing is found", func(t *testing.T) {
+		root, shared, err := resolveServeProjectRoot("", "", sharedRoot)
+		if err != nil {
+			t.Fatalf("resolveServeProjectRoot() error = %v", err)
+		}
+		if !shared {
+			t.Fatal("shared = false, want true")
+		}
+		if root != "" {
+			t.Fatalf("root = %q, want empty for the shared fallback", root)
+		}
+	})
+}
+
+// TestServeWarnsWhenTransportOrProfileSelectedFromEnvironment is a
+// regression test for ISSUE-205 AC3: a bare `serve` (no --http-address /
+// --profile flag) must warn on stderr when the transport or tool profile
+// it is about to use came from the environment, since HTTP transport
+// activating silently from an inherited legacy HTTP_ADDRESS was the
+// original bug (docs/08).
+func TestServeWarnsWhenTransportOrProfileSelectedFromEnvironment(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	originalServeRunner := serveRunner
+	serveRunner = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error { return nil }
+	defer func() { serveRunner = originalServeRunner }()
+
+	stderr.Reset()
+	envConfig := &config.Config{HTTPAddress: "127.0.0.1:0", HTTPAddressFromEnv: true, ToolProfile: "read-only", ToolProfileFromEnv: true}
+	if err := runCLI(ctx, envConfig, &stdout, &stderr, []string{"serve"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "HTTP transport selected via environment variable") {
+		t.Fatalf("stderr = %q, want an HTTP transport environment-selection warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tool profile") {
+		t.Fatalf("stderr = %q, want a tool profile environment-selection warning", stderr.String())
+	}
+
+	stderr.Reset()
+	flagConfig := &config.Config{HTTPAddress: "127.0.0.1:0", HTTPAddressFromEnv: true, ToolProfile: "read-only", ToolProfileFromEnv: true}
+	if err := runCLI(ctx, flagConfig, &stdout, &stderr, []string{"serve", "--http-address", "127.0.0.1:0", "--profile", "read-only"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if strings.Contains(stderr.String(), "selected via environment variable") {
+		t.Fatalf("stderr = %q, want no environment-selection warning when flags are explicit", stderr.String())
+	}
+}
+
+// TestInternalPackagesDoNotImportConfig is a regression test for ISSUE-205
+// AC4: internal/config is main's own external-input loader; no package
+// under internal/ may import it (each internal package that needs an
+// external input, like internal/runtime's HTTP address, must receive it as
+// a plain parameter from main instead, so it stays testable without
+// mutating the process environment or depending on this repo's specific
+// environment-variable names).
+func TestInternalPackagesDoNotImportConfig(t *testing.T) {
+	const forbiddenImport = "rhizome-mcp/internal/config"
+	var offenders []string
+	err := filepath.WalkDir("internal", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if path == filepath.Join("internal", "config", "config.go") || path == filepath.Join("internal", "config", "config_test.go") {
+			return nil
+		}
+		fileSet := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fileSet, path, nil, parser.ImportsOnly)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+		for _, imported := range file.Imports {
+			importPath := strings.Trim(imported.Path.Value, `"`)
+			if importPath == forbiddenImport {
+				offenders = append(offenders, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk internal/: %v", err)
+	}
+	if len(offenders) != 0 {
+		t.Fatalf("packages under internal/ importing %s: %v", forbiddenImport, offenders)
 	}
 }

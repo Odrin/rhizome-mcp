@@ -67,11 +67,21 @@ fresh one; the transport does not recover or replay that value for the server.
 
 ## Binding and configuration
 
-HTTP is opt-in through `rhizome-mcp serve --http-address HOST:PORT`. Project routing is independent of the transport: a workspace-specific server can still be started with `serve --project-root <absolute-root>`, while global registrations remain compatible with bare `serve`.
+HTTP is opt-in through `rhizome-mcp serve --http-address HOST:PORT`, or
+through the `RHIZOME_HTTP_ADDRESS` environment variable (the unprefixed
+`HTTP_ADDRESS` name is a deprecated fallback for one release; docs/04 §17
+and docs/03 §5.1 describe the full namespaced-vs-legacy precedence). Project
+routing is independent of the transport: a workspace-specific server can
+still be started with `serve --project-root <absolute-root>`, while global
+registrations remain compatible with bare `serve`.
 The default HTTP address is `127.0.0.1:0`; port zero selects an ephemeral
-port and the selected endpoint is logged on stderr. Explicit configuration
-takes precedence over defaults. Stdio has no HTTP listener unless this option
-is present.
+port and the selected endpoint is logged on stderr. An explicit
+`--http-address` flag always wins over the environment. Stdio has no HTTP
+listener unless the flag or one of these environment variables selects one
+-- and because an inherited environment variable can select HTTP transport
+without an explicit flag on the command line, `serve` prints a stderr
+warning naming the address whenever the environment (not the flag) is what
+selected it, so an unexpected HTTP listener is never silent.
 
 Only literal loopback addresses are valid: `127.0.0.1` and `[::1]`. Wildcards,
 unspecified addresses, non-loopback IPs, hostnames, and Unix proxy targets are

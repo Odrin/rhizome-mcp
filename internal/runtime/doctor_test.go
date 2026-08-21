@@ -11,8 +11,6 @@ import (
 )
 
 func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
-	t.Setenv("HTTP_ADDRESS", "")
-
 	repository, dataRoot := initializeProject(t)
 	fakeClock := clock.NewFakeClock(testTime)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
@@ -25,7 +23,7 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 	}
 	defer func() { _ = project.Close(context.Background()) }()
 
-	report, err := project.Doctor(context.Background(), false)
+	report, err := project.Doctor(context.Background(), projectruntime.DoctorOptions{Full: false})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
 	}
@@ -42,7 +40,7 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 		}
 	}
 
-	fullReport, err := project.Doctor(context.Background(), true)
+	fullReport, err := project.Doctor(context.Background(), projectruntime.DoctorOptions{Full: true})
 	if err != nil {
 		t.Fatalf("Doctor(full) error = %v", err)
 	}
@@ -55,8 +53,6 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 }
 
 func TestProjectDoctorReportsInvalidHTTPAddressConfiguration(t *testing.T) {
-	t.Setenv("HTTP_ADDRESS", "localhost:0")
-
 	repository, dataRoot := initializeProject(t)
 	fakeClock := clock.NewFakeClock(testTime)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
@@ -69,7 +65,7 @@ func TestProjectDoctorReportsInvalidHTTPAddressConfiguration(t *testing.T) {
 	}
 	defer func() { _ = project.Close(context.Background()) }()
 
-	report, err := project.Doctor(context.Background(), false)
+	report, err := project.Doctor(context.Background(), projectruntime.DoctorOptions{Full: false, HTTPAddress: "localhost:0"})
 	if err == nil {
 		t.Fatalf("Doctor() unexpectedly succeeded: %+v", report)
 	}
@@ -92,8 +88,6 @@ func TestProjectDoctorReportsInvalidHTTPAddressConfiguration(t *testing.T) {
 }
 
 func TestProjectDoctorReportsExpiredActiveAttemptsWithoutMutatingState(t *testing.T) {
-	t.Setenv("HTTP_ADDRESS", "")
-
 	repository, dataRoot := initializeProject(t)
 	fakeClock := clock.NewFakeClock(testTime)
 	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
@@ -125,7 +119,7 @@ func TestProjectDoctorReportsExpiredActiveAttemptsWithoutMutatingState(t *testin
 		t.Fatalf("insert test attempt: %v", err)
 	}
 
-	report, err := project.Doctor(context.Background(), false)
+	report, err := project.Doctor(context.Background(), projectruntime.DoctorOptions{Full: false})
 	if err == nil {
 		t.Fatalf("Doctor() unexpectedly succeeded: %+v", report)
 	}

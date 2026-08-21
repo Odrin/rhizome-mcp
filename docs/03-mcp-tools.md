@@ -436,12 +436,18 @@ rhizome-mcp serve --http-address 127.0.0.1:0 --profile read-only
 ```
 
 ```bash
-TOOL_PROFILE=migration rhizome-mcp serve
+RHIZOME_TOOL_PROFILE=migration rhizome-mcp serve
 ```
 
-The `--profile` CLI flag takes precedence over the `TOOL_PROFILE`
-environment variable, matching the existing `--http-address` /
-`HTTP_ADDRESS` precedence. Leaving both unset keeps the default, `full`,
+The `--profile` CLI flag takes precedence over `RHIZOME_TOOL_PROFILE`,
+which in turn takes precedence over the deprecated unprefixed
+`TOOL_PROFILE` fallback (docs/04 §17.1); using the unprefixed name logs a
+stderr deprecation warning. The same precedence applies to
+`--http-address` / `RHIZOME_HTTP_ADDRESS` / the deprecated `HTTP_ADDRESS`.
+Selecting either the transport or the tool profile from the environment
+rather than a flag also prints a separate stderr notice naming what was
+selected (docs/08 §"Binding and configuration"), so environment-driven
+behavior is never silent. Leaving both unset keeps the default, `full`,
 so an unconfigured server is unchanged from every prior release: the
 complete existing tool catalog remains backward compatible.
 

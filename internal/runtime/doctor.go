@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -52,9 +51,19 @@ func (report DoctorReport) Healthy() bool {
 	return true
 }
 
+// DoctorOptions carries doctor's caller-supplied inputs. HTTPAddress comes
+// from the caller's already-resolved config.Config.HTTPAddress -- doctor
+// itself never reads the environment or imports the config package, so it
+// stays independently testable (docs/04 §15, deterministic domain time and
+// external-input conventions).
+type DoctorOptions struct {
+	Full        bool
+	HTTPAddress string
+}
+
 // Doctor runs the lightweight Phase 1 checks plus operational read-only checks.
-func (project *Project) Doctor(ctx context.Context, full bool) (DoctorReport, error) {
-	report := DoctorReport{Full: full, ExpectedSchemaVersion: migrations.CurrentVersion()}
+func (project *Project) Doctor(ctx context.Context, options DoctorOptions) (DoctorReport, error) {
+	report := DoctorReport{Full: options.Full, ExpectedSchemaVersion: migrations.CurrentVersion()}
 	if project == nil {
 		return report, domain.NewError(CodeHealthCheck, "project doctor check failed", false,
 			domain.Detail{Field: checkPing, Code: "CHECK_FAILED", Message: "project is not open"})
@@ -78,7 +87,7 @@ func (project *Project) Doctor(ctx context.Context, full bool) (DoctorReport, er
 			domain.Detail{Field: checkPing, Code: "CHECK_FAILED", Message: "database query failed"})
 	}
 
-	if err := project.collectOperationalChecks(ctx, &report); err != nil {
+	if err := project.collectOperationalChecks(ctx, &report, options.HTTPAddress); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return report, err
 		}
@@ -114,7 +123,7 @@ func makeDoctorDetails(checks []DoctorCheck) []domain.Detail {
 	return details
 }
 
-func (project *Project) collectOperationalChecks(ctx context.Context, report *DoctorReport) error {
+func (project *Project) collectOperationalChecks(ctx context.Context, report *DoctorReport, httpAddress string) error {
 	checks := []struct {
 		name string
 		run  func(context.Context, sqlite.Queryer) (string, error)
@@ -141,7 +150,7 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 		{checkHTTPAddress, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			_ = ctx
 			_ = query
-			return checkHTTPAddressConfiguration()
+			return checkHTTPAddressConfiguration(httpAddress)
 		}},
 	}
 	if report.Full {
@@ -256,9 +265,8 @@ func checkExpiredActiveAttemptsQuery(ctx context.Context, query sqlite.Queryer, 
 	return fmt.Sprintf("count=%d", count), nil
 }
 
-func checkHTTPAddressConfiguration() (string, error) {
-	cfg := config.Load()
-	address := strings.TrimSpace(cfg.HTTPAddress)
+func checkHTTPAddressConfiguration(httpAddress string) (string, error) {
+	address := strings.TrimSpace(httpAddress)
 	if address == "" {
 		return "not configured", nil
 	}

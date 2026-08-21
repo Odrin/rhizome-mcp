@@ -23,12 +23,12 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"rhizome-mcp/config"
 	cliadapter "rhizome-mcp/internal/adapters/cli"
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
@@ -219,10 +219,13 @@ func (bundle *composedServices) Close(ctx context.Context) error {
 
 func main() {
 	resolvedVersion, resolvedCommit, resolvedDate := resolveVersion()
-	cfg := config.Load()
+	cfg, warnings := config.Load(os.Getenv)
 	cfg.Version = resolvedVersion
 	cfg.VersionCommit = resolvedCommit
 	cfg.VersionDate = resolvedDate
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
@@ -242,8 +245,8 @@ func main() {
 	pathInputs := projectconfig.PathInputs{
 		GOOS:         goruntime.GOOS,
 		HomeDir:      homeDir,
-		XDGDataHome:  os.Getenv("XDG_DATA_HOME"),
-		LocalAppData: os.Getenv("LOCALAPPDATA"),
+		XDGDataHome:  cfg.XDGDataHome,
+		LocalAppData: cfg.LocalAppData,
 	}
 
 	if err := runCLI(ctx, cfg, os.Stdout, os.Stderr, os.Args[1:], startingPath, pathInputs); err != nil {
@@ -293,7 +296,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return err
 	}
 	if len(args) > 0 && args[0] == "serve" {
-		serveProjectRoot, serveShared, err = resolveServeProjectRoot(startingPath, serveProjectRootOverride)
+		serveProjectRoot, serveShared, err = resolveServeProjectRoot(serveProjectRootOverride, cfg.ProjectRoot, startingPath)
 		if err != nil {
 			return err
 		}
@@ -302,9 +305,13 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) (err error) {
 		if httpAddress != "" {
 			cfg.HTTPAddress = httpAddress
+		} else if cfg.HTTPAddressFromEnv {
+			fmt.Fprintf(stderr, "warning: HTTP transport selected via environment variable (address %q); pass --http-address explicitly to make this intentional\n", cfg.HTTPAddress)
 		}
 		if toolProfile != "" {
 			cfg.ToolProfile = toolProfile
+		} else if cfg.ToolProfileFromEnv {
+			fmt.Fprintf(stderr, "warning: tool profile %q selected via environment variable; pass --profile explicitly to make this intentional\n", cfg.ToolProfile)
 		}
 		if router == nil {
 			dataRoot, dataRootErr := resolveDataRoot(pathInputs, dataRootOverride)
@@ -364,7 +371,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		if project == nil {
 			return cliadapter.DoctorReport{}, errors.New("project is not open")
 		}
-		report, err := project.Doctor(ctx, full)
+		report, err := project.Doctor(ctx, projectruntime.DoctorOptions{Full: full, HTTPAddress: cfg.HTTPAddress})
 		return doctorReportFromRuntime(report, cfg.Version), err
 	}
 	connectHandler := func(ctx context.Context, target string, printOnly bool) error {
@@ -482,15 +489,19 @@ func extractServeProjectRootOption(args []string) ([]string, string, error) {
 	return remaining, projectRoot, nil
 }
 
-func resolveServeProjectRoot(startingPath, projectRootOverride string) (string, bool, error) {
-	if projectRootOverride != "" {
-		resolved, err := projectconfig.LoadProjectRoot(projectRootOverride)
+// resolveServeProjectRoot is a pure function of its three inputs (no direct
+// environment access) so precedence -- flag override, then RHIZOME_PROJECT_ROOT,
+// then discovery from startingPath -- is directly testable without
+// t.Setenv. Callers pass cfg.ProjectRoot (from config.Load) as envRoot.
+func resolveServeProjectRoot(flagOverride, envRoot, startingPath string) (string, bool, error) {
+	if flagOverride != "" {
+		resolved, err := projectconfig.LoadProjectRoot(flagOverride)
 		if err != nil {
 			return "", false, err
 		}
 		return resolved.Root, false, nil
 	}
-	if envRoot := os.Getenv("RHIZOME_PROJECT_ROOT"); envRoot != "" {
+	if envRoot != "" {
 		resolved, err := projectconfig.LoadProjectRoot(envRoot)
 		if err != nil {
 			return "", false, err

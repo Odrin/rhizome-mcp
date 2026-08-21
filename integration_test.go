@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
-	"rhizome-mcp/config"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/projectconfig"
 )
 

@@ -33,6 +33,9 @@
     "linux",
     "win32"
   ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "optionalDependencies": {
     "@rhizome-mcp/darwin-x64": "0.0.1",
     "@rhizome-mcp/darwin-arm64": "0.0.1",

@@ -50,7 +50,7 @@ The Marketplace requires a plain `major.minor.patch` version with no semver prer
 - **Beta tag** `vMAJOR.MINOR.PATCH-beta.N` → Marketplace version `MAJOR.(MINOR*2+1).(PATCH*1000+N)`, published with `vsce package --pre-release` (the Marketplace's own documented convention: an odd minor version keeps pre-release builds on a separate update channel from stable).
 - **Stable tag** `vMAJOR.MINOR.PATCH` (no `-beta.N`) → Marketplace version `MAJOR.MINOR.PATCH`, published without `--pre-release`. Once a stable version ships, the extension's version locks to the server's own version verbatim.
 
-Every tagged release publishes/updates all 8 targets automatically via the `publish-vscode-extension` job in `.github/workflows/release.yml`, which is idempotent (`vsce publish --skip-duplicate`) and also exposed as a `workflow_dispatch` fallback (tag input) for a manual re-publish.
+Every tagged release publishes/updates all 8 targets automatically via the `publish-vscode-extension` job in `.github/workflows/release.yml`, which is idempotent (`vsce publish --skip-duplicate`) and also exposed as a `workflow_dispatch` fallback (tag input) for a manual re-publish. The dispatch path is version-safe: it checks out the tagged source code (not `main`), ensuring the extension's TypeScript and the tag's server binary always ship in lockstep.
 
 ## Open VSX
 
