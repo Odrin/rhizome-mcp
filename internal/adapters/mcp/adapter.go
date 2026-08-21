@@ -194,7 +194,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 			return target.openProject(ctx, request, input)
 		})
 	})
-	target.registerTool(server, groupMigration, tool("export_project", "Export the selected project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupMigration, tool("export_project", "Export the selected project as the version 1 logical interchange document.", schemaExportProject(), schemaExportProjectOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[exportProjectInput, any](target, t, (*adapter).exportProject))
 	})
 	target.registerTool(server, groupMigration, tool("validate_import", "Validate a logical project import document without writing anything.", schemaValidateImport(), schemaValidateImportOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {

@@ -372,7 +372,7 @@ rather than the tool's read/write split alone:
 | --- | --- | --- | --- | --- |
 | `open_project` | ✓ | | ✓ | |
 | `get_project` | ✓ | | ✓ | |
-| `export_project` | ✓ | | ✓ | |
+| `export_project` | | | ✓ | |
 | `validate_import` | ✓ | | ✓ | |
 | `apply_import` | | ✓ | ✓ | |
 | `list_labels` | ✓ | | ✓ | |
@@ -489,7 +489,7 @@ annotation matrix.
   incremental synchronization.
 - **`read-only`**: exactly the tools with `readOnlyHint: true` in the
   section 4.1 matrix, spanning every group (including read operations
-  inside `migration` and `sync`, e.g. `export_project`, `validate_import`,
+  inside `migration` and `sync`, e.g. `validate_import`,
   `get_changes` — reading is safe regardless of which group a tool
   otherwise belongs to). No tool this profile advertises can be
   classified as mutating; that invariant is enforced by
@@ -610,7 +610,7 @@ portable file path.
 Pass `delivery: "inline"` only when a caller needs the document in the response.
 Inline delivery returns the full logical project document, but fails with
 `LIMIT_EXCEEDED` when it exceeds 64 KiB. The default artifact file is retained
-for at most 24 hours and its digest is verified whenever it is read.
+for at most 24 hours and its digest is verified whenever it is read. The artifact delivery path performs a durable write by creating a file and pruning files older than 24h in the server's managed export directory, so this tool is not part of the `read-only` profile despite its idempotent and non-destructive annotations.
 
 ### 6.4. `validate_import`
 
