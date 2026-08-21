@@ -269,7 +269,10 @@ Index these sources:
 - decision title;
 - decision summary;
 - decision content;
-- attempt note content.
+- attempt note content;
+- review status and artifact IDs, under a title denormalized from the
+  parent issue's current title (kept in sync by triggers on both tables,
+  including a rename of the parent issue).
 
 Do not index by default:
 

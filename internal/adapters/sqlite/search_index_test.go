@@ -117,6 +117,123 @@ func TestSearchIndexTracksSourceMutationsTransactionallyAndRebuilds(t *testing.T
 	}
 }
 
+// TestSearchIndexReviewRowFollowsIssueRename is the ISSUE-214 regression:
+// the FTS review row denormalizes the parent issue title, and nothing used
+// to refresh it when the issue was renamed, leaving the review indexed
+// under a stale title until a full Rebuild.
+func TestSearchIndexReviewRowFollowsIssueRename(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "original title", Status: domain.StatusReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	const (
+		targetID = "01ARZ3NDEKTSV4RRFFQ69G5FBV"
+		reviewID = "01ARZ3NDEKTSV4RRFFQ69G5FBW"
+	)
+	timestamp := now.Format(time.RFC3339Nano)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(
+			id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
+		) VALUES (?, ?, 1, 0, '[]', 1, ?)`, targetID, issue.ID, timestamp); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
+			id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id,
+			active_attempt_id, version, created_at, resolved_at
+		) VALUES (?, ?, ?, 1, 0, '[]', 'open', NULL, NULL, 1, ?, NULL)`, reviewID, targetID, issue.ID, timestamp)
+		return err
+	}); err != nil {
+		t.Fatalf("insert review request: %v", err)
+	}
+
+	before := searchIndexRows(t, db)
+	var beforeReview *searchIndexRow
+	for index := range before {
+		if before[index].EntityType == "review" && before[index].EntityID == reviewID {
+			beforeReview = &before[index]
+		}
+	}
+	if beforeReview == nil || beforeReview.Title != "original title review" {
+		t.Fatalf("review row before rename = %#v, want title %q", beforeReview, "original title review")
+	}
+
+	if _, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID:         issue.ID,
+		ExpectedVersion: 1,
+		Changes:         domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "renamed title"}},
+	}); err != nil {
+		t.Fatalf("rename issue: %v", err)
+	}
+
+	after := searchIndexRows(t, db)
+	var afterReview *searchIndexRow
+	for index := range after {
+		if after[index].EntityType == "review" && after[index].EntityID == reviewID {
+			afterReview = &after[index]
+		}
+	}
+	if afterReview == nil || afterReview.Title != "renamed title review" {
+		t.Fatalf("review row after rename = %#v, want title %q", afterReview, "renamed title review")
+	}
+
+	searchRepository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchRepository() error = %v", err)
+	}
+	foundByNewTitle, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "renamed", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by new title: %v", err)
+	}
+	if !containsReviewResult(foundByNewTitle, reviewID) {
+		t.Fatalf("search by new title = %#v, want review %q present", foundByNewTitle, reviewID)
+	}
+	foundByOldTitle, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "original", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by old title: %v", err)
+	}
+	if containsReviewResult(foundByOldTitle, reviewID) {
+		t.Fatalf("search by old title = %#v, want review %q absent", foundByOldTitle, reviewID)
+	}
+
+	// Rebuild must agree with the trigger-maintained row: both derive the
+	// review title from the same live issues.title, so a full rebuild after
+	// the rename should reproduce exactly what the trigger already wrote,
+	// not just repair a fixture the trigger got wrong (ISSUE-214 AC3's
+	// join-alignment concern, exercised end-to-end rather than by
+	// comparing SQL text).
+	indexRepository, err := sqlite.NewSearchIndexRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchIndexRepository() error = %v", err)
+	}
+	if err := indexRepository.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild() error = %v", err)
+	}
+	rebuilt := searchIndexRows(t, db)
+	var rebuiltReview *searchIndexRow
+	for index := range rebuilt {
+		if rebuilt[index].EntityType == "review" && rebuilt[index].EntityID == reviewID {
+			rebuiltReview = &rebuilt[index]
+		}
+	}
+	if rebuiltReview == nil || rebuiltReview.Title != afterReview.Title {
+		t.Fatalf("rebuilt review row = %#v, want title %q (trigger and Rebuild must agree)", rebuiltReview, afterReview.Title)
+	}
+}
+
+func containsReviewResult(page domain.SearchPage, reviewID string) bool {
+	for _, result := range page.Results {
+		if result.EntityType == domain.SearchEntityTypeReview && result.EntityID == reviewID {
+			return true
+		}
+	}
+	return false
+}
+
 type searchIndexRow struct {
 	EntityType string
 	EntityID   string

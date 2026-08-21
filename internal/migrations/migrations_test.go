@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 5}) {
-		t.Fatalf("Migrate() result = %+v, want current version with five applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 6}) {
+		t.Fatalf("Migrate() result = %+v, want current version with six applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -94,10 +94,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "agent_session_handles" || checksum != agentSessionHandlesChecksum {
+	if version != CurrentVersion() || name != "search_index_review_title_sync" || checksum != searchIndexReviewTitleSyncChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(agentSessionHandlesSQL))
+	actualChecksum := sha256.Sum256([]byte(searchIndexReviewTitleSyncSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -119,7 +119,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 5 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 6 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -182,8 +182,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 4}) {
-		t.Fatalf("upgrade result = %+v, want three applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 5}) {
+		t.Fatalf("upgrade result = %+v, want five applied migrations", result)
 	}
 
 	var count int
@@ -260,8 +260,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 2}) {
-		t.Fatalf("upgrade result = %+v, want one applied migration", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 3}) {
+		t.Fatalf("upgrade result = %+v, want three applied migrations", result)
 	}
 
 	var after []struct {
@@ -290,16 +290,16 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+2 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+2)
+	if len(after) != len(before)+3 {
+		t.Fatalf("history rows = %d, want %d", len(after), len(before)+3)
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "agent_session_handles" || after[len(after)-1].checksum != agentSessionHandlesChecksum {
-		t.Fatalf("new history row = %+v, want agent_session_handles migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "search_index_review_title_sync" || after[len(after)-1].checksum != searchIndexReviewTitleSyncChecksum {
+		t.Fatalf("new history row = %+v, want search_index_review_title_sync migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -398,7 +398,7 @@ func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	}{
 		{name: "checksum", tamper: "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"},
 		{name: "name", tamper: "UPDATE schema_migrations SET name = 'renamed_schema'"},
-		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (6, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
+		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (7, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
 		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0 WHERE version = 1"},
 		{name: "malformed checksum", tamper: "UPDATE schema_migrations SET checksum = 'not-sha256'"},
 		{name: "malformed timestamp", tamper: "UPDATE schema_migrations SET applied_at = 'not-a-timestamp'"},
