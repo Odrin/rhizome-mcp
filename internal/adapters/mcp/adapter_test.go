@@ -2345,9 +2345,7 @@ func TestExplicitAgentSessionHandleAttribution(t *testing.T) {
 		t.Fatalf("end_agent_session = %#v", ended)
 	}
 	invalid := call(t, client, "create_issue", map[string]any{"type": "task", "title": "rejected", "agent_session_handle": sessionOutput.Handle})
-	if !invalid.IsError {
-		t.Fatal("ended agent session handle was accepted")
-	}
+	assertDomainError(t, invalid, domain.CodeSessionNotActive, false)
 }
 
 func TestAttemptEventsFollowCurrentMCPConnectionSession(t *testing.T) {

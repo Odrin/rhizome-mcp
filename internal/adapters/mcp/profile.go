@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -102,11 +101,17 @@ func touchSessionForMutatingTool[In, Out any](adapter *adapter, toolDef *sdkmcp.
 		if request != nil && request.Params != nil && len(request.Params.Arguments) != 0 {
 			var arguments map[string]json.RawMessage
 			if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
-				return nil, *new(Out), err
+				domainErr := domain.NewError(domain.CodeInvalidArgument, "agent_session_handle must be a string", false,
+					domain.Detail{Field: "agent_session_handle", Code: "INVALID_HANDLE"})
+				result, _, ferr := adapter.failure(domainErr)
+				return result, *new(Out), ferr
 			}
 			if value, ok := arguments["agent_session_handle"]; ok && string(value) != "null" {
 				if err := json.Unmarshal(value, &handle); err != nil {
-					return nil, *new(Out), fmt.Errorf("agent_session_handle must be a string")
+					domainErr := domain.NewError(domain.CodeInvalidArgument, "agent_session_handle must be a string", false,
+						domain.Detail{Field: "agent_session_handle", Code: "INVALID_HANDLE"})
+					result, _, ferr := adapter.failure(domainErr)
+					return result, *new(Out), ferr
 				}
 			}
 		}
@@ -119,7 +124,8 @@ func touchSessionForMutatingTool[In, Out any](adapter *adapter, toolDef *sdkmcp.
 				sessionID, err = adapter.sessions.ResolveAndTouch(ctx, handle)
 			}
 			if err != nil {
-				return nil, *new(Out), err
+				result, _, ferr := adapter.failure(err)
+				return result, *new(Out), ferr
 			}
 			ctx = context.WithValue(ctx, agentSessionContextKey{}, sessionID)
 		}

@@ -192,7 +192,10 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 				t.Fatalf("missing-ref rpc error = %#v", envelope.Error)
 			}
 			var missingRefResult struct {
-				IsError bool `json:"isError"`
+				IsError           bool `json:"isError"`
+				StructuredContent struct {
+					Code string `json:"code"`
+				} `json:"structuredContent"`
 				Content []struct {
 					Text string `json:"text"`
 				} `json:"content"`
@@ -203,12 +206,8 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 			if !missingRefResult.IsError {
 				t.Fatalf("create_issue without project_ref unexpectedly succeeded: %s", body)
 			}
-			if len(missingRefResult.Content) == 0 {
-				t.Fatal("create_issue without project_ref returned no content")
-			}
-			text := missingRefResult.Content[0].Text
-			if !strings.Contains(text, "PROJECT_REQUIRED") && !strings.Contains(text, "project_ref is required") {
-				t.Fatalf("create_issue without project_ref text = %q, want a project-ref requirement message", text)
+			if missingRefResult.StructuredContent.Code != "PROJECT_REQUIRED" {
+				t.Fatalf("create_issue without project_ref code = %q, want PROJECT_REQUIRED", missingRefResult.StructuredContent.Code)
 			}
 
 			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-explicit-ref", "tools/call", map[string]any{

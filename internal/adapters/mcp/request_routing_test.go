@@ -20,10 +20,13 @@ func TestRouteProjectRequestRejectsWrongProjectRefTypeBeforeAcquire(t *testing.T
 		return nil, nil, nil
 	})
 
-	_, _, err := handler(context.Background(), request, struct{}{})
-	var domainErr *domain.Error
-	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument || router.acquires != 0 {
-		t.Fatalf("handler error/acquires = %v/%d, want invalid argument/0", err, router.acquires)
+	result, _, err := handler(context.Background(), request, struct{}{})
+	if err != nil {
+		t.Fatalf("handler error = %v, want nil (domain errors route through the structured envelope)", err)
+	}
+	output, ok := result.StructuredContent.(errorOutput)
+	if result == nil || !result.IsError || !ok || output.Code != domain.CodeInvalidArgument || router.acquires != 0 {
+		t.Fatalf("result/acquires = %#v/%d, want invalid argument/0", result, router.acquires)
 	}
 }
 
@@ -35,10 +38,13 @@ func TestRouteProjectRequestPropagatesSharedProjectRequired(t *testing.T) {
 		return nil, nil, nil
 	})
 
-	_, _, err := handler(context.Background(), requestWithArguments(t, map[string]any{}), struct{}{})
-	var domainErr *domain.Error
-	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectRequired || router.acquires != 1 {
-		t.Fatalf("handler error/acquires = %v/%d, want project required/1", err, router.acquires)
+	result, _, err := handler(context.Background(), requestWithArguments(t, map[string]any{}), struct{}{})
+	if err != nil {
+		t.Fatalf("handler error = %v, want nil (domain errors route through the structured envelope)", err)
+	}
+	output, ok := result.StructuredContent.(errorOutput)
+	if result == nil || !result.IsError || !ok || output.Code != domain.CodeProjectRequired || router.acquires != 1 {
+		t.Fatalf("result/acquires = %#v/%d, want project required/1", result, router.acquires)
 	}
 }
 
@@ -57,6 +63,40 @@ func TestRouteProjectRequestReleasesLeaseAfterHandlerFailure(t *testing.T) {
 	_, _, err := handler(context.Background(), requestWithArguments(t, map[string]any{}), struct{}{})
 	if err == nil || releases != 1 {
 		t.Fatalf("handler error/releases = %v/%d, want error/1", err, releases)
+	}
+}
+
+// TestTouchSessionForMutatingToolRejectsNonStringHandle exercises the
+// malformed-argument path directly below the SDK's schema validation layer:
+// a live client call can never reach this branch because agent_session_handle
+// is declared as a string in the tool schema, so the SDK rejects a non-string
+// value before the handler runs. Constructing the raw request here is the
+// only way to prove this branch itself routes through the structured
+// envelope with an INVALID_HANDLE detail.
+func TestTouchSessionForMutatingToolRejectsNonStringHandle(t *testing.T) {
+	target := &adapter{}
+	handler := touchSessionForMutatingTool[struct{}, any](target, nil, func(context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
+		t.Fatal("handler ran")
+		return nil, nil, nil
+	})
+
+	request := requestWithArguments(t, map[string]any{"agent_session_handle": 123})
+	result, _, err := handler(context.Background(), request, struct{}{})
+	if err != nil {
+		t.Fatalf("handler error = %v, want nil (domain errors route through the structured envelope)", err)
+	}
+	output, ok := result.StructuredContent.(errorOutput)
+	if result == nil || !result.IsError || !ok || output.Code != domain.CodeInvalidArgument {
+		t.Fatalf("result = %#v, want invalid argument", result)
+	}
+	found := false
+	for _, detail := range output.Details {
+		if detail.Field == "agent_session_handle" && detail.Code == "INVALID_HANDLE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("details = %#v, want a detail with field=agent_session_handle code=INVALID_HANDLE", output.Details)
 	}
 }
 

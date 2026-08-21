@@ -415,14 +415,17 @@ func routeProjectRequest[In, Out any](adapter *adapter, toolDef *sdkmcp.Tool, ha
 	return func(ctx context.Context, request *sdkmcp.CallToolRequest, input In) (*sdkmcp.CallToolResult, Out, error) {
 		explicitRef, err := projectRefArgument(request)
 		if err != nil {
-			return nil, *new(Out), err
+			result, _, ferr := adapter.failure(err)
+			return result, *new(Out), ferr
 		}
 		lease, err := adapter.router.Acquire(ctx, explicitRef)
 		if err != nil {
-			return nil, *new(Out), err
+			result, _, ferr := adapter.failure(err)
+			return result, *new(Out), ferr
 		}
 		if lease == nil {
-			return nil, *new(Out), domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false)
+			result, _, ferr := adapter.failure(domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false))
+			return result, *new(Out), ferr
 		}
 		defer func() {
 			_ = lease.Release()
