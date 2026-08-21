@@ -758,6 +758,8 @@ Patch semantics:
 
 Changing `type` away from `epic` fails with `INVALID_EPIC_PARENT` (detail field `type`, code `HAS_CHILDREN`) while the epic still has non-archived children.
 
+A status patch targeting `review` or `done` fails with `INVALID_STATUS_TRANSITION` (detail field `changes.status`, code `UNSUPPORTED_DIRECT_TRANSITION`) regardless of the current stored status. Those two statuses are reachable only through `claim_issue`/`finish_attempt`'s gated enforcement points (docs/02 §17.1), never through a direct patch.
+
 Input:
 
 ```json
@@ -1633,6 +1635,10 @@ Input:
 Behavior:
 
 - checks claimability;
+- evaluates the `claim_work` workflow gate and snapshots the effective
+  requirement set onto the new attempt (docs/02 §17); an unmet requirement
+  fails the call with `WORKFLOW_GATE_UNSATISFIED` before any attempt is
+  created;
 - determines `work` or `review`;
 - creates attempt atomically;
 - records issue version and event ID;
@@ -1820,7 +1826,13 @@ Completion checks:
 - issue archive/cancel state;
 - blockers;
 - issue changes since claim;
-- required acknowledgments.
+- required acknowledgments;
+- the workflow gate for the enforcement point the outcome resolves to --
+  `complete_work_to_review`, `complete_work_to_done`, or `approve_review`
+  (docs/02 §17) -- evaluated against the completing attempt's or review
+  target's frozen requirement snapshot, not against live policies. An unmet
+  requirement fails the call with `WORKFLOW_GATE_UNSATISFIED` and leaves the
+  attempt active.
 
 ### 11.5. `get_work_context`
 
@@ -2030,6 +2042,13 @@ INVALID_EPIC_PARENT
 IDEMPOTENCY_CONFLICT
 LIMIT_EXCEEDED
 VALIDATION_ERROR
+WORKFLOW_GATE_UNSATISFIED
 ```
+
+`WORKFLOW_GATE_UNSATISFIED` is returned by `claim_issue` and `finish_attempt`
+when one or more configured workflow policy requirements are unmet at the
+enforcement point being evaluated (docs/02 §17). It carries one detail entry
+per unmet requirement with stable fields `policy_id`, `requirement_key`,
+`enforcement_point`, and `reason`.
 
 Internal SQLite errors and stack traces are logged locally and mapped to stable domain errors.

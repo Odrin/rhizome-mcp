@@ -1,5 +1,20 @@
 # Review workflow contract
 
+## Relationship to workflow gates
+
+A workflow policy's `review_approval` requirement (docs/02 §17) names a
+purpose (e.g. `"security"`) that must have a matching immutable approval
+record before `approve_review` -- or a work attempt completing straight to
+`done` -- can succeed. That approval record is a distinct, purpose-scoped
+concept from the review request described below: one issue can have at most
+one open-or-claimed general review request at a time (see below), but a
+policy can require several independently-satisfied purposes (for example
+`"security"` and `"design"`) before the issue can reach `done`. How an
+approval record is created, who can grant one, and how it binds to an issue
+version is specified by ISSUE-173, not by this document. This document
+covers only the general implementation review request lifecycle, which
+`approve_review` still uses to route `review -> done`.
+
 ## Review request
 
 A review request is an append-only request to review one immutable target:

@@ -152,6 +152,12 @@ A transition to `blocked` requires `blocked_reason`.
 
 When leaving `blocked`, the current `blocked_reason` is cleared, while history remains in events.
 
+This table describes every stored-status transition the system ever
+performs, regardless of mechanism. It does not mean every mechanism can
+perform every listed transition: `-> review` and `-> done` are reachable
+only through the gated attempt lifecycle (`claim_issue`/`finish_attempt`),
+never through a direct `update_issue` patch (§17.1).
+
 ### 3.6. Versioning
 
 `version` is incremented for every mutation of the issue row.
@@ -604,3 +610,415 @@ Changes that require refreshed context and explicit acknowledgment:
 - manual blocking.
 
 Acknowledgment contains the current issue version and latest event ID.
+
+## 17. Workflow policy and gate evaluation
+
+Workflow policies add project-configurable quality gates without introducing
+custom statuses or a custom workflow engine. Stored issue statuses remain
+exactly `open`, `ready`, `blocked`, `review`, `done`, `cancelled` (§3.2);
+`in_progress` remains derived (§3.3). "Review is optional" (docs/01 §7)
+remains the default; a policy that adds a `review_approval` requirement makes
+review mandatory only for the issues it matches.
+
+### 17.1. Enforcement points
+
+Gates are evaluated at exactly four fixed points, each corresponding to one
+existing lease-authenticated transition:
+
+```text
+claim_work                claim_issue on a task or bug
+complete_work_to_review   finish_attempt(kind=work, outcome=completed, target_issue_status=review)
+complete_work_to_done     finish_attempt(kind=work, outcome=completed, target_issue_status=done)
+approve_review            finish_attempt(kind=review, review_outcome=approved)
+```
+
+No other point evaluates gates, and no additional enforcement point exists.
+Today, `update_issue` can drive a direct `ready -> review`, `ready -> done`,
+or `review -> done` transition on its own, gated only by `CanTransition`
+(§3.5) and never by an attempt lifecycle -- this is the one path that could
+otherwise bypass gate evaluation entirely, since it needs neither a claimed
+attempt nor a review target. This contract changes that: `update_issue` may
+still set stored status directly to `open`, `ready`, `blocked`, or
+`cancelled`, but a patch whose target is `review` or `done` must now be
+rejected with `INVALID_STATUS_TRANSITION` -- the same error code
+`update_issue` already returns for every other transition it does not
+support, now also covering these two. `review -> done` requires going
+through `approve_review`.
+
+`claim_work`, `complete_work_to_review`, `complete_work_to_done`, and
+`approve_review` are not four separate functions in the current
+implementation: `claim_issue` is one call chain (`AttemptRepository.ClaimIssue`),
+and the other three are one shared call chain
+(`AttemptRepository.FinishAttempt`) that branches on the attempt's `kind`
+and the caller's `target_issue_status` / `review_outcome` before a single
+`UPDATE issues SET status = ...` statement. A gate implementation hooks
+these two call chains, branching the same way, rather than expecting three
+independent functions to attach to (§17.11 enumerates the exact current call
+sites this contract's gates must reach).
+
+Three other paths write `issues.status` directly on row creation, with no
+`CanTransition` check at all because there is no prior status to transition
+from, and can place a new issue directly into `review`, `done`, or
+`cancelled`: `create_issue`, `apply_issue_plan` (batch creation), and
+`apply_import` (logical interchange import -- the only one of the three that
+also skips even `CreateIssueInput.Validate`). Whether and how gates apply to
+issue creation is explicitly out of scope for this contract and is decided
+by ISSUE-201; until ISSUE-201 lands, these three paths are a known,
+documented gap, not a silent one.
+
+### 17.2. WorkflowPolicy and PolicyRequirement
+
+```text
+WorkflowPolicy
+  id                 ULID
+  selector
+    issue_types      Type[] (empty means every executable type: task, bug)
+    labels_all       string[] (every value must be present on the issue; empty means no label constraint)
+  status             active | archived
+  version            integer, incremented on any selector or requirement change
+  created_at
+  updated_at
+
+PolicyRequirement
+  policy_id          ULID (owning policy)
+  key                string, unique within its policy, stable across edits
+  kind               issue_field_nonblank | attempt_evidence | review_approval
+  field              string, issue_field_nonblank only; this version permits only "acceptance_criteria"
+  evidence_key       string, attempt_evidence only; a caller-defined stable key (e.g. "tests", "manual_qa")
+  purpose            string, review_approval only; a caller-defined stable purpose (e.g. "security", "design")
+```
+
+An epic never matches a selector: epics are never executable targets (§3.1),
+so no policy can add a requirement to one.
+
+A selector matches an issue when: `issue_types` is empty or contains the
+issue's type, **and** every value in `labels_all` is present among the
+issue's labels (case-insensitive, matching label-name normalization
+elsewhere in the domain model, §10). There is no `labels_any`, no override,
+no priority, and no exclusion -- a non-matching selector contributes nothing,
+and there is no way for one policy to suppress or outrank another.
+
+### 17.3. Composition and ordering
+
+Every `active` policy whose selector matches the issue contributes its
+requirements. The effective requirement set for an issue is the union of all
+matching policies' requirements, ordered by `policy_id` then `key`, and
+deduplicated only when both `policy_id` and `key` are identical (which in
+practice only collapses a requirement seen twice through redundant lookups;
+distinct policies are never merged, even when they declare the same `kind`
+and the same `evidence_key` or `purpose` -- each is a separate requirement
+that must be independently satisfied, and each produces its own detail entry
+on failure). An `archived` policy contributes nothing. There is no
+expression language, no conditional composition, and no way for a
+requirement to depend on another requirement.
+
+### 17.4. Which requirement kinds gate which enforcement points
+
+Applicability is fixed by requirement kind; it is not independently
+configurable per policy or per requirement:
+
+```text
+issue_field_nonblank   claim_work, complete_work_to_review, complete_work_to_done
+attempt_evidence       complete_work_to_review, complete_work_to_done
+review_approval        complete_work_to_done, approve_review
+```
+
+Rationale, not configuration: `issue_field_nonblank` is a property of the
+issue itself, so it is meaningful before an attempt exists (claim_work) and
+at either completion path. `attempt_evidence` is produced during a work
+attempt, so it cannot be evaluated before one exists; it does not apply to
+`approve_review` because a review attempt does not carry the original work
+attempt's evidence. `review_approval` gates every path that can land the
+issue in `done` -- both `complete_work_to_done` (a work attempt finishing
+directly to `done` without ever creating a review target) and
+`approve_review` (a review attempt approving the same issue) -- so a
+required approval cannot be bypassed by skipping review.
+
+An unmatched combination (e.g. an `attempt_evidence` requirement considered
+at `claim_work`) is never evaluated; it is not an error, it is simply not
+applicable at that point.
+
+### 17.5. Requirement satisfaction
+
+- `issue_field_nonblank`: satisfied when the named issue field's current
+  value is non-blank (trimmed, non-empty) at the moment of evaluation. It is
+  always evaluated against the issue's current stored value, never a
+  snapshot -- a field cannot regress from satisfied to unsatisfied mid-review
+  in a way that matters, because `update_issue` changes to acceptance
+  criteria during an active attempt already require acknowledgment (§16).
+- `attempt_evidence`: satisfied when the completing work attempt has
+  recorded structured evidence under the requirement's `evidence_key`
+  (ISSUE-171 defines how evidence is attached to a lease-authenticated
+  attempt). Evaluated against the current attempt's evidence at completion
+  time, using the evidence keys named in the attempt's frozen requirement
+  snapshot (§17.6) -- not against live policy state.
+- `review_approval`: satisfied when an immutable approval record exists for
+  the issue and the requirement's `purpose`. The exact persistence and
+  creation mechanism for purpose-scoped approval records (how a reviewer
+  grants one, and how it is bound to an issue version) is specified by
+  ISSUE-173, not by this contract; this contract fixes only what a
+  `review_approval` requirement means (a named purpose that must have a
+  matching approval) and which enforcement points check it (§17.4).
+
+### 17.6. Snapshot timing
+
+Policy edits are never retroactive:
+
+- **Work attempts** snapshot the full effective requirement set (§17.3) at
+  the moment `claim_work` succeeds, and store it with the attempt. Both
+  `complete_work_to_review` and `complete_work_to_done` re-evaluate
+  satisfaction (§17.5) against that frozen requirement list, never against
+  whatever policies are active at completion time. A policy edited or
+  archived after claim does not add, remove, or change requirements for an
+  attempt already in flight.
+- **Review targets** snapshot the `review_approval` requirement set at the
+  moment the review request is created (docs/09), and store it with the
+  request. `approve_review` re-evaluates satisfaction against that frozen
+  list, never against policies active at approval time.
+- An existing snapshot never changes, even if every policy that produced it
+  is later archived or edited. A new claim or a new review request always
+  computes a fresh snapshot from then-current policies.
+
+### 17.7. Gate failure shape
+
+An unmet requirement at any enforcement point fails the call with:
+
+```text
+WORKFLOW_GATE_UNSATISFIED
+```
+
+with one detail entry per unmet requirement, each carrying:
+
+```text
+policy_id
+requirement_key
+enforcement_point
+reason
+```
+
+Multiple unmet requirements from different policies (or the same policy)
+all appear as separate details in one response; the call fails atomically
+and makes no partial state change (§4/§5 of docs/04 -- gate evaluation runs
+inside the same transaction as the claim or transition it guards).
+
+### 17.8. Worked examples
+
+Missing acceptance criteria blocks `claim_work`:
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_GATE_UNSATISFIED",
+    "message": "workflow gate requirements are not satisfied",
+    "details": [
+      {
+        "policy_id": "01J1POLICYAAAAAAAAAAAAAAAA",
+        "requirement_key": "acceptance_criteria",
+        "enforcement_point": "claim_work",
+        "reason": "issue field 'acceptance_criteria' is blank"
+      }
+    ]
+  }
+}
+```
+
+Missing implementation evidence blocks `complete_work_to_review`:
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_GATE_UNSATISFIED",
+    "message": "workflow gate requirements are not satisfied",
+    "details": [
+      {
+        "policy_id": "01J1POLICYBBBBBBBBBBBBBBBB",
+        "requirement_key": "implementation_evidence",
+        "enforcement_point": "complete_work_to_review",
+        "reason": "no attempt_evidence recorded for key 'implementation'"
+      }
+    ]
+  }
+}
+```
+
+Missing test evidence blocks `complete_work_to_done`:
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_GATE_UNSATISFIED",
+    "message": "workflow gate requirements are not satisfied",
+    "details": [
+      {
+        "policy_id": "01J1POLICYBBBBBBBBBBBBBBBB",
+        "requirement_key": "test_evidence",
+        "enforcement_point": "complete_work_to_done",
+        "reason": "no attempt_evidence recorded for key 'tests'"
+      }
+    ]
+  }
+}
+```
+
+Missing security review blocks `approve_review` (and equally blocks a work
+attempt from completing straight to `done`, §17.4):
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_GATE_UNSATISFIED",
+    "message": "workflow gate requirements are not satisfied",
+    "details": [
+      {
+        "policy_id": "01J1POLICYCCCCCCCCCCCCCCCC",
+        "requirement_key": "security_review",
+        "enforcement_point": "approve_review",
+        "reason": "no review_approval recorded for purpose 'security'"
+      }
+    ]
+  }
+}
+```
+
+Two matching policies contribute independent requirements; both appear when
+both are unmet, ordered by `policy_id` then `key`:
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_GATE_UNSATISFIED",
+    "message": "workflow gate requirements are not satisfied",
+    "details": [
+      {
+        "policy_id": "01J1POLICYAAAAAAAAAAAAAAAA",
+        "requirement_key": "acceptance_criteria",
+        "enforcement_point": "claim_work",
+        "reason": "issue field 'acceptance_criteria' is blank"
+      },
+      {
+        "policy_id": "01J1POLICYDDDDDDDDDDDDDDDD",
+        "requirement_key": "acceptance_criteria",
+        "enforcement_point": "claim_work",
+        "reason": "issue field 'acceptance_criteria' is blank"
+      }
+    ]
+  }
+}
+```
+
+(Both policies happen to declare a requirement with the `key`
+`acceptance_criteria`, but they are not deduplicated because their
+`policy_id`s differ -- each is evaluated and reported independently, even
+though satisfying the single underlying field satisfies both at once.)
+
+Policy edited during active work does not retroactively change an in-flight
+attempt's gates. A policy adds an `attempt_evidence` requirement with key
+`"manual_qa"` after an attempt has already claimed the issue:
+
+```text
+t0  claim_work succeeds; attempt snapshot = [acceptance_criteria]
+t1  policy edited: adds attempt_evidence "manual_qa"
+t2  complete_work_to_review evaluates the t0 snapshot, not the live policy
+    -> "manual_qa" is not required for this attempt
+t3  a *new* claim on a different issue matching the same policy snapshots
+    [acceptance_criteria, manual_qa] and is subject to both
+```
+
+Direct `update_issue` transitions into `review` or `done` are rejected the
+same way any other unsupported status transition is, before gate evaluation
+is even reached -- gates guard the four enforcement points, not a fifth path
+that bypasses them:
+
+```json
+{
+  "error": {
+    "code": "INVALID_STATUS_TRANSITION",
+    "message": "update_issue cannot set status to 'review' or 'done' directly",
+    "details": [
+      {
+        "field": "changes.status",
+        "code": "UNSUPPORTED_DIRECT_TRANSITION"
+      }
+    ]
+  }
+}
+```
+
+### 17.9. Limits
+
+```text
+max requirements per policy      50
+max labels_all entries           20
+max policy key length            128 runes  (key, evidence_key, purpose)
+```
+
+These follow the existing convention of small bounded collections
+elsewhere in the domain model (docs/06 §5) rather than unbounded growth.
+There is no separate limit on the number of active policies in a project;
+a project that needs more than a handful of policies is already well
+outside typical MVP usage, and policy count is admin-configured, not
+generated by agent activity the way issues or events are.
+
+### 17.10. Compatibility
+
+A project with zero configured policies (every existing project today, and
+any new project until an operator defines one) sees no behavior change: no
+selector ever matches, no requirement is ever contributed, `claim_issue` and
+`finish_attempt` never return `WORKFLOW_GATE_UNSATISFIED`, and their
+existing response shapes are unchanged. Adding the new error code is
+additive to docs/03 §13, not a breaking change to any existing response.
+
+Attempts and review requests that exist before this feature is implemented
+have no requirement snapshot; they are treated as an empty requirement set
+at their respective enforcement points (equivalent to "no policy matched"),
+never as an error condition.
+
+Logical interchange (docs/07), work context, and board visibility for gate
+state are explicitly out of scope for this contract and are specified by
+ISSUE-175, not here.
+
+### 17.11. Current call sites gates must reach
+
+Recorded here so a later implementer does not have to rediscover it: as of
+this contract, `issues.status` is written by exactly five call sites across
+three files, and none of them share a single persistence choke point.
+
+Attempt-mediated (the four enforcement points; both `finish_attempt` rows
+share one function that branches internally):
+
+```text
+claim_work                internal/adapters/sqlite/attempts.go  AttemptRepository.ClaimIssue
+                           (inserts work_attempts; issues.status itself is not written here)
+complete_work_to_review    internal/adapters/sqlite/attempts.go  AttemptRepository.FinishAttempt
+                           kind=work, outcome=completed, target_issue_status=review
+complete_work_to_done      internal/adapters/sqlite/attempts.go  AttemptRepository.FinishAttempt
+                           kind=work, outcome=completed, target_issue_status=done
+approve_review             internal/adapters/sqlite/attempts.go  AttemptRepository.FinishAttempt
+                           kind=review, outcome=completed, review_outcome=approved
+```
+
+Not attempt-mediated (must be closed per §17.1, or explicitly deferred to
+ISSUE-201):
+
+```text
+update_issue (direct transition)   internal/adapters/sqlite/issues.go   IssueRepository.UpdateIssue
+                                    guarded only by domain.CanTransition; must reject
+                                    a "review" or "done" target per §17.1
+
+create_issue (initial status)      internal/adapters/sqlite/issues.go   IssueRepository.CreateIssue
+                                    INSERT, no CanTransition check (new row) -- deferred to ISSUE-201
+
+apply_issue_plan (initial status)  internal/adapters/sqlite/planning.go applyPlan
+                                    INSERT, no CanTransition check (new row) -- deferred to ISSUE-201
+
+apply_import (initial status)      internal/adapters/sqlite/projects.go ApplyLogicalProjectImport
+                                    INSERT, writes the imported status verbatim, does not even
+                                    run CreateIssueInput.Validate -- deferred to ISSUE-201
+```
+
+Confirmed **not** status-mutating, and therefore out of scope for this
+contract: `archive_issue` (only writes `archived_at`); `ExpireAttempts` and
+the background cleanup loop (only write `work_attempts.status`, never
+`issues.status` -- an issue whose attempt lease expires keeps its current
+stored status); `ForceReleaseAttempt` (same, plus an `attempt_interrupted`
+event); `doctor` (read-only diagnostics). None of these require a gate hook.

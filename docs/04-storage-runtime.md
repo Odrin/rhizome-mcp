@@ -101,7 +101,9 @@ Operations that must be atomic:
 - supersede a decision;
 - apply batch issue plan;
 - mutation plus FTS projection update;
-- idempotency record plus mutation result.
+- idempotency record plus mutation result;
+- evaluate workflow gates and snapshot the effective requirement set, as
+  part of claim issue and finish attempt (docs/02 §17).
 
 Use `BEGIN IMMEDIATE` for operations that are known to write and require early writer acquisition.
 
@@ -154,7 +156,17 @@ issue_events
 idempotency_records
 schema_migrations
 search_index (FTS5 virtual table)
+workflow_policies
+workflow_policy_requirements
+workflow_policy_audit_events
 ```
+
+Requirement snapshots (docs/02 §17.6) are stored alongside the attempt or
+review request they belong to, not as a separate table -- a work attempt
+carries its own frozen requirement list, and so does a review request.
+Exact column layout for policies, requirements, snapshots, evidence
+(ISSUE-171), and review approval records (ISSUE-173) is decided by those
+implementation tasks, not by this document.
 
 ## 8. Constraints
 

@@ -134,7 +134,11 @@ Agents may autonomously:
 - review work;
 - reopen completed work.
 
-Review is optional.
+Review is optional by default. A project may configure workflow policies
+(docs/02 §17) that make review mandatory, require specific evidence, or
+require a non-blank acceptance criteria field for issues matching the
+policy's selector -- but only where a policy is explicitly configured, and
+never through custom statuses or a custom workflow engine.
 
 The system must not require a permanent human assignee or a permanent agent identity.
 

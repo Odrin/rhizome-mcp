@@ -24,7 +24,11 @@ Do not include these in the first version unless required to satisfy a core inva
 ### Workflow
 
 - custom statuses;
-- custom workflows;
+- custom workflows (an arbitrary state machine, user-defined transitions, or
+  a general-purpose workflow engine); configurable workflow gates
+  (docs/02 §17, epic ISSUE-167) are not this -- they add project-configured
+  requirement checks at four fixed enforcement points over the fixed
+  status set, they do not add statuses or change what a status means;
 - arbitrary custom fields;
 - multiple assignees;
 - permanent assignee field;
@@ -124,6 +128,9 @@ graph depth: 2
 graph maximum depth: 5
 graph default nodes: 100
 graph maximum nodes: 500
+max workflow policy requirements: 50
+max workflow policy labels_all entries: 20
+max workflow policy key length: 128 runes
 ```
 
 Future changes must be recorded as a superseding MCP decision when they affect public contracts or invariants.
