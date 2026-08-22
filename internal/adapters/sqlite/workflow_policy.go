@@ -45,11 +45,12 @@ type workflowSelectorJSON struct {
 // PolicyID is omitted: it is implicit (the owning row) when persisted and is
 // reattached on load.
 type workflowRequirementJSON struct {
-	Key         string `json:"key"`
-	Kind        string `json:"kind"`
-	Field       string `json:"field,omitempty"`
-	EvidenceKey string `json:"evidence_key,omitempty"`
-	Purpose     string `json:"purpose,omitempty"`
+	Key                string `json:"key"`
+	Kind               string `json:"kind"`
+	Field              string `json:"field,omitempty"`
+	EvidenceKey        string `json:"evidence_key,omitempty"`
+	Purpose            string `json:"purpose,omitempty"`
+	AllowNotApplicable bool   `json:"allow_not_applicable,omitempty"`
 }
 
 func encodeWorkflowSelector(selector domain.PolicySelector) (string, error) {
@@ -81,7 +82,7 @@ func encodeWorkflowRequirements(requirements []domain.PolicyRequirementInput) (s
 	for index, requirement := range requirements {
 		encoded[index] = workflowRequirementJSON{
 			Key: requirement.Key, Kind: string(requirement.Kind), Field: requirement.Field,
-			EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose,
+			EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose, AllowNotApplicable: requirement.AllowNotApplicable,
 		}
 	}
 	data, err := json.Marshal(encoded)
@@ -100,7 +101,7 @@ func decodeWorkflowRequirements(raw string, policyID string) ([]domain.PolicyReq
 	for index, item := range decoded {
 		requirements[index] = domain.PolicyRequirement{
 			PolicyID: policyID, Key: item.Key, Kind: domain.RequirementKind(item.Kind),
-			Field: item.Field, EvidenceKey: item.EvidenceKey, Purpose: item.Purpose,
+			Field: item.Field, EvidenceKey: item.EvidenceKey, Purpose: item.Purpose, AllowNotApplicable: item.AllowNotApplicable,
 		}
 	}
 	return requirements, nil
@@ -123,7 +124,7 @@ func encodeWorkflowPolicyEventPayload(policy domain.WorkflowPolicy) (string, err
 	for index, requirement := range policy.Requirements {
 		requirements[index] = workflowRequirementJSON{
 			Key: requirement.Key, Kind: string(requirement.Kind), Field: requirement.Field,
-			EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose,
+			EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose, AllowNotApplicable: requirement.AllowNotApplicable,
 		}
 	}
 	payload, err := json.Marshal(workflowPolicyEventPayload{
@@ -586,7 +587,7 @@ func loadGateSnapshot(ctx context.Context, query Queryer, table, keyColumn, keyV
 			// multiple source policies, so it cannot be implied from the
 			// owning row).
 			PolicyID: item.PolicyIDValue, Key: item.Key, Kind: domain.RequirementKind(item.Kind),
-			Field: item.Field, EvidenceKey: item.EvidenceKey, Purpose: item.Purpose,
+			Field: item.Field, EvidenceKey: item.EvidenceKey, Purpose: item.Purpose, AllowNotApplicable: item.AllowNotApplicable,
 		}
 	}
 	var sourcePolicies []domain.SourcePolicyRef
@@ -646,12 +647,13 @@ func insertReviewTargetGateSnapshot(ctx context.Context, tx Executor, targetID s
 // implicit): a snapshot's requirements can originate from several source
 // policies at once.
 type snapshotRequirementJSON struct {
-	PolicyIDValue string `json:"policy_id"`
-	Key           string `json:"key"`
-	Kind          string `json:"kind"`
-	Field         string `json:"field,omitempty"`
-	EvidenceKey   string `json:"evidence_key,omitempty"`
-	Purpose       string `json:"purpose,omitempty"`
+	PolicyIDValue      string `json:"policy_id"`
+	Key                string `json:"key"`
+	Kind               string `json:"kind"`
+	Field              string `json:"field,omitempty"`
+	EvidenceKey        string `json:"evidence_key,omitempty"`
+	Purpose            string `json:"purpose,omitempty"`
+	AllowNotApplicable bool   `json:"allow_not_applicable,omitempty"`
 }
 
 func encodeGateSnapshotPayload(snapshot domain.GateSnapshot) (requirementsJSON, sourcePoliciesJSON string, err error) {
@@ -659,7 +661,7 @@ func encodeGateSnapshotPayload(snapshot domain.GateSnapshot) (requirementsJSON, 
 	for index, requirement := range snapshot.Requirements {
 		requirements[index] = snapshotRequirementJSON{
 			PolicyIDValue: requirement.PolicyID, Key: requirement.Key, Kind: string(requirement.Kind),
-			Field: requirement.Field, EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose,
+			Field: requirement.Field, EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose, AllowNotApplicable: requirement.AllowNotApplicable,
 		}
 	}
 	requirementsBytes, err := json.Marshal(requirements)

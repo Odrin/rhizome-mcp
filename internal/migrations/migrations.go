@@ -45,6 +45,9 @@ var unifyEventLogSQL string
 //go:embed sql/009_workflow_gates.sql
 var workflowGatesSQL string
 
+//go:embed sql/010_gate_evidence.sql
+var gateEvidenceSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
@@ -56,6 +59,7 @@ const searchIndexReviewTitleSyncChecksum = "24d49e7fb1dd774d4303855d846004b0246a
 const fixedWidthTimestampsChecksum = "b54b2763004d5313af3c451d7a7f0032496bdc45372559a5f3db22358dda17e4"
 const unifyEventLogChecksum = "0ef17a2f161d5d72f35993f8e80637ce8bb3306f89437df83378d302f914c957"
 const workflowGatesChecksum = "8880161636fe7b99c367e706d8dde2235fd3647837b5c70076c4b2394111c2b2"
+const gateEvidenceChecksum = "ca820e1992d2384f798a7e268119b36962b7dc830a02d70b10e212a4a4ba10b7"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -113,6 +117,12 @@ var (
 			name:     "workflow_gates",
 			checksum: workflowGatesChecksum,
 			sql:      workflowGatesSQL,
+		},
+		{
+			version:  10,
+			name:     "gate_evidence",
+			checksum: gateEvidenceChecksum,
+			sql:      gateEvidenceSQL,
 		},
 	}
 )

@@ -361,6 +361,18 @@ func (repository *recordingAttemptRepository) ListActiveAttempts(context.Context
 	return nil, nil
 }
 
+func (repository *recordingAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {
+	return ports.SubmitGateEvidenceResult{}, nil
+}
+
+func (repository *recordingAttemptRepository) LookupSubmitGateEvidence(context.Context, string, []byte) (ports.SubmitGateEvidenceResult, bool, error) {
+	return ports.SubmitGateEvidenceResult{}, false, nil
+}
+
+func (repository *recordingAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
+	return nil, nil
+}
+
 func (repository *recordingAttemptRepository) LookupFinishedAttempt(_ context.Context, key string, hash []byte) (ports.FinishAttemptResult, bool, error) {
 	repository.lookupCalled = true
 	repository.lookupKey = key

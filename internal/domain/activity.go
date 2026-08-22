@@ -19,12 +19,18 @@ const (
 	ActivityCategoryAttemptNotes ActivityCategory = "attempt_notes"
 	ActivityCategoryEvents       ActivityCategory = "events"
 	ActivityCategoryArtifacts    ActivityCategory = "artifacts"
+	// ActivityCategoryGateEvidence is rank 8 in the sqlite activity registry
+	// (internal/adapters/sqlite/activity.go): ranks 1-7 are permanently
+	// reserved for the categories above (ISSUE-216); this is the first
+	// category appended under that convention.
+	ActivityCategoryGateEvidence ActivityCategory = "gate_evidence"
 )
 
 func (value ActivityCategory) Valid() bool {
 	switch value {
 	case ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryReviews,
-		ActivityCategoryAttempts, ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts:
+		ActivityCategoryAttempts, ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts,
+		ActivityCategoryGateEvidence:
 		return true
 	default:
 		return false
@@ -41,25 +47,28 @@ var AllActivityCategories = []ActivityCategory{
 	ActivityCategoryAttemptNotes,
 	ActivityCategoryEvents,
 	ActivityCategoryArtifacts,
+	ActivityCategoryGateEvidence,
 }
 
 // ActivityEntityType identifies the concrete entity represented by an item.
 type ActivityEntityType string
 
 const (
-	ActivityEntityTypeComment     ActivityEntityType = "comment"
-	ActivityEntityTypeDecision    ActivityEntityType = "decision"
-	ActivityEntityTypeReview      ActivityEntityType = "review"
-	ActivityEntityTypeAttempt     ActivityEntityType = "attempt"
-	ActivityEntityTypeAttemptNote ActivityEntityType = "attempt_note"
-	ActivityEntityTypeEvent       ActivityEntityType = "event"
-	ActivityEntityTypeArtifact    ActivityEntityType = "artifact"
+	ActivityEntityTypeComment      ActivityEntityType = "comment"
+	ActivityEntityTypeDecision     ActivityEntityType = "decision"
+	ActivityEntityTypeReview       ActivityEntityType = "review"
+	ActivityEntityTypeAttempt      ActivityEntityType = "attempt"
+	ActivityEntityTypeAttemptNote  ActivityEntityType = "attempt_note"
+	ActivityEntityTypeEvent        ActivityEntityType = "event"
+	ActivityEntityTypeArtifact     ActivityEntityType = "artifact"
+	ActivityEntityTypeGateEvidence ActivityEntityType = "gate_evidence"
 )
 
 func (value ActivityEntityType) Valid() bool {
 	switch value {
 	case ActivityEntityTypeComment, ActivityEntityTypeDecision, ActivityEntityTypeReview,
-		ActivityEntityTypeAttempt, ActivityEntityTypeAttemptNote, ActivityEntityTypeEvent, ActivityEntityTypeArtifact:
+		ActivityEntityTypeAttempt, ActivityEntityTypeAttemptNote, ActivityEntityTypeEvent, ActivityEntityTypeArtifact,
+		ActivityEntityTypeGateEvidence:
 		return true
 	default:
 		return false
@@ -154,17 +163,18 @@ func (input GetIssueActivityInput) Validate() (GetIssueActivityInput, error) {
 
 // ActivityItem is one typed, heterogeneous activity result.
 type ActivityItem struct {
-	EntityType  ActivityEntityType `json:"entity_type"`
-	EntityID    string             `json:"entity_id"`
-	IssueID     string             `json:"issue_id"`
-	OccurredAt  time.Time          `json:"occurred_at"`
-	Comment     *Comment           `json:"comment,omitempty"`
-	Decision    *Decision          `json:"decision,omitempty"`
-	Attempt     *WorkAttempt       `json:"attempt,omitempty"`
-	AttemptNote *AttemptNote       `json:"attempt_note,omitempty"`
-	Event       *IssueEvent        `json:"event,omitempty"`
-	Artifact    *Artifact          `json:"artifact,omitempty"`
-	Review      *ReviewRequest     `json:"review,omitempty"`
+	EntityType   ActivityEntityType `json:"entity_type"`
+	EntityID     string             `json:"entity_id"`
+	IssueID      string             `json:"issue_id"`
+	OccurredAt   time.Time          `json:"occurred_at"`
+	Comment      *Comment           `json:"comment,omitempty"`
+	Decision     *Decision          `json:"decision,omitempty"`
+	Attempt      *WorkAttempt       `json:"attempt,omitempty"`
+	AttemptNote  *AttemptNote       `json:"attempt_note,omitempty"`
+	Event        *IssueEvent        `json:"event,omitempty"`
+	Artifact     *Artifact          `json:"artifact,omitempty"`
+	Review       *ReviewRequest     `json:"review,omitempty"`
+	GateEvidence *AttemptEvidence   `json:"gate_evidence,omitempty"`
 }
 
 // IssueActivity is one cursor-paginated activity result.
@@ -210,6 +220,9 @@ func ValidateActivityItem(item ActivityItem) error {
 		payloads++
 	}
 	if item.Review != nil {
+		payloads++
+	}
+	if item.GateEvidence != nil {
 		payloads++
 	}
 	if payloads != 1 {
@@ -296,6 +309,19 @@ func ValidateActivityItem(item ActivityItem) error {
 			!item.Review.CreatedAt.Equal(item.OccurredAt) {
 			return validationError("review", "MISMATCH", "does not match activity identity, scope, or timestamp")
 		}
+	case ActivityEntityTypeGateEvidence:
+		if item.GateEvidence == nil {
+			return validationError("gate_evidence", "REQUIRED", "is required for gate_evidence activity")
+		}
+		if err := validateActivityULID("entity_id", item.EntityID); err != nil {
+			return err
+		}
+		// OccurredAt tracks UpdatedAt, not CreatedAt: submit_gate_evidence is
+		// an upsert (ISSUE-171), and a replacement is itself new activity.
+		if item.GateEvidence.ID != item.EntityID || item.GateEvidence.IssueID != item.IssueID ||
+			!item.GateEvidence.UpdatedAt.Equal(item.OccurredAt) {
+			return validationError("gate_evidence", "MISMATCH", "does not match activity identity, scope, or timestamp")
+		}
 	}
 	return nil
 }
@@ -324,7 +350,16 @@ func CloneActivityItem(item ActivityItem) ActivityItem {
 	item.Event = cloneActivityEvent(item.Event)
 	item.Artifact = cloneActivityArtifact(item.Artifact)
 	item.Review = cloneActivityReview(item.Review)
+	item.GateEvidence = cloneActivityGateEvidence(item.GateEvidence)
 	return item
+}
+
+func cloneActivityGateEvidence(value *AttemptEvidence) *AttemptEvidence {
+	if value == nil {
+		return nil
+	}
+	result := CloneAttemptEvidence(*value)
+	return &result
 }
 
 func cloneActivityComment(value *Comment) *Comment {

@@ -309,6 +309,23 @@ var activityRegistry = []activityEntitySpec{
 			return nil
 		},
 	},
+	{
+		Category:   domain.ActivityCategoryGateEvidence,
+		EntityType: domain.ActivityEntityTypeGateEvidence,
+		Rank:       8,
+		// occurred_at uses updated_at, not created_at: submit_gate_evidence
+		// is an upsert (ISSUE-171), and a replacement is itself new activity.
+		Arm:        `SELECT 'gate_evidence' AS entity_type, gate_evidence.id AS entity_id, gate_evidence.updated_at AS occurred_at, 8 AS type_rank, gate_evidence.id AS sort_id FROM gate_evidence WHERE gate_evidence.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			evidence, err := loadAttemptEvidenceByID(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			item.GateEvidence = &evidence
+			return nil
+		},
+	},
 }
 
 var (

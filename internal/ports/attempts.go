@@ -121,4 +121,41 @@ type AttemptRepository interface {
 	ForceReleaseAttempt(context.Context, ForceReleaseAttemptCommand) (ForceReleaseAttemptResult, error)
 	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
 	ListActiveAttempts(context.Context, ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error)
+	// SubmitGateEvidence is a lease-authenticated, idempotent upsert (ISSUE-171):
+	// see SubmitGateEvidenceCommand for the frozen-snapshot and same-attempt
+	// artifact validation it performs inside the write transaction.
+	SubmitGateEvidence(context.Context, SubmitGateEvidenceCommand) (SubmitGateEvidenceResult, error)
+	LookupSubmitGateEvidence(context.Context, string, []byte) (SubmitGateEvidenceResult, bool, error)
+	// ListAttemptEvidence returns every current evidence record for one
+	// attempt, for atomic gate evaluation (ISSUE-172) and issue activity.
+	ListAttemptEvidence(context.Context, ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error)
+}
+
+// SubmitGateEvidenceCommand authenticates and upserts one evidence record.
+// EvidenceID is used only when no current record exists for (AttemptID, Key);
+// an existing record's ID and Version are read and incremented in place.
+type SubmitGateEvidenceCommand struct {
+	EvidenceID     string
+	AttemptID      string
+	TokenHash      []byte
+	Key            string
+	Result         domain.EvidenceResult
+	Summary        string
+	Details        string
+	ArtifactIDs    []string
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
+}
+
+// SubmitGateEvidenceResult is the persisted evidence record after a
+// successful submission.
+type SubmitGateEvidenceResult struct {
+	Evidence domain.AttemptEvidence
+}
+
+// ListAttemptEvidenceCommand identifies the attempt whose current evidence
+// records to load.
+type ListAttemptEvidenceCommand struct {
+	AttemptID string
 }

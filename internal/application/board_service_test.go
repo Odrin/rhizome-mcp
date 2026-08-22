@@ -328,6 +328,18 @@ func (repository *boardRecordingAttemptRepository) ListActiveAttempts(_ context.
 	return repository.listResult, repository.listErr
 }
 
+func (repository *boardRecordingAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {
+	return ports.SubmitGateEvidenceResult{}, nil
+}
+
+func (repository *boardRecordingAttemptRepository) LookupSubmitGateEvidence(context.Context, string, []byte) (ports.SubmitGateEvidenceResult, bool, error) {
+	return ports.SubmitGateEvidenceResult{}, false, nil
+}
+
+func (repository *boardRecordingAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
+	return nil, nil
+}
+
 type boardRecordingReviewRepository struct {
 	listQuery  ports.ListReviewRequestsQuery
 	listResult ports.ListReviewRequestsResult

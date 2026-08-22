@@ -108,8 +108,11 @@ func TestWorkflowPolicyInputValidateRequirementKinds(t *testing.T) {
 		{name: "valid attempt_evidence", input: PolicyRequirementInput{Key: "implementation_evidence", Kind: RequirementKindAttemptEvidence, EvidenceKey: "implementation"}},
 		{name: "attempt_evidence requires evidence_key", input: PolicyRequirementInput{Key: "k", Kind: RequirementKindAttemptEvidence}, wantErr: "REQUIRED"},
 		{name: "attempt_evidence rejects cross-kind purpose", input: PolicyRequirementInput{Key: "k", Kind: RequirementKindAttemptEvidence, EvidenceKey: "x", Purpose: "security"}, wantErr: "UNEXPECTED_FIELD"},
+		{name: "valid attempt_evidence with allow_not_applicable", input: PolicyRequirementInput{Key: "manual_qa", Kind: RequirementKindAttemptEvidence, EvidenceKey: "manual_qa", AllowNotApplicable: true}},
 		{name: "valid review_approval", input: PolicyRequirementInput{Key: "security_review", Kind: RequirementKindReviewApproval, Purpose: "security"}},
 		{name: "review_approval requires purpose", input: PolicyRequirementInput{Key: "k", Kind: RequirementKindReviewApproval}, wantErr: "REQUIRED"},
+		{name: "review_approval rejects allow_not_applicable", input: PolicyRequirementInput{Key: "k", Kind: RequirementKindReviewApproval, Purpose: "security", AllowNotApplicable: true}, wantErr: "UNEXPECTED_FIELD"},
+		{name: "issue_field_nonblank rejects allow_not_applicable", input: PolicyRequirementInput{Key: "k", Kind: RequirementKindIssueFieldNonblank, Field: "acceptance_criteria", AllowNotApplicable: true}, wantErr: "UNEXPECTED_FIELD"},
 		{name: "invalid kind is rejected", input: PolicyRequirementInput{Key: "k", Kind: RequirementKind("bogus")}, wantErr: "INVALID_ENUM"},
 		{name: "blank key is rejected", input: PolicyRequirementInput{Key: "  ", Kind: RequirementKindReviewApproval, Purpose: "security"}, wantErr: "REQUIRED"},
 	}

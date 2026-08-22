@@ -686,6 +686,11 @@ PolicyRequirement
   field              string, issue_field_nonblank only; this version permits only "acceptance_criteria"
   evidence_key       string, attempt_evidence only; a caller-defined stable key (e.g. "tests", "manual_qa")
   purpose            string, review_approval only; a caller-defined stable purpose (e.g. "security", "design")
+  allow_not_applicable  boolean, attempt_evidence only; defaults to false. When true, submitted
+                     evidence for this requirement's evidence_key (ISSUE-171) may use
+                     result=not_applicable instead of result=satisfied; when false (the
+                     default), only result=satisfied is accepted and a not_applicable
+                     submission fails.
 ```
 
 An epic never matches a selector: epics are never executable targets (§3.1),

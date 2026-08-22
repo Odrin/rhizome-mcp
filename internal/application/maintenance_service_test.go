@@ -107,6 +107,18 @@ func (repository *recordingMaintenanceAttemptRepository) ListActiveAttempts(cont
 	return nil, nil
 }
 
+func (repository *recordingMaintenanceAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {
+	return ports.SubmitGateEvidenceResult{}, nil
+}
+
+func (repository *recordingMaintenanceAttemptRepository) LookupSubmitGateEvidence(context.Context, string, []byte) (ports.SubmitGateEvidenceResult, bool, error) {
+	return ports.SubmitGateEvidenceResult{}, false, nil
+}
+
+func (repository *recordingMaintenanceAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
+	return nil, nil
+}
+
 type recordingMaintenanceSearchIndexRepository struct {
 	rebuildCalled bool
 	err           error

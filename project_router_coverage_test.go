@@ -218,6 +218,18 @@ func (repo *countingAttemptRepository) ListActiveAttempts(context.Context, ports
 	return nil, nil
 }
 
+func (repo *countingAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {
+	return ports.SubmitGateEvidenceResult{}, nil
+}
+
+func (repo *countingAttemptRepository) LookupSubmitGateEvidence(context.Context, string, []byte) (ports.SubmitGateEvidenceResult, bool, error) {
+	return ports.SubmitGateEvidenceResult{}, false, nil
+}
+
+func (repo *countingAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
+	return nil, nil
+}
+
 func mustNewAttemptService(t *testing.T, repo ports.AttemptRepository) *application.AttemptService {
 	t.Helper()
 	service, err := application.NewAttemptService(repo, clock.RealClock{}, fakeIDGenerator{})

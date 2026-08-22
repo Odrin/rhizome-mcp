@@ -169,17 +169,23 @@ type PolicyRequirementInput struct {
 	Field       string
 	EvidenceKey string
 	Purpose     string
+	// AllowNotApplicable is attempt_evidence-only (ISSUE-171): when true, a
+	// submitted evidence record for this requirement's evidence_key may use
+	// result=not_applicable instead of satisfied. Defaults to false (not
+	// accepted) for every other kind and when unset.
+	AllowNotApplicable bool
 }
 
 // PolicyRequirement is one validated, policy-owned requirement. PolicyID is
 // the owning policy's ULID, assigned when the requirement is persisted.
 type PolicyRequirement struct {
-	PolicyID    string
-	Key         string
-	Kind        RequirementKind
-	Field       string
-	EvidenceKey string
-	Purpose     string
+	PolicyID           string
+	Key                string
+	Kind               RequirementKind
+	Field              string
+	EvidenceKey        string
+	Purpose            string
+	AllowNotApplicable bool
 }
 
 func (input PolicyRequirementInput) validate() (PolicyRequirement, error) {
@@ -203,6 +209,9 @@ func (input PolicyRequirementInput) validate() (PolicyRequirement, error) {
 		if input.EvidenceKey != "" || input.Purpose != "" {
 			return PolicyRequirement{}, validationError("kind", "UNEXPECTED_FIELD", "issue_field_nonblank must not set evidence_key or purpose")
 		}
+		if input.AllowNotApplicable {
+			return PolicyRequirement{}, validationError("kind", "UNEXPECTED_FIELD", "issue_field_nonblank must not set allow_not_applicable")
+		}
 		result.Field = input.Field
 	case RequirementKindAttemptEvidence:
 		if input.Field != "" || input.Purpose != "" {
@@ -216,9 +225,13 @@ func (input PolicyRequirementInput) validate() (PolicyRequirement, error) {
 			return PolicyRequirement{}, validationError("evidence_key", "REQUIRED", "must not be blank")
 		}
 		result.EvidenceKey = evidenceKey
+		result.AllowNotApplicable = input.AllowNotApplicable
 	case RequirementKindReviewApproval:
 		if input.Field != "" || input.EvidenceKey != "" {
 			return PolicyRequirement{}, validationError("kind", "UNEXPECTED_FIELD", "review_approval must not set field or evidence_key")
+		}
+		if input.AllowNotApplicable {
+			return PolicyRequirement{}, validationError("kind", "UNEXPECTED_FIELD", "review_approval must not set allow_not_applicable")
 		}
 		if err := ValidateText("purpose", input.Purpose, MaxPolicyKeyRunes); err != nil {
 			return PolicyRequirement{}, err
@@ -274,7 +287,7 @@ func (input WorkflowPolicyInput) Validate() (ValidatedWorkflowPolicyInput, error
 		seenKeys[normalized.Key] = struct{}{}
 		validated = append(validated, PolicyRequirementInput{
 			Key: normalized.Key, Kind: normalized.Kind, Field: normalized.Field,
-			EvidenceKey: normalized.EvidenceKey, Purpose: normalized.Purpose,
+			EvidenceKey: normalized.EvidenceKey, Purpose: normalized.Purpose, AllowNotApplicable: normalized.AllowNotApplicable,
 		})
 	}
 	return ValidatedWorkflowPolicyInput{Selector: selector, Requirements: validated}, nil
