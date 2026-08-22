@@ -179,6 +179,26 @@ func TestSubmitGateEvidenceRejectsWrongToken(t *testing.T) {
 	assertDomainCode(t, err, domain.CodeInvalidLeaseToken)
 }
 
+func TestSubmitGateEvidenceRejectsExpiredLease(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "gate-evidence-expired")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "expired lease issue", domain.StatusReady)
+	claimed, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.Issue.ID, LeaseSeconds: intPointer(60)})
+	if err != nil {
+		t.Fatalf("ClaimIssue() error = %v", err)
+	}
+	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
+		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	})
+	fixture.clock.Advance(90 * time.Second)
+
+	_, err = fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
+		AttemptID: claimed.Attempt.ID, LeaseToken: claimed.LeaseToken, Key: "implementation",
+		Result: domain.EvidenceResultSatisfied, Summary: "too late",
+	})
+	assertDomainCode(t, err, domain.CodeLeaseExpired)
+}
+
 func TestSubmitGateEvidenceRejectsFinishedAttempt(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-finished")
 	defer fixture.close()
