@@ -899,29 +899,9 @@ func validateBlocksAcyclicity(relations []LogicalRelation) error {
 		}
 		adjacency[relation.SourceIssueID] = append(adjacency[relation.SourceIssueID], relation.TargetIssueID)
 	}
-	visited := make(map[string]bool)
-	stack := make(map[string]bool)
-	var walk func(string) error
-	walk = func(node string) error {
-		if stack[node] {
-			return invalidArgumentPath("$.relations", "BLOCKS_CYCLE", "blocks relation graph must be acyclic")
-		}
-		if visited[node] {
-			return nil
-		}
-		visited[node] = true
-		stack[node] = true
-		for _, next := range adjacency[node] {
-			if err := walk(next); err != nil {
-				return err
-			}
-		}
-		stack[node] = false
-		return nil
-	}
 	for node := range adjacency {
-		if err := walk(node); err != nil {
-			return err
+		if BlocksPathExists(node, node, func(n string) []string { return adjacency[n] }) {
+			return invalidArgumentPath("$.relations", "BLOCKS_CYCLE", "blocks relation graph must be acyclic")
 		}
 	}
 	return nil

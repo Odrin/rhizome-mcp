@@ -286,23 +286,11 @@ func loadBlocksEdges(ctx context.Context, query Queryer) ([]struct{ source, targ
 }
 
 func planPathExists(edges []struct{ source, target string }, start, sought string) bool {
-	seen := map[string]bool{start: true}
-	queue := []string{start}
-	for len(queue) != 0 {
-		current := queue[0]
-		queue = queue[1:]
-		for _, edge := range edges {
-			if edge.source != current || seen[edge.target] {
-				continue
-			}
-			if edge.target == sought {
-				return true
-			}
-			seen[edge.target] = true
-			queue = append(queue, edge.target)
-		}
+	adjacency := make(map[string][]string, len(edges))
+	for _, edge := range edges {
+		adjacency[edge.source] = append(adjacency[edge.source], edge.target)
 	}
-	return false
+	return domain.BlocksPathExists(start, sought, func(node string) []string { return adjacency[node] })
 }
 
 func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCommand) (ports.ApplyIssuePlanResult, error) {

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -250,37 +249,17 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 		if err := expireAttemptsForIssue(ctx, tx, issue.ID, now); err != nil {
 			return err
 		}
-		if issue.ArchivedAt != nil {
-			return domain.NewError(domain.CodeIssueArchived, "issue is archived", false)
-		}
-		if issue.Type != domain.TypeTask && issue.Type != domain.TypeBug {
-			return domain.NewError(domain.CodeInvalidArgument, "issue type is not executable", false,
-				domain.Detail{Field: "issue_id", Code: "NOT_EXECUTABLE"})
-		}
-		var blocked bool
-		if err := tx.QueryRowContext(ctx, `SELECT `+issueUnresolvedBlockerCountSQL+` > 0 FROM issues WHERE id = ?`, issue.ID).Scan(&blocked); err != nil {
+		var blockerCount int64
+		if err := tx.QueryRowContext(ctx, `SELECT `+issueUnresolvedBlockerCountSQL+` FROM issues WHERE id = ?`, issue.ID).Scan(&blockerCount); err != nil {
 			return err
-		}
-		if blocked {
-			return domain.NewError(domain.CodeInvalidArgument, "issue has unresolved blockers", false,
-				domain.Detail{Field: "issue_id", Code: "BLOCKED"})
-		}
-		var kind domain.AttemptKind
-		switch issue.Status {
-		case domain.StatusReady:
-			kind = domain.AttemptKindWork
-		case domain.StatusReview:
-			kind = domain.AttemptKindReview
-		default:
-			return domain.NewError(domain.CodeInvalidArgument, "issue is not claimable", false,
-				domain.Detail{Field: "issue_id", Code: "NOT_CLAIMABLE"})
 		}
 		var active bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM work_attempts WHERE issue_id = ? AND status = 'active')`, issue.ID).Scan(&active); err != nil {
 			return err
 		}
-		if active {
-			return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
+		kind, err := domain.EvaluateClaim(issue, blockerCount, active)
+		if err != nil {
+			return err
 		}
 		var latestEventID int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
@@ -996,30 +975,16 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				return domain.NewError(domain.CodeIssueChangedDuringAttempt, "issue changed during attempt", true, details...)
 			}
 		}
-		target := issue.Status
+		target, err := domain.FinishTargetStatus(kind, input, issue.Status)
+		if err != nil {
+			return err
+		}
 		if input.Outcome == domain.AttemptOutcomeCompleted {
-			if kind == domain.AttemptKindWork {
-				target = *input.TargetIssueStatus
-			} else {
-				switch *input.ReviewOutcome {
-				case domain.ReviewOutcomeApproved:
-					target = domain.StatusDone
-				case domain.ReviewOutcomeChangesRequested:
-					target = domain.StatusReady
-				case domain.ReviewOutcomeBlocked:
-					target = domain.StatusBlocked
-				}
-			}
 			blockedReason, err := domain.ApplyFinishTransition(issue.Status, target, stringValue(input.BlockedReason))
 			if err != nil {
 				return err
 			}
-			closedAt := issue.ClosedAt
-			if !issue.Status.Terminal() && target.Terminal() {
-				closedAt = &now
-			} else if issue.Status.Terminal() && !target.Terminal() {
-				closedAt = nil
-			}
+			closedAt := domain.NextClosedAt(issue.Status, target, now, issue.ClosedAt)
 			res, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, blocked_reason = ?, version = version + 1, updated_at = ?, closed_at = ?
 					WHERE id = ? AND version = ? AND archived_at IS NULL`, target, nullableStringValue(blockedReason), timestamp, nullableTime(closedAt), issue.ID, issue.Version)
 			if err != nil {
@@ -1335,7 +1300,7 @@ func completionIssueChanges(ctx context.Context, tx Queryer, issueID string, sta
 		return nil, nil, err
 	}
 	defer rows.Close()
-	warningSet, requiredSet := map[string]bool{}, map[string]bool{}
+	var allChangedFields []string
 	for rows.Next() {
 		var eventType, raw string
 		if err := rows.Scan(&eventType, &raw); err != nil {
@@ -1359,28 +1324,12 @@ func completionIssueChanges(ctx context.Context, tx Queryer, issueID string, sta
 		if err := json.Unmarshal(rawFields, &changedFields); err != nil {
 			return nil, nil, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue event payload is invalid", false)
 		}
-		for _, field := range changedFields {
-			switch field {
-			case "description", "acceptance_criteria", "status", "blocked_reason":
-				requiredSet[field] = true
-			case "title", "priority", "labels", "parent_id", "type":
-				warningSet[field] = true
-			}
-		}
+		allChangedFields = append(allChangedFields, changedFields...)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	warnings := make([]string, 0, len(warningSet))
-	for field := range warningSet {
-		warnings = append(warnings, "ISSUE_CHANGED:"+field)
-	}
-	sort.Strings(warnings)
-	required := make([]string, 0, len(requiredSet))
-	for field := range requiredSet {
-		required = append(required, field)
-	}
-	sort.Strings(required)
+	warnings, required := domain.ClassifyIssueChanges(allChangedFields)
 	return warnings, required, nil
 }
 

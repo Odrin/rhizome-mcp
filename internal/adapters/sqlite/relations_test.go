@@ -181,6 +181,70 @@ func TestRelationRepositoryRejectsBlocksCyclesInsideWriteTransaction(t *testing.
 	}
 }
 
+// TestBlocksPathExistsAgreesWithDomainHelper asserts that the adapter's
+// SQL-recursive-CTE blocksPathExists (relations.go, exercised here only
+// through ManageIssueRelation's cycle rejection, since it is unexported)
+// agrees with domain.BlocksPathExists on the same fixture graph, for
+// ISSUE-186 AC4. The fixture is A -> B -> C, A -> D (blocks edges); each
+// case attempts one additional candidate edge against a fresh copy of that
+// fixture and compares the adapter's accept/reject outcome to
+// domain.BlocksPathExists computed over the same edges (adding source ->
+// target creates a cycle iff target can already reach source).
+func TestBlocksPathExistsAgreesWithDomainHelper(t *testing.T) {
+	baseEdges := []struct{ from, to string }{{"A", "B"}, {"B", "C"}, {"A", "D"}}
+	adjacencyByName := map[string][]string{}
+	for _, edge := range baseEdges {
+		adjacencyByName[edge.from] = append(adjacencyByName[edge.from], edge.to)
+	}
+	neighbors := func(node string) []string { return adjacencyByName[node] }
+
+	cases := []struct {
+		name          string
+		candidateFrom string
+		candidateTo   string
+	}{
+		{name: "transitive back edge C->A cycles", candidateFrom: "C", candidateTo: "A"},
+		{name: "direct back edge B->A cycles", candidateFrom: "B", candidateTo: "A"},
+		{name: "sideways D->B does not cycle", candidateFrom: "D", candidateTo: "B"},
+		{name: "forward C->D does not cycle", candidateFrom: "C", candidateTo: "D"},
+		{name: "unrelated D->C does not cycle", candidateFrom: "D", candidateTo: "C"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			issues, db, now := openIssueService(t)
+			relations := openRelationService(t, db, now)
+			ctx := context.Background()
+
+			byName := map[string]application.CreateIssueResult{}
+			for _, name := range []string{"A", "B", "C", "D"} {
+				byName[name] = createRelationTestIssue(t, issues, name)
+			}
+			for _, edge := range baseEdges {
+				if _, err := relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
+					Action: domain.RelationActionAdd, SourceIssueID: byName[edge.from].ID, TargetIssueID: byName[edge.to].ID,
+					RelationType: domain.RelationTypeBlocks,
+				}); err != nil {
+					t.Fatalf("seed blocks edge %s->%s: %v", edge.from, edge.to, err)
+				}
+			}
+
+			wantCycle := domain.BlocksPathExists(testCase.candidateTo, testCase.candidateFrom, neighbors)
+
+			_, err := relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
+				Action: domain.RelationActionAdd, SourceIssueID: byName[testCase.candidateFrom].ID, TargetIssueID: byName[testCase.candidateTo].ID,
+				RelationType: domain.RelationTypeBlocks,
+			})
+
+			if wantCycle {
+				assertDomainCode(t, err, domain.CodeBlocksCycle)
+			} else if err != nil {
+				t.Fatalf("adapter rejected %s->%s but domain.BlocksPathExists found no cycle: %v", testCase.candidateFrom, testCase.candidateTo, err)
+			}
+		})
+	}
+}
+
 func TestRelationRepositoryRejectsArchivedEndpointsWithoutChanges(t *testing.T) {
 	for _, test := range []struct {
 		name     string

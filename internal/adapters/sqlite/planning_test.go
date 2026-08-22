@@ -246,3 +246,110 @@ func TestApplyIssuePlanRejectsCycleAcrossExistingAndBatchEdges(t *testing.T) {
 		t.Fatalf("errors = %#v", validation.Errors)
 	}
 }
+
+// TestBlocksPathExistsAgainstDomainFunction is a regression check for
+// planPathExists, which now delegates its BFS to domain.BlocksPathExists: it
+// exercises that delegation against a small blocks-relation fixture graph.
+// The SQL-adapter-vs-domain-helper agreement ISSUE-186 AC4 asks for is
+// covered separately by TestBlocksPathExistsAgreesWithDomainHelper in
+// relations_test.go, which goes through blocksPathExists's SQL recursive CTE.
+func TestBlocksPathExistsAgainstDomainFunction(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+
+	// Create a fixture: A -> B -> C (A blocks B, B blocks C)
+	//                  A -> D (A blocks D)
+	// There should be a path from A to C (through B), but not from C to A
+	a, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "C"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "D"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create relation service
+	relationRepository, err := sqlite.NewRelationRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := clock.NewFakeClock(now)
+	relationGenerator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relationService, err := application.NewRelationService(relationRepository, source, relationGenerator)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add blocks relations: A -> B, B -> C, A -> D
+	for _, rel := range []struct {
+		source string
+		target string
+	}{
+		{a.ID, b.ID},
+		{b.ID, c.ID},
+		{a.ID, d.ID},
+	} {
+		_, err := relationService.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
+			Action:        domain.RelationActionAdd,
+			SourceIssueID: rel.source,
+			TargetIssueID: rel.target,
+			RelationType:  domain.RelationTypeBlocks,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Test cases: (start, sought, wantPath)
+	testCases := []struct {
+		name     string
+		start    string
+		sought   string
+		wantPath bool
+	}{
+		{name: "direct edge A->B", start: a.ID, sought: b.ID, wantPath: true},
+		{name: "transitive A->B->C", start: a.ID, sought: c.ID, wantPath: true},
+		{name: "direct edge A->D", start: a.ID, sought: d.ID, wantPath: true},
+		{name: "no path C->A (backward)", start: c.ID, sought: a.ID, wantPath: false},
+		{name: "no path D->B (sideways)", start: d.ID, sought: b.ID, wantPath: false},
+		{name: "self loop check A->A", start: a.ID, sought: a.ID, wantPath: false},
+		{name: "direct edge B->C", start: b.ID, sought: c.ID, wantPath: true},
+		{name: "no path B->A (backward)", start: b.ID, sought: a.ID, wantPath: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Call domain.BlocksPathExists with an adjacency function built from the fixture
+			edges := []struct{ source, target string }{
+				{a.ID, b.ID},
+				{b.ID, c.ID},
+				{a.ID, d.ID},
+			}
+			adjacency := make(map[string][]string)
+			for _, edge := range edges {
+				adjacency[edge.source] = append(adjacency[edge.source], edge.target)
+			}
+
+			got := domain.BlocksPathExists(tc.start, tc.sought, func(node string) []string {
+				return adjacency[node]
+			})
+
+			if got != tc.wantPath {
+				t.Fatalf("BlocksPathExists(%q, %q) = %v, want %v",
+					tc.start, tc.sought, got, tc.wantPath)
+			}
+		})
+	}
+}
