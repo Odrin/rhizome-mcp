@@ -28,7 +28,14 @@ UPDATE attempt_notes SET created_at = substr(created_at, 1, 19) || '.' || substr
 
 UPDATE artifacts SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;
 
+-- issue_events is append-only (issue_events_append_only_update raises on UPDATE); lift the guard for the rewrite only.
+DROP TRIGGER issue_events_append_only_update;
 UPDATE issue_events SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;
+CREATE TRIGGER issue_events_append_only_update
+BEFORE UPDATE ON issue_events
+BEGIN
+    SELECT RAISE(ABORT, 'issue events are append-only');
+END;
 
 UPDATE idempotency_records SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;
 
@@ -39,6 +46,13 @@ UPDATE review_requests SET resolved_at = substr(resolved_at, 1, 19) || '.' || su
 
 UPDATE review_outcomes SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;
 
+-- review_events is append-only (review_events_append_only_update raises on UPDATE); lift the guard for the rewrite only.
+DROP TRIGGER review_events_append_only_update;
 UPDATE review_events SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;
+CREATE TRIGGER review_events_append_only_update
+BEFORE UPDATE ON review_events
+BEGIN
+    SELECT RAISE(ABORT, 'review events are append-only');
+END;
 
 UPDATE review_follow_ups SET created_at = substr(created_at, 1, 19) || '.' || substr((CASE WHEN instr(created_at, '.') = 0 THEN '' ELSE substr(created_at, instr(created_at, '.') + 1, length(created_at) - instr(created_at, '.') - 1) END) || '000000000', 1, 9) || 'Z' WHERE created_at IS NOT NULL;

@@ -679,3 +679,71 @@ func assertDomainCode(t *testing.T, err error, code string) {
 		t.Fatalf("error = %v, want domain code %s", err, code)
 	}
 }
+
+// Regression for migration 007 on databases that already hold events: the
+// append-only triggers on issue_events/review_events abort any UPDATE, so the
+// timestamp rewrite must lift and restore them. Empty event tables hide this.
+func TestFixedWidthTimestampMigrationRewritesPopulatedEventTables(t *testing.T) {
+	t.Parallel()
+	path, db := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:6]); err != nil {
+		t.Fatalf("seed migrations through 006: %v", err)
+	}
+
+	issueID := testID(20)
+	targetID := testID(21)
+	reviewID := testID(22)
+	const wholeSecond = "2026-07-13T08:11:12Z"
+	const shortFraction = "2026-07-13T08:11:12.5Z"
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(
+			id, sequence_no, type, title, status, priority, version, created_at, updated_at
+		) VALUES (?, 1, 'task', 'issue with events', 'ready', 'medium', 1, ?, ?)`, issueID, wholeSecond, wholeSecond); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at)
+			VALUES (?, 'issue_created', '{}', ?)`, issueID, wholeSecond); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(
+			id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
+		) VALUES (?, ?, 1, 1, '[]', 1, ?)`, targetID, issueID, shortFraction); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
+			id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id,
+			active_attempt_id, version, created_at, resolved_at
+		) VALUES (?, ?, ?, 1, 1, '[]', 'open', NULL, NULL, 1, ?, NULL)`, reviewID, targetID, issueID, shortFraction); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_events(request_id, target_id, event_type, payload, created_at)
+			VALUES (?, ?, 'review_requested', '{}', ?)`, reviewID, targetID, shortFraction)
+		return err
+	}); err != nil {
+		t.Fatalf("seed populated event tables: %v", err)
+	}
+
+	if _, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil {
+		t.Fatalf("Migrate() over populated event tables: %v", err)
+	}
+
+	inspect := openInspectionDB(t, path)
+	var issueEventAt, reviewEventAt string
+	if err := inspect.QueryRow(`SELECT created_at FROM issue_events WHERE issue_id = ? AND source = 'issue'`, issueID).Scan(&issueEventAt); err != nil {
+		t.Fatalf("read migrated issue event: %v", err)
+	}
+	if err := inspect.QueryRow(`SELECT created_at FROM issue_events WHERE issue_id = ? AND source = 'review'`, issueID).Scan(&reviewEventAt); err != nil {
+		t.Fatalf("read migrated review event: %v", err)
+	}
+	if issueEventAt != "2026-07-13T08:11:12.000000000Z" {
+		t.Fatalf("issue event created_at = %q, want fixed-width rewrite", issueEventAt)
+	}
+	if reviewEventAt != "2026-07-13T08:11:12.500000000Z" {
+		t.Fatalf("review event created_at = %q, want fixed-width rewrite", reviewEventAt)
+	}
+	// The append-only guard must be back in place after the rewrite.
+	if _, err := inspect.Exec(`UPDATE issue_events SET payload = '{"tampered":true}'`); err == nil {
+		t.Fatal("issue_events UPDATE succeeded; append-only trigger was not restored")
+	}
+}

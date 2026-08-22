@@ -372,6 +372,9 @@ mermaid
 ### SQLite integration tests
 
 - migrations from empty database;
+- migrations from a populated database: every data-rewriting migration is
+  tested against a seed that fills each table it touches, including
+  append-only tables guarded by triggers (`issue_events`, `review_events`);
 - foreign key enforcement;
 - active attempt unique index;
 - idempotency atomicity;
