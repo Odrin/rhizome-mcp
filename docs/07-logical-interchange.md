@@ -2,22 +2,22 @@
 
 ## 1. Scope and versioning
 
-This document specifies the version 1 logical interchange format for a
-Rhizome project. It is a UTF-8 JSON document, intended for inspection and
-transfer between installations. It is not a SQLite backup and does not
-preserve database implementation details.
+This document specifies the logical interchange format for a Rhizome
+project, versions 1 and 2. It is a UTF-8 JSON document, intended for
+inspection and transfer between installations. It is not a SQLite backup and
+does not preserve database implementation details.
 
 MCP delivery is separate from this logical format: `export_project` normally
 returns a managed artifact URI, while `delivery: "inline"` returns the document
 when it is within the MCP inline limit. Artifact URIs are local runtime
-capabilities and are not fields in this version 1 document.
+capabilities and are not fields in this document.
 
-The top-level document is:
+The top-level document (version 2) is:
 
 ```json
 {
   "format": "rhizome-logical-project",
-  "version": 1,
+  "version": 2,
   "exported_at": "2026-07-17T18:24:06.023717Z",
   "project": {},
   "issues": [],
@@ -29,15 +29,25 @@ The top-level document is:
   "attempts": [],
   "attempt_notes": [],
   "artifacts": [],
-  "events": []
+  "events": [],
+  "review_targets": [],
+  "review_requests": [],
+  "review_outcomes": [],
+  "review_events": [],
+  "extensions": {}
 }
 ```
 
-`format` and `version` are required. The exporter emits only version `1`.
-The importer must reject an unsupported `format` or version before any
-mutation with a stable `UNSUPPORTED_FORMAT_VERSION` error. A version 1
-document rejects unknown top-level fields and unknown fields in every record
-with `UNSUPPORTED_FIELD`; this prevents silently dropping future data.
+A version 1 document is the same shape without the last five fields.
+
+`format` and `version` are required. The exporter emits version `2`. The
+importer accepts both version `1` and version `2` and rejects any other
+version, or an unsupported `format`, before any mutation with a stable
+`UNSUPPORTED_FORMAT_VERSION` error. Both versions reject unknown top-level
+fields and unknown fields in every record with `UNSUPPORTED_FIELD`; which
+top-level fields are known depends on the document's own declared `version`
+(see §7) -- this prevents silently dropping future data, and prevents a
+version 1 document from smuggling in version-2-only fields.
 
 All timestamps are required RFC 3339 strings in UTC, with fractional seconds
 preserved when present. JSON `null` represents a nullable stored value; an
@@ -56,15 +66,22 @@ by the destination project and may differ after import.
 Arrays are deterministic:
 
 - `issues`, `labels`, `comments`, `decisions`, `attempts`, `attempt_notes`,
-  and `artifacts`: `created_at` ascending, then `id` ascending;
-- `events`: `created_at` ascending, then `source_id` ascending;
+  `artifacts`, `review_targets`, `review_requests`, and `review_outcomes`:
+  `created_at` ascending, then `id` ascending;
+- `events` and `review_events`: `created_at` ascending, then `source_id`
+  ascending;
 - `issue_labels`: `issue_id` ascending, then `label_id` ascending;
 - `relations`: `source_issue_id` ascending, `target_issue_id` ascending, then
   `type` ascending.
 
 Object member order is not semantically meaningful. Exporters use the field
-order shown below. Arrays are emitted as `[]`, never `null`; nullable values
-are emitted as `null`.
+order shown below. A version 1 field, and every version 2 array that is
+required in the version it belongs to, is emitted as `[]`, never `null` or
+absent, even when empty; nullable values are emitted as `null`. The five
+version 2 fields (`review_targets`, `review_requests`, `review_outcomes`,
+`review_events`, `extensions`) are the exception: each is *optional*, and is
+omitted entirely rather than emitted empty when there is nothing to report
+(see §7) -- an absent version 2 field means empty, not unset.
 
 ## 3. Project and issue records
 
@@ -163,7 +180,54 @@ the destination assigns its own monotonic event IDs. Event payloads are
 retained as opaque valid JSON after their referenced IDs are remapped where
 the event schema names an entity ID; `session_id` imports as `null`. Events
 with unknown types or unremappable payload references are rejected rather
-than silently corrupted.
+than silently corrupted. `events` includes review-workflow event types
+(`review_requested`, `review_claimed`, `review_approved`,
+`review_changes_requested`, `review_blocked`, `review_cancelled`,
+`review_superseded`) alongside issue-sourced ones; the record carries no
+field distinguishing the two on import, so a review-sourced event is not
+reconstructed as one on re-export -- if that distinction matters, read
+`review_events` instead (below), which is scoped to review-sourced rows
+specifically.
+
+The following four record types are version 2 only.
+
+`review_targets` records contain `id`, `issue_id`, `issue_version`,
+`latest_event_id`, `artifact_ids`, and `created_at`: the immutable snapshot a
+review request freezes at claim time.
+
+`review_requests` records contain `id`, `target_id`, `issue_id`,
+`target_issue_version`, `target_event_id`, `artifact_ids`, `status`,
+`supersedes_id`, `created_at`, and `resolved_at`. `target_id` must reference
+an included `review_targets` record; `supersedes_id`, when present, must
+reference another included `review_requests` record. A request whose status
+is `claimed` -- bound to a currently active review attempt -- is excluded
+the same way an active work attempt is excluded from `attempts`: a claim
+cannot be transferred safely.
+
+`review_outcomes` records contain `id`, `request_id`, `attempt_id`,
+`outcome`, `reason`, and `created_at`. `request_id` must reference an
+included `review_requests` record; `attempt_id` must reference an included
+`attempts` record. `reason` is required when `outcome` is `blocked` and
+absent otherwise.
+
+`review_events` records contain `source_id`, `request_id`, `target_id`,
+`attempt_id`, `event_type`, `payload`, and `created_at`: the same
+review-sourced rows already present in `events` (see above), re-shaped with
+`request_id`/`target_id` promoted out of the opaque payload into their own
+fields. It exists for tools and humans that want the review workflow's
+history scoped and typed without parsing every event's payload; it is
+export-only and read-only -- an importer replays `events`, which already
+contains every one of these rows, and must not also replay `review_events`,
+or every review event would be duplicated. Referential integrity
+(`request_id` and `target_id` must resolve to included `review_requests` /
+`review_targets` records) is still validated on parse regardless.
+
+`extensions` is a reserved top-level object, present only in version 2. Its
+values are namespaced by owning feature (for example a future `gates` or
+`reservations` key) and are not otherwise interpreted or validated by this
+format; each namespace defines and validates its own value shape. See §7 for
+when a feature should add a namespace to `extensions` versus a new top-level
+array.
 
 ## 5. Explicit exclusions
 
@@ -175,6 +239,8 @@ The following are intentionally excluded:
 - archived issues and their owned data;
 - active attempts, their leases, raw tokens, token hashes, heartbeat
   ownership, and their dependent history;
+- claimed review requests and their active review attempt binding (version
+  2 only -- see §4);
 - generated issue display IDs, source row versions, and source event IDs;
 - binary artifact content, filesystem contents, absolute local paths, and
   machine-specific credentials;
@@ -195,8 +261,8 @@ section 2; errors identify a JSON path.
 The apply phase repeats validation, then writes all records, relations,
 history, derived search entries, and destination events in one transaction.
 Any storage, mapping, constraint, or search-index failure rolls back the
-entire import. A version 1 apply requires an empty destination project to
-avoid unspecified merge behavior.
+entire import. An apply requires an empty destination project to avoid
+unspecified merge behavior, regardless of the document's version.
 
 References must target records of the correct included type. The importer
 rejects dangling references, invalid ULIDs, duplicate logical IDs,
@@ -205,11 +271,53 @@ and source active attempts. It does not coerce malformed values.
 
 ## 7. Compatibility policy
 
-Version 1 is backward-compatible only with other version 1 implementations.
-An implementation may add an optional top-level `compatibility` object in a
-future version, but it must not add fields to version 1 records. A future
-version must define its own required and optional fields, migration behavior,
-and whether it can safely down-convert to version 1.
+Version 1's fields are frozen: no future version may add a field to a
+version 1 record or change a version 1 field's meaning. version 1 documents
+remain importable indefinitely.
+
+Version 2 is version 1 plus five additional, wholly optional top-level
+fields: `review_targets`, `review_requests`, `review_outcomes`,
+`review_events`, and `extensions` (§4). "Optional" here means precisely: the
+importer's required-field check for a version 2 document is the same set
+required for version 1 (§1); a version 2 document that omits any of the five
+is valid, and an absent field means the same thing an empty array (or empty
+object, for `extensions`) would mean -- there is nothing to report, not that
+the exporter forgot to ask. This is deliberate, not incidental: it is what
+lets a version 2 importer accept a version 1 document without a separate
+code path, and what lets a version 2 exporter with nothing to put in one of
+these fields omit it rather than pad it out.
+
+New work that needs to carry additional interchange data has two options,
+in order of preference:
+
+1. **Add a namespace to `extensions`.** This is the default for anything
+   that does not need referential integration with the entity records in §3
+   and §4 -- a self-contained blob a feature can define, validate, and
+   evolve on its own schedule without touching the shared version tables in
+   `internal/domain/logical_project_import.go` at all. Pick a namespace key
+   that names the owning feature (e.g. `"gates"`, `"reservations"`) and
+   document its shape wherever that feature's own contract lives; this
+   document does not need to change.
+2. **Add a new top-level array to the shared version 2 definition**, when
+   the data genuinely needs entity records with IDs that participate in the
+   same reference-remapping and referential-integrity machinery every other
+   entity type uses (the way `review_targets`/`review_requests`/
+   `review_outcomes` need to reference `issues` and each other). This means
+   adding the array to `logicalProjectDocumentKeysV2` (and the matching
+   struct fields, semantic validation, export query, and import insertion),
+   coordinating with whoever else is also extending version 2 at the same
+   time -- **not** independently declaring a new "version 2" or bumping to
+   version 3. ISSUE-175 (workflow gates) and ISSUE-182 (reservations) are
+   the two features expected to do this next; both add sections to this
+   same shared version 2 definition rather than each claiming a version
+   number of their own (see ISSUE-215, which this section's policy exists
+   to settle).
+
+A version 3 is warranted only when a change cannot be expressed as an
+addition under version 2 -- for instance, changing the meaning or required
+status of an existing field. A future version must define its own required
+and optional fields, migration behavior, and whether it can safely
+down-convert.
 
 Export remains deterministic for a fixed logical project state. Volatile
 values such as export time do not alter record ordering or record content.

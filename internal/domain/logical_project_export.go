@@ -4,7 +4,15 @@ import (
 	"encoding/json"
 )
 
-// LogicalProjectDocument is the version 1 logical project interchange document.
+// LogicalProjectDocument is the logical project interchange document, versions
+// 1 and 2. Version 1's fields are frozen -- see docs/07 §7 for the v2
+// compatibility policy. Version 2 adds the review workflow entities
+// (ReviewTargets/ReviewRequests/ReviewOutcomes/ReviewEvents) and a reserved
+// top-level Extensions map that future work (gates, reservations) adds
+// namespaced sections to instead of each independently claiming "version 2"
+// or forcing a version bump; see ISSUE-215. All version-2 fields are
+// optional: a version-1 document simply has none of them, and an absent v2
+// array on import means empty, not "unset."
 type LogicalProjectDocument struct {
 	Format       string                `json:"format"`
 	Version      int                   `json:"version"`
@@ -20,6 +28,13 @@ type LogicalProjectDocument struct {
 	AttemptNotes []LogicalAttemptNote  `json:"attempt_notes"`
 	Artifacts    []LogicalArtifact     `json:"artifacts"`
 	Events       []LogicalEvent        `json:"events"`
+
+	// Version 2 fields. Omitted (nil/absent) in a version 1 document.
+	ReviewTargets  []LogicalReviewTarget      `json:"review_targets,omitempty"`
+	ReviewRequests []LogicalReviewRequest     `json:"review_requests,omitempty"`
+	ReviewOutcomes []LogicalReviewOutcome     `json:"review_outcomes,omitempty"`
+	ReviewEvents   []LogicalReviewEvent       `json:"review_events,omitempty"`
+	Extensions     map[string]json.RawMessage `json:"extensions,omitempty"`
 }
 
 // LogicalProjectProject is the exported project metadata record.
@@ -148,6 +163,73 @@ type LogicalEvent struct {
 	EventType string          `json:"event_type"`
 	SessionID *string         `json:"session_id"`
 	AttemptID *string         `json:"attempt_id"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt string          `json:"created_at"`
+}
+
+// LogicalReviewTarget is the exported immutable review-target snapshot
+// (version 2). Mirrors domain.ReviewTarget.
+type LogicalReviewTarget struct {
+	ID            string   `json:"id"`
+	IssueID       string   `json:"issue_id"`
+	IssueVersion  int64    `json:"issue_version"`
+	LatestEventID int64    `json:"latest_event_id"`
+	ArtifactIDs   []string `json:"artifact_ids"`
+	CreatedAt     string   `json:"created_at"`
+}
+
+// LogicalReviewRequest is the exported review request record (version 2).
+// Mirrors domain.ReviewRequest. Only non-active requests are exported --
+// ActiveAttemptID is always absent, the same "cannot export a claim in
+// progress" rule already applied to work_attempts (see LogicalAttempt) --
+// so a claimed request round-trips as its pre-claim status would require
+// (in practice: open, since claimed always implies an active attempt).
+type LogicalReviewRequest struct {
+	ID                 string   `json:"id"`
+	TargetID           string   `json:"target_id"`
+	IssueID            string   `json:"issue_id"`
+	TargetIssueVersion int64    `json:"target_issue_version"`
+	TargetEventID      int64    `json:"target_event_id"`
+	ArtifactIDs        []string `json:"artifact_ids"`
+	Status             string   `json:"status"`
+	SupersedesID       *string  `json:"supersedes_id"`
+	CreatedAt          string   `json:"created_at"`
+	ResolvedAt         *string  `json:"resolved_at"`
+}
+
+// LogicalReviewOutcome is the exported review resolution record (version 2).
+// Mirrors domain.ReviewOutcomeRecord.
+type LogicalReviewOutcome struct {
+	ID        string  `json:"id"`
+	RequestID string  `json:"request_id"`
+	AttemptID string  `json:"attempt_id"`
+	Outcome   string  `json:"outcome"`
+	Reason    *string `json:"reason"`
+	CreatedAt string  `json:"created_at"`
+}
+
+// LogicalReviewEvent is the exported review-workflow event record (version
+// 2). There is no standalone review_events table to mirror -- migration 008
+// folded it into issue_events (source='review') -- so this is derived from
+// that unified log's review-sourced rows, with RequestID/TargetID pulled
+// back out of the payload every review event already carries them in (see
+// payloadForReviewEvent in internal/adapters/sqlite/reviews.go). SourceID
+// plays the same role LogicalEvent.SourceID does for issue_events (a stable
+// reference to the original row, not reused as a destination ID on import).
+//
+// ReviewEvents is export-only: every review-sourced row it contains is
+// already present in the document's Events too (LogicalEvent's export query
+// does not filter by source), so on import only Events is replayed --
+// re-inserting ReviewEvents as well would duplicate those rows. ReviewEvents
+// exists as a typed, review-scoped convenience projection for tools and
+// humans reading the interchange document directly; its referential
+// integrity is still checked at parse time like every other v2 entity.
+type LogicalReviewEvent struct {
+	SourceID  int64           `json:"source_id"`
+	RequestID string          `json:"request_id"`
+	TargetID  string          `json:"target_id"`
+	AttemptID *string         `json:"attempt_id"`
+	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt string          `json:"created_at"`
 }

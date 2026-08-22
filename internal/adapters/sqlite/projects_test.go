@@ -225,7 +225,7 @@ func TestProjectRepositoryExportsLogicalProjectSnapshotDeterministically(t *test
 	if len(first.Relations) != 1 || first.Relations[0].ID != relationID {
 		t.Fatalf("relations = %#v", first.Relations)
 	}
-	if first.Project.ID != sqliteTestProjectID || first.Format != "rhizome-logical-project" || first.Version != 1 {
+	if first.Project.ID != sqliteTestProjectID || first.Format != "rhizome-logical-project" || first.Version != 2 {
 		t.Fatalf("document metadata = %#v", first)
 	}
 }
@@ -757,7 +757,19 @@ func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThe
 			issueID, sqlite.FormatStorageTime(now.Add(3*time.Second))); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'review_requested', '{"request_id":"req-1","target_id":"targ-1"}', ?, 'review')`,
+		// A real review_targets/review_requests pair backing the
+		// review_requested event below, so the exported document's v2
+		// review_events entry resolves referentially (request_id/target_id
+		// must match an included review_requests/review_targets row).
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB2', ?, 1, 0, '[]', 1, ?)`,
+			issueID, sqlite.FormatStorageTime(now.Add(3*time.Second))); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, version, created_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB1', '01ARZ3NDEKTSV4RRFFQ69G5FB2', ?, 1, 0, '[]', 'open', 1, ?)`,
+			issueID, sqlite.FormatStorageTime(now.Add(4*time.Second))); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'review_requested', '{"request_id":"01ARZ3NDEKTSV4RRFFQ69G5FB1","target_id":"01ARZ3NDEKTSV4RRFFQ69G5FB2"}', ?, 'review')`,
 			issueID, sqlite.FormatStorageTime(now.Add(4*time.Second)))
 		return err
 	}); err != nil {
@@ -779,7 +791,7 @@ func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThe
 	for _, event := range exported.Events {
 		if event.EventType == "review_requested" {
 			sawReviewRequested = true
-			if !strings.Contains(string(event.Payload), `"request_id":"req-1"`) {
+			if !strings.Contains(string(event.Payload), `"request_id":"01ARZ3NDEKTSV4RRFFQ69G5FB1"`) {
 				t.Fatalf("review event payload = %s, want request_id preserved", event.Payload)
 			}
 		}
@@ -822,6 +834,155 @@ func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThe
 	}
 	if importedSource != "issue" {
 		t.Fatalf("imported event source = %q, want the default 'issue' -- the v1 interchange format carries no source tag (docs/07 §1), so this is the documented, acceptable round-trip behavior, not a bug", importedSource)
+	}
+}
+
+// TestProjectRepositoryAppliesVersion2ReviewEntitiesWithRemappedReferences is
+// ISSUE-215 AC2's round-trip coverage: a hand-built version 2 document
+// carrying one issue and its full review lifecycle (target, request,
+// outcome) imports into an empty destination with every ID remapped (never
+// reusing the source document's IDs verbatim) and every cross-entity
+// reference (review_requests.target_id/issue_id,
+// review_outcomes.request_id/attempt_id) translated consistently.
+func TestProjectRepositoryAppliesVersion2ReviewEntitiesWithRemappedReferences(t *testing.T) {
+	db, _ := openProjectDatabase(t, "Imported with reviews", "Instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(time.Date(2026, 7, 17, 18, 24, 6, 0, time.UTC)), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	attemptID, err := generator.New()
+	if err != nil {
+		t.Fatalf("attempt ID generation: %v", err)
+	}
+	targetID, err := generator.New()
+	if err != nil {
+		t.Fatalf("target ID generation: %v", err)
+	}
+	requestID, err := generator.New()
+	if err != nil {
+		t.Fatalf("request ID generation: %v", err)
+	}
+	outcomeID, err := generator.New()
+	if err != nil {
+		t.Fatalf("outcome ID generation: %v", err)
+	}
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    2,
+		ExportedAt: "2026-07-17T18:24:20Z",
+		Project: domain.LogicalProjectProject{
+			ID: sqliteTestProjectID, CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+		},
+		Issues: []domain.LogicalIssue{{
+			ID: issueID, Type: "task", Title: "Reviewed task", Status: "done", Priority: "medium",
+			CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+		}},
+		Attempts: []domain.LogicalAttempt{{
+			ID: attemptID, IssueID: issueID, Kind: "review", Status: "completed",
+			IssueVersionAtStart: 2, ContextEventIDAtStart: 0,
+			LeaseExpiresAt: "2026-07-17T18:24:10Z", StartedAt: "2026-07-17T18:24:10Z", LastHeartbeatAt: "2026-07-17T18:24:10Z",
+			FinishedAt: stringValuePointer("2026-07-17T18:24:11Z"), ResultSummary: stringValuePointer("approved"),
+			NextSteps: []string{}, Verification: []string{},
+		}},
+		ReviewTargets: []domain.LogicalReviewTarget{{
+			ID: targetID, IssueID: issueID, IssueVersion: 2, LatestEventID: 0,
+			ArtifactIDs: []string{}, CreatedAt: "2026-07-17T18:24:07Z",
+		}},
+		ReviewRequests: []domain.LogicalReviewRequest{{
+			ID: requestID, TargetID: targetID, IssueID: issueID, TargetIssueVersion: 2, TargetEventID: 0,
+			ArtifactIDs: []string{}, Status: "approved",
+			CreatedAt: "2026-07-17T18:24:08Z", ResolvedAt: stringValuePointer("2026-07-17T18:24:11Z"),
+		}},
+		ReviewOutcomes: []domain.LogicalReviewOutcome{{
+			ID: outcomeID, RequestID: requestID, AttemptID: attemptID, Outcome: "approved",
+			CreatedAt: "2026-07-17T18:24:11Z",
+		}},
+	}
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+	if plan.DryRun.Counts.ReviewTargets != 1 || plan.DryRun.Counts.ReviewRequests != 1 || plan.DryRun.Counts.ReviewOutcomes != 1 {
+		t.Fatalf("dry run counts = %#v", plan.DryRun.Counts)
+	}
+	plan = assignImportDestinationIDs(t, plan)
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	result, err := repository.ApplyLogicalProjectImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+	if result.Counts.ReviewTargets != 1 || result.Counts.ReviewRequests != 1 || result.Counts.ReviewOutcomes != 1 || len(result.Conflicts) != 0 {
+		t.Fatalf("apply result = %#v", result)
+	}
+
+	var destTargetID, destRequestID, destOutcomeID, destIssueID, destAttemptID string
+	var requestTargetID, requestIssueID, requestStatus string
+	var outcomeRequestID, outcomeAttemptID, outcomeOutcome string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT id, issue_id FROM review_targets`).Scan(&destTargetID, &destIssueID); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT id, target_id, issue_id, status FROM review_requests`).Scan(&destRequestID, &requestTargetID, &requestIssueID, &requestStatus); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT id, request_id, attempt_id, outcome FROM review_outcomes`).Scan(&destOutcomeID, &outcomeRequestID, &outcomeAttemptID, &outcomeOutcome); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT id FROM work_attempts WHERE kind = 'review'`).Scan(&destAttemptID)
+	}); err != nil {
+		t.Fatalf("read imported review rows: %v", err)
+	}
+
+	if destTargetID == "" || destTargetID == targetID {
+		t.Fatalf("review_targets.id = %q, want a remapped, non-empty ID", destTargetID)
+	}
+	if destRequestID == "" || destRequestID == requestID {
+		t.Fatalf("review_requests.id = %q, want a remapped, non-empty ID", destRequestID)
+	}
+	if destOutcomeID == "" || destOutcomeID == outcomeID {
+		t.Fatalf("review_outcomes.id = %q, want a remapped, non-empty ID", destOutcomeID)
+	}
+	if destIssueID == "" || destIssueID == issueID {
+		t.Fatalf("review_targets.issue_id = %q, want a remapped, non-empty ID", destIssueID)
+	}
+	if requestTargetID != destTargetID {
+		t.Fatalf("review_requests.target_id = %q, want it to match the remapped review_targets.id %q", requestTargetID, destTargetID)
+	}
+	if requestIssueID != destIssueID {
+		t.Fatalf("review_requests.issue_id = %q, want it to match the remapped issues.id %q", requestIssueID, destIssueID)
+	}
+	if requestStatus != "approved" {
+		t.Fatalf("review_requests.status = %q, want approved", requestStatus)
+	}
+	if outcomeRequestID != destRequestID {
+		t.Fatalf("review_outcomes.request_id = %q, want it to match the remapped review_requests.id %q", outcomeRequestID, destRequestID)
+	}
+	if outcomeAttemptID != destAttemptID {
+		t.Fatalf("review_outcomes.attempt_id = %q, want it to match the remapped work_attempts.id %q", outcomeAttemptID, destAttemptID)
+	}
+	if outcomeOutcome != "approved" {
+		t.Fatalf("review_outcomes.outcome = %q, want approved", outcomeOutcome)
+	}
+
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("re-export ExportLogicalProject() error = %v", err)
+	}
+	if exported.Version != 2 || len(exported.ReviewTargets) != 1 || len(exported.ReviewRequests) != 1 || len(exported.ReviewOutcomes) != 1 {
+		t.Fatalf("re-exported document = %#v", exported)
 	}
 }
 

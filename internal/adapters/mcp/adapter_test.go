@@ -176,7 +176,7 @@ func TestExportProjectToolReturnsArtifactByDefault(t *testing.T) {
 		ArtifactURI string `json:"artifact_uri"`
 	}
 	decodeStructured(t, result, &artifact)
-	if artifact.Format != "rhizome-logical-project" || artifact.Version != 1 || artifact.ByteCount == 0 || len(artifact.SHA256) != 64 || !strings.HasPrefix(artifact.ArtifactURI, "rhizome-export://sha256/") {
+	if artifact.Format != "rhizome-logical-project" || artifact.Version != 2 || artifact.ByteCount == 0 || len(artifact.SHA256) != 64 || !strings.HasPrefix(artifact.ArtifactURI, "rhizome-export://sha256/") {
 		t.Fatalf("artifact = %#v", artifact)
 	}
 
@@ -186,7 +186,7 @@ func TestExportProjectToolReturnsArtifactByDefault(t *testing.T) {
 	}
 	var document domain.LogicalProjectDocument
 	decodeStructured(t, inline, &document)
-	if document.Format != "rhizome-logical-project" || document.Version != 1 || document.Project.ID == "" || len(document.Issues) != 0 {
+	if document.Format != "rhizome-logical-project" || document.Version != 2 || document.Project.ID == "" || len(document.Issues) != 0 {
 		t.Fatalf("inline document = %#v", document)
 	}
 }

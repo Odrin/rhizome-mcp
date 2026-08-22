@@ -47,6 +47,11 @@ type LogicalProjectImportDestinationIDs struct {
 	AttemptIDs     map[string]string
 	AttemptNoteIDs map[string]string
 	ArtifactIDs    map[string]string
+
+	// Version 2 review entities; empty for a version 1 document.
+	ReviewTargetIDs  map[string]string
+	ReviewRequestIDs map[string]string
+	ReviewOutcomeIDs map[string]string
 }
 
 // NewLogicalProjectImportDestinationIDs builds one destination ID for every
@@ -85,9 +90,22 @@ func NewLogicalProjectImportDestinationIDs(document LogicalProjectDocument, gene
 	if err != nil {
 		return LogicalProjectImportDestinationIDs{}, err
 	}
+	reviewTargetIDs, err := logicalDestinationIDs(document.ReviewTargets, func(item LogicalReviewTarget) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	reviewRequestIDs, err := logicalDestinationIDs(document.ReviewRequests, func(item LogicalReviewRequest) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	reviewOutcomeIDs, err := logicalDestinationIDs(document.ReviewOutcomes, func(item LogicalReviewOutcome) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
 	return LogicalProjectImportDestinationIDs{
 		IssueIDs: issueIDs, LabelIDs: labelIDs, RelationIDs: relationIDs, CommentIDs: commentIDs,
 		DecisionIDs: decisionIDs, AttemptIDs: attemptIDs, AttemptNoteIDs: attemptNoteIDs, ArtifactIDs: artifactIDs,
+		ReviewTargetIDs: reviewTargetIDs, ReviewRequestIDs: reviewRequestIDs, ReviewOutcomeIDs: reviewOutcomeIDs,
 	}, nil
 }
 
@@ -132,6 +150,12 @@ type LogicalProjectImportCounts struct {
 	AttemptNotes int `json:"attempt_notes"`
 	Artifacts    int `json:"artifacts"`
 	Events       int `json:"events"`
+
+	// Version 2 only; zero for a version 1 document.
+	ReviewTargets  int `json:"review_targets"`
+	ReviewRequests int `json:"review_requests"`
+	ReviewOutcomes int `json:"review_outcomes"`
+	ReviewEvents   int `json:"review_events"`
 }
 
 // LogicalProjectImportConflict is one deterministic dry-run conflict.
@@ -186,6 +210,11 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 			AttemptNotes: len(parsed.AttemptNotes),
 			Artifacts:    len(parsed.Artifacts),
 			Events:       len(parsed.Events),
+
+			ReviewTargets:  len(parsed.ReviewTargets),
+			ReviewRequests: len(parsed.ReviewRequests),
+			ReviewOutcomes: len(parsed.ReviewOutcomes),
+			ReviewEvents:   len(parsed.ReviewEvents),
 		},
 		Conflicts: nil,
 		Writes:    LogicalProjectImportWrites{Count: 0},
@@ -193,22 +222,23 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 	return plan, nil
 }
 
-func validateLogicalProjectDocumentStructure(document []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	if err := validateTopLevelLogicalProjectDocument(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); err != nil {
-		if err == io.EOF {
-			return nil
-		}
-		return decodeError(err, "$.document")
-	}
-	return invalidArgumentPath("$.document", "TRAILING_DATA", "contains trailing JSON data")
+// supportedLogicalProjectVersions lists every interchange format version
+// this importer accepts. Each entry is the version's own top-level key
+// table (validators plus which of those keys are required), selected
+// before the full structural pass runs -- see peekLogicalProjectVersion.
+// v1's table is frozen: it must never change. v2 = v1 plus the review
+// workflow entities and a reserved "extensions" map, all optional (see
+// docs/07 §7 for the compatibility policy this pins: an absent v2 array on
+// import means empty, not unset; new sections within v2 are added here,
+// coordinated across whichever epics need them, rather than any one of them
+// silently redefining v2 or forcing a version bump).
+var supportedLogicalProjectVersions = map[int]func() (map[string]validatorFunc, []string){
+	1: logicalProjectDocumentKeysV1,
+	2: logicalProjectDocumentKeysV2,
 }
 
-func validateTopLevelLogicalProjectDocument(decoder *json.Decoder) error {
-	return validateObject(decoder, "$", map[string]validatorFunc{
+func logicalProjectDocumentKeysV1() (map[string]validatorFunc, []string) {
+	validators := map[string]validatorFunc{
 		"format":        validateAnyJSONValue,
 		"version":       validateAnyJSONValue,
 		"exported_at":   validateAnyJSONValue,
@@ -223,7 +253,72 @@ func validateTopLevelLogicalProjectDocument(decoder *json.Decoder) error {
 		"attempt_notes": validateLogicalAttemptNoteArray,
 		"artifacts":     validateLogicalArtifactArray,
 		"events":        validateLogicalEventArray,
-	}, []string{"format", "version", "exported_at", "project", "issues", "labels", "issue_labels", "relations", "comments", "decisions", "attempts", "attempt_notes", "artifacts", "events"})
+	}
+	required := []string{"format", "version", "exported_at", "project", "issues", "labels", "issue_labels", "relations", "comments", "decisions", "attempts", "attempt_notes", "artifacts", "events"}
+	return validators, required
+}
+
+func logicalProjectDocumentKeysV2() (map[string]validatorFunc, []string) {
+	validators, required := logicalProjectDocumentKeysV1()
+	validators["review_targets"] = validateLogicalReviewTargetArray
+	validators["review_requests"] = validateLogicalReviewRequestArray
+	validators["review_outcomes"] = validateLogicalReviewOutcomeArray
+	validators["review_events"] = validateLogicalReviewEventArray
+	validators["extensions"] = validateLogicalExtensionsObject
+	// Deliberately not added to required: every v2 addition is optional: an
+	// absent key means empty/no extensions, not a malformed document.
+	return validators, required
+}
+
+// peekLogicalProjectVersion extracts just the top-level "version" field
+// from an otherwise-unvalidated document, so the full structural pass can
+// select the right key table before it starts. This intentionally
+// tolerates unknown top-level fields and a missing/malformed everything
+// else at this stage -- the structural pass that follows still validates
+// them properly; a genuinely malformed document surfaces the same error
+// either way, just from whichever pass reaches it first.
+func peekLogicalProjectVersion(document []byte) (int, error) {
+	var header struct {
+		Version *json.Number `json:"version"`
+	}
+	if err := json.Unmarshal(document, &header); err != nil {
+		return 0, decodeError(err, "$")
+	}
+	if header.Version == nil {
+		return 0, invalidArgumentPath("$.version", "REQUIRED", "is required")
+	}
+	version, err := header.Version.Int64()
+	if err != nil {
+		return 0, unsupportedFormatVersionError("$.version")
+	}
+	if _, supported := supportedLogicalProjectVersions[int(version)]; !supported {
+		return 0, unsupportedFormatVersionError("$.version")
+	}
+	return int(version), nil
+}
+
+func validateLogicalProjectDocumentStructure(document []byte) error {
+	version, err := peekLogicalProjectVersion(document)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	if err := validateTopLevelLogicalProjectDocument(decoder, version); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return decodeError(err, "$.document")
+	}
+	return invalidArgumentPath("$.document", "TRAILING_DATA", "contains trailing JSON data")
+}
+
+func validateTopLevelLogicalProjectDocument(decoder *json.Decoder, version int) error {
+	keys := supportedLogicalProjectVersions[version]
+	validators, required := keys()
+	return validateObject(decoder, "$", validators, required)
 }
 
 func validateLogicalProjectProjectObject(decoder *json.Decoder, path string) error {
@@ -387,6 +482,97 @@ func validateLogicalEventArray(decoder *json.Decoder, path string) error {
 	})
 }
 
+func validateLogicalReviewTargetArray(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"id":              validateAnyJSONValue,
+			"issue_id":        validateAnyJSONValue,
+			"issue_version":   validateAnyJSONValue,
+			"latest_event_id": validateAnyJSONValue,
+			"artifact_ids":    validateAnyJSONValue,
+			"created_at":      validateAnyJSONValue,
+		}, []string{"id", "issue_id", "issue_version", "latest_event_id", "artifact_ids", "created_at"})
+	})
+}
+
+func validateLogicalReviewRequestArray(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"id":                   validateAnyJSONValue,
+			"target_id":            validateAnyJSONValue,
+			"issue_id":             validateAnyJSONValue,
+			"target_issue_version": validateAnyJSONValue,
+			"target_event_id":      validateAnyJSONValue,
+			"artifact_ids":         validateAnyJSONValue,
+			"status":               validateAnyJSONValue,
+			"supersedes_id":        validateAnyJSONValue,
+			"created_at":           validateAnyJSONValue,
+			"resolved_at":          validateAnyJSONValue,
+		}, []string{"id", "target_id", "issue_id", "target_issue_version", "target_event_id", "artifact_ids", "status", "supersedes_id", "created_at", "resolved_at"})
+	})
+}
+
+func validateLogicalReviewOutcomeArray(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"id":         validateAnyJSONValue,
+			"request_id": validateAnyJSONValue,
+			"attempt_id": validateAnyJSONValue,
+			"outcome":    validateAnyJSONValue,
+			"reason":     validateAnyJSONValue,
+			"created_at": validateAnyJSONValue,
+		}, []string{"id", "request_id", "attempt_id", "outcome", "reason", "created_at"})
+	})
+}
+
+func validateLogicalReviewEventArray(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"source_id":  validateAnyJSONValue,
+			"request_id": validateAnyJSONValue,
+			"target_id":  validateAnyJSONValue,
+			"attempt_id": validateAnyJSONValue,
+			"event_type": validateAnyJSONValue,
+			"payload":    validateAnyJSONValue,
+			"created_at": validateAnyJSONValue,
+		}, []string{"source_id", "request_id", "target_id", "attempt_id", "event_type", "payload", "created_at"})
+	})
+}
+
+// validateLogicalExtensionsObject validates the reserved top-level
+// "extensions" map (version 2): it must be a JSON object, but its
+// namespaced values are intentionally not shape-checked here -- each
+// namespace (gates, reservations, ...) owns and validates its own value
+// shape; this only pins that "extensions" itself is an object, not an
+// array or scalar.
+func validateLogicalExtensionsObject(decoder *json.Decoder, path string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return decodeError(err, path)
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return invalidArgumentPath(path, "INVALID_JSON_TYPE", "expected an object")
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return decodeError(err, path)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return invalidArgumentPath(path, "INVALID_JSON_TYPE", "expected an object key")
+		}
+		if err := validateAnyJSONValue(decoder, joinPath(path, key)); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return decodeError(err, path)
+	}
+	return nil
+}
+
 type validatorFunc func(*json.Decoder, string) error
 
 func validateObject(decoder *json.Decoder, path string, validators map[string]validatorFunc, required []string) error {
@@ -518,7 +704,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 	if document.Format != "rhizome-logical-project" {
 		return unsupportedFormatVersionError("$.format")
 	}
-	if document.Version != 1 {
+	if _, supported := supportedLogicalProjectVersions[document.Version]; !supported {
 		return unsupportedFormatVersionError("$.version")
 	}
 	if err := requireNonEmptyString("$.exported_at", document.ExportedAt); err != nil {
@@ -950,6 +1136,155 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 	if err := validateBlocksAcyclicity(document.Relations); err != nil {
 		return err
 	}
+
+	// Version 2 review entities: only validate when present (always empty for v1).
+	if document.Version == 2 {
+		reviewTargetIDs := make(map[string]struct{})
+		for index, target := range document.ReviewTargets {
+			path := fmt.Sprintf("$.review_targets[%d]", index)
+			if err := requireNonEmptyString(path+".id", target.ID); err != nil {
+				return err
+			}
+			if err := validateCanonicalULID(path+".id", target.ID); err != nil {
+				return err
+			}
+			if _, exists := seenIDs[target.ID]; exists {
+				return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+			}
+			seenIDs[target.ID] = "review_target"
+			reviewTargetIDs[target.ID] = struct{}{}
+			if err := validateReference(path+".issue_id", target.IssueID, issueIDs, "issue"); err != nil {
+				return err
+			}
+			if target.IssueVersion < 1 {
+				return invalidArgumentPath(path+".issue_version", "INVALID", "must be >= 1")
+			}
+			if target.LatestEventID < 0 {
+				return invalidArgumentPath(path+".latest_event_id", "INVALID", "must be >= 0")
+			}
+			if err := validateUTCTimestamp(path+".created_at", target.CreatedAt); err != nil {
+				return err
+			}
+		}
+
+		reviewRequestIDs := make(map[string]struct{})
+		for index, request := range document.ReviewRequests {
+			path := fmt.Sprintf("$.review_requests[%d]", index)
+			if err := requireNonEmptyString(path+".id", request.ID); err != nil {
+				return err
+			}
+			if err := validateCanonicalULID(path+".id", request.ID); err != nil {
+				return err
+			}
+			if _, exists := seenIDs[request.ID]; exists {
+				return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+			}
+			seenIDs[request.ID] = "review_request"
+			reviewRequestIDs[request.ID] = struct{}{}
+			if err := validateReference(path+".target_id", request.TargetID, reviewTargetIDs, "review_target"); err != nil {
+				return err
+			}
+			if err := validateReference(path+".issue_id", request.IssueID, issueIDs, "issue"); err != nil {
+				return err
+			}
+			if request.TargetIssueVersion < 1 {
+				return invalidArgumentPath(path+".target_issue_version", "INVALID", "must be >= 1")
+			}
+			if request.TargetEventID < 0 {
+				return invalidArgumentPath(path+".target_event_id", "INVALID", "must be >= 0")
+			}
+			if !ReviewRequestStatus(request.Status).Valid() {
+				return invalidArgumentPath(path+".status", "INVALID_ENUM", "unsupported review request status")
+			}
+			if request.Status == "claimed" {
+				return invalidArgumentPath(path+".status", "UNSUPPORTED_CLAIMED_REQUEST", "claimed requests are not supported in exports")
+			}
+			if request.SupersedesID != nil {
+				if err := validateNullableCanonicalULID(path+".supersedes_id", *request.SupersedesID); err != nil {
+					return err
+				}
+				if err := validateReference(path+".supersedes_id", *request.SupersedesID, reviewRequestIDs, "review_request"); err != nil {
+					return err
+				}
+			}
+			if err := validateUTCTimestamp(path+".created_at", request.CreatedAt); err != nil {
+				return err
+			}
+			if request.ResolvedAt != nil {
+				if err := validateNullableUTCTimestamp(path+".resolved_at", *request.ResolvedAt); err != nil {
+					return err
+				}
+			}
+		}
+
+		reviewOutcomeIDs := make(map[string]struct{})
+		for index, outcome := range document.ReviewOutcomes {
+			path := fmt.Sprintf("$.review_outcomes[%d]", index)
+			if err := requireNonEmptyString(path+".id", outcome.ID); err != nil {
+				return err
+			}
+			if err := validateCanonicalULID(path+".id", outcome.ID); err != nil {
+				return err
+			}
+			if _, exists := seenIDs[outcome.ID]; exists {
+				return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+			}
+			seenIDs[outcome.ID] = "review_outcome"
+			reviewOutcomeIDs[outcome.ID] = struct{}{}
+			if err := validateReference(path+".request_id", outcome.RequestID, reviewRequestIDs, "review_request"); err != nil {
+				return err
+			}
+			if err := validateReference(path+".attempt_id", outcome.AttemptID, attemptIDs, "attempt"); err != nil {
+				return err
+			}
+			if !ReviewOutcome(outcome.Outcome).Valid() {
+				return invalidArgumentPath(path+".outcome", "INVALID_ENUM", "unsupported review outcome")
+			}
+			if outcome.Outcome == "blocked" && (outcome.Reason == nil || strings.TrimSpace(*outcome.Reason) == "") {
+				return invalidArgumentPath(path+".reason", "REQUIRED", "required when outcome is blocked")
+			}
+			if outcome.Reason != nil && outcome.Outcome != "blocked" {
+				// For non-blocked outcomes, reason can be present but is not required
+			}
+			if err := validateUTCTimestamp(path+".created_at", outcome.CreatedAt); err != nil {
+				return err
+			}
+		}
+
+		for index, event := range document.ReviewEvents {
+			path := fmt.Sprintf("$.review_events[%d]", index)
+			if event.SourceID < 0 {
+				return invalidArgumentPath(path+".source_id", "INVALID", "must be >= 0")
+			}
+			if err := validateReference(path+".request_id", event.RequestID, reviewRequestIDs, "review_request"); err != nil {
+				return err
+			}
+			if err := validateReference(path+".target_id", event.TargetID, reviewTargetIDs, "review_target"); err != nil {
+				return err
+			}
+			if event.AttemptID != nil {
+				if err := validateNullableCanonicalULID(path+".attempt_id", *event.AttemptID); err != nil {
+					return err
+				}
+				if err := validateReference(path+".attempt_id", *event.AttemptID, attemptIDs, "attempt"); err != nil {
+					return err
+				}
+			}
+			if err := requireNonEmptyString(path+".event_type", event.EventType); err != nil {
+				return err
+			}
+			if _, err := ParseReviewEventType(event.EventType); err != nil {
+				return invalidArgumentPath(path+".event_type", "INVALID_ENUM", "unsupported review event type")
+			}
+			if !isValidEventPayload(event.Payload) {
+				return invalidArgumentPath(path+".payload", "INVALID_JSON", "payload must be valid JSON")
+			}
+			if err := validateUTCTimestamp(path+".created_at", event.CreatedAt); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 

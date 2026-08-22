@@ -77,7 +77,7 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 		}
 
 		document.Format = "rhizome-logical-project"
-		document.Version = 1
+		document.Version = 2
 		document.Project = domain.LogicalProjectProject{
 			ID:           project.ID,
 			Name:         project.Name,
@@ -173,6 +173,42 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 			return err
 		}
 		document.Events = events
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
+		reviewTargets, latest, err := readLogicalReviewTargets(ctx, query)
+		if err != nil {
+			return err
+		}
+		document.ReviewTargets = reviewTargets
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
+		reviewRequests, latest, err := readLogicalReviewRequests(ctx, query)
+		if err != nil {
+			return err
+		}
+		document.ReviewRequests = reviewRequests
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
+		reviewOutcomes, latest, err := readLogicalReviewOutcomes(ctx, query)
+		if err != nil {
+			return err
+		}
+		document.ReviewOutcomes = reviewOutcomes
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
+		reviewEvents, latest, err := readLogicalReviewEvents(ctx, query)
+		if err != nil {
+			return err
+		}
+		document.ReviewEvents = reviewEvents
 		if latest.After(exportedAt) {
 			exportedAt = latest
 		}
@@ -541,6 +577,95 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				return err
 			}
 		}
+
+		reviewTargetDestIDs := plan.DestinationIDs.ReviewTargetIDs
+		reviewRequestDestIDs := plan.DestinationIDs.ReviewRequestIDs
+		reviewOutcomeDestIDs := plan.DestinationIDs.ReviewOutcomeIDs
+		for _, target := range plan.Document.ReviewTargets {
+			if _, ok := reviewTargetDestIDs[target.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination review target identifier", false)
+			}
+		}
+		for _, request := range plan.Document.ReviewRequests {
+			if _, ok := reviewRequestDestIDs[request.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination review request identifier", false)
+			}
+		}
+		for _, outcome := range plan.Document.ReviewOutcomes {
+			if _, ok := reviewOutcomeDestIDs[outcome.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination review outcome identifier", false)
+			}
+		}
+
+		for _, target := range plan.Document.ReviewTargets {
+			createdAt, err := parseLogicalProjectTimestamp("review_targets.created_at", target.CreatedAt)
+			if err != nil {
+				return err
+			}
+			artifactIDsJSON, err := json.Marshal(target.ArtifactIDs)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+				reviewTargetDestIDs[target.ID], issueDestIDs[target.IssueID], target.IssueVersion, target.LatestEventID, string(artifactIDsJSON), formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+
+		for _, request := range plan.Document.ReviewRequests {
+			createdAt, err := parseLogicalProjectTimestamp("review_requests.created_at", request.CreatedAt)
+			if err != nil {
+				return err
+			}
+			var resolvedAt *string
+			if request.ResolvedAt != nil {
+				parsedTime, err := parseLogicalProjectTimestamp("review_requests.resolved_at", *request.ResolvedAt)
+				if err != nil {
+					return err
+				}
+				formattedTime := formatStorageTime(parsedTime)
+				resolvedAt = &formattedTime
+			}
+			var supersedesID *string
+			if request.SupersedesID != nil {
+				mappedID := reviewRequestDestIDs[*request.SupersedesID]
+				supersedesID = &mappedID
+			}
+			artifactIDsJSON, err := json.Marshal(request.ArtifactIDs)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
+				reviewRequestDestIDs[request.ID], reviewTargetDestIDs[request.TargetID], issueDestIDs[request.IssueID], request.TargetIssueVersion, request.TargetEventID, string(artifactIDsJSON), request.Status, nullableString(supersedesID), formatStorageTime(createdAt), nullableString(resolvedAt)); err != nil {
+				return err
+			}
+		}
+
+		for _, outcome := range plan.Document.ReviewOutcomes {
+			createdAt, err := parseLogicalProjectTimestamp("review_outcomes.created_at", outcome.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+				reviewOutcomeDestIDs[outcome.ID], reviewRequestDestIDs[outcome.RequestID], attemptDestIDs[outcome.AttemptID], outcome.Outcome, nullableString(outcome.Reason), formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+
+		// plan.Document.ReviewEvents is deliberately NOT re-inserted here:
+		// every review-sourced event it contains is already present in
+		// plan.Document.Events too (readLogicalEvents exports all of
+		// issue_events, review-sourced rows included -- see
+		// TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThem,
+		// which pins this on purpose), and that array's own insertion loop
+		// above already recreates every one of those rows. Re-inserting
+		// them again from ReviewEvents would duplicate them. ReviewEvents
+		// exists as an export-time convenience projection (typed
+		// request_id/target_id instead of buried in an opaque payload,
+		// scoped to the review workflow) for tools and humans reading the
+		// interchange document directly, not as a second source of truth
+		// to replay; its referential integrity is still checked at parse
+		// time regardless (see validateLogicalProjectDocumentSemantics).
 
 		if len(plan.Document.Issues) > 0 {
 			if _, err := tx.ExecContext(ctx, `UPDATE projects SET next_issue_number = ?, updated_at = ?`, nextIssueNumber+int64(len(plan.Document.Issues)), formatStorageTime(projectUpdatedAt)); err != nil {
@@ -1170,6 +1295,256 @@ func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEven
 			return nil, time.Time{}, err
 		}
 		events = append(events, domain.LogicalEvent{SourceID: id, IssueID: nullableLogicalString(issueID), EventType: eventType, SessionID: nil, AttemptID: nullableLogicalString(attemptID), Payload: payload, CreatedAt: formatLogicalProjectTimestamp(createdAt)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return events, latest, nil
+}
+
+func readLogicalReviewTargets(ctx context.Context, query Queryer) ([]domain.LogicalReviewTarget, time.Time, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, created_at
+		FROM review_targets
+		WHERE issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
+		ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	targets := make([]domain.LogicalReviewTarget, 0)
+	var latest time.Time
+	for rows.Next() {
+		var (
+			id, issueID, artifactIDsJSON, createdAtText string
+			issueVersion, latestEventID                 int64
+		)
+		if err := rows.Scan(&id, &issueID, &issueVersion, &latestEventID, &artifactIDsJSON, &createdAtText); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_targets")
+		}
+		if _, err := ids.ParseStrict(id); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(issueID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "issue_id", "INVALID_ULID")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		artifactIDs, err := parseLogicalStringArray("artifact_ids", artifactIDsJSON)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		targets = append(targets, domain.LogicalReviewTarget{
+			ID:            id,
+			IssueID:       issueID,
+			IssueVersion:  issueVersion,
+			LatestEventID: latestEventID,
+			ArtifactIDs:   artifactIDs,
+			CreatedAt:     formatLogicalProjectTimestamp(createdAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return targets, latest, nil
+}
+
+func readLogicalReviewRequests(ctx context.Context, query Queryer) ([]domain.LogicalReviewRequest, time.Time, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, created_at, resolved_at
+		FROM review_requests
+		WHERE issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
+			AND status <> 'claimed'
+		ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	requests := make([]domain.LogicalReviewRequest, 0)
+	var latest time.Time
+	for rows.Next() {
+		var (
+			id, targetID, issueID, status, artifactIDsJSON, createdAtText string
+			targetIssueVersion, targetEventID                             int64
+			supersedesID, resolvedAtText                                  sql.NullString
+		)
+		if err := rows.Scan(&id, &targetID, &issueID, &targetIssueVersion, &targetEventID, &artifactIDsJSON, &status, &supersedesID, &createdAtText, &resolvedAtText); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_requests")
+		}
+		if _, err := ids.ParseStrict(id); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(targetID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "target_id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(issueID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "issue_id", "INVALID_ULID")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		artifactIDs, err := parseLogicalStringArray("artifact_ids", artifactIDsJSON)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		request := domain.LogicalReviewRequest{
+			ID:                 id,
+			TargetID:           targetID,
+			IssueID:            issueID,
+			TargetIssueVersion: targetIssueVersion,
+			TargetEventID:      targetEventID,
+			ArtifactIDs:        artifactIDs,
+			Status:             status,
+			SupersedesID:       nullableLogicalString(supersedesID),
+			CreatedAt:          formatLogicalProjectTimestamp(createdAt),
+		}
+		if resolvedAtText.Valid {
+			resolvedAt, err := parseLogicalProjectTimestamp("resolved_at", resolvedAtText.String)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			if resolvedAt.After(latest) {
+				latest = resolvedAt
+			}
+			request.ResolvedAt = ptrLogicalString(formatLogicalProjectTimestamp(resolvedAt))
+		}
+		requests = append(requests, request)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return requests, latest, nil
+}
+
+func readLogicalReviewOutcomes(ctx context.Context, query Queryer) ([]domain.LogicalReviewOutcome, time.Time, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT ro.id, ro.request_id, ro.attempt_id, ro.outcome, ro.reason, ro.created_at
+		FROM review_outcomes ro
+		JOIN review_requests rr ON ro.request_id = rr.id
+		JOIN issues i ON rr.issue_id = i.id
+		WHERE i.archived_at IS NULL
+		ORDER BY ro.created_at ASC, ro.id ASC`)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	outcomes := make([]domain.LogicalReviewOutcome, 0)
+	var latest time.Time
+	for rows.Next() {
+		var (
+			id, requestID, attemptID, outcome, createdAtText string
+			reason                                           sql.NullString
+		)
+		if err := rows.Scan(&id, &requestID, &attemptID, &outcome, &reason, &createdAtText); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_outcomes")
+		}
+		if _, err := ids.ParseStrict(id); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(requestID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "request_id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(attemptID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "attempt_id", "INVALID_ULID")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		outcomes = append(outcomes, domain.LogicalReviewOutcome{
+			ID:        id,
+			RequestID: requestID,
+			AttemptID: attemptID,
+			Outcome:   outcome,
+			Reason:    nullableLogicalString(reason),
+			CreatedAt: formatLogicalProjectTimestamp(createdAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return outcomes, latest, nil
+}
+
+func readLogicalReviewEvents(ctx context.Context, query Queryer) ([]domain.LogicalReviewEvent, time.Time, error) {
+	// review_events was folded into issue_events (source='review') by
+	// migration 008; request_id/target_id are no longer their own columns
+	// there, so pull them back out of the payload every review event
+	// already carries them in (see payloadForReviewEvent in reviews.go --
+	// every review_* event type sets both unconditionally). Applies the
+	// same archived-issue and active-attempt exclusions readLogicalEvents
+	// uses for the unified log's issue-sourced rows.
+	rows, err := query.QueryContext(ctx, `
+		SELECT e.id, json_extract(e.payload, '$.request_id'), json_extract(e.payload, '$.target_id'),
+			e.attempt_id, e.event_type, e.payload, e.created_at
+		FROM issue_events e
+		WHERE e.source = 'review'
+			AND (e.issue_id IS NULL OR e.issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL))
+			AND (e.attempt_id IS NULL OR e.attempt_id NOT IN (SELECT id FROM work_attempts WHERE status = 'active'))
+		ORDER BY e.created_at ASC, e.id ASC`)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	events := make([]domain.LogicalReviewEvent, 0)
+	var latest time.Time
+	for rows.Next() {
+		var (
+			sourceID                       int64
+			requestID, targetID, eventType string
+			payloadText, createdAtText     string
+			attemptIDNull                  sql.NullString
+		)
+		if err := rows.Scan(&sourceID, &requestID, &targetID, &attemptIDNull, &eventType, &payloadText, &createdAtText); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_events")
+		}
+		if _, err := ids.ParseStrict(requestID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "request_id", "INVALID_ULID")
+		}
+		if _, err := ids.ParseStrict(targetID); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectField(err, "target_id", "INVALID_ULID")
+		}
+		if attemptIDNull.Valid {
+			if _, err := ids.ParseStrict(attemptIDNull.String); err != nil {
+				return nil, time.Time{}, corruptLogicalProjectField(err, "attempt_id", "INVALID_ULID")
+			}
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		payload, err := parseLogicalJSONBytes("payload", payloadText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		events = append(events, domain.LogicalReviewEvent{
+			SourceID:  sourceID,
+			RequestID: requestID,
+			TargetID:  targetID,
+			AttemptID: nullableLogicalString(attemptIDNull),
+			EventType: eventType,
+			Payload:   payload,
+			CreatedAt: formatLogicalProjectTimestamp(createdAt),
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, time.Time{}, err

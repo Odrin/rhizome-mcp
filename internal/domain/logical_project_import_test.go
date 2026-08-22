@@ -274,7 +274,7 @@ func TestParseLogicalProjectImportPlanRejectsMalformedJSONAndUnsupportedVersion(
 
 	t.Run("rejects unsupported versions", func(t *testing.T) {
 		payload := buildLogicalProjectDocument(func(document map[string]any) {
-			document["version"] = 2
+			document["version"] = 3
 		})
 		_, err := domain.ParseLogicalProjectImportPlan(payload)
 		assertDomainErrorDetail(t, err, domain.CodeUnsupportedFormatVersion, domain.CodeUnsupportedFormatVersion, "$.version")
