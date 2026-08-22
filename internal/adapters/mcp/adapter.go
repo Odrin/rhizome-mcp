@@ -300,7 +300,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	// finish_attempt is lease-gated (repository requires status = 'active'),
 	// so a bare repeat after the first success fails with no further
 	// mutation; it can overwrite the issue's status/blocked_reason.
-	target.registerTool(server, groupLifecycle, tool("finish_attempt", "End a leased attempt with outcome, verification, artifacts, and status.", schemaFinishAttempt(), schemaFinishAttemptOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupLifecycle, tool("finish_attempt", "End a leased attempt with outcome, verification, and status. Kind determines required fields: set at claim_issue time.", schemaFinishAttempt(), schemaFinishAttemptOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[finishAttemptInput, any](target, t, (*adapter).finishAttempt))
 	})
 	target.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {

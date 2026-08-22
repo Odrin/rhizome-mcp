@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -477,20 +478,22 @@ func schemaFinishAttempt() *jsonschema.Schema {
 		"latest_event_id": boundedIntegerSchema(0, 9_223_372_036_854_775_807),
 	}, "issue_version", "latest_event_id")
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"attempt_id": boundedStringSchema(26), "lease_token": boundedStringSchema(512),
-		"outcome":        enumSchema("completed", "failed", "interrupted"),
-		"result_summary": boundedStringSchema(50_000),
-		"next_steps":     boundedStringsSchema(20, 1_000), "verification": boundedStringsSchema(20, 1_000),
-		"view":                     enumSchema("compact", "full"),
-		"target_issue_status":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"done", "review", "ready", "blocked", nil}},
-		"blocked_reason":           nullableBoundedStringSchema(50_000),
-		"review_outcome":           &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"approved", "changes_requested", "blocked", nil}},
-		"failure_reason_code":      &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"implementation_error", "environment_error", "missing_dependency", "invalid_requirements", "tests_failed", "context_lost", "timeout", "other", nil}},
-		"interruption_reason_code": &jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}},
-		"reason_details":           nullableBoundedStringSchema(50_000),
-		"acknowledged_changes":     &jsonschema.Schema{OneOf: []*jsonschema.Schema{acknowledgement, &jsonschema.Schema{Type: "null"}}},
-		"artifacts":                schemaArtifacts(),
-		"idempotency_key":          nullableBoundedStringSchema(128),
+		"attempt_id":               withDescription(boundedStringSchema(26), "Attempt ULID to finish; required."),
+		"lease_token":              withDescription(boundedStringSchema(512), "Opaque lease proof from claim_issue; required."),
+		"outcome":                  withDescription(enumSchema("completed", "failed", "interrupted"), "Outcome classification; required. One of: completed, failed, interrupted."),
+		"result_summary":           withDescription(boundedStringSchema(50_000), "Free-form completion summary or error description; required."),
+		"next_steps":               withDescription(boundedStringsSchema(20, 1_000), "Optional recovery or handoff steps (up to 20 items, 1000 chars each)."),
+		"verification":             withDescription(boundedStringsSchema(20, 1_000), "Optional verification items demonstrated or tested (up to 20 items, 1000 chars each)."),
+		"view":                     withDescription(enumSchema("compact", "full"), "Output format: compact (default) or full with complete payloads."),
+		"target_issue_status":      withDescription(&jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"done", "review", "ready", "blocked", nil}}, "Final issue status for work completion (outcome=completed, kind=work). Required for work completion. One of: done, review, ready, blocked. Forbidden for failed, interrupted, or review completion."),
+		"blocked_reason":           withDescription(nullableBoundedStringSchema(50_000), "Reason why a work attempt completed to blocked or review attempt completed to blocked. Required if target_issue_status=blocked (kind=work) or review_outcome=blocked (kind=review). Forbidden otherwise."),
+		"review_outcome":           withDescription(&jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"approved", "changes_requested", "blocked", nil}}, "Review classification for review completion (outcome=completed, kind=review). Required for review completion. One of: approved, changes_requested, blocked. Forbidden for failed, interrupted, or work completion."),
+		"failure_reason_code":      withDescription(&jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"implementation_error", "environment_error", "missing_dependency", "invalid_requirements", "tests_failed", "context_lost", "timeout", "other", nil}}, "Reason code for failed outcome (outcome=failed). Required if outcome=failed. Forbidden for completed or interrupted outcomes."),
+		"interruption_reason_code": withDescription(&jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"handoff", "user_request", "context_limit", "client_shutdown", "environment_change", "other", nil}}, "Reason code for interrupted outcome (outcome=interrupted). Required if outcome=interrupted. Forbidden for completed or failed outcomes."),
+		"reason_details":           withDescription(nullableBoundedStringSchema(50_000), "Additional details about failure, interruption, or blocked outcome. Only allowed when target_issue_status=blocked (kind=work) or review_outcome=blocked (kind=review)."),
+		"acknowledged_changes":     withDescription(&jsonschema.Schema{OneOf: []*jsonschema.Schema{acknowledgement, &jsonschema.Schema{Type: "null"}}}, "Optional acknowledgement of issue and event changes to prevent loss on concurrent updates."),
+		"artifacts":                withDescription(schemaArtifacts(), "Optional artifact references (links, files, or other work products) created or discovered during the attempt."),
+		"idempotency_key":          withDescription(nullableBoundedStringSchema(128), "Optional key for idempotent retries; replays exact response for identical normalized requests."),
 	}, "attempt_id", "lease_token", "outcome", "result_summary"))
 }
 
@@ -668,8 +671,23 @@ func schemaRenewAttemptOutput() *jsonschema.Schema    { return typedSchema[renew
 func schemaSaveAttemptNoteOutput() *jsonschema.Schema { return typedSchema[saveAttemptNoteOutput]() }
 func schemaFinishAttemptOutput() *jsonschema.Schema   { return schemaFinishAttemptUnion() }
 
+// rawMessageSchema overrides reflection's default translation of
+// json.RawMessage ([]byte underneath) into an array-of-integers schema:
+// json.RawMessage's custom MarshalJSON/UnmarshalJSON pass the underlying
+// bytes through as literal embedded JSON, so on the wire it's always
+// whatever JSON value it holds -- an object, for every event payload this
+// codebase produces -- never an array of numbers. An empty schema accepts
+// any JSON value, which is accurate for a field whose shape genuinely
+// varies by event_type (see ISSUE-199: this drift was invisible because
+// success() never runs the SDK's own output validation).
+var rawMessageSchema = &jsonschema.Schema{}
+
 func typedSchema[T any]() *jsonschema.Schema {
-	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})
+	schema, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{
+		TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+			reflect.TypeFor[json.RawMessage](): rawMessageSchema,
+		},
+	})
 	if err != nil {
 		panic(err)
 	}

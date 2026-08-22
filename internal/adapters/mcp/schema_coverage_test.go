@@ -345,3 +345,47 @@ func unsupportedFieldRejected(t *testing.T, result *sdkmcp.CallToolResult) (stri
 	}
 	return "", false
 }
+
+// TestFinishAttemptPropertiesAllHaveDescriptions asserts that every property
+// in finish_attempt's input schema has a non-empty Description. This covers
+// ISSUE-199 AC5: the kind/outcome-conditional contract must be documented in
+// the schema itself, not just in external docs.
+func TestFinishAttemptPropertiesAllHaveDescriptions(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "finish-attempt-descriptions.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	tools, err := client.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+
+	var finishAttemptTool *sdkmcp.Tool
+	for _, tool := range tools.Tools {
+		if tool.Name == "finish_attempt" {
+			finishAttemptTool = tool
+			break
+		}
+	}
+	if finishAttemptTool == nil {
+		t.Fatalf("finish_attempt tool not found in catalog")
+	}
+
+	schema := decodeInputSchema(t, finishAttemptTool)
+	if schema == nil || schema.Properties == nil {
+		t.Fatalf("finish_attempt has no input schema properties")
+	}
+
+	// Every property (both required and optional) must have a description.
+	for propertyName, property := range schema.Properties {
+		if property == nil {
+			t.Errorf("finish_attempt property %q is nil", propertyName)
+			continue
+		}
+		if strings.TrimSpace(property.Description) == "" {
+			t.Errorf("finish_attempt property %q has no description", propertyName)
+		}
+	}
+}

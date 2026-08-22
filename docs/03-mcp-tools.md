@@ -134,7 +134,7 @@ The following defaults are covered by the integration gate and should be treated
 | `get_issue` | standard: `id`, `display_id`, `sequence_no`, `type`, `title`, `status`, `priority`, `parent_issue_id`, `blocked_reason`, `version`, timestamps, `labels`; no bodies | 32 KiB |
 | `get_issue_graph` | `root_issue_id`, bounded `nodes`, `edges`, `summary`, `entry_points`, truncation fields | 32 KiB for the deterministic fixture used in the integration test |
 | `get_planning_graph` | bounded `nodes`, `edges`, `entry_points`, `blocking_nodes`, `summary`, `warnings`, `truncated` | 32 KiB for the deterministic fixture used in the integration test |
-| `manage_issue_relation` | `changed`, relation fields, `affected_issues`, `latest_event_id` | 32 KiB |
+| `manage_issue_relation` | `changed`, relation fields, `affected_issues` | 32 KiB |
 | `create_issue` | compact: `id`, `display_id`, `sequence_no`, `type`, `status`, `priority`, `version` | 32 KiB |
 | `update_issue` | compact `issue` (`id`, `display_id`, `status`, `version`) and `changed_fields` | 32 KiB |
 | `archive_issue` | compact: `id`, `display_id`, `status`, `version` | 32 KiB |
@@ -1733,7 +1733,7 @@ another event or artifact set. Reusing the key with a different normalized
 request returns `IDEMPOTENCY_CONFLICT`; a request without a key retains the
 ordinary non-idempotent finish behavior.
 
-Work outcomes:
+Outcomes (all kinds):
 
 ```text
 completed
@@ -1741,26 +1741,41 @@ failed
 interrupted
 ```
 
-Work completion also supplies:
+The required and forbidden fields for each (kind, outcome) combination are:
 
-```text
-target_issue_status: done | review | ready | blocked
-blocked_reason
-failure_reason_code
-interruption_reason_code
-reason_details
-```
+**Work attempt + outcome=completed:**
+- `target_issue_status` (required): done | review | ready | blocked
+- `review_outcome`, `failure_reason_code`, `interruption_reason_code` (forbidden)
+- `blocked_reason` (required if `target_issue_status: blocked`; forbidden otherwise)
+- `reason_details` (forbidden except when `target_issue_status: blocked`)
 
 Completing work with `target_issue_status: ready` while the issue is already `ready` succeeds as a no-op — the issue returns to the queue unchanged rather than being rejected as an invalid transition.
 
-Review completion supplies:
+**Work attempt + outcome=failed:**
+- `failure_reason_code` (required): implementation_error | environment_error | missing_dependency | invalid_requirements | tests_failed | context_lost | timeout | other
+- `target_issue_status`, `review_outcome`, `blocked_reason`, `interruption_reason_code` (forbidden)
+- `reason_details` (optional; provides context for the failure)
 
-```text
-review_outcome:
-  approved
-  changes_requested
-  blocked
-```
+**Work attempt + outcome=interrupted:**
+- `interruption_reason_code` (required): handoff | user_request | context_limit | client_shutdown | environment_change | other
+- `target_issue_status`, `review_outcome`, `blocked_reason`, `failure_reason_code` (forbidden)
+- `reason_details` (optional; provides context for the interruption)
+
+**Review attempt + outcome=completed:**
+- `review_outcome` (required): approved | changes_requested | blocked
+- `target_issue_status`, `failure_reason_code`, `interruption_reason_code` (forbidden)
+- `blocked_reason` (required if `review_outcome: blocked`; forbidden otherwise)
+- `reason_details` (forbidden except when `review_outcome: blocked`)
+
+**Review attempt + outcome=failed:**
+- `failure_reason_code` (required): implementation_error | environment_error | missing_dependency | invalid_requirements | tests_failed | context_lost | timeout | other
+- `target_issue_status`, `review_outcome`, `blocked_reason`, `interruption_reason_code` (forbidden)
+- `reason_details` (optional; provides context for the failure)
+
+**Review attempt + outcome=interrupted:**
+- `interruption_reason_code` (required): handoff | user_request | context_limit | client_shutdown | environment_change | other
+- `target_issue_status`, `review_outcome`, `blocked_reason`, `failure_reason_code` (forbidden)
+- `reason_details` (optional; provides context for the interruption)
 
 `view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete finish response with the full attempt and issue payloads plus the complete artifact set.
 
