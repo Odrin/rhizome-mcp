@@ -53,7 +53,7 @@ func TestProjectServiceGetsProjectMetadata(t *testing.T) {
 			UpdatedAt:     time.Unix(2, 0).UTC(),
 		},
 	}
-	service, err := application.NewProjectService(repository)
+	service, err := application.NewProjectService(repository, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestProjectServiceGetsProjectMetadata(t *testing.T) {
 
 func TestProjectServicePropagatesRepositoryError(t *testing.T) {
 	want := errors.New("repository failed")
-	service, err := application.NewProjectService(&recordingProjectRepository{err: want})
+	service, err := application.NewProjectService(&recordingProjectRepository{err: want}, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestProjectServicePropagatesRepositoryError(t *testing.T) {
 
 func TestProjectServiceExportsLogicalProjectDocument(t *testing.T) {
 	repository := &recordingProjectRepository{export: domain.LogicalProjectDocument{Format: "rhizome-logical-project", Version: 1}}
-	service, err := application.NewProjectService(repository)
+	service, err := application.NewProjectService(repository, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -100,14 +100,14 @@ func TestProjectServiceExportsLogicalProjectDocument(t *testing.T) {
 }
 
 func TestNewProjectServiceRequiresRepository(t *testing.T) {
-	if _, err := application.NewProjectService(nil); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+	if _, err := application.NewProjectService(nil, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewProjectService(nil) error = %v, want invalid argument", err)
 	}
 }
 
 func TestProjectServiceValidatesLogicalProjectImportAndReportsDestinationConflict(t *testing.T) {
 	repository := &recordingProjectRepository{hasContent: true}
-	service, err := application.NewProjectService(repository)
+	service, err := application.NewProjectService(repository, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -146,7 +146,7 @@ func TestProjectServiceValidatesLogicalProjectImportAndReportsDestinationConflic
 
 func TestProjectServiceRejectsMalformedLogicalProjectImport(t *testing.T) {
 	repository := &recordingProjectRepository{}
-	service, err := application.NewProjectService(repository)
+	service, err := application.NewProjectService(repository, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestProjectServiceRejectsMalformedLogicalProjectImport(t *testing.T) {
 
 func TestProjectServiceAppliesLogicalProjectImport(t *testing.T) {
 	repository := &recordingProjectRepository{applyResult: domain.LogicalProjectImportApplyResult{LatestEventID: 12}}
-	service, err := application.NewProjectService(repository)
+	service, err := application.NewProjectService(repository, fixedIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FA1"})
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}

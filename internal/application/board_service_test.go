@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"crypto/rand"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -206,7 +208,9 @@ func newBoardServiceDependenciesWithRepos(t *testing.T, issueRepo ports.IssueRep
 	if err != nil {
 		t.Fatalf("NewAttemptService() error = %v", err)
 	}
-	reviewService, err := NewReviewService(reviewRepo, issueRepo, clock.NewFakeClock(now))
+	fakeClock := clock.NewFakeClock(now)
+	generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+	reviewService, err := NewReviewService(reviewRepo, issueRepo, fakeClock, generator)
 	if err != nil {
 		t.Fatalf("NewReviewService() error = %v", err)
 	}

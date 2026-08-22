@@ -10,6 +10,8 @@ import (
 
 // CreateReviewRequestCommand captures a review request creation intent.
 type CreateReviewRequestCommand struct {
+	RequestID          string
+	TargetID           string
 	IssueID            string
 	TargetIssueVersion int64
 	TargetEventID      int64
@@ -64,6 +66,7 @@ type ListReviewRequestsResult struct {
 type ResolveReviewRequestCommand struct {
 	RequestID       string
 	ExpectedVersion int64
+	OutcomeID       string
 	OccurredAt      time.Time
 	AttemptID       string
 	Outcome         domain.ReviewOutcome
@@ -84,6 +87,8 @@ type ResolveReviewRequestResult struct {
 type ReplaceReviewRequestCommand struct {
 	PredecessorRequestID       string
 	PredecessorExpectedVersion int64
+	SuccessorID                string
+	SuccessorTargetID          string
 	TargetIssueVersion         int64
 	TargetEventID              int64
 	ArtifactIDs                []string

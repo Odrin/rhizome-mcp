@@ -3,6 +3,7 @@ package application
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -133,7 +135,9 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 	t.Run("resolves display IDs and copies artifact IDs", func(t *testing.T) {
 		issueRepo := &recordingIssueRepository{resolvedIssue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
 		reviewRepo := &recordingReviewRepository{}
-		service, err := NewReviewService(reviewRepo, issueRepo, clock.NewFakeClock(fixedTime))
+		fakeClock := clock.NewFakeClock(fixedTime)
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		service, err := NewReviewService(reviewRepo, issueRepo, fakeClock, generator)
 		if err != nil {
 			t.Fatalf("NewReviewService returned error: %v", err)
 		}
@@ -173,7 +177,9 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 
 	t.Run("rejects invalid list cursor and status before repository calls", func(t *testing.T) {
 		reviewRepo := &recordingReviewRepository{}
-		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, clock.NewFakeClock(fixedTime))
+		fakeClock := clock.NewFakeClock(fixedTime)
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, fakeClock, generator)
 		if err != nil {
 			t.Fatalf("NewReviewService returned error: %v", err)
 		}
@@ -199,7 +205,9 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 
 	t.Run("filters list results and derives next cursor", func(t *testing.T) {
 		reviewRepo := &recordingReviewRepository{listItems: []domain.ReviewRequest{{ID: "req-open", Status: domain.ReviewRequestStatusOpen}, {ID: "req-claimed", Status: domain.ReviewRequestStatusClaimed}, {ID: "req-approved", Status: domain.ReviewRequestStatusApproved}}, listHasMore: true, nextOffset: 7}
-		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, clock.NewFakeClock(fixedTime))
+		fakeClock := clock.NewFakeClock(fixedTime)
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, fakeClock, generator)
 		if err != nil {
 			t.Fatalf("NewReviewService returned error: %v", err)
 		}
@@ -226,7 +234,9 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 
 	t.Run("uses utc clock for cancel and supersede mutations", func(t *testing.T) {
 		reviewRepo := &recordingReviewRepository{}
-		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, clock.NewFakeClock(fixedTime))
+		fakeClock := clock.NewFakeClock(fixedTime)
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, fakeClock, generator)
 		if err != nil {
 			t.Fatalf("NewReviewService returned error: %v", err)
 		}
@@ -245,7 +255,9 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 
 	t.Run("uses canonical hash for replace and replays writes", func(t *testing.T) {
 		reviewRepo := &recordingReviewRepository{}
-		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, clock.NewFakeClock(fixedTime))
+		fakeClock := clock.NewFakeClock(fixedTime)
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		service, err := NewReviewService(reviewRepo, &recordingIssueRepository{}, fakeClock, generator)
 		if err != nil {
 			t.Fatalf("NewReviewService returned error: %v", err)
 		}
@@ -309,7 +321,7 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 
 func TestProjectServiceConstructorAndImportValidation(t *testing.T) {
 	t.Run("constructor rejects nil repository", func(t *testing.T) {
-		_, err := NewProjectService(nil)
+		_, err := NewProjectService(nil, fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FA1"))
 		if err == nil {
 			t.Fatal("expected constructor error")
 		}
@@ -321,7 +333,7 @@ func TestProjectServiceConstructorAndImportValidation(t *testing.T) {
 
 	t.Run("returns parse errors before checking destination content", func(t *testing.T) {
 		repo := &recordingProjectRepository{}
-		service, err := NewProjectService(repo)
+		service, err := NewProjectService(repo, fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FA1"))
 		if err != nil {
 			t.Fatalf("NewProjectService returned error: %v", err)
 		}
@@ -336,7 +348,7 @@ func TestProjectServiceConstructorAndImportValidation(t *testing.T) {
 
 	t.Run("adds empty-destination conflicts when destination is occupied", func(t *testing.T) {
 		repo := &recordingProjectRepository{hasDestinationContent: true}
-		service, err := NewProjectService(repo)
+		service, err := NewProjectService(repo, fixedAttemptIDGenerator("01ARZ3NDEKTSV4RRFFQ69G5FA1"))
 		if err != nil {
 			t.Fatalf("NewProjectService returned error: %v", err)
 		}

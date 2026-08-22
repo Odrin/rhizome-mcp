@@ -48,7 +48,11 @@ func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewProjectRepository() error = %v", err)
 	}
-	service, err := application.NewProjectService(repository)
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	service, err := application.NewProjectService(repository, generator)
 	if err != nil {
 		t.Fatalf("NewProjectService() error = %v", err)
 	}
@@ -317,6 +321,7 @@ func TestProjectRepositoryAppliesLogicalImportWithRemappedReferences(t *testing.
 	if err != nil {
 		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
 	}
+	plan = assignImportDestinationIDs(t, plan)
 
 	repository, err := sqlite.NewProjectRepository(db)
 	if err != nil {
@@ -417,6 +422,7 @@ func TestProjectRepositoryCanonicalizesRelatedToAfterImportRemapping(t *testing.
 	if err != nil {
 		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
 	}
+	plan = assignImportDestinationIDs(t, plan)
 
 	originalReader := cryptorand.Reader
 	cryptorand.Reader = bytes.NewReader(bytes.Join([][]byte{
@@ -515,6 +521,7 @@ func TestProjectRepositoryRollsBackFailedImportAndPreservesSequence(t *testing.T
 	if err != nil {
 		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
 	}
+	plan = assignImportDestinationIDs(t, plan)
 
 	repository, err := sqlite.NewProjectRepository(db)
 	if err != nil {
@@ -570,6 +577,7 @@ func TestProjectRepositoryReturnsConflictOnRetryAfterSuccessfulImport(t *testing
 	if err != nil {
 		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
 	}
+	plan = assignImportDestinationIDs(t, plan)
 
 	repository, err := sqlite.NewProjectRepository(db)
 	if err != nil {
@@ -788,6 +796,7 @@ func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThe
 	if err != nil {
 		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
 	}
+	plan = assignImportDestinationIDs(t, plan)
 
 	destinationDB, _ := openProjectDatabase(t, "destination project", "instructions")
 	destinationRepository, err := sqlite.NewProjectRepository(destinationDB)
@@ -873,4 +882,21 @@ func assertProjectDomainCode(t *testing.T, err error, code string) {
 
 func stringValuePointer(value string) *string {
 	return &value
+}
+
+// assignImportDestinationIDs mints a destination ID map for plan the same
+// way application.ProjectService.ApplyLogicalProjectImport now does, for
+// tests that call ProjectRepository.ApplyLogicalProjectImport directly.
+func assignImportDestinationIDs(t *testing.T, plan domain.LogicalProjectImportPlan) domain.LogicalProjectImportPlan {
+	t.Helper()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(time.Date(2026, 7, 14, 10, 11, 12, 0, time.UTC)), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	destinationIDs, err := domain.NewLogicalProjectImportDestinationIDs(plan.Document, generator.New)
+	if err != nil {
+		t.Fatalf("NewLogicalProjectImportDestinationIDs() error = %v", err)
+	}
+	plan.DestinationIDs = destinationIDs
+	return plan
 }

@@ -447,6 +447,14 @@ func cleanupBackupOutput(path string, expected os.FileInfo) error {
 	return nil
 }
 
+// Clock returns the project's injected clock.
+func (project *Project) Clock() clock.Clock {
+	if project == nil {
+		return clock.RealClock{}
+	}
+	return project.clock
+}
+
 // Close performs the configured passive checkpoint and closes owned storage.
 // Repeated calls return the result of the first close.
 func (project *Project) Close(ctx context.Context) error {

@@ -23,8 +23,86 @@ const (
 
 // LogicalProjectImportPlan is the parsed and validated logical project import plan.
 type LogicalProjectImportPlan struct {
-	Document LogicalProjectDocument
-	DryRun   LogicalProjectImportDryRun
+	Document       LogicalProjectDocument
+	DryRun         LogicalProjectImportDryRun
+	DestinationIDs LogicalProjectImportDestinationIDs
+}
+
+// LogicalProjectImportDestinationIDs maps every source (document-local) ID
+// to the destination ID it will be persisted under, one map per entity
+// type. It is built by the caller (application.ProjectService, using its
+// own injected ID generator) before the import runs, rather than minted by
+// the repository inside its write transaction -- see ISSUE-196: a
+// generator constructed inside a retried DB.Write callback mints a
+// different ID on every retry, and a real-clock generator ignores whatever
+// clock the caller injected. An empty map for an entity type with a
+// nonempty document.<Entities> is a caller error; the repository does not
+// generate missing IDs.
+type LogicalProjectImportDestinationIDs struct {
+	IssueIDs       map[string]string
+	LabelIDs       map[string]string
+	RelationIDs    map[string]string
+	CommentIDs     map[string]string
+	DecisionIDs    map[string]string
+	AttemptIDs     map[string]string
+	AttemptNoteIDs map[string]string
+	ArtifactIDs    map[string]string
+}
+
+// NewLogicalProjectImportDestinationIDs builds one destination ID for every
+// entity in document, using generate to mint each one, keyed by the
+// entity's source (document-local) ID.
+func NewLogicalProjectImportDestinationIDs(document LogicalProjectDocument, generate func() (string, error)) (LogicalProjectImportDestinationIDs, error) {
+	issueIDs, err := logicalDestinationIDs(document.Issues, func(item LogicalIssue) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	labelIDs, err := logicalDestinationIDs(document.Labels, func(item LogicalLabel) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	relationIDs, err := logicalDestinationIDs(document.Relations, func(item LogicalRelation) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	commentIDs, err := logicalDestinationIDs(document.Comments, func(item LogicalComment) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	decisionIDs, err := logicalDestinationIDs(document.Decisions, func(item LogicalDecision) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	attemptIDs, err := logicalDestinationIDs(document.Attempts, func(item LogicalAttempt) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	attemptNoteIDs, err := logicalDestinationIDs(document.AttemptNotes, func(item LogicalAttemptNote) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	artifactIDs, err := logicalDestinationIDs(document.Artifacts, func(item LogicalArtifact) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	return LogicalProjectImportDestinationIDs{
+		IssueIDs: issueIDs, LabelIDs: labelIDs, RelationIDs: relationIDs, CommentIDs: commentIDs,
+		DecisionIDs: decisionIDs, AttemptIDs: attemptIDs, AttemptNoteIDs: attemptNoteIDs, ArtifactIDs: artifactIDs,
+	}, nil
+}
+
+// logicalDestinationIDs mints one destination ID per item via generate,
+// keyed by each item's source ID as extracted by id.
+func logicalDestinationIDs[T any](items []T, id func(T) string, generate func() (string, error)) (map[string]string, error) {
+	destIDs := make(map[string]string, len(items))
+	for _, item := range items {
+		destID, err := generate()
+		if err != nil {
+			return nil, err
+		}
+		destIDs[id(item)] = destID
+	}
+	return destIDs, nil
 }
 
 // LogicalProjectImportDryRun captures deterministic dry-run state for import validation.

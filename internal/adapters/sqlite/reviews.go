@@ -3,7 +3,6 @@ package sqlite
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
@@ -19,30 +17,37 @@ import (
 
 // ReviewRepository persists review workflow requests and their transitions.
 type ReviewRepository struct {
-	db        *DB
-	generator *ids.Generator
+	db *DB
 }
 
 const replaceReviewRequestOperation = "replace_review_request"
 
 var _ ports.ReviewRepository = (*ReviewRepository)(nil)
 
-// NewReviewRepository constructs a review repository with a ULID generator.
+// NewReviewRepository constructs a review repository.
 func NewReviewRepository(db *DB) (*ReviewRepository, error) {
 	if db == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
 	}
-	generator, err := ids.NewGenerator(clock.RealClock{}, rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	return &ReviewRepository{db: db, generator: generator}, nil
+	return &ReviewRepository{db: db}, nil
 }
 
 // CreateReviewRequest inserts a new review request and its target snapshot.
 func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, command ports.CreateReviewRequestCommand) (ports.CreateReviewRequestResult, error) {
 	if repository == nil || repository.db == nil {
 		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
+	}
+	if stringsTrimmed(command.RequestID) == "" {
+		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "request_id is required", false)
+	}
+	if _, err := ids.ParseStrict(command.RequestID); err != nil {
+		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "request_id is invalid", false)
+	}
+	if stringsTrimmed(command.TargetID) == "" {
+		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "target_id is required", false)
+	}
+	if _, err := ids.ParseStrict(command.TargetID); err != nil {
+		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "target_id is invalid", false)
 	}
 	if stringsTrimmed(command.IssueID) == "" {
 		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "issue_id is required", false)
@@ -71,10 +76,7 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 			}
 			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
 		}
-		requestID, err := repository.newID()
-		if err != nil {
-			return err
-		}
+		requestID := command.RequestID
 		artifactIDsJSON, err := jsonMarshalArtifacts(command.ArtifactIDs)
 		if err != nil {
 			return err
@@ -291,6 +293,18 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 	if repository == nil || repository.db == nil {
 		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
 	}
+	if stringsTrimmed(command.SuccessorID) == "" {
+		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "successor_id is required", false)
+	}
+	if _, err := ids.ParseStrict(command.SuccessorID); err != nil {
+		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "successor_id is invalid", false)
+	}
+	if stringsTrimmed(command.SuccessorTargetID) == "" {
+		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "successor_target_id is required", false)
+	}
+	if _, err := ids.ParseStrict(command.SuccessorTargetID); err != nil {
+		return ports.ReplaceReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "successor_target_id is invalid", false)
+	}
 	var result ports.ReplaceReviewRequestResult
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
@@ -329,6 +343,8 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 		}
 
 		target, err := repository.ensureTarget(ctx, tx, ports.CreateReviewRequestCommand{
+			RequestID:          "",
+			TargetID:           command.SuccessorTargetID,
 			IssueID:            predecessor.IssueID,
 			TargetIssueVersion: command.TargetIssueVersion,
 			TargetEventID:      command.TargetEventID,
@@ -352,10 +368,7 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			return err
 		}
 
-		successorID, err := repository.newID()
-		if err != nil {
-			return err
-		}
+		successorID := command.SuccessorID
 		artifactIDsJSON, err := jsonMarshalArtifacts(command.ArtifactIDs)
 		if err != nil {
 			return err
@@ -505,6 +518,12 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 	if repository == nil || repository.db == nil {
 		return ports.ResolveReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
 	}
+	if stringsTrimmed(command.OutcomeID) == "" {
+		return ports.ResolveReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "outcome_id is required", false)
+	}
+	if _, err := ids.ParseStrict(command.OutcomeID); err != nil {
+		return ports.ResolveReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "outcome_id is invalid", false)
+	}
 	if command.AttemptID == "" {
 		return ports.ResolveReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt_id is required", false)
 	}
@@ -528,10 +547,7 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 		}
 		nextStatus := reviewRequestStatusForOutcome(command.Outcome)
 		resolvedAt := formatStorageTime(command.OccurredAt)
-		outcomeID, err := repository.newID()
-		if err != nil {
-			return err
-		}
+		outcomeID := command.OutcomeID
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`, nextStatus, resolvedAt, request.ID, request.Version); err != nil {
 			return err
 		}
@@ -580,10 +596,7 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 		}
 		return domain.ReviewTarget{}, domain.NewError(domain.CodeReviewAlreadyExists, "review request target does not match the existing target", false)
 	case isNoRowsError(err):
-		targetID, err := repository.newID()
-		if err != nil {
-			return domain.ReviewTarget{}, err
-		}
+		targetID := command.TargetID
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at)
 			VALUES (?, ?, ?, ?, ?, 1, ?)`, targetID, command.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON), createdAt); err != nil {
 			var existing reviewTargetRow
@@ -710,17 +723,6 @@ func (repository *ReviewRepository) loadRequestForMutation(ctx context.Context, 
 		target.CreatedAt = parseTimestamp(targetCreatedAtText)
 	}
 	return request, target, nil
-}
-
-func (repository *ReviewRepository) newID() (string, error) {
-	if repository == nil || repository.generator == nil {
-		return "", domain.NewError(domain.CodeIDGeneration, "review repository ID generator is not configured", false)
-	}
-	id, err := repository.generator.New()
-	if err != nil {
-		return "", domain.WrapError(err, domain.CodeIDGeneration, "cannot generate review identifier", false)
-	}
-	return id, nil
 }
 
 func reviewRequestStatusForOutcome(outcome domain.ReviewOutcome) domain.ReviewRequestStatus {

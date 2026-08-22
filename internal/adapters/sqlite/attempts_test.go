@@ -412,6 +412,8 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID:          fixture.newID(t),
+		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
 		TargetEventID:      latestEventID,
@@ -499,6 +501,8 @@ func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID:          fixture.newID(t),
+		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
 		TargetEventID:      latestEventID,
@@ -551,6 +555,8 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID:          fixture.newID(t),
+		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
 		TargetEventID:      0,
@@ -604,6 +610,8 @@ func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID:          fixture.newID(t),
+		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
 		TargetEventID:      0,
@@ -659,7 +667,9 @@ func claimedReviewFixture(t *testing.T, fixture *attemptTestFixture, name string
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
-		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: 0,
+		RequestID: fixture.newID(t),
+		TargetID:  fixture.newID(t),
+		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: 0,
 		OccurredAt: fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
@@ -795,7 +805,9 @@ func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
-		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
+		RequestID: fixture.newID(t),
+		TargetID:  fixture.newID(t),
+		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
 		OccurredAt: fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
@@ -914,7 +926,9 @@ func TestFinishAttemptApprovalRequiresRequestWhenUnbound(t *testing.T) {
 	}
 
 	_, err = reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
-		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
+		RequestID: fixture.newID(t),
+		TargetID:  fixture.newID(t),
+		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
 		OccurredAt: fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
@@ -2064,6 +2078,7 @@ type attemptTestFixture struct {
 	issues    *application.IssueService
 	attempts  *application.AttemptService
 	relations *application.RelationService
+	generator *ids.Generator
 }
 
 func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
@@ -2122,11 +2137,20 @@ func newAttemptTestFixture(t *testing.T, name string) *attemptTestFixture {
 		_ = db.Close(ctx)
 		t.Fatal(err)
 	}
-	return &attemptTestFixture{ctx: ctx, clock: source, path: path, db: db, issues: issues, attempts: attempts, relations: relations}
+	return &attemptTestFixture{ctx: ctx, clock: source, path: path, db: db, issues: issues, attempts: attempts, relations: relations, generator: generator}
 }
 
 func (fixture *attemptTestFixture) close() {
 	_ = fixture.db.Close(fixture.ctx)
+}
+
+func (fixture *attemptTestFixture) newID(t *testing.T) string {
+	t.Helper()
+	id, err := fixture.generator.New()
+	if err != nil {
+		t.Fatalf("generator.New(): %v", err)
+	}
+	return id
 }
 
 func reopenAttemptTestFixture(t *testing.T, fixture *attemptTestFixture) {

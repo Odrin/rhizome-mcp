@@ -2,12 +2,14 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"testing"
 	"time"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -15,7 +17,12 @@ func TestReviewServiceCreatesAndMutatesRequests(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	issueRepository := &issueRepositoryStub{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
 	reviewRepository := &reviewRepositoryStub{}
-	service, err := NewReviewService(reviewRepository, issueRepository, clock.NewFakeClock(now))
+	fakeClock := clock.NewFakeClock(now)
+	generator, err := ids.NewGenerator(fakeClock, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewReviewService(reviewRepository, issueRepository, fakeClock, generator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +72,12 @@ func TestReviewServiceReplaceReviewRequestDelegatesAndValidates(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	issueRepository := &issueRepositoryStub{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
 	reviewRepository := &reviewRepositoryStub{request: domain.ReviewRequest{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", IssueID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.ReviewRequestStatusOpen, Version: 3}}
-	service, err := NewReviewService(reviewRepository, issueRepository, clock.NewFakeClock(now))
+	fakeClock := clock.NewFakeClock(now)
+	generator, err := ids.NewGenerator(fakeClock, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewReviewService(reviewRepository, issueRepository, fakeClock, generator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +134,9 @@ func TestReviewServiceReplaceReviewRequestDelegatesAndValidates(t *testing.T) {
 
 func TestReviewServiceListFiltersByStatusAndClaimability(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	service, err := NewReviewService(&reviewRepositoryStub{request: domain.ReviewRequest{ID: "req-1", Status: domain.ReviewRequestStatusApproved}}, &issueRepositoryStub{}, clock.NewFakeClock(now))
+	fakeClock := clock.NewFakeClock(now)
+	generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+	service, err := NewReviewService(&reviewRepositoryStub{request: domain.ReviewRequest{ID: "req-1", Status: domain.ReviewRequestStatusApproved}}, &issueRepositoryStub{}, fakeClock, generator)
 	if err != nil {
 		t.Fatal(err)
 	}

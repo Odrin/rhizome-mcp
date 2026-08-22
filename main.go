@@ -928,12 +928,14 @@ func writeJSONToWriter(w io.Writer, value interface{}) error {
 	return err
 }
 
-func newComposedServices(project *projectruntime.Project) (*composedServices, error) {
+func newComposedServices(project *projectruntime.Project, source clock.Clock) (*composedServices, error) {
 	if project == nil {
 		return nil, errors.New("project is nil")
 	}
 
-	source := clock.RealClock{}
+	if source == nil {
+		source = clock.RealClock{}
+	}
 	issueRepository, err := sqlite.NewIssueRepository(project.Database)
 	if err != nil {
 		return nil, err
@@ -994,7 +996,7 @@ func newComposedServices(project *projectruntime.Project) (*composedServices, er
 	if err != nil {
 		return nil, err
 	}
-	projectService, err := application.NewProjectService(projectRepository)
+	projectService, err := application.NewProjectService(projectRepository, generator)
 	if err != nil {
 		return nil, err
 	}
@@ -1026,7 +1028,7 @@ func newComposedServices(project *projectruntime.Project) (*composedServices, er
 	if err != nil {
 		return nil, err
 	}
-	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source, generator)
 	if err != nil {
 		return nil, err
 	}
@@ -1098,7 +1100,7 @@ func composeServices(ctx context.Context, startingPath string, pathInputs projec
 		}
 	}()
 
-	bundle, err = newComposedServices(project)
+	bundle, err = newComposedServices(project, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1127,7 +1129,7 @@ func composeServicesFromExistingProject(ctx context.Context, projectID, dataRoot
 		}
 	}()
 
-	bundle, err = newComposedServices(project)
+	bundle, err = newComposedServices(project, source)
 	if err != nil {
 		return nil, nil, err
 	}

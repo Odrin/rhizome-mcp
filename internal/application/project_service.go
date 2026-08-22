@@ -10,14 +10,19 @@ import (
 // ProjectService queries metadata for the current project.
 type ProjectService struct {
 	repository ports.ProjectRepository
+	ids        IDGenerator
 }
 
-// NewProjectService composes the project metadata use case from its repository.
-func NewProjectService(repository ports.ProjectRepository) (*ProjectService, error) {
+// NewProjectService composes the project metadata use case from its
+// repository and its logical-import ID generator.
+func NewProjectService(repository ports.ProjectRepository, generator IDGenerator) (*ProjectService, error) {
 	if repository == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "project repository is required", false)
 	}
-	return &ProjectService{repository: repository}, nil
+	if generator == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "project ID generator is required", false)
+	}
+	return &ProjectService{repository: repository, ids: generator}, nil
 }
 
 // GetProject returns the current project's persisted metadata.
@@ -54,11 +59,19 @@ func (service *ProjectService) ValidateLogicalProjectImport(ctx context.Context,
 	return plan.DryRun, nil
 }
 
-// ApplyLogicalProjectImport applies a validated logical project document into an empty destination.
+// ApplyLogicalProjectImport applies a validated logical project document
+// into an empty destination. Every destination ID the import will need is
+// minted here, from this service's own injected generator, before the
+// repository's write transaction runs -- see
+// domain.NewLogicalProjectImportDestinationIDs.
 func (service *ProjectService) ApplyLogicalProjectImport(ctx context.Context, document []byte) (domain.LogicalProjectImportApplyResult, error) {
 	plan, err := domain.ParseLogicalProjectImportPlan(document)
 	if err != nil {
 		return domain.LogicalProjectImportApplyResult{}, err
+	}
+	plan.DestinationIDs, err = domain.NewLogicalProjectImportDestinationIDs(plan.Document, service.ids.New)
+	if err != nil {
+		return domain.LogicalProjectImportApplyResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate import identifiers", false)
 	}
 	return service.repository.ApplyLogicalProjectImport(ctx, plan)
 }

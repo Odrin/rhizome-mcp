@@ -17,6 +17,7 @@ type ReviewService struct {
 	repository      ports.ReviewRepository
 	issueRepository ports.IssueRepository
 	clock           clock.Clock
+	ids             IDGenerator
 }
 
 // CreateReviewRequestInput captures the review-request creation intent.
@@ -74,7 +75,7 @@ type ReviewMutationResult struct {
 }
 
 // NewReviewService composes the review use case from the required repositories.
-func NewReviewService(repository ports.ReviewRepository, issueRepository ports.IssueRepository, source clock.Clock) (*ReviewService, error) {
+func NewReviewService(repository ports.ReviewRepository, issueRepository ports.IssueRepository, source clock.Clock, generator IDGenerator) (*ReviewService, error) {
 	if repository == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "review repository is required", false)
 	}
@@ -84,7 +85,10 @@ func NewReviewService(repository ports.ReviewRepository, issueRepository ports.I
 	if source == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "review clock is required", false)
 	}
-	return &ReviewService{repository: repository, issueRepository: issueRepository, clock: source}, nil
+	if generator == nil {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "review generator is required", false)
+	}
+	return &ReviewService{repository: repository, issueRepository: issueRepository, clock: source, ids: generator}, nil
 }
 
 // CreateReviewRequest validates a request, resolves the issue identifier, and persists the request.
@@ -113,7 +117,17 @@ func (service *ReviewService) CreateReviewRequest(ctx context.Context, input Cre
 		}
 		issueID = issue.ID
 	}
+	requestID, err := service.ids.New()
+	if err != nil {
+		return CreateReviewRequestResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate review request identifier", false)
+	}
+	targetID, err := service.ids.New()
+	if err != nil {
+		return CreateReviewRequestResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate review target identifier", false)
+	}
 	result, err := service.repository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		RequestID:          requestID,
+		TargetID:           targetID,
 		IssueID:            issueID,
 		TargetIssueVersion: input.TargetIssueVersion,
 		TargetEventID:      input.TargetEventID,
@@ -251,9 +265,19 @@ func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input Re
 		return ReplaceReviewRequestResult{Predecessor: replay.Predecessor, Successor: replay.Successor, LatestEventID: replay.LatestEventID}, nil
 	}
 
+	successorID, err := service.ids.New()
+	if err != nil {
+		return ReplaceReviewRequestResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate successor request identifier", false)
+	}
+	successorTargetID, err := service.ids.New()
+	if err != nil {
+		return ReplaceReviewRequestResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate successor target identifier", false)
+	}
 	result, err := service.repository.ReplaceReviewRequest(ctx, ports.ReplaceReviewRequestCommand{
 		PredecessorRequestID:       normalized.PredecessorRequestID,
 		PredecessorExpectedVersion: normalized.PredecessorExpectedVersion,
+		SuccessorID:                successorID,
+		SuccessorTargetID:          successorTargetID,
 		TargetIssueVersion:         normalized.TargetIssueVersion,
 		TargetEventID:              normalized.TargetEventID,
 		ArtifactIDs:                normalized.ArtifactIDs,

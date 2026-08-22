@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
@@ -439,7 +441,7 @@ func TestNewMCPServerWithDefaultRouterStillSupportsOmittedRef(t *testing.T) {
 		defer cancel()
 		_ = project.Close(closeCtx)
 	}()
-	bundle, err := newComposedServices(project)
+	bundle, err := newComposedServices(project, project.Clock())
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
@@ -450,6 +452,87 @@ func TestNewMCPServerWithDefaultRouterStillSupportsOmittedRef(t *testing.T) {
 	}
 	if server == nil {
 		t.Fatal("expected default server")
+	}
+}
+
+// TestRouterComposedServicesUseInjectedClockNotWallClock is ISSUE-196's
+// router-level regression test: it opens a project through the same
+// composeFn (composeServicesFromExistingProject -> newComposedServices) the
+// router uses in production, with a fake clock fixed far from wall-clock
+// time, and asserts both a lease's expiry and a freshly-minted ULID's
+// embedded timestamp are computed from that fake clock -- not RealClock --
+// so a regression that silently drops the injected clock anywhere in the
+// composition chain fails this test instead of only surfacing once tests
+// depend on deterministic time (ISSUE-178/179).
+func TestRouterComposedServicesUseInjectedClockNotWallClock(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	if err := runCLI(ctx, &config.Config{}, io.Discard, io.Discard, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	// Far from wall-clock time: if anything in the composition chain falls
+	// back to RealClock, the assertions below fail by years, not by a race-y
+	// few milliseconds.
+	fakeNow := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	fakeClock := clock.NewFakeClock(fakeNow)
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: fakeClock, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open project: %v", err)
+	}
+	projectID := project.ProjectID
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := project.Close(closeCtx); err != nil {
+		t.Fatalf("close project: %v", err)
+	}
+
+	router := newProjectRouter(dataRoot, fakeClock, sqlite.Options{}, nil)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = router.Close(closeCtx)
+	}()
+	lease, err := router.Acquire(ctx, &projectID)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	defer func() {
+		if err := lease.Release(); err != nil {
+			t.Errorf("Release() error = %v", err)
+		}
+	}()
+
+	issue, err := lease.IssueService().CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "clock threading", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	leaseSeconds := 900
+	claim, err := lease.AttemptService().ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID, LeaseSeconds: &leaseSeconds})
+	if err != nil {
+		t.Fatalf("ClaimIssue() error = %v", err)
+	}
+
+	wantExpiry := fakeNow.Add(time.Duration(leaseSeconds) * time.Second)
+	if !claim.Attempt.LeaseExpiresAt.Equal(wantExpiry) {
+		t.Fatalf("lease_expires_at = %v, want %v (fake-now + lease duration)", claim.Attempt.LeaseExpiresAt, wantExpiry)
+	}
+
+	parsed, err := ids.ParseStrict(claim.Attempt.ID)
+	if err != nil {
+		t.Fatalf("ParseStrict(attempt id) error = %v", err)
+	}
+	gotULIDTime := ulid.Time(parsed.Time()).UTC()
+	if !gotULIDTime.Equal(fakeNow) {
+		t.Fatalf("attempt id ULID timestamp = %v, want %v (fake clock)", gotULIDTime, fakeNow)
 	}
 }
 

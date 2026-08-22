@@ -1490,6 +1490,8 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:            issue.ID,
 		TargetIssueVersion: 2,
 		TargetEventID:      7,
@@ -1542,6 +1544,8 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 
 	// Create a third review request using direct repository access to test replace_review_request.
 	thirdCreated, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FA3",
+		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FA4",
 		IssueID:            issue.ID,
 		TargetIssueVersion: 3,
 		TargetEventID:      9,
@@ -1619,6 +1623,8 @@ func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
 		TargetEventID:      latestEventID,
@@ -3556,7 +3562,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
-	projects, err := application.NewProjectService(projectRepository)
+	projects, err := application.NewProjectService(projectRepository, generator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3588,7 +3594,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviews, err := application.NewReviewService(reviewRepository, issueRepository, source)
+	reviews, err := application.NewReviewService(reviewRepository, issueRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
 	}
