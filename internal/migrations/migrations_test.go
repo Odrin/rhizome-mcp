@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 8}) {
-		t.Fatalf("Migrate() result = %+v, want current version with eight applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 9}) {
+		t.Fatalf("Migrate() result = %+v, want current version with nine applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -65,6 +65,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_issue_labels_label", "idx_issues_archived", "idx_issues_parent", "idx_issues_status_priority",
 		"idx_labels_name_nocase", "idx_one_active_attempt_per_issue", "idx_relations_source", "idx_relations_target",
 		"idx_review_requests_active_attempt", "idx_review_requests_active_target", "idx_review_targets_issue_version",
+		"idx_workflow_policies_status_created", "idx_workflow_policy_events_policy",
 	}
 	rows, err := inspect.Query("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name")
 	if err != nil {
@@ -94,10 +95,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "unify_event_log" || checksum != unifyEventLogChecksum {
+	if version != CurrentVersion() || name != "workflow_gates" || checksum != workflowGatesChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(unifyEventLogSQL))
+	actualChecksum := sha256.Sum256([]byte(workflowGatesSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -119,7 +120,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 8 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 9 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -182,8 +183,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 7}) {
-		t.Fatalf("upgrade result = %+v, want seven applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 8}) {
+		t.Fatalf("upgrade result = %+v, want eight applied migrations", result)
 	}
 
 	var count int
@@ -260,8 +261,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 5}) {
-		t.Fatalf("upgrade result = %+v, want five applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 6}) {
+		t.Fatalf("upgrade result = %+v, want six applied migrations", result)
 	}
 
 	var after []struct {
@@ -290,16 +291,16 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+5 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+5)
+	if len(after) != len(before)+6 {
+		t.Fatalf("history rows = %d, want %d", len(after), len(before)+6)
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "unify_event_log" || after[len(after)-1].checksum != unifyEventLogChecksum {
-		t.Fatalf("new history row = %+v, want unify_event_log migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "workflow_gates" || after[len(after)-1].checksum != workflowGatesChecksum {
+		t.Fatalf("new history row = %+v, want workflow_gates migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -398,7 +399,7 @@ func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	}{
 		{name: "checksum", tamper: "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"},
 		{name: "name", tamper: "UPDATE schema_migrations SET name = 'renamed_schema'"},
-		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (9, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
+		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (10, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
 		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0 WHERE version = 1"},
 		{name: "malformed checksum", tamper: "UPDATE schema_migrations SET checksum = 'not-sha256'"},
 		{name: "malformed timestamp", tamper: "UPDATE schema_migrations SET applied_at = 'not-a-timestamp'"},

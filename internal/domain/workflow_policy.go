@@ -343,3 +343,56 @@ func MatchWorkflowPolicies(policies []WorkflowPolicy, issueType Type, issueLabel
 	}
 	return deduped
 }
+
+// WorkflowPolicyList is one deterministic, cursor-paginated policy page.
+type WorkflowPolicyList struct {
+	Items      []WorkflowPolicy
+	NextCursor *string
+	HasMore    bool
+}
+
+// CloneWorkflowPolicyList returns a page with no shared slice or pointer data.
+func CloneWorkflowPolicyList(list WorkflowPolicyList) WorkflowPolicyList {
+	items := list.Items
+	list.Items = make([]WorkflowPolicy, len(items))
+	for index, item := range items {
+		list.Items[index] = CloneWorkflowPolicy(item)
+	}
+	list.NextCursor = copyOptionalString(list.NextCursor)
+	return list
+}
+
+// MaxWorkflowPolicyListLimit is the maximum page size for ListWorkflowPolicies.
+const MaxWorkflowPolicyListLimit = 100
+
+// ListWorkflowPoliciesInput requests one deterministic paginated policy page,
+// optionally filtered by status.
+type ListWorkflowPoliciesInput struct {
+	Status *PolicyStatus
+	Limit  int
+	Cursor string
+}
+
+// Validate validates and defensively copies a list request. Limit defaults
+// to 50 and cannot exceed MaxWorkflowPolicyListLimit.
+func (input ListWorkflowPoliciesInput) Validate() (ListWorkflowPoliciesInput, error) {
+	if input.Status != nil && !input.Status.Valid() {
+		return ListWorkflowPoliciesInput{}, invalidEnum("status", string(*input.Status))
+	}
+	if input.Limit < 0 || input.Limit > MaxWorkflowPolicyListLimit {
+		return ListWorkflowPoliciesInput{}, validationError("limit", "OUT_OF_RANGE", "must be 0 (default) or between 1 and 100")
+	}
+	if err := ValidateText("cursor", input.Cursor, 4096); err != nil {
+		return ListWorkflowPoliciesInput{}, err
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	var status *PolicyStatus
+	if input.Status != nil {
+		value := *input.Status
+		status = &value
+	}
+	return ListWorkflowPoliciesInput{Status: status, Limit: limit, Cursor: input.Cursor}, nil
+}

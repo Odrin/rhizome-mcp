@@ -80,6 +80,14 @@ const (
 	// terminal (approved, changes_requested, blocked, cancelled, or
 	// superseded) and therefore has nothing left to replace.
 	CodeReviewRequestNotReplaceable = "REVIEW_REQUEST_NOT_REPLACEABLE"
+	// CodePolicyNotFound identifies a workflow policy reference that is not present.
+	CodePolicyNotFound = "POLICY_NOT_FOUND"
+	// CodePolicyArchived identifies a workflow policy that cannot be mutated
+	// because it was already archived (soft, irreversible in v1).
+	CodePolicyArchived = "POLICY_ARCHIVED"
+	// CodeGateSnapshotNotFound identifies a work attempt or review target with
+	// no recorded gate snapshot.
+	CodeGateSnapshotNotFound = "GATE_SNAPSHOT_NOT_FOUND"
 )
 
 // Detail is one stable, field-oriented domain error detail. EntityIndex is nil
