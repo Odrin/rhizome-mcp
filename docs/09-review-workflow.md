@@ -69,7 +69,7 @@ Use the review workflow in this order when you need a durable review handoff:
 
 1. Request: create a review request with the exact target issue version, latest event position, and artifact IDs you want to freeze. The request captures that immutable snapshot and remains open until it is claimed or superseded.
 2. Discover: list or get review requests to find the request for the target you want to review. Review requests are discoverable from planning and work context, and a request that is still claimable is reported as `claimable`.
-3. Claim: start a review attempt with `claim_issue` against the review issue, then attach that active review attempt to the request. A claimed request is derived from the active review attempt; if the lease expires before completion, the request returns to `open` and can be claimed again.
+3. Claim: start a review attempt with `claim_issue` against the review issue. The attempt automatically binds the issue's open review request to the new attempt in the same transaction (no separate operation needed); if no open request exists, the attempt simply proceeds unbound. A claimed request is derived from the active review attempt; if the lease expires before completion, the request returns to `open` and can be claimed again.
 4. Complete: finish the active review attempt with `finish_attempt` and an explicit review outcome of `approved`, `changes_requested`, or `blocked`. `approved` finishes the request and marks the issue `done`; `changes_requested` leaves the issue `ready` and records that follow-up is required; `blocked` marks the issue `blocked`.
 5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, create a fresh review request for the new target version/event and repeat the discover/claim/complete cycle.
 
@@ -80,6 +80,7 @@ Recovery examples:
 - If the attempt is administratively force-released (a stuck or abandoned session, released via the CLI), the request likewise returns to `open` immediately rather than staying `claimed` against a session that will never return.
 - If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Create a new review request against the new target instead of reusing the stale one.
 - If two agents race to claim the same request, one wins and the other gets `VERSION_CONFLICT` or `ACTIVE_ATTEMPT_EXISTS`. Re-discover the request and retry the claim with the new state.
+- If a review request is created after an unbound attempt has already claimed the issue, `finish_attempt` with `review_outcome=approved` returns `REVIEW_REQUEST_REQUIRED` and does not mutate state. This ensures the new request is not silently orphaned; the caller must resolve or discover the request through the normal review flow (which most often means re-attempting the review with a fresh claim against the newly-bound request).
 
 ## Staleness and concurrency
 
@@ -89,6 +90,12 @@ content, acceptance criteria, artifacts, status, or a new implementation
 attempt makes the request stale. Priority-only changes do not. A stale request
 cannot approve, request changes, or block; it transitions to `superseded` and
 returns `STALE_REVIEW_TARGET`.
+
+The event-position comparison excludes review-sourced events and
+`attempt_started` events: an attempt's own start -- including the claiming
+review attempt's, since `claim_issue` auto-binds a request to its
+`attempt_started` row -- is the review's own workflow progressing, not the
+reviewed work changing, so it never by itself makes a request stale.
 
 Creation, claiming, completion, cancellation, and supersession use optimistic
 request version checks and short write transactions. The database enforces one

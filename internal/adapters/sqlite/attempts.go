@@ -289,6 +289,11 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 		) VALUES (?, 'attempt_started', ?, ?, ?, ?)`, issue.ID, nullableStringValuePtr(command.SessionID), command.AttemptID, string(payload), timestamp); err != nil {
 			return err
 		}
+		if kind == domain.AttemptKindReview {
+			if err := bindOpenReviewRequestForAttempt(ctx, tx, issue.ID, command.AttemptID, now); err != nil {
+				return err
+			}
+		}
 		result.Issue = issue
 		result.Attempt = domain.WorkAttempt{
 			ID: command.AttemptID, IssueID: issue.ID, SessionID: copyOptionalString(command.SessionID), Kind: kind, Status: domain.AttemptStatusActive,
@@ -932,17 +937,19 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		if blockers > 0 {
 			return domain.NewError(domain.CodeUnresolvedBlockersAdded, "unresolved blockers were added during attempt", true, domain.Detail{Field: "issue_id", Code: "BLOCKED"})
 		}
-		// Excludes source='review' rows deliberately: a review's own
-		// lifecycle (its own claim, in particular) always advances the
-		// shared issue_events sequence past whatever event position was
-		// captured when the review target was created, so counting review
-		// events here would make every review appear stale from the
-		// moment it is claimed. Staleness and the change-acknowledgment
-		// check both mean "did the reviewed work change," not "did the
-		// review's own workflow progress" -- see docs/02 for the
-		// unification contract and this exclusion's rationale.
+		// Excludes source='review' rows and attempt_started rows
+		// deliberately: an attempt's own lifecycle (its own claim, in
+		// particular -- now that ClaimIssue auto-binds a review request to
+		// its attempt_started row, ISSUE-189) always advances the shared
+		// issue_events sequence past whatever event position was captured
+		// when the review target was created, so counting those events here
+		// would make every review appear stale from the moment it is
+		// claimed. Staleness and the change-acknowledgment check both mean
+		// "did the reviewed work change," not "did some attempt's own
+		// workflow progress" -- see docs/02 for the unification contract and
+		// this exclusion's rationale.
 		var latestEventID int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review'`).Scan(&latestEventID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID); err != nil {
 			return err
 		}
 		var reviewRequest *domain.ReviewRequest
@@ -958,6 +965,18 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 					}
 					staleReviewTargetErr = domain.NewError(domain.CodeReviewTargetStale, "review target is stale", false)
 					return nil
+				}
+			}
+			// Validate that an approval attempt is bound to a request, or no
+			// unresolved request exists (review is truly optional).
+			if reviewRequest == nil && input.ReviewOutcome != nil && *input.ReviewOutcome == domain.ReviewOutcomeApproved {
+				var unresolved int64
+				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_requests WHERE issue_id = ? AND status IN ('open','claimed'))`, issue.ID).Scan(&unresolved); err != nil {
+					return err
+				}
+				if unresolved == 1 {
+					return domain.NewError(domain.CodeReviewRequestRequired, "an open review request exists for this issue but is not bound to this attempt", false,
+						domain.Detail{Field: "review_request_id", Code: domain.CodeReviewRequestRequired})
 				}
 			}
 		}
@@ -1206,6 +1225,41 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 		return ports.ForceReleaseAttemptResult{}, err
 	}
 	return result, nil
+}
+
+// bindOpenReviewRequestForAttempt looks up issueID's open review request (if
+// any) and transitions it to claimed with active_attempt_id = attemptID,
+// appending a review_claimed event -- the claim-time half of the binding
+// ClaimReviewRequest performs explicitly; ClaimIssue calls this
+// automatically whenever it starts a review attempt. No-op (returns nil,
+// nil) when no open request exists for the issue.
+func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, attemptID string, now time.Time) error {
+	var requestID, targetID string
+	var version int64
+	err := tx.QueryRowContext(ctx, `SELECT id, target_id, version FROM review_requests
+		WHERE issue_id = ? AND status = 'open' ORDER BY created_at DESC, id DESC LIMIT 1`, issueID).
+		Scan(&requestID, &targetID, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	claimedAt := formatStorageTime(now)
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = 'claimed', active_attempt_id = ?, resolved_at = NULL, version = version + 1
+		WHERE id = ? AND version = ? AND status = 'open'`, attemptID, requestID, version)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return domain.NewError(domain.CodeStorageCorrupt, "review request claim-time binding lost a race inside its own write transaction", false)
+	}
+	return appendReviewEvent(ctx, tx, issueID, "review_claimed", &attemptID,
+		payloadForReviewEvent(requestID, targetID, &attemptID, nil, nil), claimedAt)
 }
 
 func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptID string) (*domain.ReviewRequest, error) {

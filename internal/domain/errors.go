@@ -80,6 +80,10 @@ const (
 	// terminal (approved, changes_requested, blocked, cancelled, or
 	// superseded) and therefore has nothing left to replace.
 	CodeReviewRequestNotReplaceable = "REVIEW_REQUEST_NOT_REPLACEABLE"
+	// CodeReviewRequestRequired identifies a review approval attempt that has
+	// no request bound to it while an open or claimed request exists for the
+	// issue -- approving would silently strand that request.
+	CodeReviewRequestRequired = "REVIEW_REQUEST_REQUIRED"
 	// CodePolicyNotFound identifies a workflow policy reference that is not present.
 	CodePolicyNotFound = "POLICY_NOT_FOUND"
 	// CodePolicyArchived identifies a workflow policy that cannot be mutated

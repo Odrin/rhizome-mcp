@@ -1068,7 +1068,9 @@ Input:
 review-request tool, `idempotency_key` here is mandatory, not optional: this
 operation does not hold the predecessor's attempt lease token, so replaying a
 retried call safely (rather than risking a second successor from a client-side
-retry) depends on the key.
+retry) depends on the key. `target_event_id` staleness is evaluated against the
+project-wide event sequence (`issue_events`, excluding review-sourced rows),
+not scoped to the request's own issue.
 
 Output:
 

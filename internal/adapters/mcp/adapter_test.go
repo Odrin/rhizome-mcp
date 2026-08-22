@@ -1609,7 +1609,7 @@ func TestReviewCompletionViaMCPUpdatesReviewRequest(t *testing.T) {
 
 	var latestEventID int64
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}

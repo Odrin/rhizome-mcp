@@ -407,7 +407,7 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 	}
 	var latestEventID int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
 	}
 	var latestEventID int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -707,10 +707,26 @@ func assertReviewRequestReleasedToOpen(t *testing.T, fixture *attemptTestFixture
 	if err != nil {
 		t.Fatalf("claim_issue for a fresh review attempt: %v", err)
 	}
-	if _, err := reviewRepository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
-		RequestID: requestID, ExpectedVersion: requestVersion, ActiveAttemptID: &freshClaim.Attempt.ID, OccurredAt: fixture.clock.Now(),
+	// After claiming a fresh review attempt, the open request should be auto-bound.
+	// Verify that it's now claimed and bound to the fresh attempt.
+	var claimedStatus string
+	var claimedAttemptID sql.NullString
+	var claimedVersion int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status, active_attempt_id, version FROM review_requests WHERE id = ?`, requestID).
+			Scan(&claimedStatus, &claimedAttemptID, &claimedVersion)
 	}); err != nil {
-		t.Fatalf("ClaimReviewRequest() with a fresh attempt = %v, want success", err)
+		t.Fatal(err)
+	}
+	if claimedStatus != string(domain.ReviewRequestStatusClaimed) {
+		t.Fatalf("fresh claim request status = %q, want claimed (auto-binding should have happened)", claimedStatus)
+	}
+	if !claimedAttemptID.Valid || claimedAttemptID.String != freshClaim.Attempt.ID {
+		t.Fatalf("fresh claim request active_attempt_id = %#v, want %q", claimedAttemptID, freshClaim.Attempt.ID)
+	}
+	// Version should have incremented from 3 to 4 due to auto-binding
+	if claimedVersion != 4 {
+		t.Fatalf("fresh claim request version = %d, want 4 (1 creation + 1 initial bind + 1 release + 1 auto-bind)", claimedVersion)
 	}
 }
 
@@ -753,6 +769,201 @@ func TestReviewAttemptForceReleasedReturnsClaimedRequestToOpen(t *testing.T) {
 		t.Fatalf("force-release review attempt: %v", err)
 	}
 	assertReviewRequestReleasedToOpen(t, fixture, issue, reviewRepository, requestID, claim.Attempt.ID)
+}
+
+// ISSUE-189 AC4: auto-binding at claim time binds an open review request
+// to the new review attempt in a single transaction.
+func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-auto-bind")
+	defer fixture.close()
+
+	// Create a review-status issue
+	issue := createAttemptIssue(t, fixture, "auto-bind", domain.StatusReview)
+
+	// Create a review repository and add an open request before claiming,
+	// capturing the current event position with the same filter FinishAttempt
+	// uses (excludes source='review' and this attempt's own 'attempt_started'
+	// row, neither of which represent the reviewed work changing).
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targetEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&targetEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
+		OccurredAt: fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := created.Request.ID
+
+	// Claim the issue - this should auto-bind the open request
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Attempt.Kind != domain.AttemptKindReview {
+		t.Fatalf("claim kind = %v, want review", claim.Attempt.Kind)
+	}
+
+	// Verify the request is now claimed and bound to the new attempt
+	var requestStatus string
+	var activeAttemptID sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status, active_attempt_id FROM review_requests WHERE id = ?`, requestID).
+			Scan(&requestStatus, &activeAttemptID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusClaimed) {
+		t.Fatalf("request status = %q, want claimed", requestStatus)
+	}
+	if !activeAttemptID.Valid || activeAttemptID.String != claim.Attempt.ID {
+		t.Fatalf("request active_attempt_id = %#v, want %q", activeAttemptID, claim.Attempt.ID)
+	}
+
+	// Verify a review_claimed event was recorded
+	var claimedEventCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE source = 'review' AND attempt_id = ? AND event_type = 'review_claimed' AND json_extract(payload, '$.request_id') = ?`,
+			claim.Attempt.ID, requestID).Scan(&claimedEventCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if claimedEventCount != 1 {
+		t.Fatalf("review_claimed events = %d, want 1", claimedEventCount)
+	}
+
+	// ISSUE-189 AC4, the rest of the documented claim step end-to-end:
+	// finishing the auto-bound attempt as approved resolves the request and
+	// completes the issue, with no separate binding call anywhere in this test.
+	finishInput := finishInput(claim, domain.AttemptOutcomeCompleted)
+	finishInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	finishResult, err := fixture.attempts.FinishAttempt(fixture.ctx, finishInput)
+	if err != nil {
+		t.Fatalf("finish approved on an auto-bound attempt: %v", err)
+	}
+	if finishResult.Issue.Status != domain.StatusDone {
+		t.Fatalf("issue status after approval = %v, want done", finishResult.Issue.Status)
+	}
+	var resolvedStatus string
+	var resolvedActiveAttemptID sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status, active_attempt_id FROM review_requests WHERE id = ?`, requestID).
+			Scan(&resolvedStatus, &resolvedActiveAttemptID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resolvedStatus != string(domain.ReviewRequestStatusApproved) {
+		t.Fatalf("request status after approval = %q, want approved", resolvedStatus)
+	}
+	if resolvedActiveAttemptID.Valid {
+		t.Fatalf("request active_attempt_id after approval = %#v, want null", resolvedActiveAttemptID)
+	}
+}
+
+// Test that claiming a review issue with no open request still works
+// (review is optional, backward compat).
+func TestClaimReviewIssueWithoutRequest(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-no-request")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "no request", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Attempt.Kind != domain.AttemptKindReview {
+		t.Fatalf("claim kind = %v, want review", claim.Attempt.Kind)
+	}
+}
+
+// ISSUE-189 AC2: finish_attempt with review_outcome=approved fails with
+// REVIEW_REQUEST_REQUIRED when the attempt is unbound but an open/claimed
+// request exists for the issue (simulating the race where a request was
+// created after the attempt already claimed the issue).
+func TestFinishAttemptApprovalRequiresRequestWhenUnbound(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-approval-requires-request")
+	defer fixture.close()
+
+	// Create and claim a review issue with no request yet
+	issue := createAttemptIssue(t, fixture, "unbound approval", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now create a request for the same issue (the race condition)
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get the latest event ID to use as the review target
+	var targetEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&targetEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
+		OccurredAt: fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to finish with approval - should fail with REVIEW_REQUEST_REQUIRED
+	finishInput := finishInput(claim, domain.AttemptOutcomeCompleted)
+	finishInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	_, finishErr := fixture.attempts.FinishAttempt(fixture.ctx, finishInput)
+	if !errors.Is(finishErr, &domain.Error{Code: domain.CodeReviewRequestRequired}) {
+		t.Fatalf("finish error = %v, want REVIEW_REQUEST_REQUIRED", finishErr)
+	}
+
+	// Verify no state was mutated
+	var issueStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issueStatus != string(domain.StatusReview) {
+		t.Fatalf("issue status after failed finish = %q, want review", issueStatus)
+	}
+	requireAttemptActive(t, fixture, claim)
+}
+
+// Test that changes_requested on an unbound review attempt still succeeds
+// (backward compat - only approval requires a bound request).
+func TestFinishAttemptChangesRequestedOnUnboundSucceeds(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "finish-changes-unbound")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "unbound changes", domain.StatusReview)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Finish with changes_requested - should succeed even with no request
+	finishInput := finishInput(claim, domain.AttemptOutcomeCompleted)
+	finishInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeChangesRequested)
+	result, err := fixture.attempts.FinishAttempt(fixture.ctx, finishInput)
+	if err != nil {
+		t.Fatalf("finish with changes_requested: %v", err)
+	}
+	if result.Issue.Status != domain.StatusReady {
+		t.Fatalf("issue status after changes_requested = %v, want ready", result.Issue.Status)
+	}
 }
 
 func TestFinishAttemptCorruptStoredResponses(t *testing.T) {
@@ -2782,7 +2993,7 @@ func currentIssueVersionAndLatestEvent(t *testing.T, fixture *attemptTestFixture
 		if err := query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
 			return err
 		}
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
