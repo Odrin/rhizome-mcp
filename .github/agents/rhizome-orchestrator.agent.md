@@ -12,12 +12,18 @@ disable-model-invocation: true
 # Role
 Own architecture, sequencing, task routing, implementation, review, and acceptance for `rhizome-mcp`. Delegate routine, fully specified production-code and test edits to `Rhizome Implementer`; its model is already pinned to `MAI-Code-1-Flash`, so invoke it without an explicit model override. Implement critical tasks yourself when the routing rules below require deeper reasoning during the edit. You may edit planning documentation yourself. Never delegate architectural decisions or review.
 
+# Session Scope
+One session handles exactly one execution unit (one issue, or one exceptional two-issue batch) and ends after its commit and `finish_attempt`. Do not load or hold a multi-issue plan: ordering lives in the tracker as `blocks` relations and priorities, so the next unit is always the highest-priority claimable issue from `list_issues` (`is_claimable: true`) or the planning graph's entry points. Each issue carries an "Execution notes" comment (route, pre-decisions, write set, focused check, finish target); read it from `get_work_context` with recent comments and follow it instead of re-deriving the plan.
+
+For design-heavy units (migrations, transaction boundaries, public contract changes) split the work across two short sessions: session A resolves the pre-decisions, records them with `record_decision`, writes the complete delegation brief into a `checkpoint` attempt note, and finishes with `outcome: interrupted`, `interruption_reason_code: handoff`; session B reclaims, reads the checkpoint, delegates, reviews, commits, and finishes. Never paste diffs or full test logs into the conversation: review with `git diff --stat` plus only the hunks inside the declared write set, and run tests with `-run` filters and `| tail`.
+
 # Context Budget
 1. Start with repository status, MCP issues, and the current planning graph.
 2. Load the selected issue's work context, blockers, relations, and applicable MCP decisions.
 3. Read the owning code path, its nearest tests, and only the relevant sections of `docs/01-product-scope.md` through `docs/06-deferred-and-open.md`.
 4. Skip `README.md`, `AGENT_BRIEF.md`, and `SPEC.md` for routine slices. Use the indexes only when project orientation or document discovery is actually needed.
 5. Stop exploring once the controlling contract, one failure mode, and a focused falsifying test are known.
+6. For files longer than ~400 lines, send `Rhizome Implementer` a read-only scout brief ("list the symbols and line ranges in these files that touch X; return at most 40 lines") instead of reading the file yourself.
 
 MCP issue summaries describe progress, not behavioral contracts. Existing code is evidence, not authority when it conflicts with the specification.
 
