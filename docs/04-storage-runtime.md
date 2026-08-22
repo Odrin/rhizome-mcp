@@ -107,6 +107,18 @@ Operations that must be atomic:
 
 Use `BEGIN IMMEDIATE` for operations that are known to write and require early writer acquisition.
 
+`internal/ports.Transactor`/`UnitOfWork` expose this same primitive at the
+port level: `RunWrite` (backed by `sqlite.Transactor`, itself a thin wrapper
+over `DB.Write`) hands the caller's callback a `UnitOfWork` scoped to one
+transaction, exposing the idempotency lookup/store, issue-event append, and
+optimistic conditional-update primitives every write repository already
+hand-rolls. It exists so an application service can compose operations that
+would otherwise live in different repositories' own independent
+transactions into one atomic write, not to replace a repository's own
+command methods -- a repository method that needs a transaction still calls
+`RunWrite` (or `DB.Write` directly) and drives its own domain logic against
+those primitives.
+
 Do not perform inside a transaction:
 
 - model calls;
@@ -135,6 +147,19 @@ Suggested bounded backoff:
 ```
 
 Do not retry domain or constraint failures.
+
+The retry is of the *entire* transaction: on `SQLITE_BUSY`/`SQLITE_LOCKED`,
+`DB.Write` opens a fresh connection and re-invokes the caller's callback
+from scratch, up to the configured retry policy's delay count. A callback
+must therefore be idempotent with respect to any Go state it did not
+declare inside itself: an accumulator, counter, or other mutable value
+captured from the enclosing scope will be double-counted (or otherwise
+corrupted) if the first attempt runs partway before hitting contention.
+`ExpireAttempts` (internal/adapters/sqlite/attempts.go) is the concrete
+example that motivated writing this down -- its expired-attempt counter
+used to live in a variable declared outside the callback and accumulate
+across retries; it now declares a fresh counter inside the callback on
+every invocation and assigns the result only once, at the end.
 
 ## 7. Tables
 

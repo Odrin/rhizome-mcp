@@ -13,7 +13,8 @@ import (
 )
 
 type DecisionRepository struct {
-	db *DB
+	db         *DB
+	transactor *Transactor
 }
 
 type decisionCursor struct {
@@ -27,7 +28,11 @@ func NewDecisionRepository(database *DB) (*DecisionRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "decision database is required", false)
 	}
-	return &DecisionRepository{db: database}, nil
+	transactor, err := NewTransactor(database)
+	if err != nil {
+		return nil, err
+	}
+	return &DecisionRepository{db: database, transactor: transactor}, nil
 }
 
 func (repository *DecisionRepository) RecordDecision(ctx context.Context, command ports.RecordDecisionCommand) (domain.RecordDecisionResult, error) {
@@ -43,16 +48,16 @@ func (repository *DecisionRepository) RecordDecision(ctx context.Context, comman
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := formatStorageTime(now)
 	var result domain.RecordDecisionResult
-	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+	err = repository.transactor.RunWrite(ctx, func(ctx context.Context, uow ports.UnitOfWork) error {
+		tx := uow.(unitOfWork).executor()
 		var issueID *string
 		if input.IssueID != nil {
 			identifier, err := domain.ParseIssueIdentifier(*input.IssueID)
 			if err != nil {
 				return err
 			}
-			issue, err := loadIssueForMutation(ctx, tx, identifier)
+			issue, err := uow.LoadIssueForMutation(ctx, identifier)
 			if err != nil {
 				return err
 			}
@@ -84,7 +89,7 @@ func (repository *DecisionRepository) RecordDecision(ctx context.Context, comman
 			id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			command.ID, nullableStringValuePtr(issueID), input.Title, input.Summary, input.Content, input.Status,
-			nullableStringValuePtr(input.SupersedesID), nullableStringValuePtr(input.SessionID), timestamp); err != nil {
+			nullableStringValuePtr(input.SupersedesID), nullableStringValuePtr(input.SessionID), formatStorageTime(now)); err != nil {
 			return err
 		}
 
@@ -112,10 +117,8 @@ func (repository *DecisionRepository) RecordDecision(ctx context.Context, comman
 		if err != nil {
 			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode decision event", false)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
-			issue_id, event_type, session_id, attempt_id, payload, created_at
-		) VALUES (?, 'decision_recorded', ?, NULL, ?, ?)`,
-			nullableStringValuePtr(issueID), nullableStringValuePtr(input.SessionID), string(payload), timestamp); err != nil {
+		_, err = uow.AppendIssueEvent(ctx, issueID, "decision_recorded", input.SessionID, nil, payload, now)
+		if err != nil {
 			return err
 		}
 

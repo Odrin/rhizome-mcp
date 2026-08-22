@@ -14,7 +14,8 @@ import (
 
 // CommentRepository is the SQLite implementation of ports.CommentRepository.
 type CommentRepository struct {
-	db *DB
+	db         *DB
+	transactor *Transactor
 }
 
 const addCommentOperation = "add_comment"
@@ -24,7 +25,11 @@ func NewCommentRepository(database *DB) (*CommentRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "comment database is required", false)
 	}
-	return &CommentRepository{db: database}, nil
+	transactor, err := NewTransactor(database)
+	if err != nil {
+		return nil, err
+	}
+	return &CommentRepository{db: database, transactor: transactor}, nil
 }
 
 // LookupAddComment serves a replay before the comment ID is allocated.
@@ -75,40 +80,36 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := formatStorageTime(now)
 	var comment domain.Comment
-	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+	err = repository.transactor.RunWrite(ctx, func(ctx context.Context, uow ports.UnitOfWork) error {
 		if command.IdempotencyKey != "" {
-			var savedHash []byte
-			var savedResponse string
-			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
-				WHERE operation = ? AND idempotency_key = ?`, addCommentOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
-			switch {
-			case err == nil:
-				if !bytes.Equal(savedHash, command.RequestHash) {
+			requestHash, responseJSON, found, err := uow.LookupIdempotency(ctx, addCommentOperation, command.IdempotencyKey)
+			if err != nil {
+				return err
+			}
+			if found {
+				if !bytes.Equal(requestHash, command.RequestHash) {
 					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
 						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
 				}
-				if err := json.Unmarshal([]byte(savedResponse), &comment); err != nil {
+				if err := json.Unmarshal([]byte(responseJSON), &comment); err != nil {
 					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
 				}
 				return nil
-			case err == sql.ErrNoRows:
-			default:
-				return err
 			}
 		}
-		issue, err := loadIssueForMutation(ctx, tx, identifier)
+		issue, err := uow.LoadIssueForMutation(ctx, identifier)
 		if err != nil {
 			return err
 		}
 		if issue.ArchivedAt != nil {
 			return domain.NewError(domain.CodeIssueArchived, "issue is archived", false)
 		}
+		tx := uow.(unitOfWork).executor()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(
 			id, issue_id, content, created_by_session_id, author_label, created_at, edited_at
 		) VALUES (?, ?, ?, ?, NULL, ?, NULL)`,
-			command.ID, issue.ID, input.Content, nullableStringValuePtr(input.SessionID), timestamp,
+			command.ID, issue.ID, input.Content, nullableStringValuePtr(input.SessionID), formatStorageTime(now),
 		); err != nil {
 			return err
 		}
@@ -119,11 +120,8 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 		if err != nil {
 			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode comment event", false)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
-			issue_id, event_type, session_id, attempt_id, payload, created_at
-		) VALUES (?, 'comment_added', ?, NULL, ?, ?)`,
-			issue.ID, nullableStringValuePtr(input.SessionID), string(payload), timestamp,
-		); err != nil {
+		_, err = uow.AppendIssueEvent(ctx, &issue.ID, "comment_added", input.SessionID, nil, payload, now)
+		if err != nil {
 			return err
 		}
 
@@ -136,9 +134,7 @@ func (repository *CommentRepository) AddComment(ctx context.Context, command por
 			if err != nil {
 				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode comment response", false)
 			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
-				idempotency_key, operation, request_hash, response_json, created_at
-			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, addCommentOperation, command.RequestHash, string(response), timestamp)
+			err = uow.StoreIdempotency(ctx, addCommentOperation, command.IdempotencyKey, command.RequestHash, response, now)
 			if err != nil {
 				return err
 			}

@@ -381,6 +381,11 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 	}
 	now := command.OccurredAt.UTC()
 	var result ports.ExpireAttemptsResult
+	// The count accumulator lives inside the callback, not in the result
+	// variable captured from the enclosing scope: DB.Write retries this
+	// whole callback from scratch on SQLite BUSY/LOCKED (see
+	// ports.Transactor's retry-contract doc comment), and a count declared
+	// outside it would double-count across a retried attempt.
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM work_attempts
 			WHERE status = 'active' AND lease_expires_at <= ? ORDER BY id ASC`, formatStorageTime(now))
@@ -403,15 +408,17 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		var expiredCount int
 		for _, id := range attemptIDs {
 			expired, err := expireAttempt(ctx, tx, id, now)
 			if err != nil {
 				return err
 			}
 			if expired {
-				result.ExpiredAttemptCount++
+				expiredCount++
 			}
 		}
+		result = ports.ExpireAttemptsResult{ExpiredAttemptCount: expiredCount}
 		return nil
 	})
 	if err != nil {

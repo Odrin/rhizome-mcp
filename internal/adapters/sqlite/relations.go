@@ -14,7 +14,8 @@ import (
 
 // RelationRepository is the SQLite implementation of ports.RelationRepository.
 type RelationRepository struct {
-	db *DB
+	db         *DB
+	transactor *Transactor
 }
 
 const manageIssueRelationOperation = "manage_issue_relation"
@@ -24,7 +25,11 @@ func NewRelationRepository(database *DB) (*RelationRepository, error) {
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "relation database is required", false)
 	}
-	return &RelationRepository{db: database}, nil
+	transactor, err := NewTransactor(database)
+	if err != nil {
+		return nil, err
+	}
+	return &RelationRepository{db: database, transactor: transactor}, nil
 }
 
 // LookupManageIssueRelation serves a replay before a relation ID is
@@ -74,34 +79,30 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 	}
 
 	now := command.OccurredAt.UTC()
-	timestamp := formatStorageTime(now)
 	var result ports.ManageIssueRelationResult
-	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+	err := repository.transactor.RunWrite(ctx, func(ctx context.Context, uow ports.UnitOfWork) error {
 		if command.IdempotencyKey != "" {
-			var savedHash []byte
-			var savedResponse string
-			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
-				WHERE operation = ? AND idempotency_key = ?`, manageIssueRelationOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
-			switch {
-			case err == nil:
-				if !bytes.Equal(savedHash, command.RequestHash) {
+			requestHash, responseJSON, found, err := uow.LookupIdempotency(ctx, manageIssueRelationOperation, command.IdempotencyKey)
+			if err != nil {
+				return err
+			}
+			if found {
+				if !bytes.Equal(requestHash, command.RequestHash) {
 					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
 						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
 				}
-				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+				if err := json.Unmarshal([]byte(responseJSON), &result); err != nil {
 					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
 				}
 				return nil
-			case err == sql.ErrNoRows:
-			default:
-				return err
 			}
 		}
-		source, err := loadIssueForMutation(ctx, tx, command.SourceIdentifier)
+		tx := uow.(unitOfWork).executor()
+		source, err := uow.LoadIssueForMutation(ctx, command.SourceIdentifier)
 		if err != nil {
 			return err
 		}
-		target, err := loadIssueForMutation(ctx, tx, command.TargetIdentifier)
+		target, err := uow.LoadIssueForMutation(ctx, command.TargetIdentifier)
 		if err != nil {
 			return err
 		}
@@ -145,11 +146,11 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(
 				id, source_issue_id, target_issue_id, type, created_by_session_id, created_at
 			) VALUES (?, ?, ?, ?, NULL, ?)`,
-				relation.ID, relation.SourceIssueID, relation.TargetIssueID, relation.Type, timestamp,
+				relation.ID, relation.SourceIssueID, relation.TargetIssueID, relation.Type, formatStorageTime(now),
 			); err != nil {
 				return err
 			}
-			if err := appendRelationEvents(ctx, tx, "relation_added", relation, timestamp); err != nil {
+			if err := appendRelationEvents(ctx, uow, "relation_added", relation, now); err != nil {
 				return err
 			}
 			result.Changed = true
@@ -163,7 +164,7 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 				if _, err := tx.ExecContext(ctx, `DELETE FROM issue_relations WHERE id = ?`, relation.ID); err != nil {
 					return err
 				}
-				if err := appendRelationEvents(ctx, tx, "relation_removed", relation, timestamp); err != nil {
+				if err := appendRelationEvents(ctx, uow, "relation_removed", relation, now); err != nil {
 					return err
 				}
 				result.Changed = true
@@ -179,9 +180,7 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 			if err != nil {
 				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode relation response", false)
 			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
-				idempotency_key, operation, request_hash, response_json, created_at
-			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, manageIssueRelationOperation, command.RequestHash, string(response), timestamp)
+			err = uow.StoreIdempotency(ctx, manageIssueRelationOperation, command.IdempotencyKey, command.RequestHash, response, now)
 			if err != nil {
 				return err
 			}
@@ -291,7 +290,27 @@ func loadRelationAffectedIssues(ctx context.Context, tx Executor, sourceID, targ
 	return result, nil
 }
 
-func appendRelationEvents(ctx context.Context, tx Executor, eventType string, relation domain.IssueRelation, timestamp string) error {
+// appendRelationEvents appends issue_events for a relation mutation via UnitOfWork.
+func appendRelationEvents(ctx context.Context, uow ports.UnitOfWork, eventType string, relation domain.IssueRelation, occurredAt time.Time) error {
+	payload, err := json.Marshal(relationEventPayload{
+		RelationID: relation.ID, SourceIssueID: relation.SourceIssueID,
+		TargetIssueID: relation.TargetIssueID, RelationType: relation.Type,
+	})
+	if err != nil {
+		return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode relation event", false)
+	}
+	for _, issueID := range []string{relation.SourceIssueID, relation.TargetIssueID} {
+		_, err := uow.AppendIssueEvent(ctx, &issueID, eventType, nil, nil, payload, occurredAt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendRelationEventsWithExecutor appends issue_events for a relation mutation via a raw Executor.
+// This is used by planning.go and other direct database operations outside UnitOfWork context.
+func appendRelationEventsWithExecutor(ctx context.Context, tx Executor, eventType string, relation domain.IssueRelation, timestamp string) error {
 	payload, err := json.Marshal(relationEventPayload{
 		RelationID: relation.ID, SourceIssueID: relation.SourceIssueID,
 		TargetIssueID: relation.TargetIssueID, RelationType: relation.Type,

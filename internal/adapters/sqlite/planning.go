@@ -376,7 +376,7 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 			VALUES (?, ?, ?, ?, NULL, ?)`, relation.ID, source, target, relation.Type, timestamp); err != nil {
 			return result, err
 		}
-		if err := appendRelationEvents(ctx, tx, "relation_added", relation, timestamp); err != nil {
+		if err := appendRelationEventsWithExecutor(ctx, tx, "relation_added", relation, timestamp); err != nil {
 			return result, err
 		}
 		result.CreatedRelations = append(result.CreatedRelations, relation)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 
 	moderncsqlite "modernc.org/sqlite"
 )
@@ -593,4 +594,60 @@ func obtainBusyError(t *testing.T, path string) error {
 		t.Fatalf("contending error = %v, want BUSY or LOCKED", busyErr)
 	}
 	return busyErr
+}
+
+func TestTransactorRetryContractCountDoesNotDouble(t *testing.T) {
+	// Verify the retry contract: when DB.Write retries the callback on BUSY,
+	// an accumulator declared inside the callback starts fresh and doesn't
+	// double-count. This test simulates a callback that counts items,
+	// forces one BUSY error on the first attempt, and verifies the final
+	// count matches a single successful run.
+	delays := []time.Duration{time.Millisecond}
+	sleeper := &recordingSleeper{}
+	db := openTestDB(t, Options{RetryPolicy: &RetryPolicy{Delays: delays, Sleeper: sleeper}})
+	ctx := context.Background()
+
+	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE retry_test (id INTEGER PRIMARY KEY, value TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.ExecContext(ctx, "INSERT INTO retry_test(value) VALUES ('item1'), ('item2')"); err != nil {
+		t.Fatal(err)
+	}
+
+	busyErr := obtainBusyError(t, filepath.Join(t.TempDir(), "retry.db"))
+	transactor, err := NewTransactor(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Track invocation count and force BUSY only on first attempt
+	invoked := 0
+	var countResult int
+	err = transactor.RunWrite(ctx, func(ctx context.Context, uow ports.UnitOfWork) error {
+		invoked++
+		if invoked == 1 {
+			// First invocation: return BUSY error to trigger retry
+			return busyErr
+		}
+		// Subsequent invocations: count the rows inside the callback
+		// (accumulator declared inside, so it resets on retry)
+		var count int
+		if err := db.pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM retry_test").Scan(&count); err != nil {
+			return err
+		}
+		countResult = count
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunWrite() error = %v", err)
+	}
+	if invoked != 2 {
+		t.Fatalf("invoked = %d, want 2 (initial attempt + 1 retry)", invoked)
+	}
+	if countResult != 2 {
+		t.Fatalf("count result = %d, want 2 (not doubled to 4)", countResult)
+	}
+	if len(sleeper.Delays()) != 1 {
+		t.Fatalf("sleep delays = %v, want 1 delay", sleeper.Delays())
+	}
 }
