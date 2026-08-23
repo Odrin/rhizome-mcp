@@ -13,6 +13,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,6 +26,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/projectconfig"
 )
 
@@ -274,4 +277,22 @@ func mustProjectDatabasePath(t *testing.T, env integrationEnvironment) string {
 		t.Fatalf("resolve project database path: %v", err)
 	}
 	return databasePath
+}
+
+// newIntegrationULID generates one canonical ULID for tests that construct a
+// repository command directly (bypassing the MCP transport, which normally
+// generates and returns IDs itself) -- currently only review request/target
+// IDs, since there is no MCP tool to create the first review request for an
+// issue. Matches main.go's own production wiring: ids.NewGenerator(clock.RealClock{}, rand.Reader).
+func newIntegrationULID(t *testing.T) string {
+	t.Helper()
+	generator, err := ids.NewGenerator(clock.RealClock{}, rand.Reader)
+	if err != nil {
+		t.Fatalf("new ULID generator: %v", err)
+	}
+	id, err := generator.New()
+	if err != nil {
+		t.Fatalf("generate ULID: %v", err)
+	}
+	return id
 }

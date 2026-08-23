@@ -77,6 +77,7 @@ func TestIntegrationBoardCommand(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            reviewIssue.ID,
 		TargetIssueVersion: 1,
@@ -488,6 +489,7 @@ func TestIntegrationBoardServeSearch(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,

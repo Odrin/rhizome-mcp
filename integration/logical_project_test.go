@@ -192,6 +192,14 @@ func mustApplyLogicalProjectDocument(t *testing.T, env integrationEnvironment, d
 	if err != nil {
 		t.Fatalf("parse logical project import plan: %v", err)
 	}
+	// Every destination ID the import needs is minted before the write
+	// transaction runs (application.ProjectService.ApplyLogicalProjectImport's
+	// own sequence, mirrored here since this test drives the repository
+	// directly instead of through that service).
+	plan.DestinationIDs, err = domain.NewLogicalProjectImportDestinationIDs(plan.Document, func() (string, error) { return newIntegrationULID(t), nil })
+	if err != nil {
+		t.Fatalf("generate logical project import destination ids: %v", err)
+	}
 	if _, err := projectRepository.ApplyLogicalProjectImport(context.Background(), plan); err != nil {
 		t.Fatalf("apply logical project import: %v", err)
 	}

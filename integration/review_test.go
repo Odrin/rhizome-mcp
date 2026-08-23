@@ -70,6 +70,7 @@ func TestIntegrationReviewWorkflow(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
@@ -164,6 +165,7 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	predecessorCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
@@ -244,6 +246,10 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 	}
 
 	// A claimed predecessor must be rejected without detaching its attempt.
+	// claim_issue auto-binds the issue's own open review request to the new
+	// attempt in the same transaction (ISSUE-189), so claiming the issue is
+	// what claims the successor here -- a separate ClaimReviewRequest call
+	// would race that auto-bind's own version bump (open v1 -> claimed v2).
 	claimedIssue := callIntegrationTool(t, session, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
 	var claim struct {
 		Attempt struct {
@@ -256,12 +262,13 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimedIssue, claim)
 	}
 
-	claimedSuccessor, err := reviewRepository.ClaimReviewRequest(context.Background(), ports.ReviewMutationCommand{
-		RequestID: replaceOutput.Successor.ID, ExpectedVersion: 1, ActiveAttemptID: &claim.Attempt.ID,
-		OccurredAt: time.Now().UTC().Add(-time.Second),
-	})
+	claimedSuccessor, err := reviewRepository.GetReviewRequest(context.Background(), replaceOutput.Successor.ID)
 	if err != nil {
-		t.Fatalf("claim successor review request: %v", err)
+		t.Fatalf("read auto-claimed successor: %v", err)
+	}
+	if claimedSuccessor.Request.Status != domain.ReviewRequestStatusClaimed ||
+		claimedSuccessor.Request.ActiveAttemptID == nil || *claimedSuccessor.Request.ActiveAttemptID != claim.Attempt.ID {
+		t.Fatalf("successor was not auto-bound to the new attempt: %+v", claimedSuccessor.Request)
 	}
 
 	rejectedReplace := callIntegrationTool(t, session, "replace_review_request", map[string]any{
@@ -349,6 +356,7 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
@@ -390,16 +398,27 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 		t.Fatalf("finish_attempt changes requested result = %#v, decoded = %#v", finished, firstCompletion)
 	}
 
-	var issueVersion int64
-	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issue.ID).Scan(&issueVersion)
-	}); err != nil {
-		t.Fatalf("read issue version before re-review: %v", err)
+	// Re-review is reached the same way the first review was (claim_issue /
+	// finish_attempt's gated complete_work_to_review path, docs/02 §17.1) --
+	// a direct update_issue{status: review} patch has been rejected with
+	// INVALID_STATUS_TRANSITION since ISSUE-172 wired workflow gates in.
+	toReviewClaim := callIntegrationTool(t, session, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
+	var toReviewClaimOutput struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
 	}
-	updated := callIntegrationTool(t, session, "update_issue", map[string]any{
-		"issue_id":         issue.DisplayID,
-		"expected_version": issueVersion,
-		"changes":          map[string]any{"status": "review"},
+	decodeIntegrationResult(t, toReviewClaim, &toReviewClaimOutput)
+	if toReviewClaim.IsError || toReviewClaimOutput.Attempt.ID == "" || toReviewClaimOutput.LeaseToken == "" {
+		t.Fatalf("claim_issue before re-review result = %#v, decoded = %#v", toReviewClaim, toReviewClaimOutput)
+	}
+	updated := callIntegrationTool(t, session, "finish_attempt", map[string]any{
+		"attempt_id":          toReviewClaimOutput.Attempt.ID,
+		"lease_token":         toReviewClaimOutput.LeaseToken,
+		"outcome":             "completed",
+		"result_summary":      "Ready for re-review.",
+		"target_issue_status": "review",
 	})
 	var updatedIssue struct {
 		Issue struct {
@@ -408,7 +427,7 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 	}
 	decodeIntegrationResult(t, updated, &updatedIssue)
 	if updated.IsError || updatedIssue.Issue.Version == 0 {
-		t.Fatalf("update_issue result = %#v, decoded = %#v", updated, updatedIssue)
+		t.Fatalf("finish_attempt to review result = %#v, decoded = %#v", updated, updatedIssue)
 	}
 
 	secondClaim := callIntegrationTool(t, session, "claim_issue", map[string]any{"issue_id": issue.DisplayID, "lease_seconds": 60})
@@ -431,6 +450,7 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 	}
 
 	requestedAgainRes, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: updatedIssue.Issue.Version,
