@@ -944,19 +944,20 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 		if blockers > 0 {
 			return domain.NewError(domain.CodeUnresolvedBlockersAdded, "unresolved blockers were added during attempt", true, domain.Detail{Field: "issue_id", Code: "BLOCKED"})
 		}
-		// Excludes source='review' rows and attempt_started rows
-		// deliberately: an attempt's own lifecycle (its own claim, in
-		// particular -- now that ClaimIssue auto-binds a review request to
-		// its attempt_started row, ISSUE-189) always advances the shared
-		// issue_events sequence past whatever event position was captured
-		// when the review target was created, so counting those events here
-		// would make every review appear stale from the moment it is
-		// claimed. Staleness and the change-acknowledgment check both mean
-		// "did the reviewed work change," not "did some attempt's own
-		// workflow progress" -- see docs/02 for the unification contract and
-		// this exclusion's rationale.
+		// The true event-log position: the same unfiltered MAX(id) every
+		// read tool reports as latest_event_id (get_planning_graph, search,
+		// get_project, and get_changes' cursor -- docs/03). The
+		// change-acknowledgment gate below compares against this, so an
+		// agent can satisfy it by echoing back the number it just read.
+		//
+		// Review-target staleness deliberately does NOT use this value: it
+		// asks a different question ("did the reviewed work change") and is
+		// answered by reviewedWorkChangedSince. Conflating the two -- one
+		// side a client-supplied unfiltered position, the other a
+		// recomputed filtered maximum -- is what made review requests stale
+		// from the moment they were created (ISSUE-189 AC3).
 		var latestEventID int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
 			return err
 		}
 		var reviewRequest *domain.ReviewRequest
@@ -966,7 +967,11 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				return err
 			}
 			if reviewRequest != nil && reviewRequest.Status == domain.ReviewRequestStatusClaimed && reviewRequest.ActiveAttemptID != nil && *reviewRequest.ActiveAttemptID == command.AttemptID {
-				if reviewRequest.TargetIssueVersion != issue.Version || reviewRequest.TargetEventID != latestEventID {
+				workChanged, err := reviewedWorkChangedSince(ctx, tx, issue.ID, reviewRequest.TargetEventID)
+				if err != nil {
+					return err
+				}
+				if reviewRequest.TargetIssueVersion != issue.Version || workChanged {
 					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now); err != nil {
 						return err
 					}
@@ -1267,6 +1272,40 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 	}
 	return appendReviewEvent(ctx, tx, issueID, "review_claimed", &attemptID,
 		payloadForReviewEvent(requestID, targetID, &attemptID, nil, nil), claimedAt)
+}
+
+// reviewedWorkChangedSince reports whether issueID's own work changed after
+// event position afterEventID -- the question review-target staleness
+// actually asks. See docs/09 "Staleness and concurrency" for the contract
+// this implements.
+//
+// Three properties, each of which a previous shape got wrong (ISSUE-189 AC3):
+//
+// Scoped to the issue under review. A review target freezes one issue's
+// work, so an event on some other issue says nothing about whether this
+// review is still valid. A project-global comparison made every in-flight
+// review stale as soon as any agent touched any issue -- unusable once
+// claim-time binding became routine.
+//
+// Excludes source='review' rows and attempt_started rows. The review's own
+// lifecycle (its request, its claim) and an attempt's own start are the
+// workflow progressing, not the reviewed work changing.
+//
+// Asks "did anything disqualifying happen after this position" rather than
+// comparing afterEventID against a recomputed maximum. target_event_id is a
+// client-supplied position, read from the latest_event_id that read tools
+// report as an unfiltered log cursor; equality against any filtered maximum
+// compares two different quantities, and marked a request stale from the
+// moment it was created whenever the newest event happened to be one of the
+// excluded kinds (every claim_issue on any issue emits an attempt_started).
+func reviewedWorkChangedSince(ctx context.Context, tx Queryer, issueID string, afterEventID int64) (bool, error) {
+	var changed bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issue_events
+		WHERE issue_id = ? AND id > ? AND source != 'review' AND event_type != 'attempt_started')`,
+		issueID, afterEventID).Scan(&changed); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptID string) (*domain.ReviewRequest, error) {

@@ -407,7 +407,7 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 	}
 	var latestEventID int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
 	}
 	var latestEventID int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -791,16 +791,17 @@ func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
 	issue := createAttemptIssue(t, fixture, "auto-bind", domain.StatusReview)
 
 	// Create a review repository and add an open request before claiming,
-	// capturing the current event position with the same filter FinishAttempt
-	// uses (excludes source='review' and this attempt's own 'attempt_started'
-	// row, neither of which represent the reviewed work changing).
+	// capturing the event position exactly the way a client does: the
+	// unfiltered MAX(id) that get_planning_graph/search/get_project report
+	// as latest_event_id. Using any other query here would test a value no
+	// production caller can obtain (ISSUE-189 AC3/AC4).
 	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var targetEventID int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&targetEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&targetEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -877,6 +878,188 @@ func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
 	}
 	if resolvedActiveAttemptID.Valid {
 		t.Fatalf("request active_attempt_id after approval = %#v, want null", resolvedActiveAttemptID)
+	}
+}
+
+// captureClientVisibleEventPosition reads latest_event_id the way every
+// production caller does -- get_planning_graph (planning.go), search
+// (search.go) and get_project (projects.go) all report this unfiltered
+// MAX(id). Review tests must capture target_event_id through this and
+// nothing else: a test that computes the position with some private,
+// filtered query is testing a value no client can obtain (ISSUE-189 AC3).
+func captureClientVisibleEventPosition(t *testing.T, fixture *attemptTestFixture) int64 {
+	t.Helper()
+	var latestEventID int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return latestEventID
+}
+
+// ISSUE-189 AC3 regression: a review request created from the event position
+// clients actually see must be approvable. Before the fix, target_event_id
+// was captured from an unfiltered MAX(id) but compared at approval against a
+// filtered one, so whenever the newest event was an attempt_started -- which
+// every claim_issue on any issue emits -- the request was stale from birth
+// and went straight to superseded, unrecoverably.
+func TestReviewApprovalAcceptsClientVisibleEventPosition(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-client-position")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "under review", domain.StatusReview)
+
+	// Another agent claims an unrelated issue, so the newest event in the
+	// project is an attempt_started -- the case that used to poison the
+	// request the moment it was created.
+	other := createAttemptIssue(t, fixture, "unrelated work", domain.StatusReady)
+	if _, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: other.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("approve with a client-visible target_event_id: %v", err)
+	}
+
+	var requestStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) {
+		t.Fatalf("request status = %q, want approved", requestStatus)
+	}
+}
+
+// ISSUE-189 AC3: staleness is scoped to the issue under review. A review
+// target freezes one issue's work, so work recorded against some other issue
+// says nothing about whether this review is still valid. Project-global
+// scoping made every in-flight review stale as soon as any agent touched
+// anything.
+func TestReviewStalenessIgnoresOtherIssuesWork(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-scope-other-issue")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "under review", domain.StatusReview)
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ordinary, unrelated project activity while the review is in flight:
+	// a new issue is filed (issue_created, source='issue') and an unrelated
+	// issue is edited. Neither touches the reviewed work.
+	unrelated := createAttemptIssue(t, fixture, "filed during the review", domain.StatusReady)
+	if _, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: unrelated.ID, ExpectedVersion: unrelated.Issue.Version,
+		Changes: domain.IssuePatch{Description: domain.OptionalString{Set: true, Value: pointer("edited elsewhere")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("approve after unrelated project activity: %v", err)
+	}
+
+	var requestStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) {
+		t.Fatalf("request status = %q, want approved", requestStatus)
+	}
+}
+
+// The other half of the scope contract: a change to the reviewed issue
+// itself must still supersede the request. Without this, the issue-scoping
+// above could be satisfied by never detecting staleness at all.
+func TestReviewStalenessDetectsReviewedIssueChange(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-scope-same-issue")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "under review", domain.StatusReview)
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The reviewed work itself changes underneath the reviewer. Uses a
+	// comment so the issue's own version stays put and the event-position
+	// check -- not the issue-version check -- is what has to catch it.
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at)
+			VALUES (?, 'comment_added', '{}', ?)`, issue.ID, sqlite.FormatStorageTime(fixture.clock.Now().Add(2*time.Minute)))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
+		t.Fatalf("approve after the reviewed issue changed: error = %v, want STALE_REVIEW_TARGET", err)
+	}
+
+	var requestStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusSuperseded) {
+		t.Fatalf("request status = %q, want superseded", requestStatus)
 	}
 }
 
@@ -3017,7 +3200,7 @@ func currentIssueVersionAndLatestEvent(t *testing.T, fixture *attemptTestFixture
 		if err := query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
 			return err
 		}
-		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events WHERE source != 'review' AND event_type != 'attempt_started'`).Scan(&latestEventID)
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
 	}); err != nil {
 		t.Fatal(err)
 	}

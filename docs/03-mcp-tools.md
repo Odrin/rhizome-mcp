@@ -1068,9 +1068,16 @@ Input:
 review-request tool, `idempotency_key` here is mandatory, not optional: this
 operation does not hold the predecessor's attempt lease token, so replaying a
 retried call safely (rather than risking a second successor from a client-side
-retry) depends on the key. `target_event_id` staleness is evaluated against the
-project-wide event sequence (`issue_events`, excluding review-sourced rows),
-not scoped to the request's own issue.
+retry) depends on the key.
+
+`target_event_id` is an ordinary event-log position: pass the `latest_event_id`
+any read tool reports (`get_planning_graph`, `search`, `get_project`,
+`get_changes`), which is the unfiltered maximum across the whole log. It is
+recorded verbatim and is never compared for equality against a recomputed
+maximum. At approval the service instead asks whether the *reviewed issue's own*
+work changed after that position — events on other issues do not make this
+request stale, and neither do review-sourced events or `attempt_started` rows.
+See docs/09 "Staleness and concurrency".
 
 Output:
 

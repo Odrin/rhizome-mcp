@@ -84,18 +84,38 @@ Recovery examples:
 
 ## Staleness and concurrency
 
-Before review completion, the service compares the target issue version and
-event position with current values. Any change that affects implementation
+Before review completion, the service checks the target issue version and
+event position against current state. Any change that affects implementation
 content, acceptance criteria, artifacts, status, or a new implementation
 attempt makes the request stale. Priority-only changes do not. A stale request
 cannot approve, request changes, or block; it transitions to `superseded` and
 returns `STALE_REVIEW_TARGET`.
 
-The event-position comparison excludes review-sourced events and
-`attempt_started` events: an attempt's own start -- including the claiming
-review attempt's, since `claim_issue` auto-binds a request to its
-`attempt_started` row -- is the review's own workflow progressing, not the
-reviewed work changing, so it never by itself makes a request stale.
+The event-position check asks a single question: **did the reviewed issue's own
+work change after `target_event_id`?** Three properties follow from that
+wording, and each one matters:
+
+- **Issue-scoped.** A review target freezes one issue's work, so only events
+  recorded against that issue count. Activity on other issues -- another agent
+  claiming work, a comment filed elsewhere -- never supersedes this request.
+  A project-global comparison would make every in-flight review stale as soon
+  as anyone touched anything, which is unusable once claim-time binding is
+  routine.
+- **Excludes review-sourced and `attempt_started` events.** The review's own
+  lifecycle (its request, and the claim that `claim_issue` auto-binds to its
+  `attempt_started` row) is the workflow progressing, not the reviewed work
+  changing.
+- **Asks "anything since?", not "does this still equal the maximum?"**
+  `target_event_id` is a client-supplied position taken from `latest_event_id`,
+  which read tools report as an unfiltered log cursor. Comparing it for
+  equality against any filtered maximum compares two different quantities, and
+  marked requests stale the moment they were created whenever the newest event
+  happened to be one of the excluded kinds.
+
+`latest_event_id` itself is unchanged and remains the true unfiltered maximum
+across the log, so it stays usable as a `get_changes` cursor. It is also what
+`finish_attempt`'s change-acknowledgment gate compares against, which is why an
+agent can satisfy that gate by echoing back the value it just read.
 
 Creation, claiming, completion, cancellation, and supersession use optimistic
 request version checks and short write transactions. The database enforces one
