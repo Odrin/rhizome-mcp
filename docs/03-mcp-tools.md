@@ -767,6 +767,8 @@ Changing `type` away from `epic` fails with `INVALID_EPIC_PARENT` (detail field 
 
 A status patch targeting `review` or `done` fails with `INVALID_STATUS_TRANSITION` (detail field `changes.status`, code `UNSUPPORTED_DIRECT_TRANSITION`) regardless of the current stored status. Those two statuses are reachable only through `claim_issue`/`finish_attempt`'s gated enforcement points (docs/02 §17.1), never through a direct patch.
 
+A status patch targeting `cancelled` fails with `ACTIVE_ATTEMPT_EXISTS` while the issue has an active work attempt -- the same guard `archive_issue` applies (§7.5) -- so cancelling an issue can never orphan its active attempt's lease or reservations. As with `archive_issue`, an attempt whose lease has already lapsed is swept first, so a truly-expired attempt never blocks the cancellation.
+
 Input:
 
 ```json

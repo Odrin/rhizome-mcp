@@ -309,6 +309,22 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 		if err != nil {
 			return err
 		}
+		if command.Changes.Status.Set && next.Status == domain.StatusCancelled && current.Status != domain.StatusCancelled {
+			if err := expireAttemptsForIssue(ctx, tx, current.ID, now); err != nil {
+				return err
+			}
+			var hasActiveAttempt bool
+			if err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM work_attempts
+					WHERE issue_id = ? AND status = 'active'
+				)`, current.ID).Scan(&hasActiveAttempt); err != nil {
+				return err
+			}
+			if hasActiveAttempt {
+				return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
+			}
+		}
 		if current.Type == domain.TypeEpic && next.Type != domain.TypeEpic {
 			hasChildren, err := epicHasLiveChildren(ctx, tx, current.ID)
 			if err != nil {

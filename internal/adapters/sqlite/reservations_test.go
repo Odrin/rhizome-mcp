@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
@@ -253,6 +254,154 @@ func TestReservationsReleaseTransitionsToHistoryAndGuardsVersion(t *testing.T) {
 	}
 	if got := countAttemptEvents(t, fixture, claim.Attempt.ID, "reservation_released"); got != 1 {
 		t.Fatalf("reservation_released events = %d, want 1", got)
+	}
+}
+
+// TestReservationsReleaseOnFinishAttempt is ISSUE-179's core contract for
+// the FinishAttempt-routed terminations: every outcome releases the
+// attempt's active reservations in the same transaction, tagged with the
+// release reason that explains why.
+func TestReservationsReleaseOnFinishAttempt(t *testing.T) {
+	cases := []struct {
+		name       string
+		outcome    domain.AttemptOutcome
+		configure  func(*domain.FinishAttemptInput)
+		wantReason domain.ReservationReleaseReason
+	}{
+		{"completed", domain.AttemptOutcomeCompleted, func(input *domain.FinishAttemptInput) {
+			input.TargetIssueStatus = statusPointer(domain.StatusDone)
+		}, domain.ReservationReleaseReasonCompleted},
+		{"failed", domain.AttemptOutcomeFailed, func(input *domain.FinishAttemptInput) {
+			input.FailureReasonCode = failurePointer(domain.FailureReasonTestsFailed)
+		}, domain.ReservationReleaseReasonFailed},
+		{"interrupted", domain.AttemptOutcomeInterrupted, func(input *domain.FinishAttemptInput) {
+			input.InterruptionReasonCode = interruptionPointer(domain.InterruptionReasonHandoff)
+		}, domain.ReservationReleaseReasonInterrupted},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newAttemptTestFixture(t, "reservations-finish-"+testCase.name)
+			defer fixture.close()
+			claim := claimReservationFixture(t, fixture, testCase.name)
+			repository, err := sqlite.NewReservationRepository(fixture.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reserved, err := repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, claim.Issue.ID, claim.Attempt.ID,
+				domain.Resource{Kind: domain.ResourceKindFile, Path: testCase.name + ".go"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			input := finishInput(claim, testCase.outcome)
+			testCase.configure(&input)
+			if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+				t.Fatalf("FinishAttempt(%s): %v", testCase.outcome, err)
+			}
+
+			assertReservationReleased(t, fixture, repository, claim.Attempt.ID, reserved[0].ID, testCase.wantReason)
+		})
+	}
+}
+
+// TestReservationsReleaseOnForceRelease covers the one terminateAttempt call
+// site FinishAttempt doesn't: ForceReleaseAttempt sets the same
+// AttemptStatusInterrupted a plain interrupted finish does, but must record
+// a distinct force_released reservation reason rather than interrupted.
+func TestReservationsReleaseOnForceRelease(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "reservations-force-release")
+	defer fixture.close()
+	claim := claimReservationFixture(t, fixture, "force release")
+	reservationRepository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := reservationRepository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, claim.Issue.ID, claim.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindFile, Path: "force-release.go"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attemptRepository, err := sqlite.NewAttemptRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attemptRepository.ForceReleaseAttempt(fixture.ctx, ports.ForceReleaseAttemptCommand{
+		AttemptID: claim.Attempt.ID, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatalf("ForceReleaseAttempt: %v", err)
+	}
+
+	assertReservationReleased(t, fixture, reservationRepository, claim.Attempt.ID, reserved[0].ID, domain.ReservationReleaseReasonForceReleased)
+}
+
+// TestReservationsReleaseOnExpiry is the clock-driven boundary: a
+// reservation stays authoritative for exactly as long as its owning
+// attempt's lease does, with no separate reservation clock. It must remain
+// active up to and including the instant lease_expires_at, and be released
+// -- reason expired -- only once ExpireAttempts sweeps past it.
+func TestReservationsReleaseOnExpiry(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "reservations-expiry")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "expiry", domain.StatusReady)
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID, LeaseSeconds: intPointer(60)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservationRepository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := reservationRepository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, claim.Issue.ID, claim.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindFile, Path: "expiry.go"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance to the exact lease boundary and sweep: still active. The
+	// attempt's own lease_expires_at <= now guard is inclusive, but the
+	// clock is advanced to precisely that instant here, before the guard
+	// takes effect on the *next* tick, to prove authority survives up to
+	// (not just strictly before) expiry.
+	fixture.clock.Advance(59 * time.Second)
+	if _, err := fixture.attempts.ExpireAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	active, err := reservationRepository.ListActiveReservations(fixture.ctx, ports.ListActiveReservationsQuery{AttemptID: claim.Attempt.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("active one second before lease expiry = %d, want 1 (still authoritative)", len(active))
+	}
+
+	// Advance past the boundary and sweep again: now released as expired.
+	fixture.clock.Advance(time.Second)
+	if _, err := fixture.attempts.ExpireAttempts(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertReservationReleased(t, fixture, reservationRepository, claim.Attempt.ID, reserved[0].ID, domain.ReservationReleaseReasonExpired)
+}
+
+func assertReservationReleased(t *testing.T, fixture *attemptTestFixture, repository *sqlite.ReservationRepository, attemptID, reservationID string, wantReason domain.ReservationReleaseReason) {
+	t.Helper()
+	active, err := repository.ListActiveReservations(fixture.ctx, ports.ListActiveReservationsQuery{AttemptID: attemptID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active reservations for attempt %s = %d, want 0", attemptID, len(active))
+	}
+	history, err := repository.ListReservationHistory(fixture.ctx, ports.ListReservationHistoryQuery{AttemptID: attemptID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].ID != reservationID ||
+		history[0].ReleaseReason == nil || *history[0].ReleaseReason != wantReason {
+		t.Fatalf("history for attempt %s = %+v, want one row %s released as %q", attemptID, history, reservationID, wantReason)
+	}
+	if got := countAttemptEvents(t, fixture, attemptID, "reservation_released"); got != 1 {
+		t.Fatalf("reservation_released events for attempt %s = %d, want 1", attemptID, got)
 	}
 }
 

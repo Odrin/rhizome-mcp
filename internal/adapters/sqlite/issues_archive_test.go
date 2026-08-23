@@ -204,6 +204,67 @@ func TestIssueArchivePreservesRelatedDataAndBlocksActiveAttempt(t *testing.T) {
 	}
 }
 
+// ISSUE-179: unlike archive_issue, update_issue's cancellation transition
+// used to apply regardless of an active attempt, orphaning the attempt (and,
+// once reservations exist, its reservations) against a cancelled issue.
+// Cancellation now applies the same active-attempt guard archive_issue does.
+func TestUpdateIssueCancelBlocksActiveAttemptThenSucceedsAfterCompletion(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Protected from cancel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?)`,
+			"01BX5ZZKBKACTAV9WEVGEMMVS3", issue.ID, []byte("hash"),
+			sqlite.FormatStorageTime(now.Add(time.Minute)), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel := domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: 1,
+		Changes: domain.IssuePatch{Status: domain.OptionalValue[domain.Status]{Set: true, Value: domain.StatusCancelled}},
+	}
+	_, err = service.UpdateIssue(ctx, cancel)
+	assertDomainCode(t, err, domain.CodeActiveAttemptExists)
+	var updateError *domain.Error
+	if !errors.As(err, &updateError) || updateError.Retryable {
+		t.Fatalf("active attempt error retryable = %v", updateError != nil && updateError.Retryable)
+	}
+
+	var version int
+	var status string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT version, status FROM issues WHERE id = ?", issue.ID).Scan(&version, &status)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || status != string(domain.StatusOpen) {
+		t.Fatalf("issue changed on active-attempt rejection: version=%d status=%q", version, status)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = 'completed', finished_at = ?
+			WHERE issue_id = ? AND status = 'active'`, sqlite.FormatStorageTime(now), issue.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := service.UpdateIssue(ctx, cancel)
+	if err != nil {
+		t.Fatalf("UpdateIssue(cancel after attempt completion): %v", err)
+	}
+	if cancelled.Issue.Status != domain.StatusCancelled {
+		t.Fatalf("issue status = %q, want cancelled", cancelled.Issue.Status)
+	}
+}
+
 func TestIssueArchiveExpiresAttemptAtLeaseBoundary(t *testing.T) {
 	service, db, now := openIssueService(t)
 	ctx := context.Background()

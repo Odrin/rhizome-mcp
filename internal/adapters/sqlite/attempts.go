@@ -88,10 +88,16 @@ func authenticateActiveAttempt(ctx context.Context, tx Executor, attemptID strin
 }
 
 // terminateAttemptReason carries the optional failure/interruption reason
-// codes terminateAttempt persists alongside a terminal status.
+// codes terminateAttempt persists alongside a terminal status, plus the
+// reservation release reason its termination implies. The latter cannot be
+// derived from finalStatus alone: ForceReleaseAttempt sets the same
+// AttemptStatusInterrupted a plain interrupted finish does, but the two mean
+// different things for reservations (force_released vs interrupted), so each
+// call site states its own.
 type terminateAttemptReason struct {
-	FailureReasonCode      *domain.FailureReasonCode
-	InterruptionReasonCode *domain.InterruptionReasonCode
+	FailureReasonCode        *domain.FailureReasonCode
+	InterruptionReasonCode   *domain.InterruptionReasonCode
+	ReservationReleaseReason domain.ReservationReleaseReason
 }
 
 // terminateAttempt is the shared terminal-status primitive used by
@@ -103,12 +109,15 @@ type terminateAttemptReason struct {
 // lease_expires_at rather than relying on a prior authenticateActiveAttempt
 // call, but shares releaseClaimedReviewRequest below.
 //
-// Sets work_attempts to finalStatus with the given reason codes and, for a
-// status that abandons a review claim (failed, interrupted, expired --
-// never completed or cancelled), returns any claimed review request back
-// to open (docs/09's promise that losing the review attempt returns the
-// request to open, previously true only for lease expiry). Returns whether
-// the attempt was found active and terminated.
+// Sets work_attempts to finalStatus with the given reason codes, releases
+// every reservation attemptID still holds (ISSUE-179: this and expireAttempt
+// are the complete set of attempt-termination write sites, so a released
+// attempt never retains reservation authority outside the transaction that
+// ended it), and, for a status that abandons a review claim (failed,
+// interrupted, expired -- never completed or cancelled), returns any claimed
+// review request back to open (docs/09's promise that losing the review
+// attempt returns the request to open, previously true only for lease
+// expiry). Returns whether the attempt was found active and terminated.
 func terminateAttempt(ctx context.Context, tx Executor, attemptID string, finalStatus domain.AttemptStatus, reason terminateAttemptReason, now time.Time) (bool, error) {
 	timestamp := formatStorageTime(now)
 	var failure, interruption any
@@ -130,6 +139,9 @@ func terminateAttempt(ctx context.Context, tx Executor, attemptID string, finalS
 	if affected == 0 {
 		return false, nil
 	}
+	if err := releaseReservationsForAttempt(ctx, tx, attemptID, reason.ReservationReleaseReason, now); err != nil {
+		return false, err
+	}
 	if !terminalStatusAbandonsReviewClaim(finalStatus) {
 		return true, nil
 	}
@@ -145,6 +157,21 @@ func terminalStatusAbandonsReviewClaim(status domain.AttemptStatus) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// reservationReleaseReasonForOutcome maps a FinishAttempt outcome to the
+// reservation release reason terminateAttempt should record. Kept as its own
+// mapping (rather than a string cast between the two enums) so the two types
+// stay free to diverge.
+func reservationReleaseReasonForOutcome(outcome domain.AttemptOutcome) domain.ReservationReleaseReason {
+	switch outcome {
+	case domain.AttemptOutcomeFailed:
+		return domain.ReservationReleaseReasonFailed
+	case domain.AttemptOutcomeInterrupted:
+		return domain.ReservationReleaseReasonInterrupted
+	default:
+		return domain.ReservationReleaseReasonCompleted
 	}
 }
 
@@ -1076,7 +1103,8 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			}
 			verificationValue = string(encoded)
 		}
-		reason := terminateAttemptReason{FailureReasonCode: input.FailureReasonCode, InterruptionReasonCode: input.InterruptionReasonCode}
+		reason := terminateAttemptReason{FailureReasonCode: input.FailureReasonCode, InterruptionReasonCode: input.InterruptionReasonCode,
+			ReservationReleaseReason: reservationReleaseReasonForOutcome(input.Outcome)}
 		terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatus(input.Outcome), reason, now)
 		if err != nil {
 			return fmt.Errorf("update work attempt: %w", err)
@@ -1228,7 +1256,7 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 		}
 		reason := domain.InterruptionReasonUserRequest
 		terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatusInterrupted,
-			terminateAttemptReason{InterruptionReasonCode: &reason}, now)
+			terminateAttemptReason{InterruptionReasonCode: &reason, ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, now)
 		if err != nil {
 			return err
 		}
@@ -1313,9 +1341,18 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 // review stale as soon as any agent touched any issue -- unusable once
 // claim-time binding became routine.
 //
-// Excludes source='review' rows and attempt_started rows. The review's own
-// lifecycle (its request, its claim) and an attempt's own start are the
-// workflow progressing, not the reviewed work changing.
+// Excludes source='review' rows, attempt_started rows, and the two
+// reservation event types. The review's own lifecycle (its request, its
+// claim) and an attempt's own start are the workflow progressing, not the
+// reviewed work changing -- and so is a reservation acquired or released
+// against the reviewed issue (ISSUE-179/ISSUE-178 review): reservations
+// track resource ownership among concurrent attempts, not the issue's
+// content, so counting them here would make claim-time acquisition
+// (ISSUE-180) invalidate a reviewer's own in-flight review the moment they
+// claimed it. The exclusion is by event_type, not by widening
+// issue_events.source (docs/04 §7.1 documents source as a closed two-value
+// legacy-provenance enum; excluding two more event types is the smaller
+// change).
 //
 // Asks "did anything disqualifying happen after this position" rather than
 // comparing afterEventID against a recomputed maximum. target_event_id is a
@@ -1327,7 +1364,8 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 func reviewedWorkChangedSince(ctx context.Context, tx Queryer, issueID string, afterEventID int64) (bool, error) {
 	var changed bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issue_events
-		WHERE issue_id = ? AND id > ? AND source != 'review' AND event_type != 'attempt_started')`,
+		WHERE issue_id = ? AND id > ? AND source != 'review'
+		AND event_type NOT IN ('attempt_started', 'reservation_reserved', 'reservation_released'))`,
 		issueID, afterEventID).Scan(&changed); err != nil {
 		return false, err
 	}
@@ -1574,6 +1612,9 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 	}
 	var issueID string
 	if err := tx.QueryRowContext(ctx, `SELECT issue_id FROM work_attempts WHERE id = ?`, attemptID).Scan(&issueID); err != nil {
+		return false, err
+	}
+	if err := releaseReservationsForAttempt(ctx, tx, attemptID, domain.ReservationReleaseReasonExpired, now); err != nil {
 		return false, err
 	}
 	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now); err != nil {

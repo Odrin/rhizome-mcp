@@ -346,6 +346,77 @@ func (repository *ReservationRepository) ReleaseReservation(ctx context.Context,
 	return domain.CloneReservation(reservation), nil
 }
 
+// releaseReservationsForAttempt releases every active reservation owned by
+// attemptID inside tx, the caller's own write transaction -- shared by every
+// attempt-termination write site (terminateAttempt, expireAttempt) per
+// ISSUE-179's locked lifecycle, so a terminated or expired attempt never
+// retains reservation authority beyond the transaction that ended it. Unlike
+// ReleaseReservation, this is not itself a public write operation: it does
+// not authenticate a lease token, and it releases every one of attemptID's
+// active reservations unconditionally rather than one caller-identified row,
+// because the caller has already established (by terminating or expiring
+// attemptID in this same transaction) that attemptID no longer holds
+// authority over anything. Shares ReleaseReservation's row-level UPDATE so
+// the two paths cannot drift on what "released" means.
+func releaseReservationsForAttempt(ctx context.Context, tx Executor, attemptID string, reason domain.ReservationReleaseReason, now time.Time) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, issue_id, version FROM resource_reservations
+		WHERE attempt_id = ? AND status = 'active' ORDER BY id ASC`, attemptID)
+	if err != nil {
+		return err
+	}
+	type activeReservation struct {
+		id      string
+		issueID string
+		version int64
+	}
+	var active []activeReservation
+	for rows.Next() {
+		var row activeReservation
+		if err := rows.Scan(&row.id, &row.issueID, &row.version); err != nil {
+			rows.Close()
+			return err
+		}
+		active = append(active, row)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	timestamp := formatStorageTime(now)
+	for _, row := range active {
+		result, err := tx.ExecContext(ctx, `UPDATE resource_reservations
+			SET status = 'released', released_at = ?, release_reason = ?, version = version + 1
+			WHERE id = ? AND version = ?`, timestamp, string(reason), row.id, row.version)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return domain.NewError(domain.CodeStorageCorrupt,
+				"reservation version changed between the attempt-release scan and its own conditional update", false)
+		}
+		payload, err := json.Marshal(struct {
+			ReservationID string `json:"reservation_id"`
+			ReleaseReason string `json:"release_reason"`
+		}{ReservationID: row.id, ReleaseReason: string(reason)})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode reservation event", false)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'reservation_released', NULL, ?, ?, ?)`, row.issueID, attemptID, string(payload), timestamp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ListActiveReservations returns active reservations ordered by id ascending.
 func (repository *ReservationRepository) ListActiveReservations(ctx context.Context, query ports.ListActiveReservationsQuery) ([]domain.Reservation, error) {
 	var result []domain.Reservation

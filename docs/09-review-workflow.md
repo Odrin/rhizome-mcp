@@ -101,10 +101,14 @@ wording, and each one matters:
   A project-global comparison would make every in-flight review stale as soon
   as anyone touched anything, which is unusable once claim-time binding is
   routine.
-- **Excludes review-sourced and `attempt_started` events.** The review's own
-  lifecycle (its request, and the claim that `claim_issue` auto-binds to its
-  `attempt_started` row) is the workflow progressing, not the reviewed work
-  changing.
+- **Excludes review-sourced events, `attempt_started`, and reservation
+  events.** The review's own lifecycle (its request, and the claim that
+  `claim_issue` auto-binds to its `attempt_started` row) is the workflow
+  progressing, not the reviewed work changing -- and so is a reservation
+  acquired or released against the reviewed issue, since reservations track
+  resource ownership among concurrent attempts, not the issue's content.
+  Without this, claim-time reservation acquisition would invalidate a
+  reviewer's own review request the moment they claimed it.
 - **Asks "anything since?", not "does this still equal the maximum?"**
   `target_event_id` is a client-supplied position taken from `latest_event_id`,
   which read tools report as an unfiltered log cursor. Comparing it for

@@ -1063,6 +1063,77 @@ func TestReviewStalenessDetectsReviewedIssueChange(t *testing.T) {
 	}
 }
 
+// ISSUE-179 (flagged during the ISSUE-178 review): a reservation acquired or
+// released against the issue under review must not count as "the reviewed
+// work changed". This is not reachable through any wired MCP tool yet --
+// nothing calls AcquireReservations until claim-time acquisition (ISSUE-180)
+// -- but it becomes live the moment that wiring lands, and unguarded would
+// make a reviewer's own reservation on the issue they are reviewing
+// immediately and unconditionally supersede their own request.
+func TestReviewStalenessIgnoresReservationEvents(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-scope-reservation-events")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "under review", domain.StatusReview)
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Acquire and then explicitly release a reservation against the reviewed
+	// issue, owned by the review attempt itself -- exactly the sequence
+	// claim-time acquisition will produce once wired.
+	reservationRepository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := reservationRepository.AcquireReservations(fixture.ctx, ports.AcquireReservationsCommand{
+		IssueID: issue.ID, AttemptID: claim.Attempt.ID,
+		Resources: []ports.ReservationResourceInput{
+			{ID: fixture.newID(t), Resource: domain.Resource{Kind: domain.ResourceKindFile, Path: "reviewed.go"}},
+		},
+		OccurredAt: fixture.clock.Now().Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reservationRepository.ReleaseReservation(fixture.ctx, ports.ReleaseReservationCommand{
+		ID: reserved[0].ID, ExpectedVersion: reserved[0].Version, Reason: domain.ReservationReleaseReasonExplicit,
+		OccurredAt: fixture.clock.Now().Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("approve after reservation events on the reviewed issue: %v", err)
+	}
+
+	var requestStatus string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) {
+		t.Fatalf("request status = %q, want approved", requestStatus)
+	}
+}
+
 // Test that claiming a review issue with no open request still works
 // (review is optional, backward compat).
 func TestClaimReviewIssueWithoutRequest(t *testing.T) {
