@@ -18,20 +18,25 @@ type activityGetter interface {
 	GetIssueActivity(context.Context, domain.GetIssueActivityInput) (domain.IssueActivity, error)
 }
 
+type issueDetailReservationLister interface {
+	ListReservations(context.Context, domain.ListResourceReservationsInput) (domain.ReservationList, error)
+}
+
 // IssueDetailService composes the bounded issue-detail use case from the
-// existing issue, graph, and activity services.
+// existing issue, graph, activity, and reservation services.
 type IssueDetailService struct {
-	issueService    issueGetter
-	graphService    graphGetter
-	activityService activityGetter
+	issueService       issueGetter
+	graphService       graphGetter
+	activityService    activityGetter
+	reservationService issueDetailReservationLister
 }
 
 // NewIssueDetailService composes issue detail reads from the existing bounded services.
-func NewIssueDetailService(issueService issueGetter, graphService graphGetter, activityService activityGetter) (*IssueDetailService, error) {
-	if issueService == nil || graphService == nil || activityService == nil {
+func NewIssueDetailService(issueService issueGetter, graphService graphGetter, activityService activityGetter, reservationService issueDetailReservationLister) (*IssueDetailService, error) {
+	if issueService == nil || graphService == nil || activityService == nil || reservationService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "issue detail dependencies are required", false)
 	}
-	return &IssueDetailService{issueService: issueService, graphService: graphService, activityService: activityService}, nil
+	return &IssueDetailService{issueService: issueService, graphService: graphService, activityService: activityService, reservationService: reservationService}, nil
 }
 
 // GetIssueDetail returns a bounded detail projection for one issue.
@@ -69,6 +74,14 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		rootProjection = &domain.IssueProjection{Issue: issue, EffectiveStatus: effectiveStatus}
 	}
 
+	reservationPage, err := service.reservationService.ListReservations(ctx, domain.ListResourceReservationsInput{
+		IssueID: &issue.ID,
+		Limit:   domain.DefaultReservationHistoryLimit,
+	})
+	if err != nil {
+		return domain.IssueDetail{}, err
+	}
+
 	var latestAttempt *domain.WorkAttempt
 	var openReview *domain.ReviewRequest
 	var latestDecision *domain.Decision
@@ -91,5 +104,7 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		LatestAttempt:       latestAttempt,
 		OpenReview:          openReview,
 		LatestDecision:      latestDecision,
+		Reservations:        domain.SummarizeReservations(reservationPage.Items),
+		HasMoreReservations: reservationPage.HasMore,
 	}, nil
 }

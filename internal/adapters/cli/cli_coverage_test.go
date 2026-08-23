@@ -93,18 +93,19 @@ func TestWriteTableWriters(t *testing.T) {
 		label := "agent\talpha\nline"
 		blockedReason := "needs\tclarity\nnow"
 		result := domain.BoardResult{
-			GeneratedAt:    generatedAt,
-			StatusCounts:   []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusBlocked, Count: 2}},
-			ActiveAttempts: []domain.ActiveAttemptSummary{{AttemptID: "att-1", IssueDisplayID: "ISSUE-100", Kind: domain.AttemptKindWork, SessionLabel: &label, LeaseExpiresAt: leaseExpiresAt}},
-			BlockedIssues:  []domain.IssueProjection{{Issue: domain.Issue{DisplayID: "ISSUE-101", Title: "Blocked title", BlockedReason: &blockedReason}}},
-			ReviewRequests: []domain.ReviewRequest{{ID: "rev-1", IssueID: "ISSUE-101", Status: "open", CreatedAt: generatedAt.Add(1 * time.Minute)}},
-			PlanningGraph:  domain.GraphResult{Summary: domain.GraphSummary{NodeCount: 3, EdgeCount: 2, EntryPointCount: 1, BlockingNodeCount: 1}},
+			GeneratedAt:        generatedAt,
+			StatusCounts:       []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusBlocked, Count: 2}},
+			ActiveAttempts:     []domain.ActiveAttemptSummary{{AttemptID: "att-1", IssueDisplayID: "ISSUE-100", Kind: domain.AttemptKindWork, SessionLabel: &label, LeaseExpiresAt: leaseExpiresAt}},
+			ActiveReservations: []domain.Reservation{{ID: "res-1", IssueID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", AttemptID: "att-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}},
+			BlockedIssues:      []domain.IssueProjection{{Issue: domain.Issue{DisplayID: "ISSUE-101", Title: "Blocked title", BlockedReason: &blockedReason}}},
+			ReviewRequests:     []domain.ReviewRequest{{ID: "rev-1", IssueID: "ISSUE-101", Status: "open", CreatedAt: generatedAt.Add(1 * time.Minute)}},
+			PlanningGraph:      domain.GraphResult{Summary: domain.GraphSummary{NodeCount: 3, EdgeCount: 2, EntryPointCount: 1, BlockingNodeCount: 1}},
 		}
 		if err := cli.writeBoardTable(result); err != nil {
 			t.Fatalf("writeBoardTable: %v", err)
 		}
 		got := stdout.String()
-		for _, want := range []string{"generated_at\t2026-08-07T12:34:56Z", "effective_status\tcount", "att-1\tISSUE-100\twork\tagent alpha line", "ISSUE-101\tBlocked title\tneeds clarity now", "rev-1\tISSUE-101\topen\t2026-08-07T12:35:56Z", "nodes\t3", "entry_points\t1"} {
+		for _, want := range []string{"generated_at\t2026-08-07T12:34:56Z", "effective_status\tcount", "att-1\tISSUE-100\twork\tagent alpha line", "active_reservations", "res-1\tISSUE-100\tatt-1\tfile\ta.go", "ISSUE-101\tBlocked title\tneeds clarity now", "rev-1\tISSUE-101\topen\t2026-08-07T12:35:56Z", "nodes\t3", "entry_points\t1"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("output %q does not contain %q", got, want)
 			}

@@ -250,9 +250,10 @@ func schemaGetWorkContext() *jsonschema.Schema {
 		includeValues[index] = string(include)
 	}
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"issue_id": withDescription(issueIdentifierSchema(), "Issue whose work context to load."),
-		"include":  withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(10), UniqueItems: true}, "Optional unique context sections; empty returns the compact default."),
-		"limits":   withDescription(schemaWorkContextLimits(), "Optional 1-20 bounds for requested list sections only."),
+		"issue_id":          withDescription(issueIdentifierSchema(), "Issue whose work context to load."),
+		"include":           withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(includeValues...), MaxItems: intPointer(domain.MaxWorkContextIncludes), UniqueItems: true}, "Optional unique context sections; empty returns the compact default."),
+		"limits":            withDescription(schemaWorkContextLimits(), "Optional 1-20 bounds for requested list sections only."),
+		"desired_resources": withDescription(schemaResources(), "Optional resources to diagnose against active reservations elsewhere in the project (not resources being acquired). Drives the default-context conflict warning and, with reservation_conflicts requested, bounded conflict rows."),
 	}, "issue_id"))
 }
 
@@ -271,6 +272,10 @@ func schemaWorkContextLimits() *jsonschema.Schema {
 	artifacts.Description = "Applies when include contains artifacts."
 	changesSincePreviousAttempt := boundedIntegerSchema(1, 20)
 	changesSincePreviousAttempt.Description = "Applies when include contains changes_since_previous_attempt."
+	resourceReservations := boundedIntegerSchema(1, 20)
+	resourceReservations.Description = "Applies when include contains resource_reservations."
+	reservationConflicts := boundedIntegerSchema(1, 20)
+	reservationConflicts.Description = "Applies when include contains reservation_conflicts."
 	return object(map[string]*jsonschema.Schema{
 		"related_issue_summaries":        relatedIssueSummaries,
 		"recent_comments":                recentComments,
@@ -279,6 +284,8 @@ func schemaWorkContextLimits() *jsonschema.Schema {
 		"attempt_history":                attemptHistory,
 		"artifacts":                      artifacts,
 		"changes_since_previous_attempt": changesSincePreviousAttempt,
+		"resource_reservations":          resourceReservations,
+		"reservation_conflicts":          reservationConflicts,
 	})
 }
 
@@ -436,9 +443,71 @@ func schemaClaimIssue() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"issue_id":        withDescription(issueIdentifierSchema(), "Claimable ready or review issue (ULID or ISSUE-N)."),
 		"lease_seconds":   withDescription(boundedIntegerSchema(60, 3600), "Requested lease duration in seconds."),
+		"resources":       withDescription(schemaResources(), "Optional resources to reserve atomically with the claim, all-or-nothing; a conflict fails the whole claim. Rejected if the claim resolves to a review attempt."),
 		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same claim request."),
 		"view":            withDescription(enumSchema("compact", "full"), "Response shape; compact is the default."),
 	}, "issue_id"))
+}
+
+// schemaResource describes one caller-supplied reservation target before
+// normalization (docs/02 §18): kind is always required, and only the
+// path-kind fields (path) or the logical-kind fields (namespace, name)
+// apply, per kind -- the domain layer, not this schema, enforces which.
+func schemaResource() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"kind":      withDescription(enumSchema("file", "directory", "glob", "logical"), "Resource kind; path kinds (file, directory, glob) use path, logical uses namespace and name."),
+		"path":      withDescription(boundedStringSchema(domain.MaxResourcePathRunes), "Project-relative path; unused for kind=logical."),
+		"namespace": withDescription(boundedStringSchema(domain.MaxLogicalNamespaceRunes), "Logical resource namespace ([a-z][a-z0-9.-]{0,63}); unused for path kinds."),
+		"name":      withDescription(boundedStringSchema(domain.MaxLogicalNameRunes), "Logical resource name; unused for path kinds."),
+	}, "kind")
+}
+
+func schemaResources() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "array", Items: schemaResource(), MaxItems: intPointer(domain.MaxReservationResources)}
+}
+
+func schemaReserveResources() *jsonschema.Schema {
+	// Not MinItems-bounded: an empty resources array is a domain validation
+	// error (CodeInvalidArgument via PrepareReservationRequest), not a
+	// protocol-level schema rejection -- matching every other required
+	// array in this catalog (see boundedStringsSchema), so the failure
+	// carries the structured MCP error envelope (ISSUE-197 AC5) instead of
+	// a bare schema-validation rejection with no structuredContent.
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"attempt_id":      withDescription(boundedStringSchema(26), "Active work attempt receiving the reservations."),
+		"lease_token":     withDescription(boundedStringSchema(512), "Secret proof of the active attempt lease."),
+		"resources":       withDescription(schemaResources(), "Resources to add, all-or-nothing; must not be empty."),
+		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same reservation request."),
+	}, "attempt_id", "lease_token", "resources"))
+}
+
+func schemaReleaseResources() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"attempt_id":      withDescription(boundedStringSchema(26), "Active work attempt releasing the reservations."),
+		"lease_token":     withDescription(boundedStringSchema(512), "Secret proof of the active attempt lease."),
+		"reservation_ids": withDescription(boundedStringsSchema(domain.MaxReleaseResourceIDs, 26), "Reservation IDs to release; empty releases every active reservation this attempt owns."),
+		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same release request."),
+	}, "attempt_id", "lease_token"))
+}
+
+func schemaListResourceReservations() *jsonschema.Schema {
+	limit := boundedIntegerSchema(0, domain.MaxReservationHistoryLimit)
+	limit.Description = "0 uses the default limit of 20; maximum is 100."
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"issue_id":   withDescription(nullableIssueIdentifierSchema(), "Optional issue filter (ULID or ISSUE-N)."),
+		"attempt_id": withDescription(nullableBoundedStringSchema(26), "Optional attempt filter."),
+		"kind":       withDescription(&jsonschema.Schema{Types: []string{"string", "null"}, Enum: []any{"file", "directory", "glob", "logical", nil}}, "Optional resource kind filter."),
+		"active":     withDescription(&jsonschema.Schema{Types: []string{"boolean", "null"}}, "Optional lifecycle filter: true for active only, false for released only, omitted for both."),
+		"limit":      limit,
+		"cursor":     nullableBoundedStringSchema(4096),
+	}))
+}
+
+func schemaGetResourceReservation() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"reservation_id": boundedStringSchema(26),
+		"view":           withDescription(enumSchema("compact", "full"), "Response shape; compact (default) omits the normalized comparison key and version; full includes both."),
+	}, "reservation_id"))
 }
 
 func schemaRenewAttempt() *jsonschema.Schema {
@@ -673,6 +742,58 @@ func schemaClaimIssueOutput() *jsonschema.Schema      { return schemaClaimIssueU
 func schemaRenewAttemptOutput() *jsonschema.Schema    { return typedSchema[renewAttemptOutput]() }
 func schemaSaveAttemptNoteOutput() *jsonschema.Schema { return typedSchema[saveAttemptNoteOutput]() }
 func schemaFinishAttemptOutput() *jsonschema.Schema   { return schemaFinishAttemptUnion() }
+
+// schemaReservation describes one reservation in both the shape every
+// mutation and list tool returns and get_resource_reservation's own
+// compact/full toggle. Like schemaIssueListItem, this is hand-built rather
+// than derived from reservationDTO via typedSchema: comparison_value and
+// version are declared as optional properties (present only for
+// get_resource_reservation's view=full) rather than expressed as a second
+// schema, so one shape covers every caller.
+func schemaReservation() *jsonschema.Schema {
+	properties := map[string]*jsonschema.Schema{
+		"id":             stringSchema(),
+		"issue_id":       stringSchema(),
+		"attempt_id":     stringSchema(),
+		"kind":           stringSchema(),
+		"display_value":  stringSchema(),
+		"status":         stringSchema(),
+		"created_at":     stringSchema(),
+		"released_at":    nullableStringSchema(),
+		"release_reason": nullableStringSchema(),
+		// Present only when get_resource_reservation's view: "full" is requested.
+		"comparison_value": stringSchema(),
+		"version":          integerSchema(),
+	}
+	return object(properties,
+		"id", "issue_id", "attempt_id", "kind", "display_value", "status", "created_at",
+	)
+}
+
+func schemaReserveResourcesOutput() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"reservations": &jsonschema.Schema{Type: "array", Items: schemaReservation()},
+		"next_actions": stringsSchema(),
+	}, "reservations", "next_actions")
+}
+
+func schemaReleaseResourcesOutput() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"reservations": &jsonschema.Schema{Type: "array", Items: schemaReservation()},
+		"next_actions": stringsSchema(),
+	}, "reservations", "next_actions")
+}
+
+func schemaReservationListOutput() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"items":        &jsonschema.Schema{Type: "array", Items: schemaReservation()},
+		"next_cursor":  nullableStringSchema(),
+		"has_more":     booleanSchema(),
+		"next_actions": stringsSchema(),
+	}, "items", "next_cursor", "has_more", "next_actions")
+}
+
+func schemaGetResourceReservationOutput() *jsonschema.Schema { return schemaReservation() }
 
 // rawMessageSchema overrides reflection's default translation of
 // json.RawMessage ([]byte underneath) into an array-of-integers schema:

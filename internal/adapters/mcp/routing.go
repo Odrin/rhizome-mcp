@@ -34,6 +34,7 @@ type ProjectLease interface {
 	SearchService() *application.SearchService
 	ReviewService() *application.ReviewService
 	AttemptService() *application.AttemptService
+	ReservationService() *application.ReservationService
 	SessionService() *application.AgentSessionService
 	WorkContextService() *application.WorkContextService
 	Release() error
@@ -52,6 +53,7 @@ type ProjectServices struct {
 	SearchService      *application.SearchService
 	ReviewService      *application.ReviewService
 	AttemptService     *application.AttemptService
+	ReservationService *application.ReservationService
 	SessionService     *application.AgentSessionService
 	WorkContextService *application.WorkContextService
 }
@@ -121,6 +123,7 @@ func projectServicesFromLease(lease ProjectLease) ProjectServices {
 		SearchService:      lease.SearchService(),
 		ReviewService:      lease.ReviewService(),
 		AttemptService:     lease.AttemptService(),
+		ReservationService: lease.ReservationService(),
 		SessionService:     lease.SessionService(),
 		WorkContextService: lease.WorkContextService(),
 	}
@@ -147,6 +150,7 @@ func ProjectServicesFromContext(ctx context.Context) ProjectServices {
 			SearchService:      lease.SearchService(),
 			ReviewService:      lease.ReviewService(),
 			AttemptService:     lease.AttemptService(),
+			ReservationService: lease.ReservationService(),
 			SessionService:     lease.SessionService(),
 			WorkContextService: lease.WorkContextService(),
 		}
@@ -301,6 +305,12 @@ func (lease *staticLease) AttemptService() *application.AttemptService {
 	}
 	return lease.services.AttemptService
 }
+func (lease *staticLease) ReservationService() *application.ReservationService {
+	if lease == nil {
+		return nil
+	}
+	return lease.services.ReservationService
+}
 func (lease *staticLease) SessionService() *application.AgentSessionService {
 	if lease == nil {
 		return nil
@@ -405,6 +415,7 @@ func (adapter *adapter) cloneForLease(lease ProjectLease) *adapter {
 		clone.searches = services.SearchService
 		clone.reviews = services.ReviewService
 		clone.attempts = services.AttemptService
+		clone.reservations = services.ReservationService
 		clone.sessions = services.SessionService
 		clone.workContexts = services.WorkContextService
 	}

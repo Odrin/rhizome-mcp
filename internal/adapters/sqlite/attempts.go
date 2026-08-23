@@ -21,9 +21,11 @@ import (
 type AttemptRepository struct{ db *DB }
 
 const (
-	claimIssueOperation      = "claim_issue"
-	finishAttemptOperation   = "finish_attempt"
-	saveAttemptNoteOperation = "save_attempt_note"
+	claimIssueOperation       = "claim_issue"
+	finishAttemptOperation    = "finish_attempt"
+	saveAttemptNoteOperation  = "save_attempt_note"
+	reserveResourcesOperation = "reserve_resources"
+	releaseResourcesOperation = "release_resources"
 )
 
 func NewAttemptRepository(database *DB) (*AttemptRepository, error) {
@@ -212,6 +214,21 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 || command.LeaseDuration <= 0 {
 		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeInvalidArgument, "attempt claim command is invalid", false)
 	}
+	var preparedResources []domain.PreparedResource
+	if len(command.Resources) > 0 {
+		rawResources := make([]domain.Resource, len(command.Resources))
+		for index, item := range command.Resources {
+			if _, err := ids.ParseStrict(item.ID); err != nil {
+				return ports.ClaimIssueResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate reservation identifier", false)
+			}
+			rawResources[index] = item.Resource
+		}
+		prepared, err := domain.PrepareReservationRequest(rawResources)
+		if err != nil {
+			return ports.ClaimIssueResult{}, err
+		}
+		preparedResources = prepared
+	}
 	now := command.OccurredAt.UTC()
 	timestamp := formatStorageTime(now)
 	expires := now.Add(command.LeaseDuration).UTC()
@@ -330,9 +347,30 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 			return err
 		}
 		if kind == domain.AttemptKindReview {
+			// ISSUE-179's locked lifecycle: only work attempts may own
+			// reservations. A resource request against a review claim
+			// (e.g. an issue that happened to already be in review) is
+			// rejected outright rather than silently ignored, so a caller
+			// gets a clear signal instead of a claim that quietly dropped
+			// half its request.
+			if len(command.Resources) > 0 {
+				return domain.NewError(domain.CodeInvalidArgument, "review attempts cannot hold reservations", false,
+					domain.Detail{Field: "resources", Code: "REVIEW_ATTEMPT_NOT_ELIGIBLE"})
+			}
 			if err := bindOpenReviewRequestForAttempt(ctx, tx, issue.ID, command.AttemptID, now); err != nil {
 				return err
 			}
+		} else if len(command.Resources) > 0 {
+			// Claim plus every requested reservation happen in this same
+			// transaction (ISSUE-180): a conflict here aborts the whole
+			// claim, including the work_attempts insert above, so a caller
+			// never ends up with an attempt and no reservations.
+			reservations, err := acquireReservationsForAttempt(
+				ctx, tx, preparedResources, command.Resources, issue.ID, command.AttemptID, command.SessionID, now)
+			if err != nil {
+				return err
+			}
+			result.Reservations = reservations
 		}
 		result.Issue = issue
 		result.Attempt = domain.WorkAttempt{
@@ -686,6 +724,219 @@ func (repository *AttemptRepository) SaveAttemptNote(ctx context.Context, comman
 	}
 	if leaseExpired {
 		return ports.SaveAttemptNoteResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+	}
+	return result, nil
+}
+
+func (repository *AttemptRepository) LookupReserveResources(ctx context.Context, key string, hash []byte) (ports.ReserveResourcesResult, bool, error) {
+	var result ports.ReserveResourcesResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, reserveResourcesOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
+// ReserveResources authenticates AttemptID's lease, requiring a work-kind
+// attempt (ISSUE-179's locked lifecycle: only work attempts may hold
+// reservations -- a review attempt's lease fails WRONG_KIND here, the same
+// way ClaimIssue rejects resources outright for a claim that resolves to a
+// review attempt), then acquires every requested resource against the live
+// active set, all-or-nothing, in the same transaction (ISSUE-180).
+func (repository *AttemptRepository) ReserveResources(ctx context.Context, command ports.ReserveResourcesCommand) (ports.ReserveResourcesResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.ReserveResourcesResult{}, domain.NewError(domain.CodeInvalidArgument, "reserve resources command is invalid", false)
+	}
+	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 {
+		return ports.ReserveResourcesResult{}, domain.NewError(domain.CodeInvalidArgument, "reserve resources command is invalid", false)
+	}
+	rawResources := make([]domain.Resource, len(command.Resources))
+	for index, item := range command.Resources {
+		if _, err := ids.ParseStrict(item.ID); err != nil {
+			return ports.ReserveResourcesResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate reservation identifier", false)
+		}
+		rawResources[index] = item.Resource
+	}
+	prepared, err := domain.PrepareReservationRequest(rawResources)
+	if err != nil {
+		return ports.ReserveResourcesResult{}, err
+	}
+	now := command.OccurredAt.UTC()
+	timestamp := formatStorageTime(now)
+	var result ports.ReserveResourcesResult
+	var leaseExpired bool
+	writeErr := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, reserveResourcesOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
+		workKind := domain.AttemptKindWork
+		issueID, _, expired, err := authenticateActiveAttempt(ctx, tx, command.AttemptID, command.TokenHash, now, &workKind)
+		if err != nil {
+			return err
+		}
+		if expired {
+			leaseExpired = true
+			return nil
+		}
+		reservations, err := acquireReservationsForAttempt(ctx, tx, prepared, command.Resources, issueID, command.AttemptID, command.SessionID, now)
+		if err != nil {
+			return err
+		}
+		result.Reservations = reservations
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode reserve resources response", false)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, reserveResourcesOperation, command.RequestHash, string(response), timestamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if writeErr != nil {
+		return ports.ReserveResourcesResult{}, writeErr
+	}
+	if leaseExpired {
+		return ports.ReserveResourcesResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
+	}
+	return result, nil
+}
+
+func (repository *AttemptRepository) LookupReleaseResources(ctx context.Context, key string, hash []byte) (ports.ReleaseResourcesResult, bool, error) {
+	var result ports.ReleaseResourcesResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, releaseResourcesOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
+// ReleaseResources authenticates AttemptID's lease, requiring a work-kind
+// attempt (mirroring ReserveResources), then releases the named
+// reservations -- or, when ReservationIDs is empty, every active
+// reservation the attempt currently owns -- inside one transaction
+// (ISSUE-180). Every named ID must be active and owned by AttemptID or the
+// whole call fails naming the offending id (releaseResourcesForAttempt).
+func (repository *AttemptRepository) ReleaseResources(ctx context.Context, command ports.ReleaseResourcesCommand) (ports.ReleaseResourcesResult, error) {
+	if !validAttemptSessionID(command.SessionID) {
+		return ports.ReleaseResourcesResult{}, domain.NewError(domain.CodeInvalidArgument, "release resources command is invalid", false)
+	}
+	if _, err := ids.ParseStrict(command.AttemptID); err != nil || len(command.TokenHash) != 32 {
+		return ports.ReleaseResourcesResult{}, domain.NewError(domain.CodeInvalidArgument, "release resources command is invalid", false)
+	}
+	now := command.OccurredAt.UTC()
+	timestamp := formatStorageTime(now)
+	var result ports.ReleaseResourcesResult
+	var leaseExpired bool
+	writeErr := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, releaseResourcesOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
+		workKind := domain.AttemptKindWork
+		_, _, expired, err := authenticateActiveAttempt(ctx, tx, command.AttemptID, command.TokenHash, now, &workKind)
+		if err != nil {
+			return err
+		}
+		if expired {
+			leaseExpired = true
+			return nil
+		}
+		released, err := releaseResourcesForAttempt(ctx, tx, command.AttemptID, command.ReservationIDs, command.SessionID, domain.ReservationReleaseReasonExplicit, now)
+		if err != nil {
+			return err
+		}
+		result.Reservations = released
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode release resources response", false)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, releaseResourcesOperation, command.RequestHash, string(response), timestamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if writeErr != nil {
+		return ports.ReleaseResourcesResult{}, writeErr
+	}
+	if leaseExpired {
+		return ports.ReleaseResourcesResult{}, domain.NewError(domain.CodeLeaseExpired, "attempt lease has expired", false)
 	}
 	return result, nil
 }

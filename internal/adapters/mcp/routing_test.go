@@ -203,6 +203,7 @@ func completeProjectServices() ProjectServices {
 		SearchService:      new(application.SearchService),
 		ReviewService:      new(application.ReviewService),
 		AttemptService:     new(application.AttemptService),
+		ReservationService: new(application.ReservationService),
 		SessionService:     new(application.AgentSessionService),
 		WorkContextService: new(application.WorkContextService),
 	}

@@ -20,6 +20,8 @@ const (
 	WorkContextIncludeArtifacts                   WorkContextInclude = "artifacts"
 	WorkContextIncludeProjectInstructions         WorkContextInclude = "project_instructions"
 	WorkContextIncludeChangesSincePreviousAttempt WorkContextInclude = "changes_since_previous_attempt"
+	WorkContextIncludeResourceReservations        WorkContextInclude = "resource_reservations"
+	WorkContextIncludeReservationConflicts        WorkContextInclude = "reservation_conflicts"
 )
 
 // AllWorkContextIncludes is the canonical ordering used by the domain contract.
@@ -34,19 +36,23 @@ var AllWorkContextIncludes = []WorkContextInclude{
 	WorkContextIncludeArtifacts,
 	WorkContextIncludeProjectInstructions,
 	WorkContextIncludeChangesSincePreviousAttempt,
+	WorkContextIncludeResourceReservations,
+	WorkContextIncludeReservationConflicts,
 }
 
 const (
-	MaxWorkContextIncludes = 10
+	MaxWorkContextIncludes = 12
 
-	DefaultWorkContextRelatedIssueLimit      = 20
-	DefaultWorkContextRecentCommentLimit     = 10
-	DefaultWorkContextRecentAttemptNoteLimit = 10
-	DefaultWorkContextDecisionContentLimit   = 10
-	DefaultWorkContextAttemptHistoryLimit    = 10
-	DefaultWorkContextArtifactLimit          = 20
-	DefaultWorkContextChangesLimit           = 20
-	MaxWorkContextSectionLimit               = 20
+	DefaultWorkContextRelatedIssueLimit        = 20
+	DefaultWorkContextRecentCommentLimit       = 10
+	DefaultWorkContextRecentAttemptNoteLimit   = 10
+	DefaultWorkContextDecisionContentLimit     = 10
+	DefaultWorkContextAttemptHistoryLimit      = 10
+	DefaultWorkContextArtifactLimit            = 20
+	DefaultWorkContextChangesLimit             = 20
+	DefaultWorkContextResourceReservationLimit = 10
+	DefaultWorkContextReservationConflictLimit = 10
+	MaxWorkContextSectionLimit                 = 20
 )
 
 func (value WorkContextInclude) Valid() bool {
@@ -60,7 +66,9 @@ func (value WorkContextInclude) Valid() bool {
 		WorkContextIncludeAttemptHistory,
 		WorkContextIncludeArtifacts,
 		WorkContextIncludeProjectInstructions,
-		WorkContextIncludeChangesSincePreviousAttempt:
+		WorkContextIncludeChangesSincePreviousAttempt,
+		WorkContextIncludeResourceReservations,
+		WorkContextIncludeReservationConflicts:
 		return true
 	default:
 		return false
@@ -75,7 +83,9 @@ func (value WorkContextInclude) isListSection() bool {
 		WorkContextIncludeDecisionContent,
 		WorkContextIncludeAttemptHistory,
 		WorkContextIncludeArtifacts,
-		WorkContextIncludeChangesSincePreviousAttempt:
+		WorkContextIncludeChangesSincePreviousAttempt,
+		WorkContextIncludeResourceReservations,
+		WorkContextIncludeReservationConflicts:
 		return true
 	default:
 		return false
@@ -98,16 +108,31 @@ func (value WorkContextInclude) defaultLimit() int {
 		return DefaultWorkContextArtifactLimit
 	case WorkContextIncludeChangesSincePreviousAttempt:
 		return DefaultWorkContextChangesLimit
+	case WorkContextIncludeResourceReservations:
+		return DefaultWorkContextResourceReservationLimit
+	case WorkContextIncludeReservationConflicts:
+		return DefaultWorkContextReservationConflictLimit
 	default:
 		return 0
 	}
 }
 
 // GetWorkContextInput is the normalized contract for a work-context request.
+//
+// DesiredResources is an optional, caller-supplied set of resources to
+// diagnose against the project's currently active reservations -- not
+// resources the caller is acquiring. Per ISSUE-176's "reservations do not
+// change issue dependency state" decision, a conflict can only be diagnosed
+// once a caller supplies a concrete desired set; there is no issue-level
+// intended-resource state to infer one from. When non-empty, it drives the
+// default-context conflict warning and, with reservation_conflicts
+// requested, the bounded conflict rows -- independent of whether
+// reservation_conflicts is itself requested.
 type GetWorkContextInput struct {
-	IssueID string
-	Include []WorkContextInclude
-	Limits  map[WorkContextInclude]int
+	IssueID          string
+	Include          []WorkContextInclude
+	Limits           map[WorkContextInclude]int
+	DesiredResources []Resource
 }
 
 // Validate checks and normalizes a work-context request.
@@ -164,11 +189,42 @@ func (input GetWorkContextInput) Validate() (GetWorkContextInput, error) {
 		}
 	}
 
+	var desiredResources []Resource
+	if len(input.DesiredResources) > 0 {
+		if _, err := PrepareReservationRequest(input.DesiredResources); err != nil {
+			return GetWorkContextInput{}, relabelResourcesField(err, "desired_resources")
+		}
+		desiredResources = append([]Resource(nil), input.DesiredResources...)
+	}
+
 	return GetWorkContextInput{
-		IssueID: identifier.Value,
-		Include: normalizedInclude,
-		Limits:  normalizedLimits,
+		IssueID:          identifier.Value,
+		Include:          normalizedInclude,
+		Limits:           normalizedLimits,
+		DesiredResources: desiredResources,
 	}, nil
+}
+
+// relabelResourcesField rewrites a PrepareReservationRequest validation
+// error's top-level "resources" detail field to fieldName. Per-resource
+// errors (bad kind/path/namespace/name) already carry their own specific
+// field name from Normalize and are left untouched; only the batch-level
+// REQUIRED/MAX_ITEMS/INTERNAL_OVERLAP details say "resources" literally --
+// correct for reserve_resources' actual "resources" input field, but wrong
+// for get_work_context, whose caller-supplied field is "desired_resources".
+func relabelResourcesField(err error, fieldName string) error {
+	domainErr, ok := err.(*Error)
+	if !ok {
+		return err
+	}
+	details := make([]Detail, len(domainErr.Details))
+	for index, detail := range domainErr.Details {
+		if detail.Field == "resources" {
+			detail.Field = fieldName
+		}
+		details[index] = detail
+	}
+	return NewError(domainErr.Code, domainErr.Message, domainErr.Retryable, details...)
 }
 
 // WorkContextIssue is the compact issue projection used by default work context.
@@ -217,6 +273,24 @@ type WorkContextReview struct {
 	ResolvedAt         *time.Time
 }
 
+// ReservationConflict pairs one desired resource (identified by its index
+// into the caller-supplied DesiredResources) with one currently active
+// reservation, elsewhere in the project, that it overlaps -- the same
+// Overlaps check acquireReservationsForAttempt runs at claim/reserve time,
+// run here as a read-only diagnostic. IssueDisplayID/IssueTitle/SessionLabel
+// identify the conflicting reservation's owner without exposing its lease
+// token.
+type ReservationConflict struct {
+	DesiredIndex        int
+	DesiredKind         ResourceKind
+	DesiredDisplayValue string
+	Existing            Reservation
+	IssueDisplayID      string
+	IssueTitle          string
+	SessionLabel        *string
+	LeaseExpiresAt      time.Time
+}
+
 // WorkContext is the compact work-context domain contract.
 type WorkContext struct {
 	Issue           WorkContextIssue
@@ -238,6 +312,23 @@ type WorkContext struct {
 	ProjectInstructions         *string
 	ChangesSincePreviousAttempt []IssueEvent
 
+	// ActiveReservationCount is the issue's active attempt's currently held
+	// active reservation count -- always populated, independent of whether
+	// resource_reservations is requested (ISSUE-181's default-context
+	// "counts and a warning" behavior).
+	ActiveReservationCount int64
+	// ResourceReservations is the issue's own reservations, active and
+	// released, newest first; populated only when resource_reservations is
+	// requested.
+	ResourceReservations []Reservation
+	// ConflictCount is how many DesiredResources/ReservationConflicts
+	// entries were found; always populated (0 when DesiredResources is
+	// empty), independent of whether reservation_conflicts is requested.
+	ConflictCount int64
+	// ReservationConflicts is bounded, populated only when
+	// reservation_conflicts is requested and DesiredResources is non-empty.
+	ReservationConflicts []ReservationConflict
+
 	Truncated         bool
 	TruncatedSections []WorkContextInclude
 }
@@ -258,6 +349,8 @@ func NewEmptyWorkContext() WorkContext {
 		Artifacts:                   []Artifact{},
 		Reviews:                     []WorkContextReview{},
 		ChangesSincePreviousAttempt: []IssueEvent{},
+		ResourceReservations:        []Reservation{},
+		ReservationConflicts:        []ReservationConflict{},
 		TruncatedSections:           []WorkContextInclude{},
 	}
 }
@@ -282,7 +375,38 @@ func CloneWorkContext(value WorkContext) WorkContext {
 	result.Reviews = cloneWorkContextReviews(value.Reviews)
 	result.ProjectInstructions = copyOptionalString(value.ProjectInstructions)
 	result.ChangesSincePreviousAttempt = cloneIssueEvents(value.ChangesSincePreviousAttempt)
+	result.ResourceReservations = cloneReservations(value.ResourceReservations)
+	result.ReservationConflicts = cloneReservationConflicts(value.ReservationConflicts)
 	result.TruncatedSections = cloneWorkContextIncludes(value.TruncatedSections)
+	return result
+}
+
+func cloneReservations(values []Reservation) []Reservation {
+	if values == nil {
+		return nil
+	}
+	result := make([]Reservation, len(values))
+	for index, value := range values {
+		result[index] = CloneReservation(value)
+	}
+	return result
+}
+
+func cloneReservationConflicts(values []ReservationConflict) []ReservationConflict {
+	if values == nil {
+		return nil
+	}
+	result := make([]ReservationConflict, len(values))
+	for index, value := range values {
+		result[index] = cloneReservationConflict(value)
+	}
+	return result
+}
+
+func cloneReservationConflict(value ReservationConflict) ReservationConflict {
+	result := value
+	result.Existing = CloneReservation(value.Existing)
+	result.SessionLabel = cloneOptionalString(value.SessionLabel)
 	return result
 }
 

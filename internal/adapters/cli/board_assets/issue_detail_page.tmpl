@@ -53,6 +53,19 @@
 {{.GraphSVG}}
 </section>{{end}}
 <section>
+<h2>Reservations</h2>
+{{if .HasMoreReservations}}<p class="empty">Additional reservations are available.</p>{{end}}
+{{if .HasReservations}}
+<div class="table-scroll"><table>
+<thead><tr><th>Kind</th><th>Display value</th><th>Status</th><th>Created</th><th>Released</th></tr></thead>
+<tbody>
+{{range .Reservations}}<tr><td>{{.Kind}}</td><td>{{.DisplayValue}}</td><td>{{.Status}}</td><td>{{.CreatedAt}}</td><td>{{if .HasReleased}}{{.ReleasedAt}}{{else}}—{{end}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No current or historical reservations.</p>
+{{end}}
+</section>
+<section>
 <h2>Recent activity</h2>
 {{if .Activity.Items}}
 {{if .Activity.HasMore}}<p class="empty">Additional activity is available.</p>{{end}}

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"time"
 
@@ -94,6 +95,20 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			}
 		}
 
+		result.ActiveReservationCount, err = countActiveReservationsForIssue(ctx, query, resolvedIssueID)
+		if err != nil {
+			return err
+		}
+
+		conflicts := []domain.ReservationConflict{}
+		if len(input.DesiredResources) > 0 {
+			conflicts, err = findReservationConflicts(ctx, query, input.DesiredResources)
+			if err != nil {
+				return err
+			}
+		}
+		result.ConflictCount = int64(len(conflicts))
+
 		for _, include := range input.Include {
 			switch include {
 			case domain.WorkContextIncludeRelatedIssueSummaries:
@@ -166,6 +181,25 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 					result.Truncated = true
 					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
 				}
+			case domain.WorkContextIncludeResourceReservations:
+				reservations, truncated, err := loadWorkContextResourceReservations(ctx, query, resolvedIssueID, input.Limits[include])
+				if err != nil {
+					return err
+				}
+				result.ResourceReservations = reservations
+				if truncated {
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				}
+			case domain.WorkContextIncludeReservationConflicts:
+				limit := input.Limits[include]
+				if len(conflicts) > limit {
+					result.ReservationConflicts = conflicts[:limit]
+					result.Truncated = true
+					result.TruncatedSections = appendWorkContextSection(result.TruncatedSections, include)
+				} else {
+					result.ReservationConflicts = conflicts
+				}
 			}
 		}
 
@@ -187,6 +221,12 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 		result.Warnings, err = loadWorkContextWarnings(ctx, query, resolvedIssueID)
 		if err != nil {
 			return err
+		}
+		if result.ActiveReservationCount > 0 {
+			result.Warnings = append(result.Warnings, "ACTIVE_RESERVATIONS_HELD")
+		}
+		if result.ConflictCount > 0 {
+			result.Warnings = append(result.Warnings, "RESERVATION_CONFLICTS_DETECTED")
 		}
 		return nil
 	})
@@ -490,6 +530,102 @@ func loadWorkContextArtifacts(ctx context.Context, query Queryer, issueID string
 		return result[:limit], true, nil
 	}
 	return result, false, nil
+}
+
+func loadWorkContextResourceReservations(ctx context.Context, query Queryer, issueID string, limit int) ([]domain.Reservation, bool, error) {
+	rows, err := query.QueryContext(ctx, `SELECT `+reservationColumns+` FROM resource_reservations
+		WHERE issue_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?`, issueID, limit+1)
+	if err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make([]domain.Reservation, 0, limit+1)
+	for rows.Next() {
+		row, err := scanReservationRow(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		result = append(result, row.toDomain())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, workContextCorrupt(err)
+	}
+	if len(result) > limit {
+		return result[:limit], true, nil
+	}
+	return result, false, nil
+}
+
+// countActiveReservationsForIssue counts the issue's currently active
+// reservations. An issue has at most one active work attempt at a time, so
+// this is equivalently "reservations the issue's active attempt owns" --
+// ISSUE-181's default-context count, populated unconditionally.
+func countActiveReservationsForIssue(ctx context.Context, query Queryer, issueID string) (int64, error) {
+	var count int64
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM resource_reservations WHERE issue_id = ? AND status = 'active'`, issueID).Scan(&count); err != nil {
+		return 0, workContextCorrupt(err)
+	}
+	return count, nil
+}
+
+// findReservationConflicts diagnoses desiredResources against every
+// currently active reservation project-wide, running the exact same
+// domain.Overlaps check acquireReservationsForAttempt runs at claim/reserve
+// time (internal/adapters/sqlite/reservations.go), without acquiring
+// anything. desiredResources is assumed already validated (domain.
+// GetWorkContextInput.Validate ran PrepareReservationRequest). Ordered by
+// desired index, then by the conflicting reservation's id, for determinism.
+func findReservationConflicts(ctx context.Context, query Queryer, desiredResources []domain.Resource) ([]domain.ReservationConflict, error) {
+	prepared, err := domain.PrepareReservationRequest(desiredResources)
+	if err != nil {
+		return nil, err
+	}
+	active, err := loadActiveReservations(ctx, query)
+	if err != nil {
+		return nil, workContextCorrupt(err)
+	}
+
+	conflicts := make([]domain.ReservationConflict, 0)
+	for _, candidate := range prepared {
+		for _, existing := range active {
+			if !domain.Overlaps(candidate.Resource, existing.normalized) {
+				continue
+			}
+			issueDisplayID, issueTitle, err := lookupWorkContextIssueLabel(ctx, query, existing.issueID)
+			if err != nil {
+				return nil, err
+			}
+			leaseExpiresAt, agentLabel, err := lookupAttemptConflictInfo(ctx, query, existing.attemptID)
+			if err != nil {
+				return nil, workContextCorrupt(err)
+			}
+			conflicts = append(conflicts, domain.ReservationConflict{
+				DesiredIndex: candidate.Index, DesiredKind: candidate.Resource.Kind(), DesiredDisplayValue: candidate.Resource.Display(),
+				Existing: existing.toDomain(), IssueDisplayID: issueDisplayID, IssueTitle: issueTitle,
+				SessionLabel: nonEmptyStringPointer(agentLabel), LeaseExpiresAt: leaseExpiresAt,
+			})
+		}
+	}
+	return conflicts, nil
+}
+
+func lookupWorkContextIssueLabel(ctx context.Context, query Queryer, issueID string) (string, string, error) {
+	var sequenceNo int64
+	var title string
+	if err := query.QueryRowContext(ctx, `SELECT sequence_no, title FROM issues WHERE id = ?`, issueID).Scan(&sequenceNo, &title); err != nil {
+		return "", "", workContextCorrupt(err)
+	}
+	return fmt.Sprintf("ISSUE-%d", sequenceNo), title, nil
+}
+
+func nonEmptyStringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func buildWorkContextIssue(ctx context.Context, query Queryer, issue domain.Issue, now time.Time) (domain.WorkContextIssue, error) {

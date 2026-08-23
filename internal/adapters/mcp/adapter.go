@@ -38,6 +38,7 @@ type adapter struct {
 	searches      *application.SearchService
 	reviews       *application.ReviewService
 	attempts      *application.AttemptService
+	reservations  *application.ReservationService
 	sessions      *application.AgentSessionService
 	workContexts  *application.WorkContextService
 	appVersion    string
@@ -92,6 +93,7 @@ func NewServer(options Options) (*Server, error) {
 			SearchService:      lease.SearchService(),
 			ReviewService:      lease.ReviewService(),
 			AttemptService:     lease.AttemptService(),
+			ReservationService: lease.ReservationService(),
 			SessionService:     lease.SessionService(),
 			WorkContextService: lease.WorkContextService(),
 		}
@@ -115,6 +117,7 @@ func NewServer(options Options) (*Server, error) {
 		searches:      services.SearchService,
 		reviews:       services.ReviewService,
 		attempts:      services.AttemptService,
+		reservations:  services.ReservationService,
 		sessions:      services.SessionService,
 		workContexts:  services.WorkContextService,
 		appVersion:    options.ServerVersion,
@@ -306,6 +309,21 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupLifecycle, tool("get_work_context", "Get bounded task, blocker, decision, checkpoint, and recovery context.", schemaGetWorkContext(), schemaGetWorkContextOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getWorkContextInput, any](target, t, (*adapter).getWorkContext))
 	})
+	// reserve_resources is all-or-nothing but not itself claimability-gated;
+	// a bare repeat with the same resources is a genuine second acquisition
+	// attempt (which conflicts with the first), not a no-op.
+	target.registerTool(server, groupLifecycle, tool("reserve_resources", "Add a bounded set of resources to an active work attempt's reservations, all-or-nothing.", schemaReserveResources(), schemaReserveResourcesOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[reserveResourcesInput, any](target, t, (*adapter).reserveResources))
+	})
+	target.registerTool(server, groupLifecycle, tool("release_resources", "Release reservations owned by an active work attempt; empty reservation_ids releases every active reservation it owns.", schemaReleaseResources(), schemaReleaseResourcesOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[releaseResourcesInput, any](target, t, (*adapter).releaseResources))
+	})
+	target.registerTool(server, groupLifecycle, tool("list_resource_reservations", "List resource reservations filtered by issue, attempt, kind, and active state, with cursor pagination.", schemaListResourceReservations(), schemaReservationListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listResourceReservationsInput, any](target, t, (*adapter).listResourceReservations))
+	})
+	target.registerTool(server, groupLifecycle, tool("get_resource_reservation", "Get one resource reservation by id.", schemaGetResourceReservation(), schemaGetResourceReservationOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getResourceReservationInput, any](target, t, (*adapter).getResourceReservation))
+	})
 	target.registerTool(server, groupKnowledge, tool("search", "Full-text search with cursor pagination; default limit 20; archived records are excluded unless requested; results are relevance ordered.", schemaSearch(), schemaSearchOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[searchInput, any](target, t, (*adapter).search))
 	})
@@ -387,8 +405,16 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 		if input.Limits.ChangesSincePreviousAttempt != nil {
 			limits[domain.WorkContextIncludeChangesSincePreviousAttempt] = *input.Limits.ChangesSincePreviousAttempt
 		}
+		if input.Limits.ResourceReservations != nil {
+			limits[domain.WorkContextIncludeResourceReservations] = *input.Limits.ResourceReservations
+		}
+		if input.Limits.ReservationConflicts != nil {
+			limits[domain.WorkContextIncludeReservationConflicts] = *input.Limits.ReservationConflicts
+		}
 	}
-	result, err := adapter.workContexts.GetWorkContext(ctx, domain.GetWorkContextInput{IssueID: input.IssueID, Include: include, Limits: limits})
+	result, err := adapter.workContexts.GetWorkContext(ctx, domain.GetWorkContextInput{
+		IssueID: input.IssueID, Include: include, Limits: limits, DesiredResources: resourcesFromInput(input.DesiredResources),
+	})
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -402,7 +428,10 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 		return adapter.failure(unsupportedField("view"))
 	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
-	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID, IdempotencyKey: input.IdempotencyKey})
+	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{
+		IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID,
+		Resources: resourcesFromInput(input.Resources), IdempotencyKey: input.IdempotencyKey,
+	})
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -412,6 +441,10 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 	}
 	if view == "full" {
 		attempt := attemptDTOFromDomain(result.Attempt)
+		var reservations []reservationDTO
+		if len(result.Reservations) > 0 {
+			reservations = reservationDTOsFromDomain(result.Reservations)
+		}
 		return success(claimIssueOutput{
 			Issue: issueListItemDTO{
 				issueDTO:               issueDTOFromDomain(result.Projection.Issue),
@@ -421,12 +454,12 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 				IsClaimable:            result.Projection.IsClaimable,
 				ActiveAttemptID:        result.Projection.ActiveAttemptID,
 			},
-			Attempt: attempt, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
+			Attempt: attempt, Reservations: reservations, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
 			MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
 			NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
 		}, "issue claimed")
 	}
-	return success(claimIssueCompactOutputFromDomain(result.Issue, result.Attempt, result.LeaseToken), "issue claimed")
+	return success(claimIssueCompactOutputFromDomain(result.Issue, result.Attempt, result.Reservations, result.LeaseToken), "issue claimed")
 }
 
 func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
@@ -511,6 +544,70 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 			NextActions: []string{"Select new work from get_planning_graph."}}, "attempt finished")
 	}
 	return success(finishAttemptCompactOutputFromDomain(result.Attempt, result.Issue, result.Warnings, result.LatestEventID, result.Artifacts, []string{"Select new work from get_planning_graph."}), "attempt finished")
+}
+
+func (adapter *adapter) reserveResources(ctx context.Context, request *sdkmcp.CallToolRequest, input reserveResourcesInput) (*sdkmcp.CallToolResult, any, error) {
+	sessionID := adapter.sessionIDForRequest(ctx, request)
+	result, err := adapter.attempts.ReserveResources(ctx, domain.ReserveResourcesInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
+		Resources: resourcesFromInput(input.Resources), IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reserveResourcesOutput{
+		Reservations: reservationDTOsFromDomain(result.Reservations),
+		NextActions:  []string{"Continue work; release_resources when the reservation is no longer needed."},
+	}, "resources reserved")
+}
+
+func (adapter *adapter) releaseResources(ctx context.Context, request *sdkmcp.CallToolRequest, input releaseResourcesInput) (*sdkmcp.CallToolResult, any, error) {
+	sessionID := adapter.sessionIDForRequest(ctx, request)
+	result, err := adapter.attempts.ReleaseResources(ctx, domain.ReleaseResourcesInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
+		ReservationIDs: input.ReservationIDs, IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(releaseResourcesOutput{
+		Reservations: reservationDTOsFromDomain(result.Reservations),
+		NextActions:  []string{"Continue work or call finish_attempt."},
+	}, "resources released")
+}
+
+func (adapter *adapter) listResourceReservations(ctx context.Context, request *sdkmcp.CallToolRequest, input listResourceReservationsInput) (*sdkmcp.CallToolResult, any, error) {
+	var kind *domain.ResourceKind
+	if input.Kind != nil {
+		value := domain.ResourceKind(*input.Kind)
+		kind = &value
+	}
+	cursor := ""
+	if input.Cursor != nil {
+		cursor = *input.Cursor
+	}
+	result, err := adapter.reservations.ListReservations(ctx, domain.ListResourceReservationsInput{
+		IssueID: input.IssueID, AttemptID: input.AttemptID, Kind: kind, Active: input.Active,
+		Limit: input.Limit, Cursor: cursor,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reservationListOutput{
+		Items: reservationDTOsFromDomain(result.Items), NextCursor: result.NextCursor, HasMore: result.HasMore,
+		NextActions: []string{"Use next_cursor for more results, if present."},
+	}, "reservations listed")
+}
+
+func (adapter *adapter) getResourceReservation(ctx context.Context, request *sdkmcp.CallToolRequest, input getResourceReservationInput) (*sdkmcp.CallToolResult, any, error) {
+	if input.View != "" && input.View != "compact" && input.View != "full" {
+		return adapter.failure(unsupportedField("view"))
+	}
+	reservation, err := adapter.reservations.GetReservation(ctx, input.ReservationID)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reservationDTOFromDomain(reservation, input.View == "full"), "reservation retrieved")
 }
 
 func (adapter *adapter) sessionIDForRequest(ctx context.Context, request *sdkmcp.CallToolRequest) *string {
@@ -1108,6 +1205,9 @@ func validateProjectServices(services ProjectServices) error {
 	}
 	if services.AttemptService == nil {
 		return domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
+	}
+	if services.ReservationService == nil {
+		return domain.NewError(domain.CodeInvalidArgument, "reservation service is required", false)
 	}
 	if services.SessionService == nil {
 		return domain.NewError(domain.CodeInvalidArgument, "session service is required", false)

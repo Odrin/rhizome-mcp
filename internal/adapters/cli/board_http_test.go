@@ -87,6 +87,40 @@ func TestBoardHTTPHandlerServesHTMLAndJSONWithSecurityHeaders(t *testing.T) {
 	})
 }
 
+// ISSUE-181: the JSON API's active_reservations field is a filtered
+// BoardReservation (never a raw domain.Reservation), and its
+// issue_display_id is resolved from the matching ActiveAttempts row rather
+// than left blank.
+func TestBoardHTTPHandlerJSONIncludesActiveReservationsWithIssueDisplayID(t *testing.T) {
+	board := boardResultFixture()
+	board.ActiveAttempts = []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", IssueTitle: "Work", Kind: domain.AttemptKindWork}}
+	board.ActiveReservations = []domain.Reservation{{ID: "reservation-1", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive, ComparisonValue: "file:a.go", Version: 3}}
+	handler := NewBoardHTTPHandler(&stubBoardService{board: board})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/board", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var payload BoardResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.ActiveReservations) != 1 {
+		t.Fatalf("active reservations = %+v, want 1", payload.ActiveReservations)
+	}
+	reservation := payload.ActiveReservations[0]
+	if reservation.ID != "reservation-1" || reservation.AttemptID != "attempt-1" || reservation.Kind != "file" || reservation.DisplayValue != "a.go" {
+		t.Fatalf("reservation = %+v", reservation)
+	}
+	if reservation.IssueDisplayID != "ISSUE-1" {
+		t.Fatalf("reservation issue_display_id = %q, want ISSUE-1", reservation.IssueDisplayID)
+	}
+	if strings.Contains(recorder.Body.String(), "file:a.go") {
+		t.Fatalf("json response leaked the internal comparison key: %s", recorder.Body.String())
+	}
+}
+
 func TestBoardHTTPHandlerServesIssueDetailPageAndEscapesText(t *testing.T) {
 	description := "Need <script>alert(1)</script>"
 	detail := domain.IssueDetail{
@@ -418,6 +452,60 @@ func TestBoardHTTPHandlerUsesSemanticETagsForBoardAndDetailAPI(t *testing.T) {
 	if detailMatchRecorder.Body.Len() != 0 {
 		t.Fatalf("detail api 304 body length = %d, want 0", detailMatchRecorder.Body.Len())
 	}
+}
+
+// ISSUE-181: the served board's live-refresh poll relies entirely on the
+// semantic ETag changing when reservation state changes (acquire, release,
+// or version bump), since the ETag payload is a separate minimal
+// projection from the HTML/JSON renderers.
+func TestBoardHTTPHandlerETagReflectsReservationChanges(t *testing.T) {
+	board := boardResultFixture()
+	board.ActiveReservations = []domain.Reservation{
+		{ID: "reservation-1", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive, Version: 1},
+	}
+	service := &stubBoardService{board: board}
+	handler := NewBoardHTTPHandler(service)
+
+	initialRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(initialRecorder, httptest.NewRequest(http.MethodGet, "/api/board", nil))
+	initialETag := initialRecorder.Header().Get("ETag")
+	if initialETag == "" {
+		t.Fatal("expected board api ETag header")
+	}
+
+	t.Run("new active reservation changes the etag", func(t *testing.T) {
+		withExtra := board
+		withExtra.ActiveReservations = append([]domain.Reservation{}, board.ActiveReservations...)
+		withExtra.ActiveReservations = append(withExtra.ActiveReservations, domain.Reservation{
+			ID: "reservation-2", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "b.go", Status: domain.ReservationStatusActive, Version: 1,
+		})
+		service.board = withExtra
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/board", nil))
+		if got := recorder.Header().Get("ETag"); got == initialETag {
+			t.Fatalf("etag unchanged after acquiring a new reservation: %q", got)
+		}
+	})
+
+	t.Run("released reservation changes the etag even with the same id", func(t *testing.T) {
+		released := board
+		released.ActiveReservations = nil
+		service.board = released
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/board", nil))
+		if got := recorder.Header().Get("ETag"); got == initialETag {
+			t.Fatalf("etag unchanged after the only active reservation was released: %q", got)
+		}
+	})
+
+	t.Run("unrelated board fields keep the etag stable", func(t *testing.T) {
+		service.board = board
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/board", nil))
+		if got := recorder.Header().Get("ETag"); got != initialETag {
+			t.Fatalf("etag = %q, want unchanged %q for identical reservation state", got, initialETag)
+		}
+	})
 }
 
 func TestBoardHTTPHandlerMapsDetailAPIErrorResponses(t *testing.T) {

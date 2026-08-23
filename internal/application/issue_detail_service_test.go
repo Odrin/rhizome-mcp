@@ -48,6 +48,19 @@ func (s *recordingActivityService) GetIssueActivity(ctx context.Context, input d
 	return s.activity, s.err
 }
 
+type recordingReservationLister struct {
+	calls int
+	input domain.ListResourceReservationsInput
+	list  domain.ReservationList
+	err   error
+}
+
+func (s *recordingReservationLister) ListReservations(ctx context.Context, input domain.ListResourceReservationsInput) (domain.ReservationList, error) {
+	s.calls++
+	s.input = input
+	return s.list, s.err
+}
+
 func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 	issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-10", Status: domain.StatusOpen, Priority: domain.PriorityHigh}
 	graphRootID := issue.ID
@@ -65,8 +78,10 @@ func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 	issueService := &recordingIssueService{issue: issue}
 	graphService := &recordingGraphService{graph: graph}
 	activityService := &recordingActivityService{activity: activity}
+	reservations := domain.ReservationList{Items: []domain.Reservation{{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB5", IssueID: issue.ID, AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FB2", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}}, HasMore: true}
+	reservationService := &recordingReservationLister{list: reservations}
 
-	service, err := NewIssueDetailService(issueService, graphService, activityService)
+	service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService)
 	if err != nil {
 		t.Fatalf("NewIssueDetailService returned error: %v", err)
 	}
@@ -83,6 +98,24 @@ func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 	}
 	if activityService.calls != 1 {
 		t.Fatalf("activity service calls = %d, want 1", activityService.calls)
+	}
+	if reservationService.calls != 1 {
+		t.Fatalf("reservation service calls = %d, want 1", reservationService.calls)
+	}
+	if reservationService.input.IssueID == nil || *reservationService.input.IssueID != issue.ID {
+		t.Fatalf("reservation issue id = %#v, want %q", reservationService.input.IssueID, issue.ID)
+	}
+	if reservationService.input.Active != nil {
+		t.Fatalf("reservation active filter = %#v, want nil (both current and historical rows)", reservationService.input.Active)
+	}
+	if reservationService.input.Limit != domain.DefaultReservationHistoryLimit {
+		t.Fatalf("reservation limit = %d, want %d", reservationService.input.Limit, domain.DefaultReservationHistoryLimit)
+	}
+	if len(detail.Reservations) != 1 || detail.Reservations[0].DisplayValue != "a.go" {
+		t.Fatalf("detail reservations = %+v, want one a.go", detail.Reservations)
+	}
+	if !detail.HasMoreReservations {
+		t.Fatal("expected HasMoreReservations to be retained from the reservation page")
 	}
 	if issueService.id != "issue-10" {
 		t.Fatalf("issue service identifier = %q, want %q", issueService.id, "issue-10")
@@ -121,25 +154,29 @@ func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 
 func TestIssueDetailServiceStopsOnErrors(t *testing.T) {
 	tests := []struct {
-		name              string
-		issueErr          error
-		graphErr          error
-		activityErr       error
-		wantErrText       string
-		wantIssueCalls    int
-		wantGraphCalls    int
-		wantActivityCalls int
+		name                 string
+		issueErr             error
+		graphErr             error
+		activityErr          error
+		reservationErr       error
+		wantErrText          string
+		wantIssueCalls       int
+		wantGraphCalls       int
+		wantActivityCalls    int
+		wantReservationCalls int
 	}{
-		{name: "issue error", issueErr: errors.New("issue failure"), wantErrText: "issue failure", wantIssueCalls: 1, wantGraphCalls: 0, wantActivityCalls: 0},
-		{name: "graph error", graphErr: errors.New("graph failure"), wantErrText: "graph failure", wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 0},
-		{name: "activity error", activityErr: errors.New("activity failure"), wantErrText: "activity failure", wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 1},
+		{name: "issue error", issueErr: errors.New("issue failure"), wantErrText: "issue failure", wantIssueCalls: 1, wantGraphCalls: 0, wantActivityCalls: 0, wantReservationCalls: 0},
+		{name: "graph error", graphErr: errors.New("graph failure"), wantErrText: "graph failure", wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 0, wantReservationCalls: 0},
+		{name: "activity error", activityErr: errors.New("activity failure"), wantErrText: "activity failure", wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 1, wantReservationCalls: 0},
+		{name: "reservation error", reservationErr: errors.New("reservation failure"), wantErrText: "reservation failure", wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 1, wantReservationCalls: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issueService := &recordingIssueService{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-10"}, err: tt.issueErr}
+			issueService := &recordingIssueService{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-10", Status: domain.StatusOpen}, err: tt.issueErr}
 			graphService := &recordingGraphService{graph: domain.GraphResult{RootIssueID: ptrString("01ARZ3NDEKTSV4RRFFQ69G5FAV")}, err: tt.graphErr}
 			activityService := &recordingActivityService{activity: domain.IssueActivity{}, err: tt.activityErr}
-			service, err := NewIssueDetailService(issueService, graphService, activityService)
+			reservationService := &recordingReservationLister{err: tt.reservationErr}
+			service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService)
 			if err != nil {
 				t.Fatalf("NewIssueDetailService returned error: %v", err)
 			}
@@ -155,6 +192,9 @@ func TestIssueDetailServiceStopsOnErrors(t *testing.T) {
 			}
 			if activityService.calls != tt.wantActivityCalls {
 				t.Fatalf("activity service calls = %d, want %d", activityService.calls, tt.wantActivityCalls)
+			}
+			if reservationService.calls != tt.wantReservationCalls {
+				t.Fatalf("reservation service calls = %d, want %d", reservationService.calls, tt.wantReservationCalls)
 			}
 		})
 	}

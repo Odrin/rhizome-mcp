@@ -380,6 +380,22 @@ func (repository *recordingAttemptRepository) LookupFinishedAttempt(_ context.Co
 	return repository.lookupResult, repository.lookupFound, repository.lookupError
 }
 
+func (repository *recordingAttemptRepository) ReserveResources(context.Context, ports.ReserveResourcesCommand) (ports.ReserveResourcesResult, error) {
+	return ports.ReserveResourcesResult{}, nil
+}
+
+func (repository *recordingAttemptRepository) LookupReserveResources(context.Context, string, []byte) (ports.ReserveResourcesResult, bool, error) {
+	return ports.ReserveResourcesResult{}, false, nil
+}
+
+func (repository *recordingAttemptRepository) ReleaseResources(context.Context, ports.ReleaseResourcesCommand) (ports.ReleaseResourcesResult, error) {
+	return ports.ReleaseResourcesResult{}, nil
+}
+
+func (repository *recordingAttemptRepository) LookupReleaseResources(context.Context, string, []byte) (ports.ReleaseResourcesResult, bool, error) {
+	return ports.ReleaseResourcesResult{}, false, nil
+}
+
 func failureReasonPointer(value domain.FailureReasonCode) *domain.FailureReasonCode { return &value }
 
 type fixedAttemptIDGenerator string

@@ -126,6 +126,11 @@ type getWorkContextInput struct {
 	IssueID string                  `json:"issue_id"`
 	Include []string                `json:"include,omitempty"`
 	Limits  *workContextLimitsInput `json:"limits,omitempty"`
+	// DesiredResources is a caller-supplied set to diagnose against active
+	// reservations elsewhere in the project -- not resources being acquired
+	// (ISSUE-181). Drives both the default-context conflict warning and,
+	// with reservation_conflicts requested, the bounded conflict rows.
+	DesiredResources []resourceInput `json:"desired_resources,omitempty"`
 }
 
 type workContextLimitsInput struct {
@@ -136,6 +141,8 @@ type workContextLimitsInput struct {
 	AttemptHistory              *int `json:"attempt_history,omitempty"`
 	Artifacts                   *int `json:"artifacts,omitempty"`
 	ChangesSincePreviousAttempt *int `json:"changes_since_previous_attempt,omitempty"`
+	ResourceReservations        *int `json:"resource_reservations,omitempty"`
+	ReservationConflicts        *int `json:"reservation_conflicts,omitempty"`
 }
 
 type archiveIssueInput struct {
@@ -166,11 +173,58 @@ type listDecisionsInput struct {
 	Cursor  *string `json:"cursor,omitempty"`
 }
 
+type resourceInput struct {
+	Kind      string `json:"kind"`
+	Path      string `json:"path,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+func resourcesFromInput(inputs []resourceInput) []domain.Resource {
+	if inputs == nil {
+		return nil
+	}
+	resources := make([]domain.Resource, len(inputs))
+	for index, item := range inputs {
+		resources[index] = domain.Resource{Kind: domain.ResourceKind(item.Kind), Path: item.Path, Namespace: item.Namespace, Name: item.Name}
+	}
+	return resources
+}
+
 type claimIssueInput struct {
-	IssueID        string  `json:"issue_id"`
-	LeaseSeconds   *int    `json:"lease_seconds,omitempty"`
-	IdempotencyKey *string `json:"idempotency_key,omitempty"`
-	View           string  `json:"view,omitempty"`
+	IssueID        string          `json:"issue_id"`
+	LeaseSeconds   *int            `json:"lease_seconds,omitempty"`
+	Resources      []resourceInput `json:"resources,omitempty"`
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	View           string          `json:"view,omitempty"`
+}
+
+type reserveResourcesInput struct {
+	AttemptID      string          `json:"attempt_id"`
+	LeaseToken     string          `json:"lease_token"`
+	Resources      []resourceInput `json:"resources"`
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+}
+
+type releaseResourcesInput struct {
+	AttemptID      string   `json:"attempt_id"`
+	LeaseToken     string   `json:"lease_token"`
+	ReservationIDs []string `json:"reservation_ids,omitempty"`
+	IdempotencyKey *string  `json:"idempotency_key,omitempty"`
+}
+
+type listResourceReservationsInput struct {
+	IssueID   *string `json:"issue_id,omitempty"`
+	AttemptID *string `json:"attempt_id,omitempty"`
+	Kind      *string `json:"kind,omitempty"`
+	Active    *bool   `json:"active,omitempty"`
+	Limit     int     `json:"limit,omitempty"`
+	Cursor    *string `json:"cursor,omitempty"`
+}
+
+type getResourceReservationInput struct {
+	ReservationID string `json:"reservation_id"`
+	View          string `json:"view,omitempty"`
 }
 
 type createAgentSessionInput struct {
@@ -854,9 +908,10 @@ type updateIssueCompactIssueDTO struct {
 }
 
 type claimIssueCompactOutput struct {
-	Issue      claimIssueCompactIssueDTO   `json:"issue"`
-	Attempt    claimIssueCompactAttemptDTO `json:"attempt"`
-	LeaseToken string                      `json:"lease_token"`
+	Issue        claimIssueCompactIssueDTO   `json:"issue"`
+	Attempt      claimIssueCompactAttemptDTO `json:"attempt"`
+	Reservations []reservationDTO            `json:"reservations,omitempty"`
+	LeaseToken   string                      `json:"lease_token"`
 }
 
 type claimIssueCompactIssueDTO struct {
@@ -1067,19 +1122,117 @@ type workContextOutput struct {
 	Artifacts                   []artifactDTO                   `json:"artifacts"`
 	ProjectInstructions         *string                         `json:"project_instructions"`
 	ChangesSincePreviousAttempt []issueEventDTO                 `json:"changes_since_previous_attempt"`
+	ActiveReservationCount      int64                           `json:"active_reservation_count"`
+	ResourceReservations        []reservationDTO                `json:"resource_reservations"`
+	ConflictCount               int64                           `json:"conflict_count"`
+	ReservationConflicts        []reservationConflictDTO        `json:"reservation_conflicts"`
 	Truncated                   bool                            `json:"truncated"`
 	TruncatedSections           []string                        `json:"truncated_sections"`
 	NextActions                 []string                        `json:"next_actions"`
 }
 
+// reservationConflictDTO is the bounded, secret-free projection of one
+// caller-supplied desired resource's conflict with an active reservation
+// elsewhere in the project (ISSUE-181's reservation_conflicts section).
+// Never includes a lease token.
+type reservationConflictDTO struct {
+	DesiredIndex        int            `json:"desired_index"`
+	DesiredKind         string         `json:"desired_kind"`
+	DesiredDisplayValue string         `json:"desired_display_value"`
+	Existing            reservationDTO `json:"existing"`
+	IssueDisplayID      string         `json:"issue_display_id"`
+	IssueTitle          string         `json:"issue_title"`
+	SessionLabel        *string        `json:"session_label,omitempty"`
+	LeaseExpiresAt      time.Time      `json:"lease_expires_at"`
+}
+
+func reservationConflictDTOFromDomain(conflict domain.ReservationConflict) reservationConflictDTO {
+	return reservationConflictDTO{
+		DesiredIndex: conflict.DesiredIndex, DesiredKind: string(conflict.DesiredKind), DesiredDisplayValue: conflict.DesiredDisplayValue,
+		Existing: reservationDTOFromDomain(conflict.Existing, false), IssueDisplayID: conflict.IssueDisplayID, IssueTitle: conflict.IssueTitle,
+		SessionLabel: conflict.SessionLabel, LeaseExpiresAt: conflict.LeaseExpiresAt,
+	}
+}
+
+func reservationConflictDTOsFromDomain(conflicts []domain.ReservationConflict) []reservationConflictDTO {
+	items := make([]reservationConflictDTO, len(conflicts))
+	for index, conflict := range conflicts {
+		items[index] = reservationConflictDTOFromDomain(conflict)
+	}
+	return items
+}
+
 type claimIssueOutput struct {
 	Issue              issueListItemDTO    `json:"issue"`
 	Attempt            attemptDTO          `json:"attempt"`
+	Reservations       []reservationDTO    `json:"reservations,omitempty"`
 	LeaseToken         string              `json:"lease_token"`
 	LeaseExpiresAt     time.Time           `json:"lease_expires_at"`
 	MinimalWorkContext emptyWorkContextDTO `json:"minimal_work_context"`
 	Warnings           []string            `json:"warnings"`
 	NextActions        []string            `json:"next_actions"`
+}
+
+// reservationDTO is the reservation shape shared by claim_issue's optional
+// resources, reserve_resources, release_resources, and
+// list_resource_reservations items (always this compact shape), plus
+// get_resource_reservation (compact or full, ISSUE-180's locked API).
+// ComparisonValue and Version -- the normalized overlap key and the
+// optimistic-concurrency counter, neither useful outside a full single-item
+// lookup -- are populated only in the full form; their omitempty tags mean
+// they are absent from JSON entirely in the compact form, matching
+// schemaReservation's optional (not required) properties.
+type reservationDTO struct {
+	ID              string     `json:"id"`
+	IssueID         string     `json:"issue_id"`
+	AttemptID       string     `json:"attempt_id"`
+	Kind            string     `json:"kind"`
+	DisplayValue    string     `json:"display_value"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ReleasedAt      *time.Time `json:"released_at,omitempty"`
+	ReleaseReason   *string    `json:"release_reason,omitempty"`
+	ComparisonValue string     `json:"comparison_value,omitempty"`
+	Version         int64      `json:"version,omitempty"`
+}
+
+func reservationDTOFromDomain(reservation domain.Reservation, full bool) reservationDTO {
+	dto := reservationDTO{
+		ID: reservation.ID, IssueID: reservation.IssueID, AttemptID: reservation.AttemptID,
+		Kind: string(reservation.Kind), DisplayValue: reservation.DisplayValue, Status: string(reservation.Status),
+		CreatedAt: reservation.CreatedAt, ReleasedAt: copyTime(reservation.ReleasedAt),
+		ReleaseReason: stringPointer(reservation.ReleaseReason),
+	}
+	if full {
+		dto.ComparisonValue = reservation.ComparisonValue
+		dto.Version = reservation.Version
+	}
+	return dto
+}
+
+func reservationDTOsFromDomain(reservations []domain.Reservation) []reservationDTO {
+	items := make([]reservationDTO, len(reservations))
+	for index, reservation := range reservations {
+		items[index] = reservationDTOFromDomain(reservation, false)
+	}
+	return items
+}
+
+type reserveResourcesOutput struct {
+	Reservations []reservationDTO `json:"reservations"`
+	NextActions  []string         `json:"next_actions"`
+}
+
+type releaseResourcesOutput struct {
+	Reservations []reservationDTO `json:"reservations"`
+	NextActions  []string         `json:"next_actions"`
+}
+
+type reservationListOutput struct {
+	Items       []reservationDTO `json:"items"`
+	NextCursor  *string          `json:"next_cursor"`
+	HasMore     bool             `json:"has_more"`
+	NextActions []string         `json:"next_actions"`
 }
 
 type renewAttemptOutput struct {
@@ -1332,8 +1485,16 @@ func updateIssueCompactOutputFromDomain(issue domain.Issue, changedFields []stri
 	return updateIssueCompactOutput{Issue: updateIssueCompactIssueDTO{ID: issue.ID, DisplayID: issue.DisplayID, Status: string(issue.Status), Version: issue.Version}, ChangedFields: append([]string(nil), changedFields...)}
 }
 
-func claimIssueCompactOutputFromDomain(issue domain.Issue, attempt domain.WorkAttempt, leaseToken string) claimIssueCompactOutput {
-	return claimIssueCompactOutput{Issue: claimIssueCompactIssueDTO{ID: issue.ID, Status: string(issue.Status), Version: issue.Version}, Attempt: claimIssueCompactAttemptDTO{ID: attempt.ID, Kind: string(attempt.Kind), LeaseExpiresAt: attempt.LeaseExpiresAt}, LeaseToken: leaseToken}
+func claimIssueCompactOutputFromDomain(issue domain.Issue, attempt domain.WorkAttempt, reservations []domain.Reservation, leaseToken string) claimIssueCompactOutput {
+	var reservationDTOs []reservationDTO
+	if len(reservations) > 0 {
+		reservationDTOs = reservationDTOsFromDomain(reservations)
+	}
+	return claimIssueCompactOutput{
+		Issue:        claimIssueCompactIssueDTO{ID: issue.ID, Status: string(issue.Status), Version: issue.Version},
+		Attempt:      claimIssueCompactAttemptDTO{ID: attempt.ID, Kind: string(attempt.Kind), LeaseExpiresAt: attempt.LeaseExpiresAt},
+		Reservations: reservationDTOs, LeaseToken: leaseToken,
+	}
 }
 
 func finishAttemptCompactOutputFromDomain(attempt domain.WorkAttempt, issue domain.Issue, warnings []string, latestEventID int64, artifacts []domain.Artifact, nextActions []string) finishAttemptCompactOutput {
@@ -1540,6 +1701,10 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		AttemptHistory:              make([]attemptDTO, len(value.AttemptHistory)),
 		Artifacts:                   make([]artifactDTO, len(value.Artifacts)),
 		ChangesSincePreviousAttempt: make([]issueEventDTO, len(value.ChangesSincePreviousAttempt)),
+		ActiveReservationCount:      value.ActiveReservationCount,
+		ResourceReservations:        reservationDTOsFromDomain(value.ResourceReservations),
+		ConflictCount:               value.ConflictCount,
+		ReservationConflicts:        reservationConflictDTOsFromDomain(value.ReservationConflicts),
 		Truncated:                   value.Truncated,
 		TruncatedSections:           make([]string, len(value.TruncatedSections)),
 	}

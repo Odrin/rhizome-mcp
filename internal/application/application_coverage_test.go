@@ -17,7 +17,7 @@ import (
 
 func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 	t.Run("constructor rejects nil dependencies", func(t *testing.T) {
-		_, err := NewIssueDetailService(nil, nil, nil)
+		_, err := NewIssueDetailService(nil, nil, nil, nil)
 		if err == nil {
 			t.Fatal("expected constructor error")
 		}
@@ -29,17 +29,20 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 
 	t.Run("short circuits on dependency errors", func(t *testing.T) {
 		cases := []struct {
-			name              string
-			issueErr          error
-			graphErr          error
-			activityErr       error
-			wantIssueCalls    int
-			wantGraphCalls    int
-			wantActivityCalls int
+			name                 string
+			issueErr             error
+			graphErr             error
+			activityErr          error
+			reservationErr       error
+			wantIssueCalls       int
+			wantGraphCalls       int
+			wantActivityCalls    int
+			wantReservationCalls int
 		}{
 			{name: "issue error", issueErr: errors.New("issue failed"), wantIssueCalls: 1},
 			{name: "graph error", graphErr: errors.New("graph failed"), wantIssueCalls: 1, wantGraphCalls: 1},
 			{name: "activity error", activityErr: errors.New("activity failed"), wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 1},
+			{name: "reservation error", reservationErr: errors.New("reservations failed"), wantIssueCalls: 1, wantGraphCalls: 1, wantActivityCalls: 1, wantReservationCalls: 1},
 		}
 
 		for _, tc := range cases {
@@ -47,7 +50,8 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 				issueRepo := &recordingIssueDetailIssueService{issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.StatusOpen}, err: tc.issueErr}
 				graphRepo := &recordingIssueDetailGraphService{graph: domain.GraphResult{}, err: tc.graphErr}
 				activityRepo := &recordingIssueDetailActivityService{activity: domain.IssueActivity{}, err: tc.activityErr}
-				service, err := NewIssueDetailService(issueRepo, graphRepo, activityRepo)
+				reservationRepo := &recordingIssueDetailReservationService{err: tc.reservationErr}
+				service, err := NewIssueDetailService(issueRepo, graphRepo, activityRepo, reservationRepo)
 				if err != nil {
 					t.Fatalf("NewIssueDetailService returned error: %v", err)
 				}
@@ -64,13 +68,16 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 				if activityRepo.calls != tc.wantActivityCalls {
 					t.Fatalf("activity calls = %d, want %d", activityRepo.calls, tc.wantActivityCalls)
 				}
+				if reservationRepo.calls != tc.wantReservationCalls {
+					t.Fatalf("reservation calls = %d, want %d", reservationRepo.calls, tc.wantReservationCalls)
+				}
 			})
 		}
 	})
 
 	t.Run("uses fallback root projection when graph has no root", func(t *testing.T) {
 		issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.StatusOpen}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}
@@ -88,7 +95,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 
 	t.Run("returns invalid effective status when issue status is invalid", func(t *testing.T) {
 		issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.Status("invalid")}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}
@@ -109,7 +116,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 			{EntityType: domain.ActivityEntityTypeDecision, EntityID: "01ARZ3NDEKTSV4RRFFQ69G5FB6", IssueID: issue.ID, OccurredAt: time.Unix(15, 0).UTC(), Decision: &domain.Decision{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB6", IssueID: &issue.ID, CreatedAt: time.Unix(15, 0).UTC()}},
 			{EntityType: domain.ActivityEntityTypeDecision, EntityID: "01ARZ3NDEKTSV4RRFFQ69G5FB7", IssueID: issue.ID, OccurredAt: time.Unix(16, 0).UTC(), Decision: &domain.Decision{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB7", IssueID: &issue.ID, CreatedAt: time.Unix(16, 0).UTC()}},
 		}}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{RootIssueID: ptrString(issue.ID)}}, &recordingIssueDetailActivityService{activity: activity})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{RootIssueID: ptrString(issue.ID)}}, &recordingIssueDetailActivityService{activity: activity}, &recordingIssueDetailReservationService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}
@@ -400,6 +407,17 @@ type recordingIssueDetailActivityService struct {
 func (s *recordingIssueDetailActivityService) GetIssueActivity(context.Context, domain.GetIssueActivityInput) (domain.IssueActivity, error) {
 	s.calls++
 	return s.activity, s.err
+}
+
+type recordingIssueDetailReservationService struct {
+	calls int
+	list  domain.ReservationList
+	err   error
+}
+
+func (s *recordingIssueDetailReservationService) ListReservations(context.Context, domain.ListResourceReservationsInput) (domain.ReservationList, error) {
+	s.calls++
+	return s.list, s.err
 }
 
 type recordingIssueRepository struct {

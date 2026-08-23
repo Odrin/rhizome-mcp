@@ -551,6 +551,13 @@ func (lease *projectRouterLease) AttemptService() *application.AttemptService {
 	return lease.baseLease.AttemptService()
 }
 
+func (lease *projectRouterLease) ReservationService() *application.ReservationService {
+	if lease == nil || lease.baseLease == nil {
+		return nil
+	}
+	return lease.baseLease.ReservationService()
+}
+
 func (lease *projectRouterLease) SessionService() *application.AgentSessionService {
 	if lease == nil || lease.baseLease == nil {
 		return nil

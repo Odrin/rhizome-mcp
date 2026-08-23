@@ -8,21 +8,28 @@ import (
 )
 
 type ClaimIssueCommand struct {
-	Identifier     domain.IssueIdentifier
-	AttemptID      string
-	SessionID      *string
-	TokenHash      []byte
-	LeaseToken     string
-	LeaseDuration  time.Duration
-	OccurredAt     time.Time
+	Identifier    domain.IssueIdentifier
+	AttemptID     string
+	SessionID     *string
+	TokenHash     []byte
+	LeaseToken    string
+	LeaseDuration time.Duration
+	OccurredAt    time.Time
+	// Resources is optional (ISSUE-180): when non-empty, claiming the issue
+	// and acquiring every listed resource happen inside the same write
+	// transaction, so a conflict aborts the claim itself. Rejected outright
+	// when the claim resolves to a review attempt (ISSUE-179's locked
+	// lifecycle: only work attempts may own reservations).
+	Resources      []ReservationResourceInput
 	IdempotencyKey string
 	RequestHash    []byte
 }
 
 type ClaimIssueResult struct {
-	Issue      domain.Issue
-	Projection domain.IssueProjection
-	Attempt    domain.WorkAttempt
+	Issue        domain.Issue
+	Projection   domain.IssueProjection
+	Attempt      domain.WorkAttempt
+	Reservations []domain.Reservation
 	// LeaseToken is excluded from JSON encoding: it is the raw attempt
 	// secret and must never be persisted (idempotency_records.response_json
 	// stores this struct verbatim on a fresh claim).
@@ -129,6 +136,16 @@ type AttemptRepository interface {
 	// ListAttemptEvidence returns every current evidence record for one
 	// attempt, for atomic gate evaluation (ISSUE-172) and issue activity.
 	ListAttemptEvidence(context.Context, ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error)
+	// ReserveResources authenticates AttemptID's lease, then normalizes and
+	// acquires every requested resource against the live active set,
+	// all-or-nothing, in the same transaction (ISSUE-180).
+	ReserveResources(context.Context, ReserveResourcesCommand) (ReserveResourcesResult, error)
+	LookupReserveResources(ctx context.Context, key string, hash []byte) (ReserveResourcesResult, bool, error)
+	// ReleaseResources authenticates AttemptID's lease, then releases the
+	// named reservations (or every active one it owns, when ReservationIDs
+	// is empty), all inside one transaction (ISSUE-180).
+	ReleaseResources(context.Context, ReleaseResourcesCommand) (ReleaseResourcesResult, error)
+	LookupReleaseResources(ctx context.Context, key string, hash []byte) (ReleaseResourcesResult, bool, error)
 }
 
 // SubmitGateEvidenceCommand authenticates and upserts one evidence record.
@@ -158,4 +175,44 @@ type SubmitGateEvidenceResult struct {
 // records to load.
 type ListAttemptEvidenceCommand struct {
 	AttemptID string
+}
+
+// ReserveResourcesCommand is a lease-authenticated, idempotent request to
+// add resources to one active work attempt's reservations, atomically with
+// every other resource in the same call (ISSUE-180: reserve_resources).
+type ReserveResourcesCommand struct {
+	AttemptID      string
+	SessionID      *string
+	TokenHash      []byte
+	Resources      []ReservationResourceInput
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
+}
+
+// ReserveResourcesResult is the reservations newly acquired by one
+// ReserveResources call (not the attempt's full active set).
+type ReserveResourcesResult struct {
+	Reservations []domain.Reservation
+}
+
+// ReleaseResourcesCommand is a lease-authenticated, idempotent request to
+// release reservations owned by one active work attempt. ReservationIDs
+// empty means "release every active reservation this attempt owns"; a
+// non-empty list releases exactly those IDs, and fails if any named ID is
+// not both active and owned by AttemptID (ISSUE-180: release_resources).
+type ReleaseResourcesCommand struct {
+	AttemptID      string
+	SessionID      *string
+	TokenHash      []byte
+	ReservationIDs []string
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
+}
+
+// ReleaseResourcesResult is the reservations released by one
+// ReleaseResources call.
+type ReleaseResourcesResult struct {
+	Reservations []domain.Reservation
 }

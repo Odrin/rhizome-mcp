@@ -119,6 +119,22 @@ func (repository *recordingMaintenanceAttemptRepository) ListAttemptEvidence(con
 	return nil, nil
 }
 
+func (repository *recordingMaintenanceAttemptRepository) ReserveResources(context.Context, ports.ReserveResourcesCommand) (ports.ReserveResourcesResult, error) {
+	return ports.ReserveResourcesResult{}, nil
+}
+
+func (repository *recordingMaintenanceAttemptRepository) LookupReserveResources(context.Context, string, []byte) (ports.ReserveResourcesResult, bool, error) {
+	return ports.ReserveResourcesResult{}, false, nil
+}
+
+func (repository *recordingMaintenanceAttemptRepository) ReleaseResources(context.Context, ports.ReleaseResourcesCommand) (ports.ReleaseResourcesResult, error) {
+	return ports.ReleaseResourcesResult{}, nil
+}
+
+func (repository *recordingMaintenanceAttemptRepository) LookupReleaseResources(context.Context, string, []byte) (ports.ReleaseResourcesResult, bool, error) {
+	return ports.ReleaseResourcesResult{}, false, nil
+}
+
 type recordingMaintenanceSearchIndexRepository struct {
 	rebuildCalled bool
 	err           error

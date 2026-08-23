@@ -226,6 +226,22 @@ func (repo *countingAttemptRepository) LookupSubmitGateEvidence(context.Context,
 	return ports.SubmitGateEvidenceResult{}, false, nil
 }
 
+func (repo *countingAttemptRepository) ReserveResources(context.Context, ports.ReserveResourcesCommand) (ports.ReserveResourcesResult, error) {
+	return ports.ReserveResourcesResult{}, nil
+}
+
+func (repo *countingAttemptRepository) LookupReserveResources(context.Context, string, []byte) (ports.ReserveResourcesResult, bool, error) {
+	return ports.ReserveResourcesResult{}, false, nil
+}
+
+func (repo *countingAttemptRepository) ReleaseResources(context.Context, ports.ReleaseResourcesCommand) (ports.ReleaseResourcesResult, error) {
+	return ports.ReleaseResourcesResult{}, nil
+}
+
+func (repo *countingAttemptRepository) LookupReleaseResources(context.Context, string, []byte) (ports.ReleaseResourcesResult, bool, error) {
+	return ports.ReleaseResourcesResult{}, false, nil
+}
+
 func (repo *countingAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
 	return nil, nil
 }

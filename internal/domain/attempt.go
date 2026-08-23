@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -501,9 +502,15 @@ type AttemptNote struct {
 }
 
 type ClaimIssueInput struct {
-	IssueID        string
-	LeaseSeconds   *int
-	SessionID      *string
+	IssueID      string
+	LeaseSeconds *int
+	SessionID    *string
+	// Resources is optional (ISSUE-180): when non-empty, claiming the issue
+	// and acquiring every listed resource happen in one transaction, so a
+	// conflict aborts the claim itself rather than leaving an attempt with
+	// no reservations. nil/empty means "claim only," unchanged from before
+	// this field existed.
+	Resources      []Resource
 	IdempotencyKey *string
 }
 
@@ -519,6 +526,21 @@ func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
 	if err != nil {
 		return ClaimIssueInput{}, err
 	}
+	var resources []Resource
+	if len(input.Resources) > 0 {
+		// PrepareReservationRequest's result is discarded here: it exists to
+		// surface a malformed or internally-overlapping resource list as an
+		// ordinary validation error before any repository call, matching
+		// domain.ValidateArtifactInputs' role for SaveAttemptNoteInput. The
+		// repository re-normalizes from the raw list regardless (every write
+		// command re-validates inline; see ports.CreateReviewRequestCommand's
+		// Purposes convention), so nothing is lost by not threading the
+		// prepared/normalized form through.
+		if _, err := PrepareReservationRequest(input.Resources); err != nil {
+			return ClaimIssueInput{}, err
+		}
+		resources = append([]Resource(nil), input.Resources...)
+	}
 	var idempotencyKey *string
 	if input.IdempotencyKey != nil {
 		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
@@ -530,17 +552,28 @@ func (input ClaimIssueInput) Validate() (ClaimIssueInput, error) {
 		}
 		idempotencyKey = &key
 	}
-	return ClaimIssueInput{IssueID: input.IssueID, LeaseSeconds: lease, SessionID: sessionID, IdempotencyKey: idempotencyKey}, nil
+	return ClaimIssueInput{
+		IssueID: input.IssueID, LeaseSeconds: lease, SessionID: sessionID,
+		Resources: resources, IdempotencyKey: idempotencyKey,
+	}, nil
 }
 
 // CanonicalClaimIssueRequest returns deterministic JSON for a normalized claim
 // request. The idempotency key, transient session identity, and generated
-// lease values are intentionally excluded.
+// lease values are intentionally excluded. Resources are included (ISSUE-180):
+// two claims against the same issue that request different resource sets are
+// different requests, matching CanonicalSaveAttemptNoteRequest's inclusion of
+// every caller-supplied mutation field.
 func CanonicalClaimIssueRequest(input ClaimIssueInput) ([]byte, error) {
+	resources, err := canonicalizeReservationResources(input.Resources)
+	if err != nil {
+		return nil, err
+	}
 	request := struct {
-		IssueID      string `json:"issue_id"`
-		LeaseSeconds int    `json:"lease_seconds"`
-	}{IssueID: input.IssueID, LeaseSeconds: *input.LeaseSeconds}
+		IssueID      string                         `json:"issue_id"`
+		LeaseSeconds int                            `json:"lease_seconds"`
+		Resources    []canonicalReservationResource `json:"resources,omitempty"`
+	}{IssueID: input.IssueID, LeaseSeconds: *input.LeaseSeconds, Resources: resources}
 	return json.Marshal(request)
 }
 
@@ -675,6 +708,196 @@ func CanonicalSaveAttemptNoteRequest(input SaveAttemptNoteInput) ([]byte, error)
 		}
 	}
 	return json.Marshal(request)
+}
+
+// MaxReleaseResourceIDs bounds the reservation_ids list on
+// ReleaseResourcesInput, matching MaxReservationResources since one release
+// call can name at most as many reservations as one acquisition could have
+// created.
+const MaxReleaseResourceIDs = MaxReservationResources
+
+// ReserveResourcesInput requests an all-or-nothing addition of resources to
+// one active work attempt (ISSUE-180's locked API: reserve_resources).
+type ReserveResourcesInput struct {
+	AttemptID      string
+	LeaseToken     string
+	SessionID      *string
+	Resources      []Resource
+	IdempotencyKey *string
+}
+
+func (input ReserveResourcesInput) Validate() (ReserveResourcesInput, error) {
+	attemptID, err := ulid.ParseStrict(input.AttemptID)
+	if err != nil || len(input.AttemptID) != 26 || attemptID.String() != input.AttemptID {
+		return ReserveResourcesInput{}, validationError("attempt_id", "INVALID_ULID", "must be a canonical ULID")
+	}
+	if strings.TrimSpace(input.LeaseToken) == "" {
+		return ReserveResourcesInput{}, validationError("lease_token", "REQUIRED", "is required")
+	}
+	if err := ValidateText("lease_token", input.LeaseToken, MaxLeaseTokenRunes); err != nil {
+		return ReserveResourcesInput{}, err
+	}
+	// PrepareReservationRequest also rejects an empty list -- reserve_resources
+	// always adds at least one resource, matching its "adds a bounded
+	// all-or-nothing set" contract; release_resources' empty-means-all-active
+	// convention does not apply here.
+	if _, err := PrepareReservationRequest(input.Resources); err != nil {
+		return ReserveResourcesInput{}, err
+	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ReserveResourcesInput{}, err
+	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return ReserveResourcesInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return ReserveResourcesInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
+	return ReserveResourcesInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
+		Resources: append([]Resource(nil), input.Resources...), IdempotencyKey: idempotencyKey,
+	}, nil
+}
+
+// CanonicalReserveResourcesRequest returns deterministic JSON for a
+// normalized reserve-resources request. The lease-token proof is included,
+// matching CanonicalSaveAttemptNoteRequest's convention for every
+// lease-authenticated attempt mutation; the idempotency key and transient
+// session identity are excluded.
+func CanonicalReserveResourcesRequest(input ReserveResourcesInput) ([]byte, error) {
+	resources, err := canonicalizeReservationResources(input.Resources)
+	if err != nil {
+		return nil, err
+	}
+	request := struct {
+		AttemptID  string                         `json:"attempt_id"`
+		LeaseToken string                         `json:"lease_token"`
+		Resources  []canonicalReservationResource `json:"resources"`
+	}{AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Resources: resources}
+	return json.Marshal(request)
+}
+
+// ReleaseResourcesInput requests release of specific reservations owned by
+// one active work attempt, or -- when ReservationIDs is empty -- every
+// active reservation it currently owns (ISSUE-180's locked API:
+// release_resources).
+type ReleaseResourcesInput struct {
+	AttemptID      string
+	LeaseToken     string
+	SessionID      *string
+	ReservationIDs []string
+	IdempotencyKey *string
+}
+
+func (input ReleaseResourcesInput) Validate() (ReleaseResourcesInput, error) {
+	attemptID, err := ulid.ParseStrict(input.AttemptID)
+	if err != nil || len(input.AttemptID) != 26 || attemptID.String() != input.AttemptID {
+		return ReleaseResourcesInput{}, validationError("attempt_id", "INVALID_ULID", "must be a canonical ULID")
+	}
+	if strings.TrimSpace(input.LeaseToken) == "" {
+		return ReleaseResourcesInput{}, validationError("lease_token", "REQUIRED", "is required")
+	}
+	if err := ValidateText("lease_token", input.LeaseToken, MaxLeaseTokenRunes); err != nil {
+		return ReleaseResourcesInput{}, err
+	}
+	reservationIDs, err := CopyBounded("reservation_ids", input.ReservationIDs, MaxReleaseResourceIDs)
+	if err != nil {
+		return ReleaseResourcesInput{}, err
+	}
+	seen := make(map[string]bool, len(reservationIDs))
+	for index, id := range reservationIDs {
+		parsed, parseErr := ulid.ParseStrict(id)
+		if parseErr != nil || len(id) != 26 || parsed.String() != id {
+			idx := index
+			return ReleaseResourcesInput{}, NewError(CodeInvalidArgument, fmt.Sprintf("reservation id %q is not a canonical ULID", id), false,
+				Detail{EntityIndex: &idx, Field: "reservation_ids", Code: "INVALID_ULID"})
+		}
+		if seen[id] {
+			idx := index
+			return ReleaseResourcesInput{}, NewError(CodeInvalidArgument, fmt.Sprintf("reservation id %q is repeated", id), false,
+				Detail{EntityIndex: &idx, Field: "reservation_ids", Code: "DUPLICATE"})
+		}
+		seen[id] = true
+	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ReleaseResourcesInput{}, err
+	}
+	var idempotencyKey *string
+	if input.IdempotencyKey != nil {
+		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
+			return ReleaseResourcesInput{}, err
+		}
+		key := strings.TrimSpace(*input.IdempotencyKey)
+		if key == "" {
+			return ReleaseResourcesInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
+		}
+		idempotencyKey = &key
+	}
+	return ReleaseResourcesInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
+		ReservationIDs: reservationIDs, IdempotencyKey: idempotencyKey,
+	}, nil
+}
+
+// CanonicalReleaseResourcesRequest returns deterministic JSON for a
+// normalized release-resources request, following
+// CanonicalReserveResourcesRequest's same lease-proof-included convention.
+func CanonicalReleaseResourcesRequest(input ReleaseResourcesInput) ([]byte, error) {
+	request := struct {
+		AttemptID      string   `json:"attempt_id"`
+		LeaseToken     string   `json:"lease_token"`
+		ReservationIDs []string `json:"reservation_ids"`
+	}{AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, ReservationIDs: input.ReservationIDs}
+	return json.Marshal(request)
+}
+
+// canonicalReservationResource is the shared canonical-JSON shape for one
+// requested resource, used by both CanonicalClaimIssueRequest and
+// CanonicalReserveResourcesRequest.
+type canonicalReservationResource struct {
+	Kind      ResourceKind `json:"kind"`
+	Path      string       `json:"path,omitempty"`
+	Namespace string       `json:"namespace,omitempty"`
+	Name      string       `json:"name,omitempty"`
+}
+
+// canonicalizeReservationResources normalizes every resource (Normalize's
+// redundant "." and empty path-segment removal; trimmed logical name) before
+// it enters an idempotency hash, per ISSUE-180's locked instruction that
+// "idempotency request hashes include normalized resources": two requests
+// that name the same resource with different but equivalent spelling (e.g.
+// "./src/foo.go" vs "src/foo.go") must hash identically. Case is preserved
+// (Display, not the ASCII-folded Key, used for path kinds) since folding
+// case here would instead make two genuinely different resources on a
+// case-sensitive filesystem collide onto the same idempotency hash. A nil
+// or empty input returns a nil slice so a plain claim_issue request with no
+// resources keeps hashing exactly as it did before this field existed.
+func canonicalizeReservationResources(resources []Resource) ([]canonicalReservationResource, error) {
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	canonical := make([]canonicalReservationResource, len(resources))
+	for index, resource := range resources {
+		normalized, err := Normalize(resource)
+		if err != nil {
+			return nil, wrapResourceRequestError(index, err)
+		}
+		if normalized.Kind() == ResourceKindLogical {
+			canonical[index] = canonicalReservationResource{
+				Kind: normalized.Kind(), Namespace: normalized.Namespace(), Name: normalized.Name(),
+			}
+			continue
+		}
+		canonical[index] = canonicalReservationResource{Kind: normalized.Kind(), Path: normalized.Display()}
+	}
+	return canonical, nil
 }
 
 func copyOptionalSessionID(value *string) (*string, error) {

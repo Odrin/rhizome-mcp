@@ -335,7 +335,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_review_requests", "manage_issue_relation", "open_project", "record_decision", "renew_attempt", "replace_review_request", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_resource_reservation", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_resource_reservations", "list_review_requests", "manage_issue_relation", "open_project", "record_decision", "release_resources", "renew_attempt", "replace_review_request", "reserve_resources", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -3246,6 +3246,10 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 				Properties           map[string]json.RawMessage `json:"properties"`
 				AdditionalProperties bool                       `json:"additionalProperties"`
 			} `json:"limits"`
+			DesiredResources struct {
+				Type     string `json:"type"`
+				MaxItems int    `json:"maxItems"`
+			} `json:"desired_resources"`
 		} `json:"properties"`
 		Required             []string `json:"required"`
 		AdditionalProperties bool     `json:"additionalProperties"`
@@ -3253,26 +3257,30 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	if err := json.Unmarshal(data, &schema); err != nil {
 		t.Fatal(err)
 	}
+	if schema.Properties.DesiredResources.Type != "array" || schema.Properties.DesiredResources.MaxItems != domain.MaxReservationResources {
+		t.Fatalf("desired_resources schema = %+v, want array capped at %d (matching reserve_resources' resources bound)", schema.Properties.DesiredResources, domain.MaxReservationResources)
+	}
 	if !contains(schema.Required, "issue_id") {
 		t.Fatalf("get_work_context required fields = %v, want issue_id", schema.Required)
 	}
 	if schema.AdditionalProperties != false {
 		t.Fatalf("get_work_context top-level additionalProperties = %v, want false", schema.AdditionalProperties)
 	}
-	if schema.Properties.Include.Type != "array" || schema.Properties.Include.MaxItems != 10 || !schema.Properties.Include.UniqueItems {
+	if schema.Properties.Include.Type != "array" || schema.Properties.Include.MaxItems != 12 || !schema.Properties.Include.UniqueItems {
 		t.Fatalf("include schema = %+v", schema.Properties.Include)
 	}
-	if len(schema.Properties.Include.Items.Enum) != 10 {
+	if len(schema.Properties.Include.Items.Enum) != 12 {
 		t.Fatalf("include enum values = %v", schema.Properties.Include.Items.Enum)
 	}
-	if !contains(schema.Properties.Include.Items.Enum, "related_issue_summaries") || !contains(schema.Properties.Include.Items.Enum, "changes_since_previous_attempt") {
+	if !contains(schema.Properties.Include.Items.Enum, "related_issue_summaries") || !contains(schema.Properties.Include.Items.Enum, "changes_since_previous_attempt") ||
+		!contains(schema.Properties.Include.Items.Enum, "resource_reservations") || !contains(schema.Properties.Include.Items.Enum, "reservation_conflicts") {
 		t.Fatalf("include enum values = %v", schema.Properties.Include.Items.Enum)
 	}
 	if schema.Properties.Limits.Type != "object" || schema.Properties.Limits.AdditionalProperties != false {
 		t.Fatalf("limits schema = %+v", schema.Properties.Limits)
 	}
-	if len(schema.Properties.Limits.Properties) != 7 {
-		t.Fatalf("limits properties count = %d, want 7", len(schema.Properties.Limits.Properties))
+	if len(schema.Properties.Limits.Properties) != 9 {
+		t.Fatalf("limits properties count = %d, want 9", len(schema.Properties.Limits.Properties))
 	}
 	if _, ok := schema.Properties.Limits.Properties["recent_comments"]; !ok {
 		t.Fatal("limits schema missing recent_comments")
@@ -3436,6 +3444,116 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	}
 }
 
+// TestGetWorkContextReservationSections is ISSUE-181's MCP-layer wiring
+// check for resource_reservations/reservation_conflicts: verifies the DTO
+// conversion (dto.go) correctly serializes real reservation/conflict data
+// end-to-end through the actual tool call, on top of the domain/repository
+// coverage in internal/domain and internal/adapters/sqlite.
+func TestGetWorkContextReservationSections(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "work-context-reservations.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	client, stop := newClient(t, options)
+	defer stop()
+
+	target := call(t, client, "create_issue", map[string]any{"type": "task", "title": "reservation context target", "status": "ready"})
+	var targetIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, target, &targetIssue)
+
+	other := call(t, client, "create_issue", map[string]any{"type": "task", "title": "reservation context other", "status": "ready"})
+	var otherIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, other, &otherIssue)
+
+	otherClaim := call(t, client, "claim_issue", map[string]any{
+		"issue_id": otherIssue.ID,
+		"resources": []map[string]any{
+			{"kind": "file", "path": "shared.go"},
+		},
+	})
+	var otherClaimResult struct {
+		LeaseToken string `json:"lease_token"`
+		Attempt    struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+	}
+	decodeStructured(t, otherClaim, &otherClaimResult)
+
+	targetClaim := call(t, client, "claim_issue", map[string]any{
+		"issue_id": targetIssue.ID,
+		"resources": []map[string]any{
+			{"kind": "file", "path": "own.go"},
+		},
+	})
+	var targetClaimResult struct {
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, targetClaim, &targetClaimResult)
+
+	// Default context: counts and warnings populated, full rows absent.
+	defaultContext := call(t, client, "get_work_context", map[string]any{
+		"issue_id":          targetIssue.ID,
+		"desired_resources": []map[string]any{{"kind": "file", "path": "shared.go"}},
+	})
+	var defaultResult struct {
+		ActiveReservationCount int64    `json:"active_reservation_count"`
+		ConflictCount          int64    `json:"conflict_count"`
+		ResourceReservations   []any    `json:"resource_reservations"`
+		ReservationConflicts   []any    `json:"reservation_conflicts"`
+		Warnings               []string `json:"warnings"`
+	}
+	decodeStructured(t, defaultContext, &defaultResult)
+	if defaultResult.ActiveReservationCount != 1 {
+		t.Fatalf("active_reservation_count = %d, want 1", defaultResult.ActiveReservationCount)
+	}
+	if defaultResult.ConflictCount != 1 {
+		t.Fatalf("conflict_count = %d, want 1", defaultResult.ConflictCount)
+	}
+	if len(defaultResult.ResourceReservations) != 0 || len(defaultResult.ReservationConflicts) != 0 {
+		t.Fatalf("default context full rows should be empty: reservations=%v conflicts=%v", defaultResult.ResourceReservations, defaultResult.ReservationConflicts)
+	}
+	if !contains(defaultResult.Warnings, "ACTIVE_RESERVATIONS_HELD") || !contains(defaultResult.Warnings, "RESERVATION_CONFLICTS_DETECTED") {
+		t.Fatalf("warnings = %v, want both reservation warning codes", defaultResult.Warnings)
+	}
+
+	// Explicit include: full, secret-free rows.
+	fullContext := call(t, client, "get_work_context", map[string]any{
+		"issue_id":          targetIssue.ID,
+		"include":           []string{"resource_reservations", "reservation_conflicts"},
+		"desired_resources": []map[string]any{{"kind": "file", "path": "shared.go"}},
+	})
+	var fullResult struct {
+		ResourceReservations []struct {
+			DisplayValue string `json:"display_value"`
+			Status       string `json:"status"`
+		} `json:"resource_reservations"`
+		ReservationConflicts []struct {
+			DesiredDisplayValue string `json:"desired_display_value"`
+			IssueDisplayID      string `json:"issue_display_id"`
+			IssueTitle          string `json:"issue_title"`
+			Existing            struct {
+				DisplayValue string `json:"display_value"`
+			} `json:"existing"`
+		} `json:"reservation_conflicts"`
+	}
+	decodeStructured(t, fullContext, &fullResult)
+	if len(fullResult.ResourceReservations) != 1 || fullResult.ResourceReservations[0].DisplayValue != "own.go" || fullResult.ResourceReservations[0].Status != "active" {
+		t.Fatalf("resource_reservations = %+v, want one active own.go", fullResult.ResourceReservations)
+	}
+	if len(fullResult.ReservationConflicts) != 1 {
+		t.Fatalf("reservation_conflicts = %+v, want one entry", fullResult.ReservationConflicts)
+	}
+	conflict := fullResult.ReservationConflicts[0]
+	if conflict.DesiredDisplayValue != "shared.go" || conflict.Existing.DisplayValue != "shared.go" || conflict.IssueTitle != "reservation context other" {
+		t.Fatalf("reservation conflict = %+v", conflict)
+	}
+	assertNoRawToken(t, "get_work_context", fullContext, otherClaimResult.LeaseToken)
+	assertNoRawToken(t, "get_work_context", fullContext, targetClaimResult.LeaseToken)
+}
+
 type trackingLease struct {
 	mcpadapter.ProjectLease
 	releaseCount *int
@@ -3513,6 +3631,7 @@ func servicesFromOptions(t *testing.T, options mcpadapter.Options) mcpadapter.Pr
 		SearchService:      lease.SearchService(),
 		ReviewService:      lease.ReviewService(),
 		AttemptService:     lease.AttemptService(),
+		ReservationService: lease.ReservationService(),
 		SessionService:     lease.SessionService(),
 		WorkContextService: lease.WorkContextService(),
 	}
@@ -3568,6 +3687,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reservationRepository, err := sqlite.NewReservationRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	workContextRepository, err := sqlite.NewWorkContextRepository(db)
 	if err != nil {
 		t.Fatal(err)
@@ -3620,6 +3743,10 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	reservations, err := application.NewReservationService(reservationRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
 	workContexts, err := application.NewWorkContextService(workContextRepository, source)
 	if err != nil {
 		t.Fatal(err)
@@ -3644,6 +3771,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		SearchService:      searches,
 		ReviewService:      reviews,
 		AttemptService:     attempts,
+		ReservationService: reservations,
 		SessionService:     sessions,
 		WorkContextService: workContexts,
 	}

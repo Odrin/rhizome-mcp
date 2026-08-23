@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Resource reservations** — `claim_issue` accepts an optional `resources` field to atomically reserve files, directories, globs, or logical resources alongside a claim, all-or-nothing. New `reserve_resources`, `release_resources`, `list_resource_reservations`, and `get_resource_reservation` MCP tools manage reservations on an active work attempt directly. Only work attempts may hold reservations; a conflict with another attempt's active reservation fails with `RESOURCE_RESERVATION_CONFLICT`.
+
+- **Reservation visibility in work context and the board** — `get_work_context` gains an `active_reservation_count`/`conflict_count` default summary plus optional `resource_reservations` (the issue's own reservations, active and released) and `reservation_conflicts` sections; the latter diagnoses a caller-supplied `desired_resources` set against active reservations elsewhere in the project without acquiring anything. The status board (served and offline snapshot) shows an active-reservation count and lists active reservations grouped under their owning attempt; the served issue detail page adds a current/historical reservations section. The board's JSON API, CLI table output, and semantic ETag all carry reservation data too, so the served board's live-refresh poll detects acquire/release.
+
 ### Removed
 
 - **Deprecated review request tools** — Removed `create_review_request` and `supersede_review_request` MCP tools after one-release compatibility window. The atomic `replace_review_request` tool provides the combined functionality and is the supported replacement.

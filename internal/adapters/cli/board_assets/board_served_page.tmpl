@@ -52,11 +52,13 @@
 </section>
 <section>
 <h2>Active (leased) attempts</h2>
+<p class="generated">{{.ActiveReservationCount}} active resource reservation{{if ne .ActiveReservationCount 1}}s{{end}}, shown grouped under the attempt that holds each one.</p>
 {{if .ActiveAttempts}}
 <div class="table-scroll"><table>
-<thead><tr><th>Attempt</th><th>Issue</th><th>Title</th><th>Kind</th><th>Session label</th><th>Started</th><th>Lease expires</th></tr></thead>
+<thead><tr><th>Attempt</th><th>Issue</th><th>Title</th><th>Kind</th><th>Session label</th><th>Started</th><th>Lease expires</th><th>Reservations</th></tr></thead>
 <tbody>
-{{range .ActiveAttempts}}<tr><td>{{.AttemptID}}</td><td>{{if .HasIssueLink}}<a href="{{.IssueHref}}">{{.IssueLabel}}</a>{{else}}{{.IssueLabel}}{{end}}</td><td>{{.IssueTitle}}</td><td>{{.Kind}}</td><td>{{.SessionLabel}}</td><td>{{.StartedAt}}</td><td>{{.LeaseExpiresAt}}</td></tr>
+{{range .ActiveAttempts}}<tr><td>{{.AttemptID}}</td><td>{{if .HasIssueLink}}<a href="{{.IssueHref}}">{{.IssueLabel}}</a>{{else}}{{.IssueLabel}}{{end}}</td><td>{{.IssueTitle}}</td><td>{{.Kind}}</td><td>{{.SessionLabel}}</td><td>{{.StartedAt}}</td><td>{{.LeaseExpiresAt}}</td><td>{{if .HasReservations}}<ul class="reservations">{{range .Reservations}}<li>{{.Kind}}: {{.DisplayValue}}</li>
+{{end}}</ul>{{else}}—{{end}}</td></tr>
 {{end}}</tbody>
 </table></div>
 {{else}}<p class="empty">No active attempts.</p>

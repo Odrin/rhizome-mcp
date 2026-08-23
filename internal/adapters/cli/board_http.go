@@ -393,12 +393,15 @@ func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPS
 }
 
 func semanticBoardETag(result domain.BoardResult) string {
-	payload := boardETagPayload{StatusCounts: make([]boardETagStatusCount, len(result.StatusCounts)), ActiveAttempts: make([]boardETagActiveAttempt, len(result.ActiveAttempts)), BlockedIssues: make([]IssueSummary, len(result.BlockedIssues)), ReviewRequests: make([]boardETagReviewRequest, len(result.ReviewRequests)), PlanningGraph: boardETagGraph{Nodes: make([]IssueSummary, len(result.PlanningGraph.Nodes)), Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints, BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated}}
+	payload := boardETagPayload{StatusCounts: make([]boardETagStatusCount, len(result.StatusCounts)), ActiveAttempts: make([]boardETagActiveAttempt, len(result.ActiveAttempts)), ActiveReservations: make([]boardETagReservation, len(result.ActiveReservations)), BlockedIssues: make([]IssueSummary, len(result.BlockedIssues)), ReviewRequests: make([]boardETagReviewRequest, len(result.ReviewRequests)), PlanningGraph: boardETagGraph{Nodes: make([]IssueSummary, len(result.PlanningGraph.Nodes)), Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints, BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated}}
 	for index, item := range result.StatusCounts {
 		payload.StatusCounts[index] = boardETagStatusCount{EffectiveStatus: string(item.EffectiveStatus), Count: item.Count}
 	}
 	for index, item := range result.ActiveAttempts {
 		payload.ActiveAttempts[index] = boardETagActiveAttempt{AttemptID: item.AttemptID, IssueID: item.IssueID, IssueDisplayID: item.IssueDisplayID, IssueTitle: item.IssueTitle, Kind: string(item.Kind), SessionID: copyOptionalString(item.SessionID), SessionLabel: copyOptionalString(item.SessionLabel), StartedAt: item.StartedAt.UTC(), LeaseExpiresAt: item.LeaseExpiresAt.UTC()}
+	}
+	for index, item := range result.ActiveReservations {
+		payload.ActiveReservations[index] = boardETagReservation{ID: item.ID, IssueID: item.IssueID, AttemptID: item.AttemptID, Kind: string(item.Kind), DisplayValue: item.DisplayValue, Status: string(item.Status), Version: item.Version}
 	}
 	for index, item := range result.BlockedIssues {
 		payload.BlockedIssues[index] = issueFromDomainProjection(item)
@@ -442,11 +445,22 @@ func etagMatches(candidate string, actual string) bool {
 }
 
 type boardETagPayload struct {
-	StatusCounts   []boardETagStatusCount   `json:"status_counts"`
-	ActiveAttempts []boardETagActiveAttempt `json:"active_attempts"`
-	BlockedIssues  []IssueSummary           `json:"blocked_issues"`
-	ReviewRequests []boardETagReviewRequest `json:"review_requests"`
-	PlanningGraph  boardETagGraph           `json:"planning_graph"`
+	StatusCounts       []boardETagStatusCount   `json:"status_counts"`
+	ActiveAttempts     []boardETagActiveAttempt `json:"active_attempts"`
+	ActiveReservations []boardETagReservation   `json:"active_reservations"`
+	BlockedIssues      []IssueSummary           `json:"blocked_issues"`
+	ReviewRequests     []boardETagReviewRequest `json:"review_requests"`
+	PlanningGraph      boardETagGraph           `json:"planning_graph"`
+}
+
+type boardETagReservation struct {
+	ID           string `json:"id"`
+	IssueID      string `json:"issue_id"`
+	AttemptID    string `json:"attempt_id"`
+	Kind         string `json:"kind"`
+	DisplayValue string `json:"display_value"`
+	Status       string `json:"status"`
+	Version      int64  `json:"version"`
 }
 
 type boardETagStatusCount struct {

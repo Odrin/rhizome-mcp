@@ -13,6 +13,8 @@ th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #e2e
 th { color: #475569; font-weight: 600; }
 .empty { color: #64748b; font-style: italic; }
 .table-scroll { overflow-x: auto; }
+ul.reservations { list-style: none; margin: 0; padding: 0; }
+ul.reservations li { overflow-wrap: anywhere; }
 .graph { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.5rem; margin-top: 0.75rem; }
 .graph svg { display: block; }
 pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }

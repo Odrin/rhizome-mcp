@@ -15,27 +15,29 @@ import (
 )
 
 func TestNewBoardServiceRejectsNilDependencies(t *testing.T) {
-	issueService, attemptService, reviewService, graphService, source := newBoardServiceDependencies(t, time.Date(2026, 8, 7, 13, 14, 15, 0, time.UTC))
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependencies(t, time.Date(2026, 8, 7, 13, 14, 15, 0, time.UTC))
 
 	tests := []struct {
-		name     string
-		issue    *IssueService
-		attempt  *AttemptService
-		review   *ReviewService
-		graph    *GraphService
-		source   clock.Clock
-		wantCode string
+		name        string
+		issue       *IssueService
+		attempt     *AttemptService
+		reservation *ReservationService
+		review      *ReviewService
+		graph       *GraphService
+		source      clock.Clock
+		wantCode    string
 	}{
-		{name: "nil issue service", issue: nil, attempt: attemptService, review: reviewService, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
-		{name: "nil attempt service", issue: issueService, attempt: nil, review: reviewService, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
-		{name: "nil review service", issue: issueService, attempt: attemptService, review: nil, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
-		{name: "nil graph service", issue: issueService, attempt: attemptService, review: reviewService, graph: nil, source: source, wantCode: domain.CodeInvalidArgument},
-		{name: "nil clock", issue: issueService, attempt: attemptService, review: reviewService, graph: graphService, source: nil, wantCode: domain.CodeInvalidArgument},
+		{name: "nil issue service", issue: nil, attempt: attemptService, reservation: reservationService, review: reviewService, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
+		{name: "nil attempt service", issue: issueService, attempt: nil, reservation: reservationService, review: reviewService, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
+		{name: "nil reservation service", issue: issueService, attempt: attemptService, reservation: nil, review: reviewService, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
+		{name: "nil review service", issue: issueService, attempt: attemptService, reservation: reservationService, review: nil, graph: graphService, source: source, wantCode: domain.CodeInvalidArgument},
+		{name: "nil graph service", issue: issueService, attempt: attemptService, reservation: reservationService, review: reviewService, graph: nil, source: source, wantCode: domain.CodeInvalidArgument},
+		{name: "nil clock", issue: issueService, attempt: attemptService, reservation: reservationService, review: reviewService, graph: graphService, source: nil, wantCode: domain.CodeInvalidArgument},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewBoardService(tt.issue, tt.attempt, tt.review, tt.graph, tt.source)
+			_, err := NewBoardService(tt.issue, tt.attempt, tt.reservation, tt.review, tt.graph, tt.source)
 			if !errors.Is(err, &domain.Error{Code: tt.wantCode}) {
 				t.Fatalf("NewBoardService() error = %v, want %q", err, tt.wantCode)
 			}
@@ -50,11 +52,12 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 		listResult:  domain.IssueList{Items: []domain.IssueProjection{{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1"}, EffectiveStatus: domain.EffectiveStatusBlocked, IsBlocked: true}}},
 	}
 	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", IssueTitle: "Work", Kind: domain.AttemptKindWork}}}
+	reservationRepo := &boardRecordingReservationRepository{listResult: domain.ReservationList{Items: []domain.Reservation{{ID: "reservation-1", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}}}}
 	reviewRepo := &boardRecordingReviewRepository{listResult: ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{{ID: "review-1", IssueID: "issue-1", Status: domain.ReviewRequestStatusOpen}}}}
 	graphRepo := &boardRecordingGraphRepository{snapshot: domain.GraphSnapshot{RootIssueID: boardStringPointer("issue-1"), Nodes: []domain.IssueProjection{{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1"}}}}}
 
-	issueService, attemptService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reviewRepo, graphRepo, now)
-	service, err := NewBoardService(issueService, attemptService, reviewService, graphService, source)
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
 	if err != nil {
 		t.Fatalf("NewBoardService() error = %v", err)
 	}
@@ -76,6 +79,9 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 	if !reflect.DeepEqual(result.ActiveAttempts, []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", IssueTitle: "Work", Kind: domain.AttemptKindWork}}) {
 		t.Fatalf("ActiveAttempts = %#v", result.ActiveAttempts)
 	}
+	if !reflect.DeepEqual(result.ActiveReservations, []domain.Reservation{{ID: "reservation-1", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}}) {
+		t.Fatalf("ActiveReservations = %#v", result.ActiveReservations)
+	}
 	if !reflect.DeepEqual(result.ReviewRequests, []domain.ReviewRequest{{ID: "review-1", IssueID: "issue-1", Status: domain.ReviewRequestStatusOpen}}) {
 		t.Fatalf("ReviewRequests = %#v", result.ReviewRequests)
 	}
@@ -95,6 +101,12 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 	if attemptRepo.listCommand.Limit != domain.MaxBoardCollectionLimit {
 		t.Fatalf("active attempt limit = %d", attemptRepo.listCommand.Limit)
 	}
+	if reservationRepo.listCommand.Input.Active == nil || !*reservationRepo.listCommand.Input.Active {
+		t.Fatalf("active reservations filter = %#v", reservationRepo.listCommand.Input.Active)
+	}
+	if reservationRepo.listCommand.Input.Limit != domain.MaxBoardCollectionLimit {
+		t.Fatalf("active reservation limit = %d", reservationRepo.listCommand.Input.Limit)
+	}
 	if reviewRepo.listQuery.Status == nil || *reviewRepo.listQuery.Status != domain.ReviewRequestStatusOpen {
 		t.Fatalf("review status query = %#v", reviewRepo.listQuery.Status)
 	}
@@ -112,24 +124,25 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 	now := time.Date(2026, 8, 7, 13, 14, 15, 0, time.UTC)
 	tests := []struct {
-		name              string
-		configure         func(*boardRecordingIssueRepository, *boardRecordingAttemptRepository, *boardRecordingReviewRepository, *boardRecordingGraphRepository)
-		wantCountCalled   bool
-		wantListCalled    bool
-		wantAttemptCalled bool
-		wantReviewCalled  bool
-		wantGraphCalled   bool
+		name                  string
+		configure             func(*boardRecordingIssueRepository, *boardRecordingAttemptRepository, *boardRecordingReservationRepository, *boardRecordingReviewRepository, *boardRecordingGraphRepository)
+		wantCountCalled       bool
+		wantListCalled        bool
+		wantAttemptCalled     bool
+		wantReservationCalled bool
+		wantReviewCalled      bool
+		wantGraphCalled       bool
 	}{
 		{
 			name: "count issues",
-			configure: func(issueRepo *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
+			configure: func(issueRepo *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReservationRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
 				issueRepo.countErr = errors.New("count failed")
 			},
 			wantCountCalled: true,
 		},
 		{
 			name: "list issues",
-			configure: func(issueRepo *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
+			configure: func(issueRepo *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReservationRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
 				issueRepo.listErr = errors.New("list failed")
 			},
 			wantCountCalled: true,
@@ -137,7 +150,7 @@ func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 		},
 		{
 			name: "active attempts",
-			configure: func(_ *boardRecordingIssueRepository, attemptRepo *boardRecordingAttemptRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
+			configure: func(_ *boardRecordingIssueRepository, attemptRepo *boardRecordingAttemptRepository, _ *boardRecordingReservationRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
 				attemptRepo.listErr = errors.New("attempts failed")
 			},
 			wantCountCalled:   true,
@@ -145,25 +158,37 @@ func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 			wantAttemptCalled: true,
 		},
 		{
+			name: "active reservations",
+			configure: func(_ *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, reservationRepo *boardRecordingReservationRepository, _ *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
+				reservationRepo.listErr = errors.New("reservations failed")
+			},
+			wantCountCalled:       true,
+			wantListCalled:        true,
+			wantAttemptCalled:     true,
+			wantReservationCalled: true,
+		},
+		{
 			name: "review requests",
-			configure: func(_ *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, reviewRepo *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
+			configure: func(_ *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReservationRepository, reviewRepo *boardRecordingReviewRepository, _ *boardRecordingGraphRepository) {
 				reviewRepo.listErr = errors.New("reviews failed")
 			},
-			wantCountCalled:   true,
-			wantListCalled:    true,
-			wantAttemptCalled: true,
-			wantReviewCalled:  true,
+			wantCountCalled:       true,
+			wantListCalled:        true,
+			wantAttemptCalled:     true,
+			wantReservationCalled: true,
+			wantReviewCalled:      true,
 		},
 		{
 			name: "planning graph",
-			configure: func(_ *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReviewRepository, graphRepo *boardRecordingGraphRepository) {
+			configure: func(_ *boardRecordingIssueRepository, _ *boardRecordingAttemptRepository, _ *boardRecordingReservationRepository, _ *boardRecordingReviewRepository, graphRepo *boardRecordingGraphRepository) {
 				graphRepo.err = errors.New("graph failed")
 			},
-			wantCountCalled:   true,
-			wantListCalled:    true,
-			wantAttemptCalled: true,
-			wantReviewCalled:  true,
-			wantGraphCalled:   true,
+			wantCountCalled:       true,
+			wantListCalled:        true,
+			wantAttemptCalled:     true,
+			wantReservationCalled: true,
+			wantReviewCalled:      true,
+			wantGraphCalled:       true,
 		},
 	}
 
@@ -171,12 +196,13 @@ func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			issueRepo := &boardRecordingIssueRepository{}
 			attemptRepo := &boardRecordingAttemptRepository{}
+			reservationRepo := &boardRecordingReservationRepository{}
 			reviewRepo := &boardRecordingReviewRepository{}
 			graphRepo := &boardRecordingGraphRepository{}
-			tt.configure(issueRepo, attemptRepo, reviewRepo, graphRepo)
+			tt.configure(issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo)
 
-			issueService, attemptService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reviewRepo, graphRepo, now)
-			service, err := NewBoardService(issueService, attemptService, reviewService, graphService, source)
+			issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
+			service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
 			if err != nil {
 				t.Fatalf("NewBoardService() error = %v", err)
 			}
@@ -186,19 +212,19 @@ func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 				t.Fatal("GetBoard() error = nil, want failure")
 			}
 
-			if issueRepo.countCalled != tt.wantCountCalled || issueRepo.listCalled != tt.wantListCalled || attemptRepo.listCalled != tt.wantAttemptCalled || reviewRepo.listCalled != tt.wantReviewCalled || graphRepo.called != tt.wantGraphCalled {
-				t.Fatalf("calls = count:%t list:%t attempts:%t reviews:%t graph:%t", issueRepo.countCalled, issueRepo.listCalled, attemptRepo.listCalled, reviewRepo.listCalled, graphRepo.called)
+			if issueRepo.countCalled != tt.wantCountCalled || issueRepo.listCalled != tt.wantListCalled || attemptRepo.listCalled != tt.wantAttemptCalled || reservationRepo.listCalled != tt.wantReservationCalled || reviewRepo.listCalled != tt.wantReviewCalled || graphRepo.called != tt.wantGraphCalled {
+				t.Fatalf("calls = count:%t list:%t attempts:%t reservations:%t reviews:%t graph:%t", issueRepo.countCalled, issueRepo.listCalled, attemptRepo.listCalled, reservationRepo.listCalled, reviewRepo.listCalled, graphRepo.called)
 			}
 		})
 	}
 }
 
-func newBoardServiceDependencies(t *testing.T, now time.Time) (*IssueService, *AttemptService, *ReviewService, *GraphService, clock.Clock) {
+func newBoardServiceDependencies(t *testing.T, now time.Time) (*IssueService, *AttemptService, *ReservationService, *ReviewService, *GraphService, clock.Clock) {
 	t.Helper()
-	return newBoardServiceDependenciesWithRepos(t, &boardRecordingIssueRepository{}, &boardRecordingAttemptRepository{}, &boardRecordingReviewRepository{}, &boardRecordingGraphRepository{}, now)
+	return newBoardServiceDependenciesWithRepos(t, &boardRecordingIssueRepository{}, &boardRecordingAttemptRepository{}, &boardRecordingReservationRepository{}, &boardRecordingReviewRepository{}, &boardRecordingGraphRepository{}, now)
 }
 
-func newBoardServiceDependenciesWithRepos(t *testing.T, issueRepo ports.IssueRepository, attemptRepo ports.AttemptRepository, reviewRepo ports.ReviewRepository, graphRepo ports.GraphRepository, now time.Time) (*IssueService, *AttemptService, *ReviewService, *GraphService, clock.Clock) {
+func newBoardServiceDependenciesWithRepos(t *testing.T, issueRepo ports.IssueRepository, attemptRepo ports.AttemptRepository, reservationRepo ports.ReservationRepository, reviewRepo ports.ReviewRepository, graphRepo ports.GraphRepository, now time.Time) (*IssueService, *AttemptService, *ReservationService, *ReviewService, *GraphService, clock.Clock) {
 	t.Helper()
 	issueService, err := NewIssueService(issueRepo, clock.NewFakeClock(now), testIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 	if err != nil {
@@ -207,6 +233,10 @@ func newBoardServiceDependenciesWithRepos(t *testing.T, issueRepo ports.IssueRep
 	attemptService, err := NewAttemptService(attemptRepo, clock.NewFakeClock(now), testIDGenerator{id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 	if err != nil {
 		t.Fatalf("NewAttemptService() error = %v", err)
+	}
+	reservationService, err := NewReservationService(reservationRepo)
+	if err != nil {
+		t.Fatalf("NewReservationService() error = %v", err)
 	}
 	fakeClock := clock.NewFakeClock(now)
 	generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
@@ -218,7 +248,7 @@ func newBoardServiceDependenciesWithRepos(t *testing.T, issueRepo ports.IssueRep
 	if err != nil {
 		t.Fatalf("NewGraphService() error = %v", err)
 	}
-	return issueService, attemptService, reviewService, graphService, clock.NewFakeClock(now)
+	return issueService, attemptService, reservationService, reviewService, graphService, clock.NewFakeClock(now)
 }
 
 type testIDGenerator struct {
@@ -342,6 +372,59 @@ func (repository *boardRecordingAttemptRepository) LookupSubmitGateEvidence(cont
 
 func (repository *boardRecordingAttemptRepository) ListAttemptEvidence(context.Context, ports.ListAttemptEvidenceCommand) ([]domain.AttemptEvidence, error) {
 	return nil, nil
+}
+
+func (repository *boardRecordingAttemptRepository) ReserveResources(context.Context, ports.ReserveResourcesCommand) (ports.ReserveResourcesResult, error) {
+	return ports.ReserveResourcesResult{}, nil
+}
+
+func (repository *boardRecordingAttemptRepository) LookupReserveResources(context.Context, string, []byte) (ports.ReserveResourcesResult, bool, error) {
+	return ports.ReserveResourcesResult{}, false, nil
+}
+
+func (repository *boardRecordingAttemptRepository) ReleaseResources(context.Context, ports.ReleaseResourcesCommand) (ports.ReleaseResourcesResult, error) {
+	return ports.ReleaseResourcesResult{}, nil
+}
+
+func (repository *boardRecordingAttemptRepository) LookupReleaseResources(context.Context, string, []byte) (ports.ReleaseResourcesResult, bool, error) {
+	return ports.ReleaseResourcesResult{}, false, nil
+}
+
+type boardRecordingReservationRepository struct {
+	listCommand ports.ListReservationsCommand
+	listResult  domain.ReservationList
+	listErr     error
+	listCalled  bool
+}
+
+func (repository *boardRecordingReservationRepository) AcquireReservations(context.Context, ports.AcquireReservationsCommand) ([]domain.Reservation, error) {
+	return nil, nil
+}
+
+func (repository *boardRecordingReservationRepository) LookupAcquireReservations(context.Context, string, []byte) ([]domain.Reservation, bool, error) {
+	return nil, false, nil
+}
+
+func (repository *boardRecordingReservationRepository) ReleaseReservation(context.Context, ports.ReleaseReservationCommand) (domain.Reservation, error) {
+	return domain.Reservation{}, nil
+}
+
+func (repository *boardRecordingReservationRepository) ListActiveReservations(context.Context, ports.ListActiveReservationsQuery) ([]domain.Reservation, error) {
+	return nil, nil
+}
+
+func (repository *boardRecordingReservationRepository) ListReservationHistory(context.Context, ports.ListReservationHistoryQuery) ([]domain.Reservation, error) {
+	return nil, nil
+}
+
+func (repository *boardRecordingReservationRepository) ListReservations(_ context.Context, command ports.ListReservationsCommand) (domain.ReservationList, error) {
+	repository.listCalled = true
+	repository.listCommand = command
+	return repository.listResult, repository.listErr
+}
+
+func (repository *boardRecordingReservationRepository) GetReservation(context.Context, string) (domain.Reservation, error) {
+	return domain.Reservation{}, nil
 }
 
 type boardRecordingReviewRepository struct {

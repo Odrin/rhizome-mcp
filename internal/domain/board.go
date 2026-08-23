@@ -25,14 +25,22 @@ type ActiveAttemptSummary struct {
 }
 
 // BoardResult is the bounded read-only project status board aggregate: issue
-// counts by effective status, currently leased attempts, blocked issues, open
-// review requests, and the planning graph. Every field is already bounded by
-// the collaborating services and repositories that produced it.
+// counts by effective status, currently leased attempts, active resource
+// reservations, blocked issues, open review requests, and the planning
+// graph. Every field is already bounded by the collaborating services and
+// repositories that produced it.
+//
+// ActiveReservations is grouped under ActiveAttempts by AttemptID at the
+// view layer rather than carrying its own owner/session/lease-expiry
+// projection: every active reservation's owning attempt is, by definition,
+// active, so it always has a matching ActiveAttemptSummary row to join
+// against (ISSUE-181).
 type BoardResult struct {
-	GeneratedAt    time.Time              `json:"generated_at"`
-	StatusCounts   []EffectiveStatusCount `json:"status_counts"`
-	ActiveAttempts []ActiveAttemptSummary `json:"active_attempts"`
-	BlockedIssues  []IssueProjection      `json:"blocked_issues"`
-	ReviewRequests []ReviewRequest        `json:"review_requests"`
-	PlanningGraph  GraphResult            `json:"planning_graph"`
+	GeneratedAt        time.Time              `json:"generated_at"`
+	StatusCounts       []EffectiveStatusCount `json:"status_counts"`
+	ActiveAttempts     []ActiveAttemptSummary `json:"active_attempts"`
+	ActiveReservations []Reservation          `json:"active_reservations"`
+	BlockedIssues      []IssueProjection      `json:"blocked_issues"`
+	ReviewRequests     []ReviewRequest        `json:"review_requests"`
+	PlanningGraph      GraphResult            `json:"planning_graph"`
 }

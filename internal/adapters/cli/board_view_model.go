@@ -10,40 +10,42 @@ import (
 )
 
 type boardStaticPageViewModel struct {
-	Title                string
-	GeneratedAt          string
-	Style                template.CSS
-	StatusCounts         []boardStatusCountViewModel
-	ActiveAttempts       []boardActiveAttemptViewModel
-	BlockedIssues        []boardIssueRowViewModel
-	ReviewRequests       []boardReviewRequestViewModel
-	PlanningGraphSVG     template.HTML
-	PlanningGraphSummary string
-	PlanningGraphMermaid string
+	Title                  string
+	GeneratedAt            string
+	Style                  template.CSS
+	StatusCounts           []boardStatusCountViewModel
+	ActiveAttempts         []boardActiveAttemptViewModel
+	ActiveReservationCount int
+	BlockedIssues          []boardIssueRowViewModel
+	ReviewRequests         []boardReviewRequestViewModel
+	PlanningGraphSVG       template.HTML
+	PlanningGraphSummary   string
+	PlanningGraphMermaid   string
 }
 
 type boardServedPageViewModel struct {
-	Title                string
-	GeneratedAt          string
-	Style                template.CSS
-	LiveRefreshScript    template.JS
-	SearchScript         template.JS
-	SearchQuery          string
-	SelectedEntityType   string
-	SearchStatusMessage  string
-	SearchResults        []boardSearchResultViewModel
-	SearchHasResults     bool
-	SearchHasMore        bool
-	SearchInvalid        bool
-	SearchError          bool
-	SearchIsInitial      bool
-	StatusCounts         []boardStatusCountViewModel
-	ActiveAttempts       []boardActiveAttemptViewModel
-	BlockedIssues        []boardIssueRowViewModel
-	ReviewRequests       []boardReviewRequestViewModel
-	PlanningGraphSVG     template.HTML
-	PlanningGraphSummary string
-	PlanningGraphMermaid string
+	Title                  string
+	GeneratedAt            string
+	Style                  template.CSS
+	LiveRefreshScript      template.JS
+	SearchScript           template.JS
+	SearchQuery            string
+	SelectedEntityType     string
+	SearchStatusMessage    string
+	SearchResults          []boardSearchResultViewModel
+	SearchHasResults       bool
+	SearchHasMore          bool
+	SearchInvalid          bool
+	SearchError            bool
+	SearchIsInitial        bool
+	StatusCounts           []boardStatusCountViewModel
+	ActiveAttempts         []boardActiveAttemptViewModel
+	ActiveReservationCount int
+	BlockedIssues          []boardIssueRowViewModel
+	ReviewRequests         []boardReviewRequestViewModel
+	PlanningGraphSVG       template.HTML
+	PlanningGraphSummary   string
+	PlanningGraphMermaid   string
 }
 
 type boardSearchResultViewModel struct {
@@ -62,15 +64,26 @@ type boardStatusCountViewModel struct {
 }
 
 type boardActiveAttemptViewModel struct {
-	AttemptID      string
-	IssueLabel     string
-	IssueHref      string
-	HasIssueLink   bool
-	IssueTitle     string
-	Kind           string
-	SessionLabel   string
-	StartedAt      string
-	LeaseExpiresAt string
+	AttemptID       string
+	IssueLabel      string
+	IssueHref       string
+	HasIssueLink    bool
+	IssueTitle      string
+	Kind            string
+	SessionLabel    string
+	StartedAt       string
+	LeaseExpiresAt  string
+	Reservations    []boardReservationRowViewModel
+	HasReservations bool
+}
+
+// boardReservationRowViewModel is one active reservation nested under its
+// owning attempt's boardActiveAttemptViewModel row -- kind and display
+// value only, since owner/session/lease-expiry are already on the parent
+// row (ISSUE-181's "group active reservations under active attempts").
+type boardReservationRowViewModel struct {
+	Kind         string
+	DisplayValue string
 }
 
 type boardIssueRowViewModel struct {
@@ -92,27 +105,42 @@ type boardReviewRequestViewModel struct {
 }
 
 type issueDetailPageViewModel struct {
-	Title              string
-	Identifier         string
-	BoardEndpoint      string
-	BoardRoute         string
-	ReturnHref         string
-	IssueHeading       string
-	StatusLine         string
-	Metadata           []issueDetailMetadataViewModel
-	Labels             []string
-	HasLabels          bool
-	Description        issueDetailTextSectionViewModel
-	AcceptanceCriteria issueDetailTextSectionViewModel
-	BlockedReason      issueDetailTextSectionViewModel
-	RootIssue          *issueDetailLinkViewModel
-	LatestAttempt      *issueDetailAttemptViewModel
-	OpenReview         *issueDetailReviewViewModel
-	LatestDecision     *issueDetailDecisionViewModel
-	GraphSVG           template.HTML
-	Activity           issueDetailActivityViewModel
-	Style              template.CSS
-	LiveRefreshScript  template.JS
+	Title               string
+	Identifier          string
+	BoardEndpoint       string
+	BoardRoute          string
+	ReturnHref          string
+	IssueHeading        string
+	StatusLine          string
+	Metadata            []issueDetailMetadataViewModel
+	Labels              []string
+	HasLabels           bool
+	Description         issueDetailTextSectionViewModel
+	AcceptanceCriteria  issueDetailTextSectionViewModel
+	BlockedReason       issueDetailTextSectionViewModel
+	RootIssue           *issueDetailLinkViewModel
+	LatestAttempt       *issueDetailAttemptViewModel
+	OpenReview          *issueDetailReviewViewModel
+	LatestDecision      *issueDetailDecisionViewModel
+	GraphSVG            template.HTML
+	Activity            issueDetailActivityViewModel
+	Reservations        []issueDetailReservationViewModel
+	HasReservations     bool
+	HasMoreReservations bool
+	Style               template.CSS
+	LiveRefreshScript   template.JS
+}
+
+// issueDetailReservationViewModel is one current or historical reservation
+// row on the issue detail page (ISSUE-181: "issue detail shows current and
+// historical rows").
+type issueDetailReservationViewModel struct {
+	Kind         string
+	DisplayValue string
+	Status       string
+	CreatedAt    string
+	ReleasedAt   string
+	HasReleased  bool
 }
 
 type issueDetailMetadataViewModel struct {
@@ -164,29 +192,34 @@ type issueDetailActivityItemViewModel struct {
 func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewModel {
 	mapping := issueDisplayIDMap(result.PlanningGraph.Nodes)
 	vm := boardStaticPageViewModel{
-		Title:                "Rhizome status board",
-		GeneratedAt:          result.GeneratedAt.Format(time.RFC3339),
-		Style:                template.CSS(boardHTMLStyle),
-		StatusCounts:         make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
-		ActiveAttempts:       make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
-		BlockedIssues:        make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
-		ReviewRequests:       make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
-		PlanningGraphSVG:     template.HTML(renderBoardGraphSVG(result.PlanningGraph)),
-		PlanningGraphSummary: buildPlanningGraphSummary(result.PlanningGraph),
-		PlanningGraphMermaid: renderMermaid(result.PlanningGraph),
+		Title:                  "Rhizome status board",
+		GeneratedAt:            result.GeneratedAt.Format(time.RFC3339),
+		Style:                  template.CSS(boardHTMLStyle),
+		StatusCounts:           make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
+		ActiveAttempts:         make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
+		ActiveReservationCount: len(result.ActiveReservations),
+		BlockedIssues:          make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
+		ReviewRequests:         make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
+		PlanningGraphSVG:       template.HTML(renderBoardGraphSVG(result.PlanningGraph)),
+		PlanningGraphSummary:   buildPlanningGraphSummary(result.PlanningGraph),
+		PlanningGraphMermaid:   renderMermaid(result.PlanningGraph),
 	}
 	for _, count := range result.StatusCounts {
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})
 	}
+	reservationsByAttempt := boardReservationsByAttempt(result.ActiveReservations)
 	for _, attempt := range result.ActiveAttempts {
+		reservations := reservationsByAttempt[attempt.AttemptID]
 		vm.ActiveAttempts = append(vm.ActiveAttempts, boardActiveAttemptViewModel{
-			AttemptID:      attempt.AttemptID,
-			IssueLabel:     issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
-			IssueTitle:     attempt.IssueTitle,
-			Kind:           string(attempt.Kind),
-			SessionLabel:   sessionLabel(attempt.SessionLabel),
-			StartedAt:      attempt.StartedAt.Format(time.RFC3339),
-			LeaseExpiresAt: attempt.LeaseExpiresAt.Format(time.RFC3339),
+			AttemptID:       attempt.AttemptID,
+			IssueLabel:      issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
+			IssueTitle:      attempt.IssueTitle,
+			Kind:            string(attempt.Kind),
+			SessionLabel:    sessionLabel(attempt.SessionLabel),
+			StartedAt:       attempt.StartedAt.Format(time.RFC3339),
+			LeaseExpiresAt:  attempt.LeaseExpiresAt.Format(time.RFC3339),
+			Reservations:    reservations,
+			HasReservations: len(reservations) > 0,
 		})
 	}
 	for _, issue := range result.BlockedIssues {
@@ -211,41 +244,46 @@ func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewM
 func newBoardServedPageViewModel(result domain.BoardResult, state servedBoardSearchState) boardServedPageViewModel {
 	mapping := issueDisplayIDMap(result.PlanningGraph.Nodes)
 	vm := boardServedPageViewModel{
-		Title:                "Rhizome status board",
-		GeneratedAt:          result.GeneratedAt.Format(time.RFC3339),
-		Style:                template.CSS(boardHTMLStyle),
-		LiveRefreshScript:    template.JS(boardLiveRefreshScript),
-		SearchScript:         template.JS(boardSearchScript),
-		SearchQuery:          state.Query,
-		SelectedEntityType:   state.EntityType,
-		SearchStatusMessage:  state.StatusMessage,
-		SearchHasResults:     len(state.Results) > 0,
-		SearchHasMore:        state.HasMore,
-		SearchInvalid:        state.Invalid,
-		SearchError:          state.Error,
-		SearchIsInitial:      state.Query == "",
-		StatusCounts:         make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
-		ActiveAttempts:       make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
-		BlockedIssues:        make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
-		ReviewRequests:       make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
-		PlanningGraphSVG:     template.HTML(renderServedBoardGraphSVG(result.PlanningGraph)),
-		PlanningGraphSummary: buildPlanningGraphSummary(result.PlanningGraph),
-		PlanningGraphMermaid: renderMermaid(result.PlanningGraph),
+		Title:                  "Rhizome status board",
+		GeneratedAt:            result.GeneratedAt.Format(time.RFC3339),
+		Style:                  template.CSS(boardHTMLStyle),
+		LiveRefreshScript:      template.JS(boardLiveRefreshScript),
+		SearchScript:           template.JS(boardSearchScript),
+		SearchQuery:            state.Query,
+		SelectedEntityType:     state.EntityType,
+		SearchStatusMessage:    state.StatusMessage,
+		SearchHasResults:       len(state.Results) > 0,
+		SearchHasMore:          state.HasMore,
+		SearchInvalid:          state.Invalid,
+		SearchError:            state.Error,
+		SearchIsInitial:        state.Query == "",
+		StatusCounts:           make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
+		ActiveAttempts:         make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
+		ActiveReservationCount: len(result.ActiveReservations),
+		BlockedIssues:          make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
+		ReviewRequests:         make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
+		PlanningGraphSVG:       template.HTML(renderServedBoardGraphSVG(result.PlanningGraph)),
+		PlanningGraphSummary:   buildPlanningGraphSummary(result.PlanningGraph),
+		PlanningGraphMermaid:   renderMermaid(result.PlanningGraph),
 	}
 	for _, count := range result.StatusCounts {
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})
 	}
+	reservationsByAttempt := boardReservationsByAttempt(result.ActiveReservations)
 	for _, attempt := range result.ActiveAttempts {
+		reservations := reservationsByAttempt[attempt.AttemptID]
 		vm.ActiveAttempts = append(vm.ActiveAttempts, boardActiveAttemptViewModel{
-			AttemptID:      attempt.AttemptID,
-			IssueLabel:     issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
-			IssueHref:      boardIssuePath(attempt.IssueID, issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping)),
-			HasIssueLink:   true,
-			IssueTitle:     attempt.IssueTitle,
-			Kind:           string(attempt.Kind),
-			SessionLabel:   sessionLabel(attempt.SessionLabel),
-			StartedAt:      attempt.StartedAt.Format(time.RFC3339),
-			LeaseExpiresAt: attempt.LeaseExpiresAt.Format(time.RFC3339),
+			AttemptID:       attempt.AttemptID,
+			IssueLabel:      issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
+			IssueHref:       boardIssuePath(attempt.IssueID, issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping)),
+			HasIssueLink:    true,
+			IssueTitle:      attempt.IssueTitle,
+			Kind:            string(attempt.Kind),
+			SessionLabel:    sessionLabel(attempt.SessionLabel),
+			StartedAt:       attempt.StartedAt.Format(time.RFC3339),
+			LeaseExpiresAt:  attempt.LeaseExpiresAt.Format(time.RFC3339),
+			Reservations:    reservations,
+			HasReservations: len(reservations) > 0,
 		})
 	}
 	for _, issue := range result.BlockedIssues {
@@ -387,11 +425,41 @@ func newIssueDetailPageViewModel(detail domain.IssueDetail) issueDetailPageViewM
 		})
 	}
 	vm.Activity.HasMore = detail.Activity.HasMore
+	vm.Reservations = make([]issueDetailReservationViewModel, 0, len(detail.Reservations))
+	for _, reservation := range detail.Reservations {
+		row := issueDetailReservationViewModel{
+			Kind: string(reservation.Kind), DisplayValue: reservation.DisplayValue, Status: string(reservation.Status),
+			CreatedAt: reservation.CreatedAt.Format(time.RFC3339),
+		}
+		if reservation.ReleasedAt != nil {
+			row.ReleasedAt = reservation.ReleasedAt.Format(time.RFC3339)
+			row.HasReleased = true
+		}
+		vm.Reservations = append(vm.Reservations, row)
+	}
+	vm.HasReservations = len(vm.Reservations) > 0
+	vm.HasMoreReservations = detail.HasMoreReservations
 	return vm
 }
 
 func buildIssueStatusLine(detail domain.IssueDetail) string {
 	return "Stored status: " + string(detail.Issue.Status) + " · Effective status: " + string(EffectiveStatusForIssue(detail)) + " · Type: " + string(detail.Issue.Type) + " · Priority: " + string(detail.Issue.Priority)
+}
+
+// boardReservationsByAttempt groups active reservations by their owning
+// attempt ID, preserving id ordering within each group (the repository
+// orders ListReservations by created_at DESC, id DESC). Every active
+// reservation's owning attempt is, by definition, active, so grouping by
+// AttemptID against the already-fetched ActiveAttempts needs no separate
+// issue/session/lease-expiry lookup.
+func boardReservationsByAttempt(reservations []domain.Reservation) map[string][]boardReservationRowViewModel {
+	grouped := make(map[string][]boardReservationRowViewModel, len(reservations))
+	for _, reservation := range reservations {
+		grouped[reservation.AttemptID] = append(grouped[reservation.AttemptID], boardReservationRowViewModel{
+			Kind: string(reservation.Kind), DisplayValue: reservation.DisplayValue,
+		})
+	}
+	return grouped
 }
 
 func issueDisplayLabel(identifier string, displayID string, mapping map[string]string) string {

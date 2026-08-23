@@ -182,6 +182,7 @@ func TestToolProfileAgentExcludesBulkTransferAndSync(t *testing.T) {
 		"replace_review_request", "add_comment", "record_decision", "list_decisions",
 		"get_issue_activity", "search", "claim_issue", "renew_attempt", "save_attempt_note", "finish_attempt",
 		"get_work_context", "list_labels",
+		"reserve_resources", "release_resources", "list_resource_reservations", "get_resource_reservation",
 	}
 	for _, name := range retained {
 		if !containsName(names, name) {

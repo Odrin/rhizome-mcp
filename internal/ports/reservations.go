@@ -52,6 +52,14 @@ type ListReservationHistoryQuery struct {
 	Limit     int
 }
 
+// ListReservationsCommand carries the already-validated filter and
+// pagination input for list_resource_reservations (ISSUE-180). Unlike
+// ListActiveReservationsQuery/ListReservationHistoryQuery, this covers both
+// lifecycle states and cursor pagination in one call.
+type ListReservationsCommand struct {
+	Input domain.ListResourceReservationsInput
+}
+
 // ReservationRepository persists resource reservations and enforces
 // conflict-free acquisition transactionally, per ISSUE-178's locked schema.
 type ReservationRepository interface {
@@ -78,4 +86,10 @@ type ReservationRepository interface {
 	// ListReservationHistory returns released reservations ordered by
 	// released_at descending, then id descending.
 	ListReservationHistory(context.Context, ListReservationHistoryQuery) ([]domain.Reservation, error)
+	// ListReservations serves list_resource_reservations (ISSUE-180): issue,
+	// attempt, kind, and active-state filtering with cursor pagination
+	// across both active and released reservations.
+	ListReservations(context.Context, ListReservationsCommand) (domain.ReservationList, error)
+	// GetReservation loads one reservation, active or released, by id.
+	GetReservation(context.Context, string) (domain.Reservation, error)
 }

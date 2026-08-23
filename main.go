@@ -167,6 +167,7 @@ type composedServices struct {
 	searchService      *application.SearchService
 	reviewService      *application.ReviewService
 	attemptService     *application.AttemptService
+	reservationService *application.ReservationService
 	maintenanceService *application.MaintenanceService
 	workContextService *application.WorkContextService
 	sessionService     *application.AgentSessionService
@@ -200,6 +201,7 @@ func (bundle *composedServices) ProjectServices() mcpadapter.ProjectServices {
 		SearchService:      bundle.searchService,
 		ReviewService:      bundle.reviewService,
 		AttemptService:     bundle.attemptService,
+		ReservationService: bundle.reservationService,
 		SessionService:     bundle.sessionService,
 		WorkContextService: bundle.workContextService,
 	}
@@ -984,6 +986,10 @@ func newComposedServices(project *projectruntime.Project, source clock.Clock) (*
 	if err != nil {
 		return nil, err
 	}
+	reservationRepository, err := sqlite.NewReservationRepository(project.Database)
+	if err != nil {
+		return nil, err
+	}
 	workContextRepository, err := sqlite.NewWorkContextRepository(project.Database)
 	if err != nil {
 		return nil, err
@@ -1036,6 +1042,10 @@ func newComposedServices(project *projectruntime.Project, source clock.Clock) (*
 	if err != nil {
 		return nil, err
 	}
+	reservationService, err := application.NewReservationService(reservationRepository)
+	if err != nil {
+		return nil, err
+	}
 	maintenanceService, err := application.NewMaintenanceService(attemptRepository, searchIndexRepository, source)
 	if err != nil {
 		return nil, err
@@ -1052,11 +1062,11 @@ func newComposedServices(project *projectruntime.Project, source clock.Clock) (*
 	if err != nil {
 		return nil, err
 	}
-	boardService, err := application.NewBoardService(issueService, attemptService, reviewService, graphService, source)
+	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
 	if err != nil {
 		return nil, err
 	}
-	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService)
+	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,6 +1084,7 @@ func newComposedServices(project *projectruntime.Project, source clock.Clock) (*
 		searchService:      searchService,
 		reviewService:      reviewService,
 		attemptService:     attemptService,
+		reservationService: reservationService,
 		maintenanceService: maintenanceService,
 		workContextService: workContextService,
 		sessionService:     sessionService,

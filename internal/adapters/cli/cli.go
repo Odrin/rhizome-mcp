@@ -994,6 +994,17 @@ func (c *CLI) writeBoardTable(result domain.BoardResult) error {
 			attempt.AttemptID, attempt.IssueDisplayID, attempt.Kind, escapeTableValue(label), attempt.LeaseExpiresAt.Format(time.RFC3339Nano)))
 	}
 
+	reservationIssueDisplayIDByAttempt := make(map[string]string, len(result.ActiveAttempts))
+	for _, attempt := range result.ActiveAttempts {
+		reservationIssueDisplayIDByAttempt[attempt.AttemptID] = attempt.IssueDisplayID
+	}
+	builder.WriteString("\nactive_reservations\n")
+	builder.WriteString("id\tissue\tattempt_id\tkind\tdisplay_value\n")
+	for _, reservation := range result.ActiveReservations {
+		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n",
+			reservation.ID, reservationIssueDisplayIDByAttempt[reservation.AttemptID], reservation.AttemptID, reservation.Kind, escapeTableValue(reservation.DisplayValue)))
+	}
+
 	builder.WriteString("\nblocked_issues\n")
 	builder.WriteString("display_id\ttitle\tblocked_reason\n")
 	for _, issue := range result.BlockedIssues {
@@ -1304,12 +1315,13 @@ func searchResponseFromDomain(page domain.SearchPage) SearchResponse {
 // BoardResponse is a stable CLI projection of the board's aggregate status
 // summary.
 type BoardResponse struct {
-	GeneratedAt    time.Time            `json:"generated_at"`
-	StatusCounts   []BoardStatusCount   `json:"status_counts"`
-	ActiveAttempts []BoardActiveAttempt `json:"active_attempts"`
-	BlockedIssues  []IssueSummary       `json:"blocked_issues"`
-	ReviewRequests []BoardReviewRequest `json:"review_requests"`
-	PlanningGraph  BoardGraph           `json:"planning_graph"`
+	GeneratedAt        time.Time            `json:"generated_at"`
+	StatusCounts       []BoardStatusCount   `json:"status_counts"`
+	ActiveAttempts     []BoardActiveAttempt `json:"active_attempts"`
+	ActiveReservations []BoardReservation   `json:"active_reservations"`
+	BlockedIssues      []IssueSummary       `json:"blocked_issues"`
+	ReviewRequests     []BoardReviewRequest `json:"review_requests"`
+	PlanningGraph      BoardGraph           `json:"planning_graph"`
 }
 
 // BoardStatusCount is one bounded aggregate count of issues in a single
@@ -1330,6 +1342,23 @@ type BoardActiveAttempt struct {
 	SessionLabel   *string   `json:"session_label,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+// BoardReservation is a stable CLI projection of one active resource
+// reservation. Never carries a lease token; session label/lease-expiry are
+// read from the matching BoardActiveAttempt (grouped by AttemptID) instead
+// of duplicating that projection here (ISSUE-181). IssueDisplayID is looked
+// up from that same matching attempt so this block can be read (and its
+// issue column correlated with the active_attempts block) without a
+// separate issue lookup, matching every other board collection's use of
+// the human-readable ISSUE-N form over the raw internal ID.
+type BoardReservation struct {
+	ID             string `json:"id"`
+	IssueID        string `json:"issue_id"`
+	IssueDisplayID string `json:"issue_display_id"`
+	AttemptID      string `json:"attempt_id"`
+	Kind           string `json:"kind"`
+	DisplayValue   string `json:"display_value"`
 }
 
 // BoardReviewRequest is a stable CLI projection of one open review request.
@@ -1364,6 +1393,17 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 			StartedAt: item.StartedAt.UTC(), LeaseExpiresAt: item.LeaseExpiresAt.UTC(),
 		}
 	}
+	issueDisplayIDByAttempt := make(map[string]string, len(result.ActiveAttempts))
+	for _, attempt := range result.ActiveAttempts {
+		issueDisplayIDByAttempt[attempt.AttemptID] = attempt.IssueDisplayID
+	}
+	reservations := make([]BoardReservation, len(result.ActiveReservations))
+	for index, item := range result.ActiveReservations {
+		reservations[index] = BoardReservation{
+			ID: item.ID, IssueID: item.IssueID, IssueDisplayID: issueDisplayIDByAttempt[item.AttemptID],
+			AttemptID: item.AttemptID, Kind: string(item.Kind), DisplayValue: item.DisplayValue,
+		}
+	}
 	blocked := make([]IssueSummary, len(result.BlockedIssues))
 	for index, item := range result.BlockedIssues {
 		blocked[index] = issueFromDomainProjection(item)
@@ -1380,11 +1420,12 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 		nodes[index] = issueFromDomainProjection(item)
 	}
 	return BoardResponse{
-		GeneratedAt:    result.GeneratedAt.UTC(),
-		StatusCounts:   counts,
-		ActiveAttempts: attempts,
-		BlockedIssues:  blocked,
-		ReviewRequests: reviews,
+		GeneratedAt:        result.GeneratedAt.UTC(),
+		StatusCounts:       counts,
+		ActiveAttempts:     attempts,
+		ActiveReservations: reservations,
+		BlockedIssues:      blocked,
+		ReviewRequests:     reviews,
 		PlanningGraph: BoardGraph{
 			Nodes: nodes, Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints,
 			BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated,

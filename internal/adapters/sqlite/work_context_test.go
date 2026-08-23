@@ -1197,6 +1197,286 @@ func TestWorkContextRepositoryBoundsArtifacts(t *testing.T) {
 	})
 }
 
+// ISSUE-181: resource_reservations reports the issue's own reservations
+// (active and released), newest first, and ActiveReservationCount is
+// always populated regardless of include.
+func TestWorkContextRepositoryLoadsResourceReservationsWhenRequested(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA7"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusActive, now.Add(10*time.Minute), now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	releasedAt := now.Add(3 * time.Second)
+	releaseReason := domain.ReservationReleaseReasonExplicit
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB1", target.ID, attemptID, domain.ResourceKindFile, "a.go", domain.ReservationStatusReleased, now.Add(1*time.Second), &releasedAt, &releaseReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB2", target.ID, attemptID, domain.ResourceKindFile, "b.go", domain.ReservationStatusActive, now.Add(4*time.Second), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default context: count is always populated, full rows are not.
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ActiveReservationCount != 1 {
+		t.Fatalf("ActiveReservationCount = %d, want 1", result.ActiveReservationCount)
+	}
+	if len(result.ResourceReservations) != 0 {
+		t.Fatalf("default context resource_reservations = %+v, want empty", result.ResourceReservations)
+	}
+	if !containsString(result.Warnings, "ACTIVE_RESERVATIONS_HELD") {
+		t.Fatalf("warnings = %v, want ACTIVE_RESERVATIONS_HELD", result.Warnings)
+	}
+
+	// Explicit include: both active and released, newest first.
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeResourceReservations}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.ResourceReservations) != 2 {
+		t.Fatalf("len(resource_reservations) = %d, want 2", len(result.ResourceReservations))
+	}
+	if result.ResourceReservations[0].DisplayValue != "b.go" || result.ResourceReservations[0].Status != domain.ReservationStatusActive {
+		t.Fatalf("first reservation = %+v, want active b.go", result.ResourceReservations[0])
+	}
+	if result.ResourceReservations[1].DisplayValue != "a.go" || result.ResourceReservations[1].Status != domain.ReservationStatusReleased {
+		t.Fatalf("second reservation = %+v, want released a.go", result.ResourceReservations[1])
+	}
+	if result.Truncated {
+		t.Fatal("resource_reservations should not be truncated for this request")
+	}
+}
+
+func TestWorkContextRepositoryBoundsResourceReservations(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA7"
+	if err := seedAttempt(t, db, attemptID, target.ID, domain.AttemptStatusActive, now.Add(10*time.Minute), now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	generator := newTestULIDGenerator(t, now)
+	for index := 0; index < 3; index++ {
+		id, err := generator.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seedReservation(t, db, id, target.ID, attemptID, domain.ResourceKindFile, fmt.Sprintf("f%d.go", index), domain.ReservationStatusActive, now.Add(time.Duration(index+1)*time.Second), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{Input: domain.GetWorkContextInput{IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeResourceReservations}, Limits: map[domain.WorkContextInclude]int{domain.WorkContextIncludeResourceReservations: 2}}, Now: now})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.ResourceReservations) != 2 {
+		t.Fatalf("len(resource_reservations) = %d, want 2", len(result.ResourceReservations))
+	}
+	if !result.Truncated {
+		t.Fatal("truncated should be true")
+	}
+	if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeResourceReservations}) {
+		t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeResourceReservations})
+	}
+}
+
+// ISSUE-181: reservation_conflicts diagnoses a caller-supplied desired set
+// against active reservations elsewhere in the project, without acquiring
+// anything, mirroring acquireReservationsForAttempt's own overlap check.
+func TestWorkContextRepositoryComputesReservationConflicts(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA6"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	otherAttemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA8"
+	leaseExpires := now.Add(15 * time.Minute)
+	if err := seedAttempt(t, db, otherAttemptID, otherIssueID, domain.AttemptStatusActive, leaseExpires, now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB3", otherIssueID, otherAttemptID, domain.ResourceKindFile, "shared.go", domain.ReservationStatusActive, now.Add(1*time.Second), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// No conflict: a desired path that doesn't overlap anything active.
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{
+		Input: domain.GetWorkContextInput{IssueID: target.ID, DesiredResources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "unrelated.go"}}}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ConflictCount != 0 {
+		t.Fatalf("ConflictCount = %d, want 0", result.ConflictCount)
+	}
+	if containsString(result.Warnings, "RESERVATION_CONFLICTS_DETECTED") {
+		t.Fatalf("warnings = %v, want no RESERVATION_CONFLICTS_DETECTED", result.Warnings)
+	}
+
+	// Conflict: a desired path that overlaps the other issue's active reservation.
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{
+		Input: domain.GetWorkContextInput{IssueID: target.ID, DesiredResources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "shared.go"}}}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ConflictCount != 1 {
+		t.Fatalf("ConflictCount = %d, want 1", result.ConflictCount)
+	}
+	if !containsString(result.Warnings, "RESERVATION_CONFLICTS_DETECTED") {
+		t.Fatalf("warnings = %v, want RESERVATION_CONFLICTS_DETECTED", result.Warnings)
+	}
+	if len(result.ReservationConflicts) != 0 {
+		t.Fatalf("default context reservation_conflicts = %+v, want empty (not included)", result.ReservationConflicts)
+	}
+
+	result, err = repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{
+		Input: domain.GetWorkContextInput{
+			IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeReservationConflicts},
+			DesiredResources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "shared.go"}},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if len(result.ReservationConflicts) != 1 {
+		t.Fatalf("len(reservation_conflicts) = %d, want 1", len(result.ReservationConflicts))
+	}
+	conflict := result.ReservationConflicts[0]
+	if conflict.DesiredIndex != 0 || conflict.DesiredKind != domain.ResourceKindFile || conflict.DesiredDisplayValue != "shared.go" {
+		t.Fatalf("conflict desired fields = %+v", conflict)
+	}
+	if conflict.Existing.DisplayValue != "shared.go" || conflict.Existing.AttemptID != otherAttemptID {
+		t.Fatalf("conflict existing = %+v", conflict.Existing)
+	}
+	if conflict.IssueDisplayID != "ISSUE-2" || conflict.IssueTitle != "other issue" {
+		t.Fatalf("conflict owner = display_id %q title %q, want ISSUE-2/other issue", conflict.IssueDisplayID, conflict.IssueTitle)
+	}
+	if !conflict.LeaseExpiresAt.Equal(leaseExpires) {
+		t.Fatalf("conflict lease expiry = %v, want %v", conflict.LeaseExpiresAt, leaseExpires)
+	}
+	if conflict.SessionLabel != nil {
+		t.Fatalf("conflict session label = %v, want nil (no session on this attempt)", conflict.SessionLabel)
+	}
+}
+
+// A mix of conflicting and non-conflicting desired resources must report
+// the conflict against the correct original index (candidate.Index, not
+// its position in a loop over only-conflicting matches) and must not flag
+// the non-conflicting entries at all.
+func TestWorkContextRepositoryComputesReservationConflictsForMixedDesiredSet(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA6"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	otherAttemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA8"
+	if err := seedAttempt(t, db, otherAttemptID, otherIssueID, domain.AttemptStatusActive, now.Add(15*time.Minute), now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB3", otherIssueID, otherAttemptID, domain.ResourceKindFile, "taken.go", domain.ReservationStatusActive, now.Add(1*time.Second), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{
+		Input: domain.GetWorkContextInput{
+			IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeReservationConflicts},
+			DesiredResources: []domain.Resource{
+				{Kind: domain.ResourceKindFile, Path: "free-one.go"},
+				{Kind: domain.ResourceKindFile, Path: "taken.go"},
+				{Kind: domain.ResourceKindFile, Path: "free-two.go"},
+			},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ConflictCount != 1 {
+		t.Fatalf("ConflictCount = %d, want 1 (only the middle desired resource conflicts)", result.ConflictCount)
+	}
+	if len(result.ReservationConflicts) != 1 {
+		t.Fatalf("len(reservation_conflicts) = %d, want 1", len(result.ReservationConflicts))
+	}
+	conflict := result.ReservationConflicts[0]
+	if conflict.DesiredIndex != 1 {
+		t.Fatalf("conflict desired index = %d, want 1 (the caller's original position of taken.go)", conflict.DesiredIndex)
+	}
+	if conflict.DesiredDisplayValue != "taken.go" {
+		t.Fatalf("conflict desired display value = %q, want taken.go", conflict.DesiredDisplayValue)
+	}
+}
+
+func TestWorkContextRepositoryBoundsReservationConflicts(t *testing.T) {
+	db, _, now, target := newWorkContextTestFixture(t)
+	repository, err := sqlite.NewWorkContextRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherIssueID := "01ARZ3NDEKTSV4RRFFQ69G5FA6"
+	if err := seedIssue(t, db, otherIssueID, 2, domain.StatusReady, "other issue", nil, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	otherAttemptID := "01ARZ3NDEKTSV4RRFFQ69G5FA8"
+	if err := seedAttempt(t, db, otherAttemptID, otherIssueID, domain.AttemptStatusActive, now.Add(15*time.Minute), now.Add(1*time.Second), nil, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB3", otherIssueID, otherAttemptID, domain.ResourceKindFile, "shared.go", domain.ReservationStatusActive, now.Add(1*time.Second), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedReservation(t, db, "01ARZ3NDEKTSV4RRFFQ69G5FB4", otherIssueID, otherAttemptID, domain.ResourceKindFile, "shared2.go", domain.ReservationStatusActive, now.Add(2*time.Second), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.GetWorkContext(context.Background(), ports.GetWorkContextCommand{
+		Input: domain.GetWorkContextInput{
+			IssueID: target.ID, Include: []domain.WorkContextInclude{domain.WorkContextIncludeReservationConflicts},
+			Limits:           map[domain.WorkContextInclude]int{domain.WorkContextIncludeReservationConflicts: 1},
+			DesiredResources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "shared.go"}, {Kind: domain.ResourceKindFile, Path: "shared2.go"}},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("GetWorkContext() error = %v", err)
+	}
+	if result.ConflictCount != 2 {
+		t.Fatalf("ConflictCount = %d, want 2 (unconditional count is not bounded by the section limit)", result.ConflictCount)
+	}
+	if len(result.ReservationConflicts) != 1 {
+		t.Fatalf("len(reservation_conflicts) = %d, want 1 (bounded by limit)", len(result.ReservationConflicts))
+	}
+	if !result.Truncated {
+		t.Fatal("truncated should be true")
+	}
+	if !reflect.DeepEqual(result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeReservationConflicts}) {
+		t.Fatalf("truncated sections = %#v, want %#v", result.TruncatedSections, []domain.WorkContextInclude{domain.WorkContextIncludeReservationConflicts})
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWorkContextRepositoryLoadsAttemptHistoryWhenRequested(t *testing.T) {
 	db, _, now, target := newWorkContextTestFixture(t)
 	repository, err := sqlite.NewWorkContextRepository(db)
@@ -2075,6 +2355,39 @@ func seedAttempt(t *testing.T, db *sqlite.DB, id, issueID string, status domain.
 			interruptionReasonCode = domain.InterruptionReasonHandoff
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, failure_reason_code, interruption_reason_code) VALUES (?, ?, 'work', ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)`, id, issueID, status, []byte{1, 2, 3}, sqlite.FormatStorageTime(leaseExpiresAt), sqlite.FormatStorageTime(startedAt), sqlite.FormatStorageTime(now), finishedValue, nil, failureReasonCode, interruptionReasonCode)
+		return err
+	})
+}
+
+// seedReservation inserts one resource_reservations row directly, computing
+// display/comparison values and normalized_json the same way
+// acquireReservationsForAttempt does (via domain.Normalize +
+// marshalIdentity's {"path": ...} shape) so scanReservationRow's
+// re-normalization/comparison-value corruption check passes.
+func seedReservation(t *testing.T, db *sqlite.DB, id, issueID, attemptID string, kind domain.ResourceKind, path string, status domain.ReservationStatus, createdAt time.Time, releasedAt *time.Time, releaseReason *domain.ReservationReleaseReason) error {
+	t.Helper()
+	normalized, err := domain.Normalize(domain.Resource{Kind: kind, Path: path})
+	if err != nil {
+		t.Fatalf("seedReservation: normalize %q: %v", path, err)
+	}
+	normalizedJSON := fmt.Sprintf(`{"path":%q}`, normalized.Display())
+	displayValue := normalized.Display()
+	comparisonValue := normalized.Key()
+	var releasedAtValue any
+	if releasedAt != nil {
+		releasedAtValue = sqlite.FormatStorageTime(*releasedAt)
+	}
+	var releaseReasonValue any
+	if releaseReason != nil {
+		releaseReasonValue = string(*releaseReason)
+	}
+	return db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(
+			id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json,
+			status, version, created_at, released_at, release_reason
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+			id, issueID, attemptID, string(kind), displayValue, comparisonValue, normalizedJSON,
+			string(status), sqlite.FormatStorageTime(createdAt), releasedAtValue, releaseReasonValue)
 		return err
 	})
 }

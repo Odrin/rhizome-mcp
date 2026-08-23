@@ -115,6 +115,61 @@ func TestGetWorkContextInputValidate(t *testing.T) {
 		}
 	})
 
+	t.Run("desired resources are validated, copied, and independent of caller state", func(t *testing.T) {
+		callerResources := []domain.Resource{{Kind: domain.ResourceKindFile, Path: "a.go"}}
+		got, err := domain.GetWorkContextInput{IssueID: ulid, DesiredResources: callerResources}.Validate()
+		if err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+		if len(got.DesiredResources) != 1 || got.DesiredResources[0].Path != "a.go" {
+			t.Fatalf("DesiredResources = %#v, want one file a.go", got.DesiredResources)
+		}
+		callerResources[0].Path = "mutated.go"
+		if got.DesiredResources[0].Path != "a.go" {
+			t.Fatalf("normalized desired resources were mutated by caller state: %#v", got.DesiredResources)
+		}
+	})
+
+	t.Run("too many desired resources relabels the resources field to desired_resources", func(t *testing.T) {
+		// PrepareReservationRequest's batch-level errors report their field
+		// as "resources" (correct for reserve_resources' own input field),
+		// so Validate must relabel it to this tool's actual input field
+		// rather than leaking the wrong name in a client-facing error.
+		_, err := domain.GetWorkContextInput{IssueID: ulid, DesiredResources: make([]domain.Resource, domain.MaxReservationResources+1)}.Validate()
+		if err == nil {
+			t.Fatal("Validate() error = nil, want error")
+		}
+		if !errors.Is(err, &domain.Error{Code: domain.CodeLimitExceeded}) {
+			t.Fatalf("Validate() error = %v, want LIMIT_EXCEEDED", err)
+		}
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) {
+			t.Fatalf("error type = %T, want *domain.Error", err)
+		}
+		found := false
+		for _, detail := range domainErr.Details {
+			if detail.Field == "desired_resources" && detail.Code == "MAX_ITEMS" {
+				found = true
+			}
+			if detail.Field == "resources" {
+				t.Fatalf("details leaked the reserve_resources field name %q instead of desired_resources: %#v", detail.Field, domainErr.Details)
+			}
+		}
+		if !found {
+			t.Fatalf("details = %#v, want field \"desired_resources\" code \"MAX_ITEMS\"", domainErr.Details)
+		}
+	})
+
+	t.Run("empty desired resources normalizes to nil", func(t *testing.T) {
+		got, err := domain.GetWorkContextInput{IssueID: ulid}.Validate()
+		if err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+		if got.DesiredResources != nil {
+			t.Fatalf("DesiredResources = %#v, want nil", got.DesiredResources)
+		}
+	})
+
 	t.Run("invalid input", func(t *testing.T) {
 		cases := []struct {
 			name       string
@@ -136,7 +191,7 @@ func TestGetWorkContextInputValidate(t *testing.T) {
 			},
 			{
 				name:       "too many includes",
-				input:      domain.GetWorkContextInput{IssueID: ulid, Include: make([]domain.WorkContextInclude, 11)},
+				input:      domain.GetWorkContextInput{IssueID: ulid, Include: make([]domain.WorkContextInclude, 13)},
 				field:      "include",
 				detailCode: "OUT_OF_RANGE",
 			},
@@ -175,6 +230,12 @@ func TestGetWorkContextInputValidate(t *testing.T) {
 				input:      domain.GetWorkContextInput{IssueID: "bad"},
 				field:      "issue_id",
 				detailCode: "INVALID_IDENTIFIER",
+			},
+			{
+				name:       "malformed desired resource",
+				input:      domain.GetWorkContextInput{IssueID: ulid, DesiredResources: []domain.Resource{{Kind: "bogus"}}},
+				field:      "kind",
+				detailCode: "INVALID_ENUM",
 			},
 		}
 		for _, tc := range cases {

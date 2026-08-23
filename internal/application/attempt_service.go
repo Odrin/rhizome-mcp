@@ -21,10 +21,11 @@ type AttemptService struct {
 }
 
 type ClaimIssueResult struct {
-	Issue      domain.Issue
-	Projection domain.IssueProjection
-	Attempt    domain.WorkAttempt
-	LeaseToken string
+	Issue        domain.Issue
+	Projection   domain.IssueProjection
+	Attempt      domain.WorkAttempt
+	Reservations []domain.Reservation
+	LeaseToken   string
 }
 
 func NewAttemptService(repository ports.AttemptRepository, source clock.Clock, generator IDGenerator) (*AttemptService, error) {
@@ -72,15 +73,48 @@ func (service *AttemptService) ClaimIssue(ctx context.Context, input domain.Clai
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	hash := sha256.Sum256([]byte(token))
 	now := service.clock.Now().UTC()
+	resources, err := service.newReservationResourceInputs(normalized.Resources, "resources")
+	if err != nil {
+		return ClaimIssueResult{}, err
+	}
 	result, err := service.repository.ClaimIssue(ctx, ports.ClaimIssueCommand{
 		Identifier: identifier, AttemptID: id, SessionID: normalized.SessionID, TokenHash: hash[:], LeaseToken: token,
-		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
+		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now, Resources: resources,
 		IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 	if err != nil {
 		return ClaimIssueResult{}, err
 	}
-	return ClaimIssueResult{Issue: result.Issue, Projection: result.Projection, Attempt: result.Attempt, LeaseToken: result.LeaseToken}, nil
+	return ClaimIssueResult{
+		Issue: result.Issue, Projection: result.Projection, Attempt: result.Attempt,
+		Reservations: result.Reservations, LeaseToken: result.LeaseToken,
+	}, nil
+}
+
+// newReservationResourceInputs generates one ULID per requested resource
+// (ID generation is an application-layer concern -- ports.ReservationResourceInput's
+// own doc comment), preserving order. field names the caller's input slice
+// in generated error details (e.g. "resources" for ClaimIssue,
+// "resources" for ReserveResources), matching the artifacts[N].id
+// convention FinishAttempt/SaveAttemptNote already use.
+func (service *AttemptService) newReservationResourceInputs(resources []domain.Resource, field string) ([]ports.ReservationResourceInput, error) {
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	inputs := make([]ports.ReservationResourceInput, len(resources))
+	for index, resource := range resources {
+		id, err := service.ids.New()
+		if err != nil {
+			return nil, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate reservation identifier", false,
+				domain.Detail{Field: field + "[" + strconv.Itoa(index) + "].id", Code: "ID_GENERATION_FAILED"})
+		}
+		if _, err := ids.ParseStrict(id); err != nil {
+			return nil, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate reservation identifier", false,
+				domain.Detail{Field: field + "[" + strconv.Itoa(index) + "].id", Code: "INVALID_ULID"})
+		}
+		inputs[index] = ports.ReservationResourceInput{ID: id, Resource: resource}
+	}
+	return inputs, nil
 }
 
 func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.RenewAttemptInput) (ports.RenewAttemptResult, error) {
@@ -221,6 +255,76 @@ func (service *AttemptService) SubmitGateEvidence(ctx context.Context, input dom
 // ListAttemptEvidence returns every current evidence record for one attempt.
 func (service *AttemptService) ListAttemptEvidence(ctx context.Context, attemptID string) ([]domain.AttemptEvidence, error) {
 	return service.repository.ListAttemptEvidence(ctx, ports.ListAttemptEvidenceCommand{AttemptID: attemptID})
+}
+
+// ReserveResources validates and idempotently adds resources to one active
+// work attempt's reservations, all-or-nothing (ISSUE-180: reserve_resources).
+func (service *AttemptService) ReserveResources(ctx context.Context, input domain.ReserveResourcesInput) (ports.ReserveResourcesResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return ports.ReserveResourcesResult{}, err
+	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalReserveResourcesRequest(normalized)
+		if err != nil {
+			return ports.ReserveResourcesResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode reserve resources request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupReserveResources(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ports.ReserveResourcesResult{}, err
+		}
+		if found {
+			return result, nil
+		}
+	}
+	resources, err := service.newReservationResourceInputs(normalized.Resources, "resources")
+	if err != nil {
+		return ports.ReserveResourcesResult{}, err
+	}
+	now := service.clock.Now().UTC()
+	tokenHash := sha256.Sum256([]byte(normalized.LeaseToken))
+	return service.repository.ReserveResources(ctx, ports.ReserveResourcesCommand{
+		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: tokenHash[:], Resources: resources,
+		OccurredAt: now, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+	})
+}
+
+// ReleaseResources validates and idempotently releases reservations owned
+// by one active work attempt (ISSUE-180: release_resources).
+func (service *AttemptService) ReleaseResources(ctx context.Context, input domain.ReleaseResourcesInput) (ports.ReleaseResourcesResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return ports.ReleaseResourcesResult{}, err
+	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalReleaseResourcesRequest(normalized)
+		if err != nil {
+			return ports.ReleaseResourcesResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode release resources request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupReleaseResources(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return ports.ReleaseResourcesResult{}, err
+		}
+		if found {
+			return result, nil
+		}
+	}
+	now := service.clock.Now().UTC()
+	tokenHash := sha256.Sum256([]byte(normalized.LeaseToken))
+	return service.repository.ReleaseResources(ctx, ports.ReleaseResourcesCommand{
+		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: tokenHash[:], ReservationIDs: normalized.ReservationIDs,
+		OccurredAt: now, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+	})
 }
 
 func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.FinishAttemptInput) (ports.FinishAttemptResult, error) {

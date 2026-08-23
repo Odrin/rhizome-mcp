@@ -168,7 +168,7 @@ Audited baselines from prior review work are informative but are not current def
 
 ## 3.1. Tool inventory
 
-The catalog exposes 33 full tools, 29 agent tools, 5 migration tools, and 16 read-only tools:
+The catalog exposes 37 full tools, 33 agent tools, 5 migration tools, and 18 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
@@ -201,8 +201,12 @@ The catalog exposes 33 full tools, 29 agent tools, 5 migration tools, and 16 rea
 29. `save_attempt_note`
 30. `finish_attempt`
 31. `get_work_context`
-32. `search`
-33. `get_changes`
+32. `reserve_resources`
+33. `release_resources`
+34. `list_resource_reservations`
+35. `get_resource_reservation`
+36. `search`
+37. `get_changes`
 
 ### 3.1. `create_agent_session`
 
@@ -408,6 +412,10 @@ rather than the tool's read/write split alone:
 | `save_attempt_note` | | | | |
 | `finish_attempt` | | ✓ | ✓ | |
 | `get_work_context` | ✓ | | ✓ | |
+| `reserve_resources` | | | | |
+| `release_resources` | | ✓ | ✓ | |
+| `list_resource_reservations` | ✓ | | ✓ | |
+| `get_resource_reservation` | ✓ | | ✓ | |
 | `search` | ✓ | | ✓ | |
 | `get_changes` | ✓ | | ✓ | |
 
@@ -493,10 +501,10 @@ annotation matrix.
 | planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
 | review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `supersede_review_request`, `replace_review_request` | yes | no |
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
-| lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context` | yes | no |
+| lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation` | yes | no |
 
-- **`full`** (default): every group, all 33 tools.
-- **`agent`** (29 tools): every group except `migration` and `sync` — the
+- **`full`** (default): every group, all 37 tools.
+- **`agent`** (33 tools): every group except `migration` and `sync` — the
   complete ordinary issue discovery, planning, review, knowledge, and
   leased work lifecycle workflow, without bulk project transfer or
   incremental synchronization.
@@ -1639,6 +1647,7 @@ Input:
 {
   "issue_id": "ISSUE-42",
   "lease_seconds": null,
+  "resources": null,
   "idempotency_key": null,
   "view": "compact"
 }
@@ -1653,6 +1662,16 @@ Behavior:
   created;
 - determines `work` or `review`;
 - creates attempt atomically;
+- when `resources` is a non-empty array, acquires every listed resource
+  (docs/02 §18) in the same transaction as the claim -- a conflict with an
+  existing active reservation or a malformed/internally-overlapping
+  resources list aborts the whole claim, leaving neither the attempt nor
+  any reservation behind (`RESOURCE_RESERVATION_CONFLICT`,
+  `INVALID_RESERVATION_SET`). Only work attempts may hold reservations: a
+  claim that resolves to `kind: "review"` rejects a non-empty `resources`
+  with `VALIDATION_ERROR` rather than silently ignoring it. Omitting
+  `resources` (or passing an empty array) is unchanged from before this
+  field existed;
 - records issue version and event ID;
 - creates an opaque lease token;
 - accepts an optional `idempotency_key` that, for the same normalized request, either rotates the lease and returns a fresh `lease_token` for the same attempt (if it is still active) or fails with `ATTEMPT_NOT_ACTIVE` (if it has since finished, expired, or been force-released); a different request with the same key returns `IDEMPOTENCY_CONFLICT`. The original raw token is never persisted or replayed — only its hash is stored, so a repeated claim always supplies a fresh secret rather than resupplying the first one.
@@ -1673,11 +1692,12 @@ Compact output (`view: "compact"`, default):
     "kind": "work",
     "lease_expires_at": "2026-08-05T12:34:56Z"
   },
+  "reservations": [],
   "lease_token": "opaque-token"
 }
 ```
 
-The `lease_token` field appears only in claim results, including idempotent claim replay responses. Compact claim responses omit issue bodies, labels, timestamps, attempt history, and other non-essential metadata. They also never introduce lease tokens outside claim results. Migration guidance is the same as for the other mutations: callers that need the legacy full claim payload should pass `view: "full"`.
+The `lease_token` field appears only in claim results, including idempotent claim replay responses. Compact claim responses omit issue bodies, labels, timestamps, attempt history, and other non-essential metadata. They also never introduce lease tokens outside claim results. Migration guidance is the same as for the other mutations: callers that need the legacy full claim payload should pass `view: "full"`. `reservations` is present only when `resources` was requested and non-empty; both compact and full claim responses list every newly acquired reservation in section 11.6's compact shape.
 
 ### 11.2. `renew_attempt`
 
@@ -1878,9 +1898,19 @@ Input:
 {
   "issue_id": "ISSUE-42",
   "include": [],
-  "limits": {}
+  "limits": {},
+  "desired_resources": []
 }
 ```
+
+`desired_resources` is optional and caller-supplied (same shape as
+`claim_issue`'s/`reserve_resources`' `resources`): resources the caller is
+*considering* reserving, not resources being acquired. Per the reservations
+epic's "reservations do not change issue dependency state" decision, a
+conflict can only be diagnosed once a caller supplies a concrete desired
+set — there is no issue-level intended-resource state to infer one from. It
+drives the default-context conflict count/warning below and, with
+`reservation_conflicts` requested, the bounded conflict rows.
 
 Minimal default includes:
 
@@ -1895,7 +1925,17 @@ previous attempt result summary
 previous attempt next steps
 latest checkpoint
 warnings
+active_reservation_count
+conflict_count
 ```
+
+`active_reservation_count` is the issue's active attempt's currently held
+active reservation count. `conflict_count` is how many `desired_resources`
+entries conflict with an active reservation held elsewhere in the project
+(0 when `desired_resources` is empty). Both are always populated,
+independent of whether `resource_reservations`/`reservation_conflicts` is
+requested; when either is greater than zero, `warnings` gains
+`ACTIVE_RESERVATIONS_HELD` and/or `RESERVATION_CONFLICTS_DETECTED`.
 
 Optional includes:
 
@@ -1910,7 +1950,18 @@ attempt_history
 artifacts
 project_instructions
 changes_since_previous_attempt
+resource_reservations
+reservation_conflicts
 ```
+
+`resource_reservations` returns the issue's own reservations (active and
+released, newest first, bounded by its limit) — the compact reservation
+shape shared with `list_resource_reservations`. `reservation_conflicts`
+returns, for each conflicting `desired_resources` entry, the conflicting
+active reservation plus its owning `issue_display_id`/`issue_title`/
+`session_label`/`lease_expires_at` — the same bounded, secret-free diagnostic
+shape `RESOURCE_RESERVATION_CONFLICT` errors use at claim/reserve time, run
+here read-only without acquiring anything.
 
 Output:
 
@@ -1921,6 +1972,8 @@ decisions
 reviews
 previous_attempt
 checkpoint
+active_reservation_count
+conflict_count
 requested optional sections
 warnings
 truncated
@@ -1942,9 +1995,10 @@ issue) are an intentional, expected part of the default response — this is
 unlike `list_issues`, where the same fields were being repeated once per
 backlog item for no benefit. Every optional list section (`related_issue_summaries`,
 `recent_comments`, `recent_attempt_notes`, decision details selected by `decision_content`,
-`attempt_history`, `artifacts`, `changes_since_previous_attempt`) is capped at
+`attempt_history`, `artifacts`, `changes_since_previous_attempt`, `resource_reservations`,
+`reservation_conflicts`) is capped at
 1–20 items via `limits` (default varies per section; see the audited request
-schema), and at most 10 sections can be requested at once
+schema), and at most 12 sections can be requested at once
 (`MaxWorkContextIncludes`), so optional-section growth is bounded. `blockers`
 and `parent_epic` reuse the same per-issue projection as the primary `issue`
 field (including full `description`/`acceptance_criteria`), and `blockers` in
@@ -1955,6 +2009,155 @@ dependency graph. `related_issue_summaries` is named "summaries" but, like
 truncated preview; this is a known imprecision worth tightening in a future
 change but is not addressed here, since (unlike the `list_issues` default) it
 requires an explicit `include` entry and is capped at 20 items.
+
+### 11.6. `reserve_resources`
+
+Input:
+
+```json
+{
+  "attempt_id": "01J0ABCDEF1234567890",
+  "lease_token": "opaque-token",
+  "resources": [
+    { "kind": "file", "path": "internal/adapters/sqlite/reservations.go" },
+    { "kind": "logical", "namespace": "docs", "name": "rfc-1" }
+  ],
+  "idempotency_key": null
+}
+```
+
+Adds `resources` to `attempt_id`'s active reservations, all-or-nothing, in
+the same transaction: a conflict with an existing active reservation, or a
+malformed/internally-overlapping `resources` list, leaves every
+already-held reservation untouched and acquires none of the new ones
+(`RESOURCE_RESERVATION_CONFLICT`, `INVALID_RESERVATION_SET`). Requires an
+active work attempt's lease token; a review attempt's lease token fails
+with `VALIDATION_ERROR` (docs/02 §18, ISSUE-179's locked lifecycle: only
+work attempts may hold reservations). `resources` must not be empty. An
+`idempotency_key` replays the exact prior response for an identical
+normalized request (attempt, lease proof, and resources); a different
+request with the same key returns `IDEMPOTENCY_CONFLICT`.
+
+Output:
+
+```json
+{
+  "reservations": [
+    {
+      "id": "01J1RESERVATION000000001",
+      "issue_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "attempt_id": "01J0ABCDEF1234567890",
+      "kind": "file",
+      "display_value": "internal/adapters/sqlite/reservations.go",
+      "status": "active",
+      "created_at": "2026-08-05T12:00:00Z"
+    }
+  ],
+  "next_actions": ["Continue work; release_resources when the reservation is no longer needed."]
+}
+```
+
+`reservations` lists only the resources this call newly acquired, not the
+attempt's full active set (use `list_resource_reservations` for that). Each
+entry is the compact reservation shape (§11.8): it omits the normalized
+comparison key and the optimistic-concurrency version counter, both
+available only from `get_resource_reservation`'s `view: "full"`.
+
+### 11.7. `release_resources`
+
+Input:
+
+```json
+{
+  "attempt_id": "01J0ABCDEF1234567890",
+  "lease_token": "opaque-token",
+  "reservation_ids": [],
+  "idempotency_key": null
+}
+```
+
+Releases the named `reservation_ids`, or -- when `reservation_ids` is
+empty -- every active reservation `attempt_id` currently owns. Every named
+ID must exist, be active, and be owned by the calling attempt, or the
+whole call fails naming the offending ID (`RESERVATION_NOT_FOUND` for an
+unknown or not-owned ID, `RESERVATION_NOT_ACTIVE` for one already
+released); there is no partial release. Releasing with an empty active set
+(nothing to release) succeeds trivially rather than erroring. Released
+reservations cannot be reactivated -- a later `reserve_resources` call
+creates new rows. Requires an active work attempt's lease token, matching
+`reserve_resources`. An `idempotency_key` replays the exact prior response
+for an identical normalized request.
+
+Output shape matches `reserve_resources`'s (`reservations`, `next_actions`),
+listing exactly the reservations this call released, each with
+`release_reason: "explicit"` and its `released_at` timestamp populated.
+
+### 11.8. `list_resource_reservations`
+
+Input:
+
+```json
+{
+  "issue_id": null,
+  "attempt_id": null,
+  "kind": null,
+  "active": null,
+  "limit": 20,
+  "cursor": null
+}
+```
+
+Filters by issue, attempt, resource `kind`, and lifecycle state
+(`active: true` for active-only, `active: false` for released-only,
+omitted for both), combined with AND. Results are ordered
+most-recently-created first with opaque cursor pagination (default limit
+20, maximum 100), matching `list_decisions`'s convention. Every filter is
+optional; an empty request lists every reservation in the project across
+every issue and attempt.
+
+Output:
+
+```json
+{
+  "items": [
+    {
+      "id": "01J1RESERVATION000000001",
+      "issue_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "attempt_id": "01J0ABCDEF1234567890",
+      "kind": "file",
+      "display_value": "internal/adapters/sqlite/reservations.go",
+      "status": "active",
+      "created_at": "2026-08-05T12:00:00Z"
+    }
+  ],
+  "next_cursor": null,
+  "has_more": false,
+  "next_actions": ["Use next_cursor for more results, if present."]
+}
+```
+
+Items are always the compact reservation shape: `comparison_value` (the
+normalized overlap key) and `version` (the optimistic-concurrency counter)
+are never included here, even for a released item's `released_at` and
+`release_reason` -- both of which are included, since they are ordinary
+identity fields, not internals. Use `get_resource_reservation` with
+`view: "full"` for a single item's normalized key and version.
+
+### 11.9. `get_resource_reservation`
+
+Input:
+
+```json
+{
+  "reservation_id": "01J1RESERVATION000000001",
+  "view": "compact"
+}
+```
+
+Gets one reservation, active or released, by id. `view` supports exactly
+`compact` and `full`, defaulting to `compact`; `full` additionally
+includes `comparison_value` and `version`. `reservation_id` naming no
+reservation returns `RESERVATION_NOT_FOUND`.
 
 ---
 
@@ -2090,7 +2293,23 @@ IDEMPOTENCY_CONFLICT
 LIMIT_EXCEEDED
 VALIDATION_ERROR
 WORKFLOW_GATE_UNSATISFIED
+INVALID_RESERVATION_SET
+RESOURCE_RESERVATION_CONFLICT
+RESERVATION_NOT_FOUND
+RESERVATION_NOT_ACTIVE
 ```
+
+`INVALID_RESERVATION_SET` identifies a malformed or internally-overlapping
+resources list (`claim_issue`, `reserve_resources`) -- two requested
+resources in the same call that overlap each other, per docs/02 §18.4.
+`RESOURCE_RESERVATION_CONFLICT` identifies a requested resource that
+overlaps an existing active reservation held by another attempt; it carries
+one detail per conflicting resource naming the conflicting reservation,
+its owning issue/attempt, and (when available) the owning lease's expiry
+and session label -- never a lease token. `RESERVATION_NOT_FOUND` and
+`RESERVATION_NOT_ACTIVE` are returned by `release_resources` for a named
+`reservation_ids` entry that does not exist, is not owned by the calling
+attempt, or is no longer active.
 
 `WORKFLOW_GATE_UNSATISFIED` is returned by `claim_issue`, `finish_attempt`,
 `create_issue` (status `review` or `done`), and `apply_issue_plan` (any
