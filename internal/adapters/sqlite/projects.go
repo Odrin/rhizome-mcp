@@ -572,8 +572,18 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				mappedID := attemptDestIDs[*event.AttemptID]
 				attemptID = &mappedID
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at) VALUES (?, ?, NULL, ?, ?, ?)`,
-				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt)); err != nil {
+			// A version 1 document carries no source (it predates the
+			// unified log), so its events restore as ordinary issue
+			// events. A version 2 document round-trips the tag verbatim:
+			// dropping it here silently reclassified every review event as
+			// issue activity, which changes what review staleness sees
+			// after a restore (ISSUE-215).
+			source := event.Source
+			if source == "" {
+				source = domain.LogicalEventSourceIssue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at, source) VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt), source); err != nil {
 				return err
 			}
 		}
@@ -1252,7 +1262,7 @@ func readLogicalArtifacts(ctx context.Context, query Queryer) ([]domain.LogicalA
 
 func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEvent, time.Time, error) {
 	rows, err := query.QueryContext(ctx, `
-		SELECT id, issue_id, event_type, attempt_id, payload, created_at
+		SELECT id, issue_id, event_type, attempt_id, payload, created_at, source
 		FROM issue_events
 		WHERE (issue_id IS NULL OR issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL))
 			AND (attempt_id IS NULL OR attempt_id NOT IN (SELECT id FROM work_attempts WHERE status = 'active'))
@@ -1266,12 +1276,15 @@ func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEven
 	var latest time.Time
 	for rows.Next() {
 		var (
-			issueID, attemptID                    sql.NullString
-			id                                    int64
-			eventType, payloadText, createdAtText string
+			issueID, attemptID                            sql.NullString
+			id                                            int64
+			eventType, payloadText, createdAtText, source string
 		)
-		if err := rows.Scan(&id, &issueID, &eventType, &attemptID, &payloadText, &createdAtText); err != nil {
+		if err := rows.Scan(&id, &issueID, &eventType, &attemptID, &payloadText, &createdAtText, &source); err != nil {
 			return nil, time.Time{}, corruptLogicalProjectValue(err, "events")
+		}
+		if source != domain.LogicalEventSourceIssue && source != domain.LogicalEventSourceReview {
+			return nil, time.Time{}, corruptLogicalProjectField(nil, "events", "INVALID_VALUE")
 		}
 		if issueID.Valid {
 			if _, err := ids.ParseStrict(issueID.String); err != nil {
@@ -1294,7 +1307,7 @@ func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEven
 		if err != nil {
 			return nil, time.Time{}, err
 		}
-		events = append(events, domain.LogicalEvent{SourceID: id, IssueID: nullableLogicalString(issueID), EventType: eventType, SessionID: nil, AttemptID: nullableLogicalString(attemptID), Payload: payload, CreatedAt: formatLogicalProjectTimestamp(createdAt)})
+		events = append(events, domain.LogicalEvent{SourceID: id, IssueID: nullableLogicalString(issueID), EventType: eventType, SessionID: nil, AttemptID: nullableLogicalString(attemptID), Payload: payload, CreatedAt: formatLogicalProjectTimestamp(createdAt), Source: source})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, time.Time{}, err

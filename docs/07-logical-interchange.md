@@ -38,7 +38,9 @@ The top-level document (version 2) is:
 }
 ```
 
-A version 1 document is the same shape without the last five fields.
+A version 1 document is the same shape without the last five fields, and
+without the optional `source` field on `events` records (§4) — those six
+additions are the whole of version 2.
 
 `format` and `version` are required. The exporter emits version `2`. The
 importer accepts both version `1` and version `2` and rejects any other
@@ -183,11 +185,22 @@ with unknown types or unremappable payload references are rejected rather
 than silently corrupted. `events` includes review-workflow event types
 (`review_requested`, `review_claimed`, `review_approved`,
 `review_changes_requested`, `review_blocked`, `review_cancelled`,
-`review_superseded`) alongside issue-sourced ones; the record carries no
-field distinguishing the two on import, so a review-sourced event is not
-reconstructed as one on re-export -- if that distinction matters, read
-`review_events` instead (below), which is scoped to review-sourced rows
-specifically.
+`review_superseded`) alongside issue-sourced ones.
+
+`events` records additionally carry `source` in **version 2 only**: either
+`"issue"` or `"review"`, mirroring the unified event log's own `source`
+column. It is optional — an absent `source` imports as `"issue"` — and a
+version 1 document may not carry it at all (version 1 predates the unified
+log and cannot express the distinction, so its frozen record shape rejects
+the key). A version 2 exporter always emits it.
+
+This tag is not cosmetic and must not be dropped by a consumer that
+rewrites documents: review-target staleness is evaluated against
+issue-sourced events only (docs/09), so review events restored without
+their tag would count as reviewed work changing, and a restored project
+would resolve reviews differently from the original it was exported from.
+For a typed view scoped to review-sourced rows specifically, read
+`review_events` (below).
 
 The following four record types are version 2 only.
 
@@ -277,7 +290,12 @@ remain importable indefinitely.
 
 Version 2 is version 1 plus five additional, wholly optional top-level
 fields: `review_targets`, `review_requests`, `review_outcomes`,
-`review_events`, and `extensions` (§4). "Optional" here means precisely: the
+`review_events`, and `extensions` (§4), plus one optional field *within* an
+existing record: `events[].source` (§4). That second kind of addition is
+permitted only because version 1's own record shape is untouched — a
+version 1 document still rejects the key — which is what the per-version
+key table in `internal/domain/logical_project_import.go` exists to enforce.
+"Optional" here means precisely: the
 importer's required-field check for a version 2 document is the same set
 required for version 1 (§1); a version 2 document that omits any of the five
 is valid, and an absent field means the same thing an empty array (or empty

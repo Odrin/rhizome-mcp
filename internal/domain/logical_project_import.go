@@ -260,6 +260,10 @@ func logicalProjectDocumentKeysV1() (map[string]validatorFunc, []string) {
 
 func logicalProjectDocumentKeysV2() (map[string]validatorFunc, []string) {
 	validators, required := logicalProjectDocumentKeysV1()
+	// v2 events carry the unified event log's "source" tag. v1's frozen
+	// validator keeps rejecting that key, so a v1 document cannot smuggle
+	// one in -- the per-version table is exactly the mechanism for this.
+	validators["events"] = validateLogicalEventArrayV2
 	validators["review_targets"] = validateLogicalReviewTargetArray
 	validators["review_requests"] = validateLogicalReviewRequestArray
 	validators["review_outcomes"] = validateLogicalReviewOutcomeArray
@@ -281,7 +285,12 @@ func peekLogicalProjectVersion(document []byte) (int, error) {
 	var header struct {
 		Version *json.Number `json:"version"`
 	}
-	if err := json.Unmarshal(document, &header); err != nil {
+	// Decode, not Unmarshal: Decode reads exactly one JSON value and leaves
+	// whatever follows it alone, whereas Unmarshal rejects trailing data
+	// itself. Using Unmarshal here made the structural pass's precise
+	// TRAILING_DATA error unreachable, degrading it to a generic
+	// malformed-JSON error from this peek.
+	if err := json.NewDecoder(bytes.NewReader(document)).Decode(&header); err != nil {
 		return 0, decodeError(err, "$")
 	}
 	if header.Version == nil {
@@ -478,6 +487,25 @@ func validateLogicalEventArray(decoder *json.Decoder, path string) error {
 			"attempt_id": validateAnyJSONValue,
 			"payload":    validateAnyJSONValue,
 			"created_at": validateAnyJSONValue,
+		}, []string{"source_id", "issue_id", "event_type", "session_id", "attempt_id", "payload", "created_at"})
+	})
+}
+
+// validateLogicalEventArrayV2 is validateLogicalEventArray plus the optional
+// "source" key. Optional rather than required, matching every other v2
+// addition: an absent source means "issue", not a malformed document, so a
+// hand-built v2 document need not tag events it has no opinion about.
+func validateLogicalEventArrayV2(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"source_id":  validateAnyJSONValue,
+			"issue_id":   validateAnyJSONValue,
+			"event_type": validateAnyJSONValue,
+			"session_id": validateAnyJSONValue,
+			"attempt_id": validateAnyJSONValue,
+			"payload":    validateAnyJSONValue,
+			"created_at": validateAnyJSONValue,
+			"source":     validateAnyJSONValue,
 		}, []string{"source_id", "issue_id", "event_type", "session_id", "attempt_id", "payload", "created_at"})
 	})
 }
@@ -1130,6 +1158,17 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 		}
 		if !isValidEventPayload(event.Payload) {
 			return invalidArgumentPath(path+".payload", "INVALID_JSON", "payload must be valid JSON")
+		}
+		// Version 1 has no event source and the structural pass already
+		// rejects the key there; this guards a document assembled in-process
+		// rather than parsed, so v1 cannot acquire v2 semantics by accident.
+		if event.Source != "" {
+			if document.Version < 2 {
+				return invalidArgumentPath(path+".source", "UNSUPPORTED_FIELD", "event source requires version 2")
+			}
+			if event.Source != LogicalEventSourceIssue && event.Source != LogicalEventSourceReview {
+				return invalidArgumentPath(path+".source", "INVALID_ENUM", "unsupported event source")
+			}
 		}
 	}
 

@@ -733,10 +733,15 @@ func TestProjectRepositoryHasNoWriteSideEffects(t *testing.T) {
 // ExportLogicalProject never read, so they were silently absent from every
 // logical export. Now that they are ordinary issue_events rows (source =
 // 'review'), they must appear in export like any other event, and survive
-// an import round trip. The interchange document format itself is locked
-// at version 1 with no new fields (docs/07 §1), so the 'source' tag is not
-// part of the export payload and is not expected to survive re-import --
-// only the event's issue_id/event_type/payload/created_at need to.
+// an import round trip.
+//
+// This test used to assert the opposite of the source check below, on the
+// grounds that the format was "locked at version 1 with no new fields" so
+// the tag could not be carried. ISSUE-215 repealed that premise: v2 carries
+// an optional per-event `source`, and dropping it is not cosmetic -- review
+// staleness reads that column (docs/09), so a restored project whose review
+// events came back tagged 'issue' behaves differently from the original.
+// The tag is part of the round trip now.
 func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThem(t *testing.T) {
 	db, now := openProjectDatabase(t, "source project", "instructions")
 	ctx := context.Background()
@@ -832,8 +837,20 @@ func TestProjectRepositoryExportIncludesReviewSourcedEventsAndImportPreservesThe
 	if importedCount != 1 {
 		t.Fatalf("imported review_requested event count = %d, want 1", importedCount)
 	}
-	if importedSource != "issue" {
-		t.Fatalf("imported event source = %q, want the default 'issue' -- the v1 interchange format carries no source tag (docs/07 §1), so this is the documented, acceptable round-trip behavior, not a bug", importedSource)
+	if importedSource != "review" {
+		t.Fatalf("imported event source = %q, want 'review' preserved through the round trip", importedSource)
+	}
+
+	// The other side of the tag: plain issue events must not be promoted to
+	// review events either.
+	var importedIssueSourced int
+	if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE event_type = 'issue_created' AND source = 'issue'`).Scan(&importedIssueSourced)
+	}); err != nil {
+		t.Fatalf("read imported events: %v", err)
+	}
+	if importedIssueSourced != 1 {
+		t.Fatalf("imported issue-sourced event count = %d, want 1", importedIssueSourced)
 	}
 }
 

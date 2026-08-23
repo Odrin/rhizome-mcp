@@ -165,7 +165,24 @@ type LogicalEvent struct {
 	AttemptID *string         `json:"attempt_id"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt string          `json:"created_at"`
+
+	// Source is the event's origin in the unified event log, either
+	// LogicalEventSourceIssue or LogicalEventSourceReview. Version 2 only:
+	// a version 1 document omits it and imports as "issue", because v1
+	// predates the unified log (migration 008) and cannot express the
+	// distinction. Carrying it is what lets a project that used reviews
+	// round-trip without silently reclassifying its review lifecycle as
+	// ordinary issue activity -- review staleness reads this column, so
+	// losing it changes behaviour after a restore (ISSUE-215).
+	Source string `json:"source,omitempty"`
 }
+
+// Event origins for LogicalEvent.Source, mirroring the issue_events.source
+// column introduced by migration 008.
+const (
+	LogicalEventSourceIssue  = "issue"
+	LogicalEventSourceReview = "review"
+)
 
 // LogicalReviewTarget is the exported immutable review-target snapshot
 // (version 2). Mirrors domain.ReviewTarget.

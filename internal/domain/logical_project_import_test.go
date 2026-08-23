@@ -281,6 +281,61 @@ func TestParseLogicalProjectImportPlanRejectsMalformedJSONAndUnsupportedVersion(
 	})
 }
 
+// ISSUE-215: the per-event `source` tag is a version 2 field. v1's key table
+// is frozen and must keep rejecting it; v2 accepts it as optional and
+// validates its value.
+func TestParseLogicalProjectImportPlanEventSourceIsVersionGated(t *testing.T) {
+	withEvent := func(version int, event map[string]any) []byte {
+		return buildLogicalProjectDocument(func(document map[string]any) {
+			document["version"] = version
+			issues := document["issues"].([]any)
+			base := map[string]any{
+				"source_id":  1,
+				"issue_id":   issues[0].(map[string]any)["id"],
+				"event_type": "issue_created",
+				"session_id": nil,
+				"attempt_id": nil,
+				"payload":    map[string]any{},
+				"created_at": "2026-07-17T18:24:06Z",
+			}
+			for key, value := range event {
+				base[key] = value
+			}
+			document["events"] = []any{base}
+		})
+	}
+
+	t.Run("version 1 rejects the source key", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(withEvent(1, map[string]any{"source": "review"}))
+		assertDomainErrorDetail(t, err, domain.CodeUnsupportedField, domain.CodeUnsupportedField, "$.events[0].source")
+	})
+
+	t.Run("version 2 accepts a review source", func(t *testing.T) {
+		plan, err := domain.ParseLogicalProjectImportPlan(withEvent(2, map[string]any{"source": "review"}))
+		if err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+		if got := plan.Document.Events[0].Source; got != domain.LogicalEventSourceReview {
+			t.Fatalf("event source = %q, want %q", got, domain.LogicalEventSourceReview)
+		}
+	})
+
+	t.Run("version 2 treats an absent source as unset", func(t *testing.T) {
+		plan, err := domain.ParseLogicalProjectImportPlan(withEvent(2, nil))
+		if err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+		if got := plan.Document.Events[0].Source; got != "" {
+			t.Fatalf("event source = %q, want empty (storage applies the 'issue' default)", got)
+		}
+	})
+
+	t.Run("version 2 rejects an unknown source", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(withEvent(2, map[string]any{"source": "gate"}))
+		assertDetail(t, err, "INVALID_ENUM", "$.events[0].source")
+	})
+}
+
 func TestParseLogicalProjectImportPlanRejectsBlockCyclesAndActiveAttempts(t *testing.T) {
 	t.Run("rejects blocks cycles", func(t *testing.T) {
 		payload := buildLogicalProjectDocument(func(document map[string]any) {
