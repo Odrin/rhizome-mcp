@@ -667,6 +667,8 @@ Input:
 
 As with `validate_import`, supply exactly one of `document` or `source_uri`.
 
+`apply_import` restores historical terminal state and is exempt from workflow-gate evaluation (docs/02 §17.1) regardless of any imported issue's status -- but every imported issue still runs the same field/enum/limit validation `create_issue` runs (`CreateIssueInput.Validate`).
+
 Output:
 
 The structured content is the apply result containing deterministic counts, sorted conflicts, and the latest event ID. The tool does not duplicate the full document payload in text.
@@ -731,6 +733,7 @@ Rules:
 - `blocked_reason` is required when status is `blocked`.
 - Parent constraints are validated.
 - `idempotency_key` is optional. When supplied, it must be a non-blank string up to 128 runes. Reusing the same key with the same normalized request replays the original issue response; reusing it with a different request returns `IDEMPOTENCY_CONFLICT`.
+- `status: review` or `status: done` is gated exactly like the matching completion path -- `complete_work_to_review` / `complete_work_to_done` respectively, evaluated from a virtual `open` (docs/02 §17.1). An unmet requirement fails the call with `WORKFLOW_GATE_UNSATISFIED` (§13) and creates no issue. `status: cancelled` is not gated.
 
 `view` supports exactly `compact` and `full`. It defaults to `compact` when omitted. Explicit `view: "full"` preserves the legacy complete issue response for callers that need the full record.
 
@@ -1449,8 +1452,9 @@ Limits:
 Behavior:
 
 - performs the same validation again;
+- evaluates the create-time workflow gate for every entry whose `status` is `review` or `done`, exactly as `create_issue` would for that status (docs/02 §17.1), before any row is written;
 - executes in one transaction;
-- rolls back completely on any error;
+- rolls back completely on any error, including a gate failure on any single entry;
 - assigns issue numbers atomically.
 
 Output:
@@ -2054,10 +2058,12 @@ VALIDATION_ERROR
 WORKFLOW_GATE_UNSATISFIED
 ```
 
-`WORKFLOW_GATE_UNSATISFIED` is returned by `claim_issue` and `finish_attempt`
-when one or more configured workflow policy requirements are unmet at the
-enforcement point being evaluated (docs/02 §17). It carries one detail entry
-per unmet requirement with stable fields `policy_id`, `requirement_key`,
-`enforcement_point`, and `reason`.
+`WORKFLOW_GATE_UNSATISFIED` is returned by `claim_issue`, `finish_attempt`,
+`create_issue` (status `review` or `done`), and `apply_issue_plan` (any
+entry with status `review` or `done`) when one or more configured workflow
+policy requirements are unmet at the enforcement point being evaluated
+(docs/02 §17). It carries one detail entry per unmet requirement with
+stable fields `policy_id`, `requirement_key`, `enforcement_point`, and
+`reason`.
 
 Internal SQLite errors and stack traces are logged locally and mapped to stable domain errors.

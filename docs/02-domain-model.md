@@ -660,11 +660,45 @@ Three other paths write `issues.status` directly on row creation, with no
 `CanTransition` check at all because there is no prior status to transition
 from, and can place a new issue directly into `review`, `done`, or
 `cancelled`: `create_issue`, `apply_issue_plan` (batch creation), and
-`apply_import` (logical interchange import -- the only one of the three that
-also skips even `CreateIssueInput.Validate`). Whether and how gates apply to
-issue creation is explicitly out of scope for this contract and is decided
-by ISSUE-201; until ISSUE-201 lands, these three paths are a known,
-documented gap, not a silent one.
+`apply_import` (logical interchange import).
+
+**Resolved by ISSUE-201:** a new issue created directly with `status:
+review` or `status: done` is a transition from a virtual `open`, and is
+gated exactly as if it had reached that status through the corresponding
+completion path -- `create_issue{status: review}` and each
+`apply_issue_plan` entry with `status: review` are evaluated against
+`complete_work_to_review`; `status: done` against `complete_work_to_done`.
+No new enforcement-point names are introduced; these two existing points
+are simply reached from a second call site. `apply_issue_plan` is create,
+repeated per entry: it applies the identical rule to each planned issue,
+not a separate one. `status: cancelled` remains ungated for all three
+paths, matching `update_issue`'s own scope above: gates protect the path
+into `review`/`done`, not the path out of active work.
+
+There is no claimed attempt and no review target at creation time, so
+`attempt_evidence` and `review_approval` requirements -- both applicable at
+`complete_work_to_review` and/or `complete_work_to_done` per §17.4 -- can
+never be satisfied by a bare create. They are still *evaluated* at that
+point (this is not the "unmatched combination" case §17.4 treats as
+not-applicable) and therefore always fail with `WORKFLOW_GATE_UNSATISFIED`
+whenever an active policy requires either kind at that enforcement point.
+Only `issue_field_nonblank` can be satisfied at create time, checked
+directly against the fields supplied in the same call (e.g.
+`acceptance_criteria`). In practice: creating straight into `review` or
+`done` is only possible while no active policy matching the issue's
+type/labels requires attempt evidence or review approval at that
+completion path -- the same outcome `update_issue`'s direct-transition
+rejection produces for an existing issue, reached here through a different
+call site instead of a status patch.
+
+`apply_import` remains exempt from gate evaluation -- it restores
+historical terminal state, not a live transition -- but it no longer skips
+validation: every imported issue runs the same field/enum/limit validation
+`create_issue` runs (`CreateIssueInput.Validate`), regardless of status.
+Import can restore an issue that no active policy would currently allow to
+be *created* directly in `review`/`done`; that is intentional (§17.6
+already establishes that policy changes are never retroactive), not a
+bypass, since import never re-runs live policy evaluation for any status.
 
 ### 17.2. WorkflowPolicy and PolicyRequirement
 
@@ -1002,8 +1036,9 @@ approve_review             internal/adapters/sqlite/attempts.go  AttemptReposito
                            kind=review, outcome=completed, review_outcome=approved
 ```
 
-Not attempt-mediated (must be closed per §17.1, or explicitly deferred to
-ISSUE-201):
+Not attempt-mediated (must be closed per §17.1; create-time semantics for
+the three creation paths are resolved there too, per ISSUE-201 -- all four
+rows require implementation, tracked by ISSUE-172):
 
 ```text
 update_issue (direct transition)   internal/adapters/sqlite/issues.go   IssueRepository.UpdateIssue
@@ -1011,14 +1046,18 @@ update_issue (direct transition)   internal/adapters/sqlite/issues.go   IssueRep
                                     a "review" or "done" target per §17.1
 
 create_issue (initial status)      internal/adapters/sqlite/issues.go   IssueRepository.CreateIssue
-                                    INSERT, no CanTransition check (new row) -- deferred to ISSUE-201
+                                    INSERT, no CanTransition check (new row); status review/done
+                                    routes through complete_work_to_review/complete_work_to_done
+                                    per §17.1
 
 apply_issue_plan (initial status)  internal/adapters/sqlite/planning.go applyPlan
-                                    INSERT, no CanTransition check (new row) -- deferred to ISSUE-201
+                                    INSERT per entry, no CanTransition check (new row); same rule
+                                    as create_issue, applied independently to each planned issue
 
 apply_import (initial status)      internal/adapters/sqlite/projects.go ApplyLogicalProjectImport
-                                    INSERT, writes the imported status verbatim, does not even
-                                    run CreateIssueInput.Validate -- deferred to ISSUE-201
+                                    INSERT, writes the imported status verbatim; exempt from gate
+                                    evaluation (historical restore, §17.1) but must run
+                                    CreateIssueInput.Validate like every other creation path
 ```
 
 Confirmed **not** status-mutating, and therefore out of scope for this
