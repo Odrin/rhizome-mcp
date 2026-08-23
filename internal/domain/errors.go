@@ -92,6 +92,17 @@ const (
 	// CodeGateSnapshotNotFound identifies a work attempt or review target with
 	// no recorded gate snapshot.
 	CodeGateSnapshotNotFound = "GATE_SNAPSHOT_NOT_FOUND"
+	// CodeInvalidReservationSet identifies a reservation acquisition request
+	// whose resources overlap each other without being exact duplicates.
+	CodeInvalidReservationSet = "INVALID_RESERVATION_SET"
+	// CodeResourceReservationConflict identifies a requested resource that
+	// overlaps an existing active reservation.
+	CodeResourceReservationConflict = "RESOURCE_RESERVATION_CONFLICT"
+	// CodeReservationNotFound identifies a missing reservation.
+	CodeReservationNotFound = "RESERVATION_NOT_FOUND"
+	// CodeReservationNotActive identifies a reservation that cannot be
+	// released because it is already released.
+	CodeReservationNotActive = "RESERVATION_NOT_ACTIVE"
 )
 
 // Detail is one stable, field-oriented domain error detail. EntityIndex is nil

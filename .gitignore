@@ -30,3 +30,6 @@ go.work.sum
 
 # Local editor config
 lsp.json
+
+# Local DB backups
+/.backups/
