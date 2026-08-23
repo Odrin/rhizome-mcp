@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -547,5 +548,53 @@ func TestClaimWorkRaceAgainstConcurrentPolicyEdit(t *testing.T) {
 		if len(snapshot.Requirements) != 0 && (len(snapshot.Requirements) != 1 || snapshot.Requirements[0].Key != "ac") {
 			t.Fatalf("issue %d: snapshot requirements = %+v, want either none or exactly the one full requirement", i, snapshot.Requirements)
 		}
+	}
+}
+
+// TestWorkflowGateUnsatisfiedDetailShapeMatchesDocumentedContract pins the
+// wire shape docs/02 §17.7 and docs/03 §13 lock (ISSUE-220): the error
+// message text, and one project-standard {field, code, message} detail per
+// unmet requirement -- requirement_key structured in Field, and policy_id,
+// enforcement_point, and reason packed into Message. Two policies are used
+// so the documented policy_id-then-key ordering is exercised too, and so
+// the packed policy_id is the only thing distinguishing two details that
+// are otherwise identical. Requirement Key ("ac") deliberately differs from
+// the gated Field ("acceptance_criteria") so the test would catch the two
+// being confused.
+func TestWorkflowGateUnsatisfiedDetailShapeMatchesDocumentedContract(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "gate-detail-shape")
+	defer fixture.close()
+	requirements := []domain.PolicyRequirementInput{
+		{Key: "ac", Kind: domain.RequirementKindIssueFieldNonblank, Field: "acceptance_criteria"},
+	}
+	firstPolicy := createWorkflowPolicy(t, fixture, allTasksSelector(), requirements)
+	secondPolicy := createWorkflowPolicy(t, fixture, allTasksSelector(), requirements)
+	issue := createAttemptIssue(t, fixture, "blank ac", domain.StatusReady)
+
+	_, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("error = %v, want *domain.Error", err)
+	}
+	if domainErr.Code != domain.CodeWorkflowGateUnsatisfied {
+		t.Fatalf("code = %q, want %q", domainErr.Code, domain.CodeWorkflowGateUnsatisfied)
+	}
+	if domainErr.Message != "workflow gate requirements are not satisfied" {
+		t.Fatalf("message = %q, want the docs/02 §17.7 text", domainErr.Message)
+	}
+
+	orderedPolicyIDs := []string{firstPolicy.ID, secondPolicy.ID}
+	slices.Sort(orderedPolicyIDs)
+	want := make([]domain.Detail, len(orderedPolicyIDs))
+	for index, policyID := range orderedPolicyIDs {
+		want[index] = domain.Detail{
+			Field: "ac",
+			Code:  domain.CodeWorkflowGateUnsatisfied,
+			Message: "policy_id=" + policyID +
+				" enforcement_point=claim_work: issue field 'acceptance_criteria' is blank",
+		}
+	}
+	if !reflect.DeepEqual(domainErr.Details, want) {
+		t.Fatalf("details = %#v, want %#v", domainErr.Details, want)
 	}
 }

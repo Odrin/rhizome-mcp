@@ -2315,8 +2315,13 @@ attempt, or is no longer active.
 `create_issue` (status `review` or `done`), and `apply_issue_plan` (any
 entry with status `review` or `done`) when one or more configured workflow
 policy requirements are unmet at the enforcement point being evaluated
-(docs/02 §17). It carries one detail entry per unmet requirement with
-stable fields `policy_id`, `requirement_key`, `enforcement_point`, and
-`reason`.
+(docs/02 §17). Its message is `workflow gate requirements are not
+satisfied` and it carries one detail entry per unmet requirement, in the
+same `{field, code, message}` detail shape as every other error here:
+`field` is the `requirement_key`, `code` is `WORKFLOW_GATE_UNSATISFIED`,
+and `message` packs the remaining three dimensions as
+`policy_id=<id> enforcement_point=<point>: <reason>`. Only `code` and
+`field` are a branching contract; the packed dimensions are diagnostics.
+docs/02 §17.7 is the normative statement of this shape.
 
 Internal SQLite errors and stack traces are logged locally and mapped to stable domain errors.

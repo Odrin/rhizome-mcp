@@ -111,12 +111,15 @@ func evaluateGate(point domain.EnforcementPoint, requirements []domain.PolicyReq
 }
 
 // workflowGateUnsatisfiedError builds the WORKFLOW_GATE_UNSATISFIED error,
-// one Detail per unmet requirement (docs/02 §17.7): Field is the
-// requirement_key (the natural "what failed" identifier, consistent with
-// every other validation error in this codebase); Message packs
-// policy_id, enforcement_point, and reason into a readable string,
-// following the same pack-identifying-dimensions-into-one-detail pattern
-// migrations.go uses for FOREIGN_KEY_VIOLATION.
+// one Detail per unmet requirement, in the shape docs/02 §17.7 and
+// docs/03 §13 lock: Field is the requirement_key (the natural "what
+// failed" identifier, consistent with every other validation error in this
+// codebase); Message packs policy_id, enforcement_point, and reason into a
+// readable string, following the same pack-identifying-dimensions-into-one-
+// detail pattern migrations.go uses for FOREIGN_KEY_VIOLATION. The message
+// text and the detail shape are both asserted by
+// TestWorkflowGateUnsatisfiedDetailShapeMatchesDocumentedContract so they
+// cannot drift from the docs silently (ISSUE-220).
 func workflowGateUnsatisfiedError(evaluation domain.GateEvaluation) error {
 	details := make([]domain.Detail, len(evaluation.Unmet))
 	for index, unmet := range evaluation.Unmet {
@@ -126,7 +129,7 @@ func workflowGateUnsatisfiedError(evaluation domain.GateEvaluation) error {
 			Message: fmt.Sprintf("policy_id=%s enforcement_point=%s: %s", unmet.PolicyID, unmet.EnforcementPoint, unmet.Reason),
 		}
 	}
-	return domain.NewError(domain.CodeWorkflowGateUnsatisfied, "workflow gate requirements are unmet", false, details...)
+	return domain.NewError(domain.CodeWorkflowGateUnsatisfied, "workflow gate requirements are not satisfied", false, details...)
 }
 
 func loadActiveWorkflowPolicies(ctx context.Context, query Queryer) ([]domain.WorkflowPolicy, error) {

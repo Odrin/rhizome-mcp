@@ -836,14 +836,36 @@ An unmet requirement at any enforcement point fails the call with:
 WORKFLOW_GATE_UNSATISFIED
 ```
 
-with one detail entry per unmet requirement, each carrying:
+and the message `workflow gate requirements are not satisfied`, with one
+detail entry per unmet requirement. Details use the project-wide error
+detail shape (docs/03 §13) -- gate failures are not an exception to it:
 
-```text
-policy_id
-requirement_key
-enforcement_point
-reason
+```json
+{
+  "field": "<requirement_key>",
+  "code": "WORKFLOW_GATE_UNSATISFIED",
+  "message": "policy_id=<policy_id> enforcement_point=<enforcement_point>: <reason>"
+}
 ```
+
+So of the four dimensions a gate failure reports, exactly one is a
+structured field and three are packed into the message:
+
+| dimension          | where it lives                                     |
+| ------------------ | -------------------------------------------------- |
+| `requirement_key`  | structured -- the detail's `field`                  |
+| `policy_id`        | packed -- `message`, as `policy_id=<id>`            |
+| `enforcement_point`| packed -- `message`, as `enforcement_point=<point>` |
+| `reason`           | packed -- `message`, after the `: ` separator       |
+
+A client that must branch programmatically can branch on `code` and
+`field`; `policy_id`, `enforcement_point`, and `reason` are human-readable
+diagnostics in `message` and are not a parsing contract. All four remain
+available structurally inside the domain (`domain.UnmetRequirement`) --
+only the error transport packs them. This keeps every error in the system
+on one detail shape rather than giving gate errors a bespoke one; the same
+pack-identifying-dimensions-into-the-message pattern is used for
+`FOREIGN_KEY_VIOLATION` details.
 
 Multiple unmet requirements from different policies (or the same policy)
 all appear as separate details in one response; the call fails atomically
@@ -861,10 +883,9 @@ Missing acceptance criteria blocks `claim_work`:
     "message": "workflow gate requirements are not satisfied",
     "details": [
       {
-        "policy_id": "01J1POLICYAAAAAAAAAAAAAAAA",
-        "requirement_key": "acceptance_criteria",
-        "enforcement_point": "claim_work",
-        "reason": "issue field 'acceptance_criteria' is blank"
+        "field": "acceptance_criteria",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYAAAAAAAAAAAAAAAA enforcement_point=claim_work: issue field 'acceptance_criteria' is blank"
       }
     ]
   }
@@ -880,10 +901,9 @@ Missing implementation evidence blocks `complete_work_to_review`:
     "message": "workflow gate requirements are not satisfied",
     "details": [
       {
-        "policy_id": "01J1POLICYBBBBBBBBBBBBBBBB",
-        "requirement_key": "implementation_evidence",
-        "enforcement_point": "complete_work_to_review",
-        "reason": "no attempt_evidence recorded for key 'implementation'"
+        "field": "implementation_evidence",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYBBBBBBBBBBBBBBBB enforcement_point=complete_work_to_review: no attempt_evidence recorded for key 'implementation'"
       }
     ]
   }
@@ -899,10 +919,9 @@ Missing test evidence blocks `complete_work_to_done`:
     "message": "workflow gate requirements are not satisfied",
     "details": [
       {
-        "policy_id": "01J1POLICYBBBBBBBBBBBBBBBB",
-        "requirement_key": "test_evidence",
-        "enforcement_point": "complete_work_to_done",
-        "reason": "no attempt_evidence recorded for key 'tests'"
+        "field": "test_evidence",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYBBBBBBBBBBBBBBBB enforcement_point=complete_work_to_done: no attempt_evidence recorded for key 'tests'"
       }
     ]
   }
@@ -919,10 +938,9 @@ attempt from completing straight to `done`, §17.4):
     "message": "workflow gate requirements are not satisfied",
     "details": [
       {
-        "policy_id": "01J1POLICYCCCCCCCCCCCCCCCC",
-        "requirement_key": "security_review",
-        "enforcement_point": "approve_review",
-        "reason": "no review_approval recorded for purpose 'security'"
+        "field": "security_review",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYCCCCCCCCCCCCCCCC enforcement_point=approve_review: no review_approval recorded for purpose 'security'"
       }
     ]
   }
@@ -939,16 +957,14 @@ both are unmet, ordered by `policy_id` then `key`:
     "message": "workflow gate requirements are not satisfied",
     "details": [
       {
-        "policy_id": "01J1POLICYAAAAAAAAAAAAAAAA",
-        "requirement_key": "acceptance_criteria",
-        "enforcement_point": "claim_work",
-        "reason": "issue field 'acceptance_criteria' is blank"
+        "field": "acceptance_criteria",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYAAAAAAAAAAAAAAAA enforcement_point=claim_work: issue field 'acceptance_criteria' is blank"
       },
       {
-        "policy_id": "01J1POLICYDDDDDDDDDDDDDDDD",
-        "requirement_key": "acceptance_criteria",
-        "enforcement_point": "claim_work",
-        "reason": "issue field 'acceptance_criteria' is blank"
+        "field": "acceptance_criteria",
+        "code": "WORKFLOW_GATE_UNSATISFIED",
+        "message": "policy_id=01J1POLICYDDDDDDDDDDDDDDDD enforcement_point=claim_work: issue field 'acceptance_criteria' is blank"
       }
     ]
   }
@@ -958,7 +974,9 @@ both are unmet, ordered by `policy_id` then `key`:
 (Both policies happen to declare a requirement with the `key`
 `acceptance_criteria`, but they are not deduplicated because their
 `policy_id`s differ -- each is evaluated and reported independently, even
-though satisfying the single underlying field satisfies both at once.)
+though satisfying the single underlying field satisfies both at once. The
+two details are therefore identical in `field` and `code`, and differ only
+in the `policy_id=` prefix packed into `message`.)
 
 Policy edited during active work does not retroactively change an in-flight
 attempt's gates. A policy adds an `attempt_evidence` requirement with key
