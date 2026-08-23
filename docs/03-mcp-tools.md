@@ -1834,7 +1834,12 @@ Completion checks:
   (docs/02 §17) -- evaluated against the completing attempt's or review
   target's frozen requirement snapshot, not against live policies. An unmet
   requirement fails the call with `WORKFLOW_GATE_UNSATISFIED` and leaves the
-  attempt active.
+  attempt active. Interim note (ISSUE-172, until ISSUE-173 lands): review
+  targets do not yet snapshot their own requirement set, so `approve_review`
+  is evaluated against the reviewing attempt's own claim-time snapshot
+  (`claim_work`'s, per §11.1) instead -- still frozen and snapshot-based, not
+  a live-policy read, but not yet the purpose-scoped review-target snapshot
+  ISSUE-173 will add.
 
 ### 11.5. `get_work_context`
 

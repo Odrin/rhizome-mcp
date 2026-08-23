@@ -3022,8 +3022,23 @@ func TestRelationToolsExposeDerivedBlockersAndArchivedEndpointErrors(t *testing.
 		t.Fatalf("repeated add output = %#v", repeated)
 	}
 
-	done := call(t, client, "update_issue", map[string]any{
-		"issue_id": blocker.ID, "expected_version": blocker.Version, "changes": map[string]any{"status": "done"},
+	// "done" is reachable only through claim_issue/finish_attempt now
+	// (docs/02 §17.1); update_issue no longer accepts it as a direct patch
+	// target.
+	claimedBlocker := call(t, client, "claim_issue", map[string]any{"issue_id": blocker.ID, "lease_seconds": 60})
+	var blockerClaim struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimedBlocker, &blockerClaim)
+	if claimedBlocker.IsError {
+		t.Fatalf("claim blocker = %#v", claimedBlocker)
+	}
+	done := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": blockerClaim.Attempt.ID, "lease_token": blockerClaim.LeaseToken,
+		"outcome": "completed", "result_summary": "done", "target_issue_status": "done",
 	})
 	if done.IsError {
 		t.Fatalf("complete blocker = %#v", done)

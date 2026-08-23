@@ -386,6 +386,18 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 					parentID = &mappedParentID
 				}
 			}
+			// apply_import is exempt from gate evaluation (docs/02 §17.1,
+			// ISSUE-201): it restores historical terminal state, not a live
+			// transition. It is no longer exempt from validation, though --
+			// every imported issue runs the same field/enum/limit checks
+			// create_issue runs.
+			if _, err := (domain.CreateIssueInput{
+				Type: domain.Type(issue.Type), Title: issue.Title, Description: issue.Description,
+				AcceptanceCriteria: issue.AcceptanceCriteria, Status: domain.Status(issue.Status), Priority: domain.Priority(issue.Priority),
+				ParentID: parentID, BlockedReason: issue.BlockedReason,
+			}).Validate(); err != nil {
+				return err
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO issues(
 					id, sequence_no, type, title, description, acceptance_criteria,

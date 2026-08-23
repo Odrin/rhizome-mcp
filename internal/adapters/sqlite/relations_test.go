@@ -338,9 +338,28 @@ func TestRelationRepositoryDerivesBlockerProjections(t *testing.T) {
 	assertBlockerProjection(t, issues, target.ID, 1, true, false)
 	assertProjectionFilterContains(t, issues, domain.ListIssuesInput{IsBlocked: boolPointer(true)}, target.ID)
 
-	if _, err := issues.UpdateIssue(ctx, domain.UpdateIssueInput{
-		IssueID: unresolved.ID, ExpectedVersion: unresolved.Issue.Version,
-		Changes: domain.IssuePatch{Status: domain.OptionalValue[domain.Status]{Set: true, Value: domain.StatusDone}},
+	// "done" is reachable only through claim_issue/finish_attempt now
+	// (docs/02 §17.1); update_issue no longer accepts it as a direct patch
+	// target.
+	attemptRepository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptGenerator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := application.NewAttemptService(attemptRepository, clock.NewFakeClock(now), attemptGenerator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unresolvedClaim, err := attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: unresolved.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attempts.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: unresolvedClaim.Attempt.ID, LeaseToken: unresolvedClaim.LeaseToken, Outcome: domain.AttemptOutcomeCompleted,
+		ResultSummary: "done", TargetIssueStatus: statusPointer(domain.StatusDone),
 	}); err != nil {
 		t.Fatal(err)
 	}

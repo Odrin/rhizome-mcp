@@ -92,6 +92,12 @@ const (
 	// CodeGateSnapshotNotFound identifies a work attempt or review target with
 	// no recorded gate snapshot.
 	CodeGateSnapshotNotFound = "GATE_SNAPSHOT_NOT_FOUND"
+	// CodeWorkflowGateUnsatisfied identifies one or more unmet workflow
+	// policy requirements at an enforcement point (docs/02 §17.7). Details
+	// carry one entry per unmet requirement: Field is the requirement key,
+	// Message identifies the policy and enforcement point and states why it
+	// failed.
+	CodeWorkflowGateUnsatisfied = "WORKFLOW_GATE_UNSATISFIED"
 	// CodeInvalidReservationSet identifies a reservation acquisition request
 	// whose resources overlap each other without being exact duplicates.
 	CodeInvalidReservationSet = "INVALID_RESERVATION_SET"

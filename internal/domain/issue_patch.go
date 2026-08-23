@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -208,6 +209,17 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 	}
 
 	if patch.Status.Set {
+		if patch.Status.Value == StatusReview || patch.Status.Value == StatusDone {
+			// docs/02 §17.1 (locked): a direct patch targeting review or done is
+			// rejected unconditionally, regardless of the current stored status
+			// or any workflow policy -- those two statuses are reachable only
+			// through claim_issue/finish_attempt's gated enforcement points.
+			// This is stricter than "gate-evaluate and fail without an attempt"
+			// (ISSUE-172's own prose loosely describes it that way): an issue
+			// with zero matching policies would trivially pass a gate
+			// evaluation, but must still be rejected here.
+			return Issue{}, nil, directTransitionToGatedStatusForbidden(current.Status, patch.Status.Value)
+		}
 		if patch.Status.Value == StatusBlocked {
 			if !patch.BlockedReason.Set || patch.BlockedReason.Value == nil {
 				return Issue{}, nil, blockedReasonRequired()
@@ -296,4 +308,13 @@ func blockedReasonRequired() *Error {
 func blockedReasonForbidden() *Error {
 	return NewError(CodeInvalidArgument, "blocked_reason is only allowed when status is blocked", false,
 		Detail{Field: "blocked_reason", Code: "FORBIDDEN"})
+}
+
+// directTransitionToGatedStatusForbidden matches docs/03 §7.2's locked
+// detail shape exactly: field "changes.status", code "UNSUPPORTED_DIRECT_TRANSITION".
+func directTransitionToGatedStatusForbidden(current, target Status) *Error {
+	return NewError(CodeInvalidTransition,
+		fmt.Sprintf("cannot transition issue status from %q to %q directly; review and done are reachable only through claim_issue/finish_attempt", current, target),
+		false,
+		Detail{Field: "changes.status", Code: "UNSUPPORTED_DIRECT_TRANSITION"})
 }

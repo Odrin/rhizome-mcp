@@ -60,6 +60,31 @@ func TestActivityRepositoryIncludesGateEvidence(t *testing.T) {
 		t.Fatalf("NewActivityRepository() error = %v", err)
 	}
 
+	// A matching workflow policy must exist before claim, so the real
+	// claim_work gate evaluation (ISSUE-172) freezes this requirement into
+	// the new attempt's snapshot itself -- attempt_gate_snapshots is
+	// immutable, so nothing can seed one after the fact.
+	policyRepository, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyRepository() error = %v", err)
+	}
+	policyID, err := generator.New()
+	if err != nil {
+		t.Fatalf("generator.New() error = %v", err)
+	}
+	if _, err := policyRepository.CreatePolicy(ctx, ports.CreateWorkflowPolicyCommand{
+		ID: policyID,
+		Input: domain.WorkflowPolicyInput{
+			Selector: domain.PolicySelectorInput{IssueTypes: []domain.Type{domain.TypeTask}},
+			Requirements: []domain.PolicyRequirementInput{
+				{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+			},
+		},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreatePolicy() error = %v", err)
+	}
+
 	issue, err := issues.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "gate evidence activity", Status: domain.StatusReady})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
@@ -67,23 +92,6 @@ func TestActivityRepositoryIncludesGateEvidence(t *testing.T) {
 	claimed, err := attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID})
 	if err != nil {
 		t.Fatalf("ClaimIssue() error = %v", err)
-	}
-	requirementsJSON := `[{"policy_id":"01ARZ3NDEKTSV4RRFFQ69G5FF0","key":"impl","kind":"attempt_evidence","evidence_key":"implementation"}]`
-	snapshot, err := domain.NewGateSnapshot(
-		[]domain.PolicyRequirement{{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FF0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"}},
-		[]domain.SourcePolicyRef{{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FF0", Version: 1}}, 1, now,
-	)
-	if err != nil {
-		t.Fatalf("NewGateSnapshot() error = %v", err)
-	}
-	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO attempt_gate_snapshots(
-			attempt_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at
-		) VALUES (?, ?, '[{"policy_id":"01ARZ3NDEKTSV4RRFFQ69G5FF0","version":1}]', ?, ?, ?)`,
-			claimed.Attempt.ID, requirementsJSON, snapshot.Fingerprint, snapshot.IssueVersion, sqlite.FormatStorageTime(now))
-		return err
-	}); err != nil {
-		t.Fatalf("seed attempt gate snapshot: %v", err)
 	}
 
 	submitted, err := attempts.SubmitGateEvidence(ctx, domain.SubmitGateEvidenceInput{

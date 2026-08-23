@@ -97,6 +97,12 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 				return err
 			}
 		}
+		if point, gated := enforcementPointForCreateStatus(input.Status); gated {
+			evidence := domain.GateEvidence{AcceptanceCriteriaBlank: acceptanceCriteriaBlank(input.AcceptanceCriteria)}
+			if _, _, err := evaluateGateAgainstLivePolicies(ctx, tx, point, input.Type, input.Labels, evidence); err != nil {
+				return err
+			}
+		}
 		var sequenceNo int64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE projects

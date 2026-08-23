@@ -317,6 +317,12 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 		CreatedIssues: []ports.CreatedPlanIssue{}, CreatedRelations: []domain.IssueRelation{}, CreatedDecisions: []ports.Decision{},
 	}
 	for i, planned := range command.Plan.Issues {
+		if point, gated := enforcementPointForCreateStatus(planned.Status); gated {
+			evidence := domain.GateEvidence{AcceptanceCriteriaBlank: acceptanceCriteriaBlank(planned.AcceptanceCriteria)}
+			if _, _, err := evaluateGateAgainstLivePolicies(ctx, tx, point, planned.Type, planned.Labels, evidence); err != nil {
+				return result, err
+			}
+		}
 		var parentID *string
 		if planned.ParentRef != nil {
 			id, err := resolveID(*planned.ParentRef)

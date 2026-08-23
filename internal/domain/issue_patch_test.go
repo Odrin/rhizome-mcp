@@ -169,3 +169,42 @@ func TestApplyIssuePatchRejectsInvalidStatusTransition(t *testing.T) {
 		t.Fatalf("ApplyIssuePatch() mutation = next %#v, changed %v; want no mutation", next, changed)
 	}
 }
+
+// TestApplyIssuePatchRejectsDirectTransitionToReviewOrDone covers ISSUE-172's
+// closing of docs/02 §17.1's gap: review and done are reachable only through
+// claim_issue/finish_attempt, never a direct update_issue patch --
+// unconditionally, regardless of the current stored status (even from a
+// status CanTransition alone would have permitted, like ready or review) and
+// regardless of any workflow policy (this path never evaluates one).
+func TestApplyIssuePatchRejectsDirectTransitionToReviewOrDone(t *testing.T) {
+	tests := []struct {
+		name    string
+		current domain.Status
+		target  domain.Status
+	}{
+		{name: "ready to review", current: domain.StatusReady, target: domain.StatusReview},
+		{name: "ready to done", current: domain.StatusReady, target: domain.StatusDone},
+		{name: "review to done", current: domain.StatusReview, target: domain.StatusDone},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			current := domain.Issue{Type: domain.TypeTask, Status: test.current}
+			next, changed, err := domain.ApplyIssuePatch(current, domain.IssuePatch{
+				Status: domain.OptionalValue[domain.Status]{Set: true, Value: test.target},
+			})
+			if !reflect.DeepEqual(next, domain.Issue{}) || changed != nil {
+				t.Fatalf("ApplyIssuePatch() mutation = next %#v, changed %v; want no mutation", next, changed)
+			}
+			domainErr, ok := err.(*domain.Error)
+			if !ok {
+				t.Fatalf("ApplyIssuePatch() error type = %T, want *domain.Error", err)
+			}
+			if domainErr.Code != "INVALID_STATUS_TRANSITION" || domainErr.Retryable {
+				t.Fatalf("ApplyIssuePatch() error = %+v, want non-retryable INVALID_STATUS_TRANSITION", domainErr)
+			}
+			if len(domainErr.Details) != 1 || domainErr.Details[0].Field != "changes.status" || domainErr.Details[0].Code != "UNSUPPORTED_DIRECT_TRANSITION" {
+				t.Fatalf("ApplyIssuePatch() details = %+v, want field=changes.status code=UNSUPPORTED_DIRECT_TRANSITION (docs/03 §7.2)", domainErr.Details)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -9,7 +10,10 @@ import (
 	"testing"
 
 	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 )
 
 func TestIssueUpdatePersistsPatchStatusEventAndCanonicalParent(t *testing.T) {
@@ -65,7 +69,7 @@ func TestIssueUpdatePersistsPatchStatusEventAndCanonicalParent(t *testing.T) {
 }
 
 func TestIssueUpdateBlockedTransitionsClosedAtAndRegularEvent(t *testing.T) {
-	service, db, _ := openIssueService(t)
+	service, db, now := openIssueService(t)
 	ctx := context.Background()
 	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeBug, Title: "Bug"})
 	if err != nil {
@@ -94,7 +98,29 @@ func TestIssueUpdateBlockedTransitionsClosedAtAndRegularEvent(t *testing.T) {
 	if unblocked.Issue.BlockedReason != nil {
 		t.Fatalf("blocked reason not cleared: %#v", unblocked.Issue)
 	}
-	done, err := service.UpdateIssue(ctx, updateStatus(issue.ID, unblocked.Issue.Version, domain.StatusDone, nil))
+	// "done" is reachable only through claim_issue/finish_attempt now
+	// (docs/02 §17.1); update_issue no longer accepts it as a direct patch
+	// target.
+	attemptRepository, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptGenerator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := application.NewAttemptService(attemptRepository, clock.NewFakeClock(now), attemptGenerator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := attempts.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: unblocked.Issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := attempts.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Outcome: domain.AttemptOutcomeCompleted,
+		ResultSummary: "done", TargetIssueStatus: statusPointer(domain.StatusDone),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,39 +9,41 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
-// seedAttemptGateSnapshot writes a minimal attempt_gate_snapshots row
-// directly, since inserting one is an unexported package-internal helper
-// (ISSUE-170) meant to be called from inside a live claim transaction, not
-// from an external test.
-func seedAttemptGateSnapshot(t *testing.T, fixture *attemptTestFixture, attemptID string, requirements []domain.PolicyRequirement) {
+// claimGateEvidenceIssueWithRequirements creates a workflow policy matching
+// every task with requirements, then creates and claims a ready issue --
+// letting the real claim_work gate evaluation (ISSUE-172) freeze exactly
+// those requirements into the new attempt's snapshot, the same way
+// production does. This replaces hand-seeding an attempt_gate_snapshots row
+// directly: claim_work now always writes one itself, and the table is
+// immutable (docs/02 §17.6), so a second write for the same attempt would
+// be rejected.
+func claimGateEvidenceIssueWithRequirements(t *testing.T, fixture *attemptTestFixture, title string, requirements []domain.PolicyRequirementInput) (issueID string, claimed application.ClaimIssueResult) {
 	t.Helper()
-	snapshot, err := domain.NewGateSnapshot(requirements, []domain.SourcePolicyRef{{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Version: 1}}, 1, fixture.clock.Now())
+	createGateEvidencePolicy(t, fixture, requirements)
+	return claimReadyIssueForEvidence(t, fixture, title)
+}
+
+func createGateEvidencePolicy(t *testing.T, fixture *attemptTestFixture, requirements []domain.PolicyRequirementInput) domain.WorkflowPolicy {
+	t.Helper()
+	policyRepository, err := sqlite.NewWorkflowPolicyRepository(fixture.db)
 	if err != nil {
-		t.Fatalf("NewGateSnapshot() error = %v", err)
+		t.Fatal(err)
 	}
-	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
-		requirementsJSON := `[`
-		for index, requirement := range requirements {
-			if index > 0 {
-				requirementsJSON += ","
-			}
-			requirementsJSON += `{"policy_id":"` + requirement.PolicyID + `","key":"` + requirement.Key + `","kind":"` + string(requirement.Kind) + `","evidence_key":"` + requirement.EvidenceKey + `"`
-			if requirement.AllowNotApplicable {
-				requirementsJSON += `,"allow_not_applicable":true`
-			}
-			requirementsJSON += `}`
-		}
-		requirementsJSON += `]`
-		_, err := tx.ExecContext(ctx, `INSERT INTO attempt_gate_snapshots(
-			attempt_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at
-		) VALUES (?, ?, '[{"policy_id":"01ARZ3NDEKTSV4RRFFQ69G5FE0","version":1}]', ?, ?, ?)`,
-			attemptID, requirementsJSON, snapshot.Fingerprint, snapshot.IssueVersion, sqlite.FormatStorageTime(fixture.clock.Now()))
-		return err
-	}); err != nil {
-		t.Fatalf("seed attempt gate snapshot: %v", err)
+	policy, err := policyRepository.CreatePolicy(fixture.ctx, ports.CreateWorkflowPolicyCommand{
+		ID: fixture.newID(t),
+		Input: domain.WorkflowPolicyInput{
+			Selector:     domain.PolicySelectorInput{IssueTypes: []domain.Type{domain.TypeTask}},
+			Requirements: requirements,
+		},
+		CreatedAt: fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreatePolicy() error = %v", err)
 	}
+	return policy
 }
 
 func seedGateEvidenceArtifact(t *testing.T, fixture *attemptTestFixture, id, issueID, attemptID string) {
@@ -68,9 +70,8 @@ func claimReadyIssueForEvidence(t *testing.T, fixture *attemptTestFixture, title
 func TestSubmitGateEvidenceValidatesAgainstSnapshotAndUpserts(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-upsert")
 	defer fixture.close()
-	issueID, claimed := claimReadyIssueForEvidence(t, fixture, "evidence issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	issueID, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "evidence issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	artifactID := "01ARZ3NDEKTSV4RRFFQ69G5FE1"
 	seedGateEvidenceArtifact(t, fixture, artifactID, issueID, claimed.Attempt.ID)
@@ -123,10 +124,9 @@ func TestSubmitGateEvidenceRejectsUnknownKey(t *testing.T) {
 func TestSubmitGateEvidenceForbidsNotApplicableUnlessAllowed(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-not-applicable")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "not applicable issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "strict", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "strict_key"},
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "lenient", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "lenient_key", AllowNotApplicable: true},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "not applicable issue", []domain.PolicyRequirementInput{
+		{Key: "strict", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "strict_key"},
+		{Key: "lenient", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "lenient_key", AllowNotApplicable: true},
 	})
 
 	_, err := fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
@@ -150,11 +150,10 @@ func TestSubmitGateEvidenceForbidsNotApplicableUnlessAllowed(t *testing.T) {
 func TestSubmitGateEvidenceRejectsCrossIssueArtifact(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-cross-issue")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "issue A")
-	otherIssue := createAttemptIssue(t, fixture, "issue B", domain.StatusReady)
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "issue A", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
+	otherIssue := createAttemptIssue(t, fixture, "issue B", domain.StatusReady)
 	foreignArtifactID := "01ARZ3NDEKTSV4RRFFQ69G5FE2"
 	seedGateEvidenceArtifact(t, fixture, foreignArtifactID, otherIssue.Issue.ID, claimed.Attempt.ID)
 
@@ -168,9 +167,8 @@ func TestSubmitGateEvidenceRejectsCrossIssueArtifact(t *testing.T) {
 func TestSubmitGateEvidenceRejectsWrongToken(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-wrong-token")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "wrong token issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "wrong token issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	_, err := fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
 		AttemptID: claimed.Attempt.ID, LeaseToken: "wrong-token-wrong-token-wrong-token", Key: "implementation",
@@ -182,14 +180,14 @@ func TestSubmitGateEvidenceRejectsWrongToken(t *testing.T) {
 func TestSubmitGateEvidenceRejectsExpiredLease(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-expired")
 	defer fixture.close()
+	createGateEvidencePolicy(t, fixture, []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	})
 	issue := createAttemptIssue(t, fixture, "expired lease issue", domain.StatusReady)
 	claimed, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.Issue.ID, LeaseSeconds: intPointer(60)})
 	if err != nil {
 		t.Fatalf("ClaimIssue() error = %v", err)
 	}
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
-	})
 	fixture.clock.Advance(90 * time.Second)
 
 	_, err = fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
@@ -202,9 +200,8 @@ func TestSubmitGateEvidenceRejectsExpiredLease(t *testing.T) {
 func TestSubmitGateEvidenceRejectsFinishedAttempt(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-finished")
 	defer fixture.close()
-	issueID, claimed := claimReadyIssueForEvidence(t, fixture, "finished issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	issueID, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "finished issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	_, err := fixture.attempts.FinishAttempt(fixture.ctx, domain.FinishAttemptInput{
 		AttemptID: claimed.Attempt.ID, LeaseToken: claimed.LeaseToken, Outcome: domain.AttemptOutcomeCompleted,
@@ -237,6 +234,14 @@ func TestSubmitGateEvidenceRejectsReviewAttempt(t *testing.T) {
 		t.Fatalf("FinishAttempt() to review error = %v", err)
 	}
 
+	// Create the requirement only now, after the work attempt already
+	// finished to review: claim_work freezes a fresh snapshot per attempt,
+	// so this reaches the upcoming review claim's snapshot without making
+	// the completed work attempt's own (already-frozen, empty) snapshot
+	// retroactively unsatisfied.
+	createGateEvidencePolicy(t, fixture, []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	})
 	reviewClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.Issue.ID})
 	if err != nil {
 		t.Fatalf("ClaimIssue() on a review-status issue error = %v", err)
@@ -244,9 +249,6 @@ func TestSubmitGateEvidenceRejectsReviewAttempt(t *testing.T) {
 	if reviewClaim.Attempt.Kind != domain.AttemptKindReview {
 		t.Fatalf("claimed attempt kind = %q, want review", reviewClaim.Attempt.Kind)
 	}
-	seedAttemptGateSnapshot(t, fixture, reviewClaim.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
-	})
 	_, err = fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
 		AttemptID: reviewClaim.Attempt.ID, LeaseToken: reviewClaim.LeaseToken, Key: "implementation",
 		Result: domain.EvidenceResultSatisfied, Summary: "review attempts cannot submit evidence",
@@ -257,9 +259,8 @@ func TestSubmitGateEvidenceRejectsReviewAttempt(t *testing.T) {
 func TestSubmitGateEvidenceIdempotentReplayAndConflict(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-idempotency")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "idempotent issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "idempotent issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	key := "evidence-retry"
 	input := domain.SubmitGateEvidenceInput{
@@ -287,9 +288,8 @@ func TestSubmitGateEvidenceIdempotentReplayAndConflict(t *testing.T) {
 func TestSubmitGateEvidenceConcurrentUpsertsAreRaceSafe(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-race")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "race issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "race issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 
 	var wg sync.WaitGroup
@@ -323,9 +323,8 @@ func TestSubmitGateEvidenceConcurrentUpsertsAreRaceSafe(t *testing.T) {
 func TestGateEvidenceIsImmutableAndNeverDeletedOnceAttemptIsInactive(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-immutable")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "immutable issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "immutable issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	submitted, err := fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
 		AttemptID: claimed.Attempt.ID, LeaseToken: claimed.LeaseToken, Key: "implementation",
@@ -370,9 +369,8 @@ func TestGateEvidenceIsImmutableAndNeverDeletedOnceAttemptIsInactive(t *testing.
 func TestAttemptEvidenceReturnsStorageCorruptForInvalidRows(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-evidence-corrupt")
 	defer fixture.close()
-	_, claimed := claimReadyIssueForEvidence(t, fixture, "corrupt issue")
-	seedAttemptGateSnapshot(t, fixture, claimed.Attempt.ID, []domain.PolicyRequirement{
-		{PolicyID: "01ARZ3NDEKTSV4RRFFQ69G5FE0", Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+	_, claimed := claimGateEvidenceIssueWithRequirements(t, fixture, "corrupt issue", []domain.PolicyRequirementInput{
+		{Key: "impl", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
 	})
 	if _, err := fixture.attempts.SubmitGateEvidence(fixture.ctx, domain.SubmitGateEvidenceInput{
 		AttemptID: claimed.Attempt.ID, LeaseToken: claimed.LeaseToken, Key: "implementation",

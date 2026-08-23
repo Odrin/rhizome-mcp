@@ -261,6 +261,12 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 		if err != nil {
 			return err
 		}
+		claimEvidence := domain.GateEvidence{AcceptanceCriteriaBlank: acceptanceCriteriaBlank(issue.AcceptanceCriteria)}
+		gateRequirements, gateSourcePolicies, err := evaluateGateAgainstLivePolicies(
+			ctx, tx, domain.EnforcementPointClaimWork, issue.Type, labelNames(issue.Labels), claimEvidence)
+		if err != nil {
+			return err
+		}
 		var latestEventID int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
 			return err
@@ -275,6 +281,13 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 			if isActiveAttemptConstraint(err) {
 				return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
 			}
+			return err
+		}
+		gateSnapshot, err := domain.NewGateSnapshot(gateRequirements, gateSourcePolicies, issue.Version, now)
+		if err != nil {
+			return err
+		}
+		if err := insertAttemptGateSnapshot(ctx, tx, command.AttemptID, gateSnapshot); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(struct {
@@ -1014,6 +1027,19 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			blockedReason, err := domain.ApplyFinishTransition(issue.Status, target, stringValue(input.BlockedReason))
 			if err != nil {
 				return err
+			}
+			if point, gated := enforcementPointForFinish(kind, target, input.ReviewOutcome); gated {
+				finishEvidence := domain.GateEvidence{AcceptanceCriteriaBlank: acceptanceCriteriaBlank(issue.AcceptanceCriteria)}
+				if point == domain.EnforcementPointCompleteWorkToReview || point == domain.EnforcementPointCompleteWorkToDone {
+					evidenceKeys, err := loadAttemptEvidenceKeys(ctx, tx, command.AttemptID)
+					if err != nil {
+						return err
+					}
+					finishEvidence.AttemptEvidenceKeys = evidenceKeys
+				}
+				if err := evaluateGateAgainstAttemptSnapshot(ctx, tx, point, command.AttemptID, finishEvidence); err != nil {
+					return err
+				}
 			}
 			closedAt := domain.NextClosedAt(issue.Status, target, now, issue.ClosedAt)
 			res, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, blocked_reason = ?, version = version + 1, updated_at = ?, closed_at = ?
