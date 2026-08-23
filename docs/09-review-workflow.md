@@ -5,15 +5,17 @@
 A workflow policy's `review_approval` requirement (docs/02 §17) names a
 purpose (e.g. `"security"`) that must have a matching immutable approval
 record before `approve_review` -- or a work attempt completing straight to
-`done` -- can succeed. That approval record is a distinct, purpose-scoped
-concept from the review request described below: one issue can have at most
-one open-or-claimed general review request at a time (see below), but a
-policy can require several independently-satisfied purposes (for example
-`"security"` and `"design"`) before the issue can reach `done`. How an
-approval record is created, who can grant one, and how it binds to an issue
-version is specified by ISSUE-173, not by this document. This document
-covers only the general implementation review request lifecycle, which
-`approve_review` still uses to route `review -> done`.
+`done` -- can succeed. That approval record is granted by the review request
+described below, not a separate entity: a request declares the `purposes` it
+covers (ISSUE-173), one issue can have at most one open-or-claimed request at
+a time (see below), and a single request can cover several purposes at once
+(for example `"implementation"` and `"security"`) rather than needing one
+request per purpose. Creating or replacing a request resolves the target's
+currently-active `review_approval` requirements and rejects a request whose
+purposes do not cover all of them (`REVIEW_PURPOSE_REQUIRED`); approving the
+request then grants one immutable, purpose-scoped approval row per purpose it
+covers, bound to the request's target (issue version and event position).
+Full contract: docs/02 §17.5, docs/03 §7.6.
 
 ## Review request
 
@@ -26,6 +28,7 @@ review_request
   target_issue_version
   target_event_id
   artifact_ids
+  purposes
   status: open | claimed | approved | changes_requested | blocked | cancelled | superseded
   supersedes_id nullable
   created_at
@@ -33,9 +36,10 @@ review_request
 ```
 
 The request stores an exact issue version and latest event position, plus a
-bounded ordered list of artifact IDs. It does not store a reviewer identity.
-Reviewer attribution is supplied by the existing leased work attempt and its
-temporary agent session.
+bounded ordered list of artifact IDs and the purposes it covers (a unique
+sorted list of 1-10 normalized keys, `[implementation]` by default). It does
+not store a reviewer identity. Reviewer attribution is supplied by the
+existing leased work attempt and its temporary agent session.
 
 Only one `open` or `claimed` request may exist for the same
 `issue_id`/`target_issue_version` pair. A duplicate create is idempotent only
@@ -67,11 +71,11 @@ stores `in_progress`.
 
 Use the review workflow in this order when you need a durable review handoff:
 
-1. Request: create a review request with the exact target issue version, latest event position, and artifact IDs you want to freeze. The request captures that immutable snapshot and remains open until it is claimed or superseded.
+1. Request: create a review request with the exact target issue version, latest event position, artifact IDs, and purposes you want to freeze (purposes default to `[implementation]`, and any purpose an active `review_approval` policy currently requires for this target must be included or the call fails with `REVIEW_PURPOSE_REQUIRED`). The request captures that immutable snapshot and remains open until it is claimed or superseded.
 2. Discover: list or get review requests to find the request for the target you want to review. Review requests are discoverable from planning and work context, and a request that is still claimable is reported as `claimable`.
 3. Claim: start a review attempt with `claim_issue` against the review issue. The attempt automatically binds the issue's open review request to the new attempt in the same transaction (no separate operation needed); if no open request exists, the attempt simply proceeds unbound. A claimed request is derived from the active review attempt; if the lease expires before completion, the request returns to `open` and can be claimed again.
 4. Complete: finish the active review attempt with `finish_attempt` and an explicit review outcome of `approved`, `changes_requested`, or `blocked`. `approved` finishes the request and marks the issue `done`; `changes_requested` leaves the issue `ready` and records that follow-up is required; `blocked` marks the issue `blocked`.
-5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, create a fresh review request for the new target version/event and repeat the discover/claim/complete cycle.
+5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, create a fresh review request for the new target version/event (via `replace_review_request`, which inherits the predecessor's purposes unless the new request names different ones) and repeat the discover/claim/complete cycle.
 
 Recovery examples:
 

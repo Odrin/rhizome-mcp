@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -49,6 +50,7 @@ type ReviewRequest struct {
 	TargetIssueVersion int64
 	TargetEventID      int64
 	ArtifactIDs        []string
+	Purposes           []string
 	Status             ReviewRequestStatus
 	SupersedesID       *string
 	ActiveAttemptID    *string
@@ -64,8 +66,27 @@ type ReviewTarget struct {
 	IssueVersion  int64
 	LatestEventID int64
 	ArtifactIDs   []string
+	Purposes      []string
 	Version       int64
 	CreatedAt     time.Time
+}
+
+// ReviewApproval is one immutable, purpose-scoped approval record (ISSUE-173,
+// docs/02 §17.5): proof that an approved, non-stale review request granted
+// requirement.Purpose for the issue at TargetIssueVersion. A request grants
+// one approval per purpose it covers, written in the same transaction that
+// resolves the request to approved; approvals are never updated or deleted.
+type ReviewApproval struct {
+	ID                 string
+	IssueID            string
+	TargetID           string
+	RequestID          string
+	AttemptID          string
+	Purpose            string
+	TargetIssueVersion int64
+	TargetEventID      int64
+	Version            int64
+	CreatedAt          time.Time
 }
 
 // ReviewOutcomeRecord is the durable review resolution row for a request.
@@ -128,6 +149,52 @@ type ReviewEvent struct {
 // or replacement, matching the existing create_review_request bound.
 const MaxReviewArtifactIDs = 20
 
+// MaxReviewPurposes bounds the purposes list on a review request or target,
+// matching the CHECK constraint migration 012 adds to both tables.
+const MaxReviewPurposes = 10
+
+// DefaultReviewPurposes returns a fresh compatibility-default purposes list
+// (docs/02 §17.5) for a caller that names no purpose at all. Returns a new
+// slice on every call so callers can freely mutate or store the result.
+func DefaultReviewPurposes() []string { return []string{"implementation"} }
+
+// ValidateReviewPurposes trims, bounds, deduplicates, and sorts a
+// caller-supplied purposes list. Normalization matches
+// PolicyRequirement.Purpose's own (trim only, case preserved) so a review
+// request's purposes compare equal to policy-declared requirement purposes
+// by ordinary string equality -- this is deliberately not full label-style
+// case-folding. An empty input is rejected rather than silently defaulted;
+// callers wanting the compatibility default pass DefaultReviewPurposes()
+// explicitly.
+func ValidateReviewPurposes(purposes []string) ([]string, error) {
+	if len(purposes) == 0 {
+		return nil, validationError("purposes", "REQUIRED", "must include at least one purpose")
+	}
+	if len(purposes) > MaxReviewPurposes {
+		return nil, NewError(CodeLimitExceeded, fmt.Sprintf("purposes exceeds the maximum count of %d", MaxReviewPurposes), false,
+			Detail{Field: "purposes", Code: "MAX_ITEMS", Message: fmt.Sprintf("maximum %d", MaxReviewPurposes)})
+	}
+	normalized := make([]string, len(purposes))
+	seen := make(map[string]bool, len(purposes))
+	for index, purpose := range purposes {
+		if err := ValidateText("purposes", purpose, MaxPolicyKeyRunes); err != nil {
+			return nil, err
+		}
+		trimmed := strings.TrimSpace(purpose)
+		if trimmed == "" {
+			return nil, validationError("purposes", "REQUIRED", "must not contain a blank purpose")
+		}
+		if seen[trimmed] {
+			return nil, NewError(CodeInvalidArgument, fmt.Sprintf("purpose %q is repeated", trimmed), false,
+				Detail{Field: "purposes", Code: "DUPLICATE", Message: trimmed})
+		}
+		seen[trimmed] = true
+		normalized[index] = trimmed
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
 // ReplaceReviewRequestInput is a caller-owned request to atomically supersede
 // a predecessor review request and create its open successor in one
 // transaction. The predecessor determines the issue scope: there is no
@@ -140,7 +207,14 @@ type ReplaceReviewRequestInput struct {
 	TargetIssueVersion         int64
 	TargetEventID              int64
 	ArtifactIDs                []string
-	IdempotencyKey             string
+	// Purposes is optional: nil or empty means "inherit the predecessor's
+	// purposes", resolved by the repository once it has loaded the
+	// predecessor (docs/02 §17.5 says nothing about a successor changing
+	// scope, and the predecessor is the only source of that default this
+	// request-shape validator has no access to). A non-empty list is
+	// validated and normalized here like any other purposes list.
+	Purposes       []string
+	IdempotencyKey string
 }
 
 // Validate checks request-local replacement rules and returns a normalized
@@ -165,6 +239,13 @@ func (input ReplaceReviewRequestInput) Validate() (ReplaceReviewRequestInput, er
 	if err != nil {
 		return ReplaceReviewRequestInput{}, err
 	}
+	var purposes []string
+	if len(input.Purposes) > 0 {
+		purposes, err = ValidateReviewPurposes(input.Purposes)
+		if err != nil {
+			return ReplaceReviewRequestInput{}, err
+		}
+	}
 	key := strings.TrimSpace(input.IdempotencyKey)
 	if key == "" {
 		return ReplaceReviewRequestInput{}, validationError("idempotency_key", "REQUIRED", "must not be blank")
@@ -178,6 +259,7 @@ func (input ReplaceReviewRequestInput) Validate() (ReplaceReviewRequestInput, er
 		TargetIssueVersion:         input.TargetIssueVersion,
 		TargetEventID:              input.TargetEventID,
 		ArtifactIDs:                artifactIDs,
+		Purposes:                   purposes,
 		IdempotencyKey:             key,
 	}, nil
 }
@@ -192,12 +274,14 @@ func CanonicalReplaceReviewRequestRequest(input ReplaceReviewRequestInput) ([]by
 		TargetIssueVersion         int64    `json:"target_issue_version"`
 		TargetEventID              int64    `json:"target_event_id"`
 		ArtifactIDs                []string `json:"artifact_ids"`
+		Purposes                   []string `json:"purposes,omitempty"`
 	}{
 		PredecessorRequestID:       input.PredecessorRequestID,
 		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
 		TargetIssueVersion:         input.TargetIssueVersion,
 		TargetEventID:              input.TargetEventID,
 		ArtifactIDs:                input.ArtifactIDs,
+		Purposes:                   input.Purposes,
 	}
 	return json.Marshal(request)
 }

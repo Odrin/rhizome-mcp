@@ -207,6 +207,7 @@ type replaceReviewRequestInput struct {
 	TargetIssueVersion         int64    `json:"target_issue_version"`
 	TargetEventID              int64    `json:"target_event_id"`
 	ArtifactIDs                []string `json:"artifact_ids,omitempty"`
+	Purposes                   []string `json:"purposes,omitempty"`
 	IdempotencyKey             string   `json:"idempotency_key"`
 }
 
@@ -470,6 +471,7 @@ func reviewRequestDTOFromDomain(request domain.ReviewRequest, claimable bool) re
 		TargetIssueVersion: request.TargetIssueVersion,
 		TargetEventID:      request.TargetEventID,
 		ArtifactIDs:        append([]string(nil), request.ArtifactIDs...),
+		Purposes:           append([]string(nil), request.Purposes...),
 		Status:             string(request.Status),
 		SupersedesID:       copyReviewOptionalString(request.SupersedesID),
 		ActiveAttemptID:    copyReviewOptionalString(request.ActiveAttemptID),
@@ -655,6 +657,7 @@ type reviewRequestDTO struct {
 	TargetIssueVersion int64      `json:"target_issue_version"`
 	TargetEventID      int64      `json:"target_event_id"`
 	ArtifactIDs        []string   `json:"artifact_ids"`
+	Purposes           []string   `json:"purposes"`
 	Status             string     `json:"status"`
 	SupersedesID       *string    `json:"supersedes_id,omitempty"`
 	ActiveAttemptID    *string    `json:"active_attempt_id,omitempty"`

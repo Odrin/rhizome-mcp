@@ -323,12 +323,15 @@ func schemaCancelReviewRequest() *jsonschema.Schema {
 }
 
 func schemaReplaceReviewRequest() *jsonschema.Schema {
+	purposes := boundedStringsSchema(domain.MaxReviewPurposes, domain.MaxPolicyKeyRunes)
+	purposes.Description = "Purposes the successor covers. Omit to inherit the predecessor's purposes; a non-empty list must cover every purpose an active review_approval policy currently requires for this target, or the call fails with REVIEW_PURPOSE_REQUIRED."
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"predecessor_request_id":       reviewRequestIdentifierSchema(),
 		"predecessor_expected_version": boundedIntegerSchema(1, 9_223_372_036_854_775_807),
 		"target_issue_version":         boundedIntegerSchema(1, 9_223_372_036_854_775_807),
 		"target_event_id":              boundedIntegerSchema(0, 9_223_372_036_854_775_807),
 		"artifact_ids":                 boundedStringsSchema(domain.MaxReviewArtifactIDs, 4_096),
+		"purposes":                     purposes,
 		"idempotency_key":              boundedStringSchema(domain.MaxIdempotencyKeyRunes),
 	}, "predecessor_request_id", "predecessor_expected_version", "target_issue_version", "target_event_id", "idempotency_key"))
 }

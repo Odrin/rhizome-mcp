@@ -604,6 +604,7 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 
 	// Create first review request: for get_review_request and list_review_requests testing.
 	firstRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB1",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB2",
 		IssueID:            issueOutput1.ID,
@@ -651,6 +652,7 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 
 	// Create a second review request for cancel testing.
 	secondRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB3",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB4",
 		IssueID:            issueOutput2.ID,
@@ -688,6 +690,7 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 
 	// Create a third review request for replace testing.
 	thirdRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB5",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB6",
 		IssueID:            issueOutput3.ID,

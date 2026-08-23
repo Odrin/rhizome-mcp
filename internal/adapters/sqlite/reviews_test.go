@@ -26,6 +26,7 @@ func TestReviewRepositoryLifecycleCreatesEventsAndOutcome(t *testing.T) {
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -90,6 +91,7 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 	issueID := fixture.insertIssue(t, "follow-up review")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -132,6 +134,7 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 	}
 
 	reviewed, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -165,6 +168,7 @@ func TestReviewRepositoryBlockedOutcomeKeepsReason(t *testing.T) {
 	issueID := fixture.insertIssue(t, "blocked review")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -212,6 +216,7 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 	issueID := fixture.insertIssue(t, "duplicate review")
 
 	command := ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -261,6 +266,7 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 	}
 
 	conflicting, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -284,6 +290,7 @@ func TestReviewRepositoryConcurrentClaimsHaveOneWinner(t *testing.T) {
 	issueID := fixture.insertIssue(t, "concurrent review claim")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -341,6 +348,7 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
@@ -386,6 +394,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 
 	issueID := fixture.insertIssue(t, "replace target issue")
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 3, ArtifactIDs: []string{"artifact-1"},
@@ -484,6 +493,7 @@ func TestReviewRepositoryReplaceRejectsClaimedPredecessorWithZeroWrites(t *testi
 	issueID := fixture.insertIssue(t, "claimed predecessor issue")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
@@ -536,6 +546,7 @@ func TestReviewRepositoryReplaceRejectsTerminalPredecessor(t *testing.T) {
 
 	issueID := fixture.insertIssue(t, "terminal predecessor issue")
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
@@ -570,6 +581,7 @@ func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) 
 
 	issueID := fixture.insertIssue(t, "version conflict predecessor")
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
@@ -621,6 +633,7 @@ func TestReviewRepositoryConcurrentReplaceHaveOneWinner(t *testing.T) {
 
 	issueID := fixture.insertIssue(t, "concurrent replace issue")
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
@@ -688,6 +701,7 @@ func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *t
 
 	issueID := fixture.insertIssue(t, "concurrent independent replace issue")
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},

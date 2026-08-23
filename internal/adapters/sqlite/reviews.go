@@ -3,12 +3,17 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
@@ -58,8 +63,13 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 	if command.TargetEventID < 0 {
 		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeInvalidArgument, "target_event_id must be >= 0", false)
 	}
+	purposes, err := domain.ValidateReviewPurposes(command.Purposes)
+	if err != nil {
+		return ports.CreateReviewRequestResult{}, err
+	}
+	command.Purposes = purposes
 	var result ports.CreateReviewRequestResult
-	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+	err = repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		target, err := repository.ensureTarget(ctx, tx, command)
 		if err != nil {
 			return err
@@ -69,32 +79,39 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 			return err
 		}
 		if activeRequest != nil {
-			if sameArtifactIDs(activeRequest.ArtifactIDs, command.ArtifactIDs) && sameSupersedesID(activeRequest.SupersedesID, command.SupersedesID) && activeRequest.TargetIssueVersion == command.TargetIssueVersion && activeRequest.TargetEventID == command.TargetEventID && activeRequest.IssueID == command.IssueID {
+			if sameArtifactIDs(activeRequest.ArtifactIDs, command.ArtifactIDs) && sameSupersedesID(activeRequest.SupersedesID, command.SupersedesID) && activeRequest.TargetIssueVersion == command.TargetIssueVersion && activeRequest.TargetEventID == command.TargetEventID && activeRequest.IssueID == command.IssueID && samePurposes(activeRequest.Purposes, command.Purposes) {
 				result.Request = *activeRequest
 				result.Target = target
 				return nil
 			}
 			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
 		}
+		if err := requireReviewPurposeCoverage(ctx, tx, target.ID, command.Purposes); err != nil {
+			return err
+		}
 		requestID := command.RequestID
 		artifactIDsJSON, err := jsonMarshalArtifacts(command.ArtifactIDs)
+		if err != nil {
+			return err
+		}
+		purposesJSON, err := marshalReviewPurposes(command.Purposes)
 		if err != nil {
 			return err
 		}
 		requestVersion := int64(1)
 		createdAt := formatStorageTime(command.OccurredAt)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
-            id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json,
+            id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json,
             status, supersedes_id, active_attempt_id, version, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL)`,
-			requestID, target.ID, command.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON),
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL)`,
+			requestID, target.ID, command.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON), string(purposesJSON),
 			stringOrNil(command.SupersedesID), requestVersion, createdAt,
 		); err != nil {
 			activeRequest, err := repository.loadActiveRequestForTarget(ctx, tx, target.ID)
 			if err != nil {
 				return err
 			}
-			if activeRequest != nil && sameArtifactIDs(activeRequest.ArtifactIDs, command.ArtifactIDs) && sameSupersedesID(activeRequest.SupersedesID, command.SupersedesID) && activeRequest.TargetIssueVersion == command.TargetIssueVersion && activeRequest.TargetEventID == command.TargetEventID && activeRequest.IssueID == command.IssueID {
+			if activeRequest != nil && sameArtifactIDs(activeRequest.ArtifactIDs, command.ArtifactIDs) && sameSupersedesID(activeRequest.SupersedesID, command.SupersedesID) && activeRequest.TargetIssueVersion == command.TargetIssueVersion && activeRequest.TargetEventID == command.TargetEventID && activeRequest.IssueID == command.IssueID && samePurposes(activeRequest.Purposes, command.Purposes) {
 				result.Request = *activeRequest
 				result.Target = target
 				return nil
@@ -111,6 +128,7 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 			TargetIssueVersion: command.TargetIssueVersion,
 			TargetEventID:      command.TargetEventID,
 			ArtifactIDs:        append([]string(nil), command.ArtifactIDs...),
+			Purposes:           append([]string(nil), command.Purposes...),
 			Status:             domain.ReviewRequestStatusOpen,
 			SupersedesID:       copyOptionalString(command.SupersedesID),
 			Version:            requestVersion,
@@ -165,7 +183,7 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 	}
 	var items []domain.ReviewRequest
 	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
-		rows, err := queryer.QueryContext(ctx, `SELECT review_requests.id, review_requests.target_id, review_requests.issue_id, review_requests.target_issue_version, review_requests.target_event_id, review_requests.artifact_ids_json, review_requests.status, review_requests.supersedes_id, review_requests.active_attempt_id, review_requests.version, review_requests.created_at, review_requests.resolved_at
+		rows, err := queryer.QueryContext(ctx, `SELECT `+reviewRequestColumnsQualified+`
             FROM review_requests
             LEFT JOIN review_targets ON review_targets.id = review_requests.target_id
             `+where+` ORDER BY review_requests.created_at DESC, review_requests.id DESC LIMIT ? OFFSET ?`, append(args, query.Limit+1, query.Offset)...)
@@ -174,33 +192,9 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var request domain.ReviewRequest
-			var artifactIDsJSON []byte
-			var status string
-			var supersedesID sql.NullString
-			var activeAttemptID sql.NullString
-			var createdAtText string
-			var resolvedAtText sql.NullString
-			if err := rows.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
-				return err
-			}
-			request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
+			request, err := scanReviewRequestRow(rows)
 			if err != nil {
 				return err
-			}
-			request.Status = domain.ReviewRequestStatus(status)
-			if supersedesID.Valid {
-				value := supersedesID.String
-				request.SupersedesID = &value
-			}
-			if activeAttemptID.Valid {
-				value := activeAttemptID.String
-				request.ActiveAttemptID = &value
-			}
-			request.CreatedAt = parseTimestamp(createdAtText)
-			if resolvedAtText.Valid {
-				value := parseTimestamp(resolvedAtText.String)
-				request.ResolvedAt = &value
 			}
 			items = append(items, request)
 		}
@@ -342,6 +336,16 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			return domain.NewError(domain.CodeReviewRequestNotReplaceable, "review request cannot be replaced", false)
 		}
 
+		// A caller that names no purposes inherits the predecessor's --
+		// there is nothing else to inherit from at this layer (domain
+		// validation has no predecessor to read), and re-review typically
+		// continues covering the same scope. A caller that does name
+		// purposes gets exactly those, already validated and normalized.
+		purposes := command.Purposes
+		if len(purposes) == 0 {
+			purposes = predecessor.Purposes
+		}
+
 		target, err := repository.ensureTarget(ctx, tx, ports.CreateReviewRequestCommand{
 			RequestID:          "",
 			TargetID:           command.SuccessorTargetID,
@@ -349,6 +353,7 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			TargetIssueVersion: command.TargetIssueVersion,
 			TargetEventID:      command.TargetEventID,
 			ArtifactIDs:        command.ArtifactIDs,
+			Purposes:           purposes,
 			OccurredAt:         command.OccurredAt,
 		})
 		if err != nil {
@@ -360,6 +365,9 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 		}
 		if activeForTarget != nil && activeForTarget.ID != predecessor.ID {
 			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
+		}
+		if err := requireReviewPurposeCoverage(ctx, tx, target.ID, purposes); err != nil {
+			return err
 		}
 
 		occurredAt := formatStorageTime(command.OccurredAt)
@@ -373,11 +381,15 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 		if err != nil {
 			return err
 		}
+		purposesJSON, err := marshalReviewPurposes(purposes)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
-            id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json,
+            id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json,
             status, supersedes_id, active_attempt_id, version, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, 1, ?, NULL)`,
-			successorID, target.ID, predecessor.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON),
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, 1, ?, NULL)`,
+			successorID, target.ID, predecessor.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON), string(purposesJSON),
 			predecessor.ID, occurredAt,
 		); err != nil {
 			return err
@@ -412,6 +424,7 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 				TargetIssueVersion: command.TargetIssueVersion,
 				TargetEventID:      command.TargetEventID,
 				ArtifactIDs:        append([]string(nil), command.ArtifactIDs...),
+				Purposes:           append([]string(nil), purposes...),
 				Status:             domain.ReviewRequestStatusOpen,
 				SupersedesID:       &supersedesID,
 				Version:            1,
@@ -573,6 +586,70 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 	return result, nil
 }
 
+const reviewRequestColumns = `id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at`
+
+const reviewRequestColumnsQualified = `review_requests.id, review_requests.target_id, review_requests.issue_id, review_requests.target_issue_version, review_requests.target_event_id, review_requests.artifact_ids_json, review_requests.purposes_json, review_requests.status, review_requests.supersedes_id, review_requests.active_attempt_id, review_requests.version, review_requests.created_at, review_requests.resolved_at`
+
+// scanReviewRequestRow scans one row shaped like reviewRequestColumns (or its
+// qualified counterpart) into a domain.ReviewRequest.
+func scanReviewRequestRow(row scanner) (domain.ReviewRequest, error) {
+	var request domain.ReviewRequest
+	var artifactIDsJSON, purposesJSON []byte
+	var status string
+	var supersedesID, activeAttemptID sql.NullString
+	var createdAtText string
+	var resolvedAtText sql.NullString
+	if err := row.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID,
+		&artifactIDsJSON, &purposesJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
+		return domain.ReviewRequest{}, err
+	}
+	artifactIDs, err := unmarshalArtifactIDs(artifactIDsJSON)
+	if err != nil {
+		return domain.ReviewRequest{}, err
+	}
+	purposes, err := unmarshalReviewPurposes(purposesJSON)
+	if err != nil {
+		return domain.ReviewRequest{}, err
+	}
+	request.ArtifactIDs = artifactIDs
+	request.Purposes = purposes
+	request.Status = domain.ReviewRequestStatus(status)
+	if supersedesID.Valid {
+		value := supersedesID.String
+		request.SupersedesID = &value
+	}
+	if activeAttemptID.Valid {
+		value := activeAttemptID.String
+		request.ActiveAttemptID = &value
+	}
+	request.CreatedAt = parseTimestamp(createdAtText)
+	if resolvedAtText.Valid {
+		value := parseTimestamp(resolvedAtText.String)
+		request.ResolvedAt = &value
+	}
+	return request, nil
+}
+
+const reviewTargetColumns = `id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at`
+
+const reviewTargetColumnsQualified = `review_targets.id, review_targets.issue_id, review_targets.issue_version, review_targets.latest_event_id, review_targets.artifact_ids_json, review_targets.purposes_json, review_targets.version, review_targets.created_at`
+
+func scanReviewTargetRow(row scanner) (reviewTargetRow, error) {
+	var target reviewTargetRow
+	err := row.Scan(&target.ID, &target.IssueID, &target.IssueVersion, &target.LatestEventID,
+		&target.ArtifactIDsJSON, &target.PurposesJSON, &target.Version, &target.CreatedAtText)
+	return target, err
+}
+
+// ensureTarget returns the review target for (command.IssueID,
+// command.TargetIssueVersion), creating it -- together with its immutable
+// review_approval gate snapshot (docs/02 §17.6, ISSUE-173) -- the first time
+// any request names that issue version. A target is frozen once and reused
+// by every later request against the same issue version (the existing-row
+// branch below), so its own purposes and snapshot never change after
+// creation; callers must instead check their OWN purposes against the
+// target's frozen snapshot (done by CreateReviewRequest/ReplaceReviewRequest
+// right after this returns), not re-derive requirements here.
 func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executor, command ports.CreateReviewRequestCommand) (domain.ReviewTarget, error) {
 	artifactIDsJSON, err := jsonMarshalArtifacts(command.ArtifactIDs)
 	if err != nil {
@@ -580,11 +657,8 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 	}
 	createdAt := formatStorageTime(command.OccurredAt)
 
-	var row reviewTargetRow
-	err = tx.QueryRowContext(ctx, `SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
-        FROM review_targets WHERE issue_id = ? AND issue_version = ?`, command.IssueID, command.TargetIssueVersion).Scan(
-		&row.ID, &row.IssueID, &row.IssueVersion, &row.LatestEventID, &row.ArtifactIDsJSON, &row.Version, &row.CreatedAtText,
-	)
+	row, err := scanReviewTargetRow(tx.QueryRowContext(ctx, `SELECT `+reviewTargetColumns+`
+        FROM review_targets WHERE issue_id = ? AND issue_version = ?`, command.IssueID, command.TargetIssueVersion))
 	switch {
 	case err == nil:
 		artifactIDs, err := unmarshalArtifactIDs(row.ArtifactIDsJSON)
@@ -597,18 +671,17 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 		return domain.ReviewTarget{}, domain.NewError(domain.CodeReviewAlreadyExists, "review request target does not match the existing target", false)
 	case isNoRowsError(err):
 		targetID := command.TargetID
-		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at)
-			VALUES (?, ?, ?, ?, ?, 1, ?)`, targetID, command.IssueID, command.TargetIssueVersion, command.TargetEventID, string(artifactIDsJSON), createdAt); err != nil {
-			var existing reviewTargetRow
-			err = tx.QueryRowContext(ctx, `SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
-                FROM review_targets WHERE issue_id = ? AND issue_version = ?`, command.IssueID, command.TargetIssueVersion).Scan(
-				&existing.ID, &existing.IssueID, &existing.IssueVersion, &existing.LatestEventID, &existing.ArtifactIDsJSON, &existing.Version, &existing.CreatedAtText,
-			)
-			if err != nil {
-				if isNoRowsError(err) {
-					return domain.ReviewTarget{}, err
-				}
-				return domain.ReviewTarget{}, err
+		purposesJSON, err := marshalReviewPurposes(command.Purposes)
+		if err != nil {
+			return domain.ReviewTarget{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, 1, ?)`, targetID, command.IssueID, command.TargetIssueVersion, command.TargetEventID,
+			string(artifactIDsJSON), string(purposesJSON), createdAt); err != nil {
+			existing, existingErr := scanReviewTargetRow(tx.QueryRowContext(ctx, `SELECT `+reviewTargetColumns+`
+                FROM review_targets WHERE issue_id = ? AND issue_version = ?`, command.IssueID, command.TargetIssueVersion))
+			if existingErr != nil {
+				return domain.ReviewTarget{}, existingErr
 			}
 			artifactIDs, err := unmarshalArtifactIDs(existing.ArtifactIDsJSON)
 			if err != nil {
@@ -619,12 +692,16 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 			}
 			return domain.ReviewTarget{}, domain.NewError(domain.CodeReviewAlreadyExists, "review request target does not match the existing target", false)
 		}
+		if err := freezeReviewTargetGateSnapshot(ctx, tx, targetID, command.IssueID, command.TargetIssueVersion, command.OccurredAt); err != nil {
+			return domain.ReviewTarget{}, err
+		}
 		return domain.ReviewTarget{
 			ID:            targetID,
 			IssueID:       command.IssueID,
 			IssueVersion:  command.TargetIssueVersion,
 			LatestEventID: command.TargetEventID,
 			ArtifactIDs:   append([]string(nil), command.ArtifactIDs...),
+			Purposes:      append([]string(nil), command.Purposes...),
 			Version:       1,
 			CreatedAt:     parseTimestamp(createdAt),
 		}, nil
@@ -633,74 +710,162 @@ func (repository *ReviewRepository) ensureTarget(ctx context.Context, tx Executo
 	}
 }
 
+// freezeReviewTargetGateSnapshot resolves every currently active
+// review_approval requirement matching issueID's type/labels and freezes it
+// onto targetID's immutable gate snapshot (docs/02 §17.6), the review-target
+// counterpart of the full-requirement-set snapshot claim_work freezes onto a
+// work attempt. Unlike that full snapshot, this one is deliberately narrowed
+// to review_approval requirements: no other requirement kind ever applies at
+// approve_review (docs/02 §17.4), and complete_work_to_done -- the kind's
+// other applicable point -- re-evaluates against a live issue-scoped
+// approval lookup, not this snapshot.
+func freezeReviewTargetGateSnapshot(ctx context.Context, tx Executor, targetID, issueID string, issueVersion int64, now time.Time) error {
+	issue, err := loadIssueForMutation(ctx, tx, domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: issueID})
+	if err != nil {
+		return err
+	}
+	policies, err := loadActiveWorkflowPolicies(ctx, tx)
+	if err != nil {
+		return err
+	}
+	matched := domain.MatchWorkflowPolicies(policies, issue.Type, labelNames(issue.Labels))
+	sourcePolicies := matchingSourcePolicies(policies, issue.Type, labelNames(issue.Labels))
+	requirements := make([]domain.PolicyRequirement, 0, len(matched))
+	for _, requirement := range matched {
+		if requirement.Kind == domain.RequirementKindReviewApproval {
+			requirements = append(requirements, requirement)
+		}
+	}
+	snapshot, err := domain.NewGateSnapshot(requirements, sourcePolicies, issueVersion, now)
+	if err != nil {
+		return err
+	}
+	return insertReviewTargetGateSnapshot(ctx, tx, targetID, snapshot)
+}
+
+// reviewApprovalPurposesRequired returns the distinct, sorted set of
+// purposes a frozen review_approval requirement snapshot requires. Every
+// requirement in a review-target snapshot is review_approval-kind by
+// construction (freezeReviewTargetGateSnapshot never stores any other
+// kind), so this does not re-filter by kind.
+func reviewApprovalPurposesRequired(requirements []domain.PolicyRequirement) []string {
+	seen := make(map[string]bool, len(requirements))
+	var purposes []string
+	for _, requirement := range requirements {
+		if seen[requirement.Purpose] {
+			continue
+		}
+		seen[requirement.Purpose] = true
+		purposes = append(purposes, requirement.Purpose)
+	}
+	sort.Strings(purposes)
+	return purposes
+}
+
+// missingReviewPurposes returns the entries of required not present in
+// covered, sorted, for a deterministic error detail order.
+func missingReviewPurposes(required, covered []string) []string {
+	have := make(map[string]bool, len(covered))
+	for _, purpose := range covered {
+		have[purpose] = true
+	}
+	var missing []string
+	for _, purpose := range required {
+		if !have[purpose] {
+			missing = append(missing, purpose)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// requireReviewPurposeCoverage loads targetID's frozen review_approval
+// snapshot and rejects with CodeReviewPurposeRequired if purposes omits any
+// requirement it lists (docs/02 §17.5's "resolves current approve_review
+// requirements and rejects a request that does not include every required
+// purpose for its target"). A missing snapshot is treated as no
+// requirements, not an error, mirroring evaluateGateAgainstAttemptSnapshot's
+// same defensive handling -- every target created through ensureTarget
+// always has one, so this only guards against a target that somehow
+// predates this code path.
+func requireReviewPurposeCoverage(ctx context.Context, tx Executor, targetID string, purposes []string) error {
+	snapshot, err := loadGateSnapshot(ctx, tx, "review_target_gate_snapshots", "target_id", targetID)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) && domainErr.Code == domain.CodeGateSnapshotNotFound {
+			return nil
+		}
+		return err
+	}
+	required := reviewApprovalPurposesRequired(snapshot.Requirements)
+	missing := missingReviewPurposes(required, purposes)
+	if len(missing) == 0 {
+		return nil
+	}
+	details := make([]domain.Detail, len(missing))
+	for index, purpose := range missing {
+		details[index] = domain.Detail{Field: "purposes", Code: domain.CodeReviewPurposeRequired,
+			Message: fmt.Sprintf("purpose %q is required by an active review_approval policy for this target", purpose)}
+	}
+	return domain.NewError(domain.CodeReviewPurposeRequired, "review request purposes do not cover every required purpose", false, details...)
+}
+
 func (repository *ReviewRepository) loadActiveRequestForTarget(ctx context.Context, queryer Queryer, targetID string) (*domain.ReviewRequest, error) {
-	var request domain.ReviewRequest
-	var artifactIDsJSON []byte
-	var status string
-	var supersedesID sql.NullString
-	var activeAttemptID sql.NullString
-	var createdAtText string
-	var resolvedAtText sql.NullString
-	err := queryer.QueryRowContext(ctx, `SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at
-        FROM review_requests WHERE target_id = ? AND status IN ('open','claimed') ORDER BY created_at DESC LIMIT 1`, targetID).Scan(
-		&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText,
-	)
+	request, err := scanReviewRequestRow(queryer.QueryRowContext(ctx, `SELECT `+reviewRequestColumns+`
+        FROM review_requests WHERE target_id = ? AND status IN ('open','claimed') ORDER BY created_at DESC LIMIT 1`, targetID))
 	if err != nil {
 		if isNoRowsError(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
-	if err != nil {
-		return nil, err
-	}
-	request.Status = domain.ReviewRequestStatus(status)
-	if supersedesID.Valid {
-		value := supersedesID.String
-		request.SupersedesID = &value
-	}
-	if activeAttemptID.Valid {
-		value := activeAttemptID.String
-		request.ActiveAttemptID = &value
-	}
-	request.CreatedAt = parseTimestamp(createdAtText)
-	if resolvedAtText.Valid {
-		value := parseTimestamp(resolvedAtText.String)
-		request.ResolvedAt = &value
-	}
 	return &request, nil
 }
 
 func (repository *ReviewRepository) loadRequestForMutation(ctx context.Context, queryer Queryer, requestID string) (domain.ReviewRequest, domain.ReviewTarget, error) {
-	var request domain.ReviewRequest
-	var target domain.ReviewTarget
-	var artifactIDsJSON []byte
-	var status string
-	var supersedesID sql.NullString
-	var activeAttemptID sql.NullString
-	var createdAtText string
-	var resolvedAtText sql.NullString
-	var targetArtifactIDsJSON []byte
-	var targetCreatedAtText string
-	err := queryer.QueryRowContext(ctx, `SELECT review_requests.id, review_requests.target_id, review_requests.issue_id, review_requests.target_issue_version, review_requests.target_event_id, review_requests.artifact_ids_json, review_requests.status, review_requests.supersedes_id, review_requests.active_attempt_id, review_requests.version, review_requests.created_at, review_requests.resolved_at,
-        review_targets.id, review_targets.issue_id, review_targets.issue_version, review_targets.latest_event_id, review_targets.artifact_ids_json, review_targets.version, review_targets.created_at
+	row := queryer.QueryRowContext(ctx, `SELECT `+reviewRequestColumnsQualified+`,
+        `+reviewTargetColumnsQualified+`
         FROM review_requests
         LEFT JOIN review_targets ON review_targets.id = review_requests.target_id
-        WHERE review_requests.id = ?`, requestID).Scan(
-		&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText,
-		&target.ID, &target.IssueID, &target.IssueVersion, &target.LatestEventID, &targetArtifactIDsJSON, &target.Version, &targetCreatedAtText,
-	)
+        WHERE review_requests.id = ?`, requestID)
+	request, target, err := scanReviewRequestAndTargetRow(row)
 	if err != nil {
 		if isNoRowsError(err) {
 			return domain.ReviewRequest{}, domain.ReviewTarget{}, domain.NewError(domain.CodeIssueNotFound, "review request not found", false)
 		}
 		return domain.ReviewRequest{}, domain.ReviewTarget{}, err
 	}
-	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
+	return request, target, nil
+}
+
+// scanReviewRequestAndTargetRow scans one row shaped like
+// reviewRequestColumnsQualified followed by reviewTargetColumnsQualified --
+// the LEFT JOIN loadRequestForMutation runs to load a request with its
+// target in one round trip.
+func scanReviewRequestAndTargetRow(row scanner) (domain.ReviewRequest, domain.ReviewTarget, error) {
+	var request domain.ReviewRequest
+	var target reviewTargetRow
+	var artifactIDsJSON, purposesJSON []byte
+	var status string
+	var supersedesID, activeAttemptID sql.NullString
+	var createdAtText string
+	var resolvedAtText sql.NullString
+	if err := row.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID,
+		&artifactIDsJSON, &purposesJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText,
+		&target.ID, &target.IssueID, &target.IssueVersion, &target.LatestEventID, &target.ArtifactIDsJSON, &target.PurposesJSON, &target.Version, &target.CreatedAtText,
+	); err != nil {
+		return domain.ReviewRequest{}, domain.ReviewTarget{}, err
+	}
+	artifactIDs, err := unmarshalArtifactIDs(artifactIDsJSON)
 	if err != nil {
 		return domain.ReviewRequest{}, domain.ReviewTarget{}, err
 	}
+	purposes, err := unmarshalReviewPurposes(purposesJSON)
+	if err != nil {
+		return domain.ReviewRequest{}, domain.ReviewTarget{}, err
+	}
+	request.ArtifactIDs = artifactIDs
+	request.Purposes = purposes
 	request.Status = domain.ReviewRequestStatus(status)
 	if supersedesID.Valid {
 		value := supersedesID.String
@@ -715,14 +880,91 @@ func (repository *ReviewRepository) loadRequestForMutation(ctx context.Context, 
 		value := parseTimestamp(resolvedAtText.String)
 		request.ResolvedAt = &value
 	}
-	target.ArtifactIDs, err = unmarshalArtifactIDs(targetArtifactIDsJSON)
+	return request, reviewTargetFromRow(target), nil
+}
+
+// newReviewApprovalID mints a fresh ULID for one review_approvals row. Every
+// other write command's IDs are generated at the application layer (the
+// implementation baseline decision: "generate ULIDs from injected time and
+// cryptographic entropy" -- describing the mechanism, not literally
+// forbidding this), but the number of approvals one approve_review
+// resolution writes -- one per request.Purposes entry -- is discovered only
+// after loading, mid-transaction, the review request bound to the resolving
+// attempt (internal/adapters/sqlite/attempts.go's
+// loadActiveReviewRequestForAttempt). Unlike finish_attempt's artifact IDs,
+// whose count the caller's own input already fixes before the transaction
+// starts, no pre-transaction read can supply this count without adding a
+// speculative extra round trip and a TOCTOU window against the very request
+// this resolution is about to mutate. now is the same injected transaction
+// timestamp used everywhere else; only the entropy source (crypto/rand,
+// matching every other ID in this codebase) is sourced locally.
+func newReviewApprovalID(now time.Time) (string, error) {
+	id, err := ulid.New(ulid.Timestamp(now), rand.Reader)
 	if err != nil {
-		return domain.ReviewRequest{}, domain.ReviewTarget{}, err
+		return "", domain.WrapError(err, domain.CodeIDGeneration, "cannot generate review approval identifier", false)
 	}
-	if targetCreatedAtText != "" {
-		target.CreatedAt = parseTimestamp(targetCreatedAtText)
+	return id.String(), nil
+}
+
+// insertReviewApprovals writes one immutable review_approvals row per
+// purpose in request.Purposes, granted by attemptID's approval of request
+// (docs/02 §17.5, ISSUE-173). Called only for the approved outcome, in the
+// same transaction that resolves the request -- an approval is durable proof
+// tied to the exact target version/event position the request was bound to,
+// never re-derived later.
+func insertReviewApprovals(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, now time.Time) error {
+	timestamp := formatStorageTime(now)
+	for _, purpose := range request.Purposes {
+		id, err := newReviewApprovalID(now)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_approvals(
+			id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+			id, request.IssueID, request.TargetID, request.ID, attemptID, purpose, request.TargetIssueVersion, request.TargetEventID, timestamp,
+		); err != nil {
+			return err
+		}
 	}
-	return request, target, nil
+	return nil
+}
+
+// loadIssueReviewApprovalPurposes returns the distinct set of purposes
+// issueID holds at least one review_approval record for, regardless of
+// which target or issue version granted it (docs/02 §17.5 states plain
+// existence, with no staleness qualifier -- unlike approve_review, which
+// checks its own review target's frozen snapshot, complete_work_to_done has
+// no review target of its own to freeze against). Used to populate
+// GateEvidence.ReviewApprovalPurposes at complete_work_to_done.
+func loadIssueReviewApprovalPurposes(ctx context.Context, tx Executor, issueID string) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT purpose FROM review_approvals WHERE issue_id = ?`, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	purposes := make(map[string]bool)
+	for rows.Next() {
+		var purpose string
+		if err := rows.Scan(&purpose); err != nil {
+			return nil, err
+		}
+		purposes[purpose] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return purposes, nil
+}
+
+// reviewPurposeSet converts a purposes list to the set shape
+// domain.GateEvidence.ReviewApprovalPurposes expects.
+func reviewPurposeSet(purposes []string) map[string]bool {
+	set := make(map[string]bool, len(purposes))
+	for _, purpose := range purposes {
+		set[purpose] = true
+	}
+	return set
 }
 
 func reviewRequestStatusForOutcome(outcome domain.ReviewOutcome) domain.ReviewRequestStatus {
@@ -814,6 +1056,13 @@ func sameArtifactIDs(left []string, right []string) bool {
 	return reflect.DeepEqual(left, right)
 }
 
+// samePurposes compares two already-normalized (ValidateReviewPurposes)
+// purposes lists. Both sides are canonically sorted before storage, so
+// order-sensitive equality is correct here, matching sameArtifactIDs.
+func samePurposes(left, right []string) bool {
+	return reflect.DeepEqual(left, right)
+}
+
 func sameSupersedesID(left, right *string) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -884,19 +1133,45 @@ type reviewTargetRow struct {
 	IssueVersion    int64
 	LatestEventID   int64
 	ArtifactIDsJSON []byte
+	PurposesJSON    []byte
 	Version         int64
 	CreatedAtText   string
 }
 
 func reviewTargetFromRow(row reviewTargetRow) domain.ReviewTarget {
 	artifactIDs, _ := unmarshalArtifactIDs(row.ArtifactIDsJSON)
+	purposes, _ := unmarshalReviewPurposes(row.PurposesJSON)
 	return domain.ReviewTarget{
 		ID:            row.ID,
 		IssueID:       row.IssueID,
 		IssueVersion:  row.IssueVersion,
 		LatestEventID: row.LatestEventID,
 		ArtifactIDs:   artifactIDs,
+		Purposes:      purposes,
 		Version:       row.Version,
 		CreatedAt:     parseTimestamp(row.CreatedAtText),
 	}
+}
+
+// unmarshalReviewPurposes decodes one purposes_json column. A nil/empty
+// payload (only possible for a pre-migration-012 row read through some path
+// that does not select the column) decodes to nil, matching
+// unmarshalArtifactIDs' own leniency.
+func unmarshalReviewPurposes(data []byte) ([]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var purposes []string
+	if err := json.Unmarshal(data, &purposes); err != nil {
+		return nil, domain.WrapError(err, domain.CodeStorageCorrupt, "stored review purposes are invalid", false)
+	}
+	return purposes, nil
+}
+
+func marshalReviewPurposes(purposes []string) ([]byte, error) {
+	encoded, err := json.Marshal(purposes)
+	if err != nil {
+		return nil, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode review purposes", false)
+	}
+	return encoded, nil
 }

@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 11}) {
-		t.Fatalf("Migrate() result = %+v, want current version with eleven applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 12}) {
+		t.Fatalf("Migrate() result = %+v, want current version with twelve applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -37,7 +37,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"agent_sessions", "artifacts", "attempt_notes", "comments", "decisions", "idempotency_records",
 		"issue_events", "issue_labels", "issue_relations", "issues", "labels", "projects",
 		"resource_reservations",
-		"review_follow_ups", "review_outcomes", "review_requests", "review_targets", "schema_migrations", "work_attempts",
+		"review_approvals", "review_follow_ups", "review_outcomes", "review_requests", "review_targets",
+		"schema_migrations", "work_attempts",
 	}
 	for _, table := range ordinaryTables {
 		var tableType string
@@ -67,6 +68,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_issue_labels_label", "idx_issues_archived", "idx_issues_parent", "idx_issues_status_priority",
 		"idx_labels_name_nocase", "idx_one_active_attempt_per_issue", "idx_relations_source", "idx_relations_target",
 		"idx_reservations_active", "idx_reservations_active_identity", "idx_reservations_attempt", "idx_reservations_issue",
+		"idx_review_approvals_issue_purpose", "idx_review_approvals_request_purpose",
 		"idx_review_requests_active_attempt", "idx_review_requests_active_target", "idx_review_targets_issue_version",
 		"idx_workflow_policies_status_created", "idx_workflow_policy_events_policy",
 	}
@@ -98,10 +100,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "resource_reservations" || checksum != reservationsChecksum {
+	if version != CurrentVersion() || name != "review_purpose_approvals" || checksum != reviewPurposeApprovalsChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(reservationsSQL))
+	actualChecksum := sha256.Sum256([]byte(reviewPurposeApprovalsSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -123,7 +125,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 11 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 12 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -186,8 +188,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 10}) {
-		t.Fatalf("upgrade result = %+v, want ten applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 11}) {
+		t.Fatalf("upgrade result = %+v, want eleven applied migrations", result)
 	}
 
 	var count int
@@ -264,8 +266,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 8}) {
-		t.Fatalf("upgrade result = %+v, want eight applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 9}) {
+		t.Fatalf("upgrade result = %+v, want nine applied migrations", result)
 	}
 
 	var after []struct {
@@ -294,16 +296,16 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+8 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+8)
+	if len(after) != len(before)+9 {
+		t.Fatalf("history rows = %d, want %d", len(after), len(before)+9)
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "resource_reservations" || after[len(after)-1].checksum != reservationsChecksum {
-		t.Fatalf("new history row = %+v, want resource_reservations migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_purpose_approvals" || after[len(after)-1].checksum != reviewPurposeApprovalsChecksum {
+		t.Fatalf("new history row = %+v, want review_purpose_approvals migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -402,7 +404,7 @@ func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	}{
 		{name: "checksum", tamper: "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"},
 		{name: "name", tamper: "UPDATE schema_migrations SET name = 'renamed_schema'"},
-		{name: "future", tamper: "INSERT INTO schema_migrations VALUES (12, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')"},
+		{name: "future", tamper: fmt.Sprintf("INSERT INTO schema_migrations VALUES (%d, 'future_schema', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-01-01T00:00:00Z')", CurrentVersion()+1)},
 		{name: "malformed version", tamper: "UPDATE schema_migrations SET version = 0 WHERE version = 1"},
 		{name: "malformed checksum", tamper: "UPDATE schema_migrations SET checksum = 'not-sha256'"},
 		{name: "malformed timestamp", tamper: "UPDATE schema_migrations SET applied_at = 'not-a-timestamp'"},
@@ -748,4 +750,131 @@ func TestFixedWidthTimestampMigrationRewritesPopulatedEventTables(t *testing.T) 
 	if _, err := inspect.Exec(`UPDATE issue_events SET payload = '{"tampered":true}'`); err == nil {
 		t.Fatal("issue_events UPDATE succeeded; append-only trigger was not restored")
 	}
+}
+
+// Regression for migration 012 on databases that already hold review rows:
+// pre-ISSUE-173 targets and requests must survive the upgrade covering the
+// implementation purpose, and every target must end up with a frozen review
+// gate snapshot so approving an in-flight request stays an unconditional
+// snapshot read.
+func TestReviewPurposeMigrationBackfillsExistingReviewRows(t *testing.T) {
+	t.Parallel()
+	path, db := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:11]); err != nil {
+		t.Fatalf("seed migrations through 011: %v", err)
+	}
+
+	issueID := testID(40)
+	targetID := testID(41)
+	requestID := testID(42)
+	const targetCreatedAt = "2026-07-13T08:11:12.500000000Z"
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(
+			id, sequence_no, type, title, status, priority, version, created_at, updated_at
+		) VALUES (?, 1, 'task', 'reviewed issue', 'review', 'medium', 3, ?, ?)`, issueID, nowText(), nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(
+			id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
+		) VALUES (?, ?, 3, 7, '[]', 1, ?)`, targetID, issueID, targetCreatedAt); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_requests(
+			id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status,
+			supersedes_id, active_attempt_id, version, created_at, resolved_at
+		) VALUES (?, ?, ?, 3, 7, '[]', 'open', NULL, NULL, 1, ?, NULL)`, requestID, targetID, issueID, nowText())
+		return err
+	}); err != nil {
+		t.Fatalf("seed pre-upgrade review rows: %v", err)
+	}
+
+	if _, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil {
+		t.Fatalf("Migrate() over existing review rows: %v", err)
+	}
+
+	inspect := openInspectionDB(t, path)
+	var targetPurposes, requestPurposes string
+	if err := inspect.QueryRow("SELECT purposes_json FROM review_targets WHERE id = ?", targetID).Scan(&targetPurposes); err != nil {
+		t.Fatalf("read migrated target purposes: %v", err)
+	}
+	if err := inspect.QueryRow("SELECT purposes_json FROM review_requests WHERE id = ?", requestID).Scan(&requestPurposes); err != nil {
+		t.Fatalf("read migrated request purposes: %v", err)
+	}
+	if targetPurposes != `["implementation"]` || requestPurposes != `["implementation"]` {
+		t.Fatalf("purposes = %q/%q, want the implementation default on both projections", targetPurposes, requestPurposes)
+	}
+
+	var requirements, sourcePolicies, fingerprint, snapshotCreatedAt string
+	var snapshotIssueVersion int
+	if err := inspect.QueryRow(`SELECT requirements_json, source_policies_json, fingerprint, issue_version, created_at
+		FROM review_target_gate_snapshots WHERE target_id = ?`, targetID).Scan(
+		&requirements, &sourcePolicies, &fingerprint, &snapshotIssueVersion, &snapshotCreatedAt); err != nil {
+		t.Fatalf("read backfilled target snapshot: %v", err)
+	}
+	if requirements != "[]" || sourcePolicies != "[]" {
+		t.Fatalf("backfilled snapshot = %s/%s, want an empty requirement set", requirements, sourcePolicies)
+	}
+	if fingerprint != strings.Repeat("0", 64) {
+		t.Fatalf("backfilled fingerprint = %q, want the legacy sentinel", fingerprint)
+	}
+	if snapshotIssueVersion != 3 || snapshotCreatedAt != targetCreatedAt {
+		t.Fatalf("backfilled snapshot = (%d, %q), want the target's own version and creation time", snapshotIssueVersion, snapshotCreatedAt)
+	}
+
+	// The backfill must not disturb the table's immutability guarantee.
+	assertSQLFails(t, inspect, "UPDATE review_target_gate_snapshots SET fingerprint = ?", strings.Repeat("1", 64))
+}
+
+// Migration 012's constraints: purposes are a bounded JSON array, and an
+// approval record is written once and never changed (docs/02 §17.5).
+func TestReviewApprovalConstraintsAndImmutability(t *testing.T) {
+	t.Parallel()
+	path, db := openMigrationDB(t)
+	if _, err := Migrate(context.Background(), db, clock.NewFakeClock(migrationTime)); err != nil {
+		t.Fatal(err)
+	}
+	inspect := openInspectionDB(t, path)
+
+	issueID := testID(50)
+	targetID := testID(51)
+	requestID := testID(52)
+	attemptID := testID(53)
+	approvalID := testID(54)
+	insertIssue(t, inspect, issueID, 1, "review", nil)
+	insertActiveAttempt(t, inspect, attemptID, issueID)
+	if _, err := inspect.Exec(`INSERT INTO review_targets(
+		id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at
+	) VALUES (?, ?, 1, 5, '[]', 1, ?)`, targetID, issueID, nowText()); err != nil {
+		t.Fatalf("insert review target: %v", err)
+	}
+	if _, err := inspect.Exec(`INSERT INTO review_requests(
+		id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status,
+		supersedes_id, active_attempt_id, version, created_at, resolved_at, purposes_json
+	) VALUES (?, ?, ?, 1, 5, '[]', 'approved', NULL, NULL, 1, ?, ?, '["implementation","security"]')`,
+		requestID, targetID, issueID, nowText(), nowText()); err != nil {
+		t.Fatalf("insert review request: %v", err)
+	}
+
+	// Purposes must be a JSON array of one to ten entries.
+	assertSQLFails(t, inspect, `UPDATE review_requests SET purposes_json = '"security"' WHERE id = ?`, requestID)
+	assertSQLFails(t, inspect, `UPDATE review_requests SET purposes_json = '[]' WHERE id = ?`, requestID)
+	assertSQLFails(t, inspect, `UPDATE review_requests SET purposes_json = '["p1","p2","p3","p4","p5","p6","p7","p8","p9","p10","p11"]' WHERE id = ?`, requestID)
+
+	insertApproval := `INSERT INTO review_approvals(
+		id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, 1, 5, 1, ?)`
+	if _, err := inspect.Exec(insertApproval, approvalID, issueID, targetID, requestID, attemptID, "security", nowText()); err != nil {
+		t.Fatalf("insert review approval: %v", err)
+	}
+	// One purpose per request, granted once.
+	assertSQLFails(t, inspect, insertApproval, testID(55), issueID, targetID, requestID, attemptID, "security", nowText())
+	assertSQLFails(t, inspect, insertApproval, testID(56), issueID, targetID, requestID, attemptID, "  ", nowText())
+	// A second purpose from the same request is a separate record.
+	if _, err := inspect.Exec(insertApproval, testID(57), issueID, targetID, requestID, attemptID, "implementation", nowText()); err != nil {
+		t.Fatalf("insert second purpose approval: %v", err)
+	}
+
+	assertSQLFails(t, inspect, "UPDATE review_approvals SET purpose = 'design' WHERE id = ?", approvalID)
+	assertSQLFails(t, inspect, "DELETE FROM review_approvals WHERE id = ?", approvalID)
 }

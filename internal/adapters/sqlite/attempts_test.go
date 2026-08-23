@@ -412,6 +412,7 @@ func TestReviewAttemptCompletionUpdatesRequestAndIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
@@ -501,6 +502,7 @@ func TestReviewAttemptChangesRequestedCompletesIssueToReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
@@ -555,6 +557,7 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
@@ -610,6 +613,7 @@ func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
@@ -667,6 +671,7 @@ func claimedReviewFixture(t *testing.T, fixture *attemptTestFixture, name string
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: 0,
@@ -806,6 +811,7 @@ func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,
@@ -923,6 +929,7 @@ func TestReviewApprovalAcceptsClientVisibleEventPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
 		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
 		TargetEventID: captureClientVisibleEventPosition(t, fixture),
@@ -968,6 +975,7 @@ func TestReviewStalenessIgnoresOtherIssuesWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
 		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
 		TargetEventID: captureClientVisibleEventPosition(t, fixture),
@@ -1022,6 +1030,7 @@ func TestReviewStalenessDetectsReviewedIssueChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
 		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
 		TargetEventID: captureClientVisibleEventPosition(t, fixture),
@@ -1080,6 +1089,7 @@ func TestReviewStalenessIgnoresReservationEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
 		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
 		TargetEventID: captureClientVisibleEventPosition(t, fixture),
@@ -1180,6 +1190,7 @@ func TestFinishAttemptApprovalRequiresRequestWhenUnbound(t *testing.T) {
 	}
 
 	_, err = reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
 		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: targetEventID,

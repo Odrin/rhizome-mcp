@@ -792,12 +792,22 @@ applicable at that point.
   time, using the evidence keys named in the attempt's frozen requirement
   snapshot (§17.6) -- not against live policy state.
 - `review_approval`: satisfied when an immutable approval record exists for
-  the issue and the requirement's `purpose`. The exact persistence and
-  creation mechanism for purpose-scoped approval records (how a reviewer
-  grants one, and how it is bound to an issue version) is specified by
-  ISSUE-173, not by this contract; this contract fixes only what a
-  `review_approval` requirement means (a named purpose that must have a
-  matching approval) and which enforcement points check it (§17.4).
+  the issue and the requirement's `purpose` (ISSUE-173). A review request
+  names the purposes it covers (`purposes`, a unique sorted list of 1-10
+  normalized keys, `[implementation]` by default); creating or replacing one
+  resolves the target's currently-active `review_approval` requirements and
+  rejects a request whose purposes do not cover all of them
+  (`REVIEW_PURPOSE_REQUIRED`, docs/03 §7.6). Approving that request grants
+  one immutable approval row per purpose it covers, in the same transaction
+  as the approval. `approve_review` checks the approving request's own
+  purposes against its review target's frozen snapshot (§17.6) -- always
+  satisfied by construction, since creation already required full coverage
+  of that same frozen snapshot. `complete_work_to_done` has no review target
+  of its own to check against, so it instead checks a live, issue-scoped
+  lookup of every purpose the issue holds at least one approval for,
+  regardless of which request or target granted it, with no staleness
+  qualifier -- unlike a review request's own staleness (docs/09), an
+  existing approval never expires on its own.
 
 ### 17.6. Snapshot timing
 

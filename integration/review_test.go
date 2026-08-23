@@ -70,6 +70,7 @@ func TestIntegrationReviewWorkflow(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
 		TargetEventID:      latestEventID,
@@ -163,6 +164,7 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	predecessorCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
 		TargetEventID:      0,
@@ -347,6 +349,7 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	requested, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 1,
 		TargetEventID:      latestEventID,
@@ -428,6 +431,7 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 	}
 
 	requestedAgainRes, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: updatedIssue.Issue.Version,
 		TargetEventID:      latestEventIDAfterSecondClaim,

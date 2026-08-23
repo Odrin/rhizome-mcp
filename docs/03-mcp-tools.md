@@ -1064,6 +1064,7 @@ Input:
   "target_issue_version": 10,
   "target_event_id": 1900,
   "artifact_ids": [],
+  "purposes": ["implementation", "security"],
   "idempotency_key": "replace-2026-07-24-01"
 }
 ```
@@ -1074,6 +1075,20 @@ review-request tool, `idempotency_key` here is mandatory, not optional: this
 operation does not hold the predecessor's attempt lease token, so replaying a
 retried call safely (rather than risking a second successor from a client-side
 retry) depends on the key.
+
+`purposes` is optional: a unique, sorted list of 1-10 normalized keys (each up
+to 128 characters) naming what this review covers. Omit it to inherit the
+predecessor's own purposes — the common case for a re-review after changes,
+which typically covers the same scope. Supplying it sets the successor's
+purposes explicitly instead, replacing rather than extending the
+predecessor's list. Either way, the successor's target freezes the
+currently-active `review_approval` policy requirements at creation (docs/02
+§17.6) and the purposes actually in effect — supplied or inherited — must
+cover every one of them, or the call fails with `REVIEW_PURPOSE_REQUIRED`
+(detail field `purposes`, one entry per missing purpose) and makes no write.
+This is a request-shape check, not one of the four gate enforcement points
+(docs/02 §17.1): it exists so an approval against this request can actually
+satisfy those policies later, at `approve_review`.
 
 `target_event_id` is an ordinary event-log position: pass the `latest_event_id`
 any read tool reports (`get_planning_graph`, `search`, `get_project`,
@@ -1109,6 +1124,9 @@ Failure modes, all structured and side-effect-free (zero writes):
   `blocked`, `cancelled`, `superseded`) → `REVIEW_REQUEST_NOT_REPLACEABLE`.
 - The successor's target already has an unrelated active request →
   `REVIEW_ALREADY_EXISTS`.
+- The purposes in effect (supplied or inherited) omit a purpose an active
+  `review_approval` policy currently requires for this target →
+  `REVIEW_PURPOSE_REQUIRED`.
 - Reusing `idempotency_key` with a different normalized request →
   `IDEMPOTENCY_CONFLICT`. Reusing it with the same request replays the
   original `predecessor`/`successor`/`latest_event_id` without any new
@@ -1183,6 +1201,7 @@ issue_id
 target_issue_version
 target_event_id
 artifact_ids
+purposes
 status
 supersedes_id
 active_attempt_id
@@ -1191,6 +1210,10 @@ version
 created_at
 resolved_at
 ```
+
+`purposes` is the sorted, deduplicated list of purposes the request covers
+(1-10 normalized keys; `["implementation"]` unless the request named others).
+Only `replace_review_request` ever sets it explicitly — see below.
 
 ---
 
@@ -1833,15 +1856,19 @@ Completion checks:
 - required acknowledgments;
 - the workflow gate for the enforcement point the outcome resolves to --
   `complete_work_to_review`, `complete_work_to_done`, or `approve_review`
-  (docs/02 §17) -- evaluated against the completing attempt's or review
-  target's frozen requirement snapshot, not against live policies. An unmet
+  (docs/02 §17) -- evaluated against a frozen requirement snapshot, not
+  against live policies. `complete_work_to_review` and `complete_work_to_done`
+  re-evaluate the completing work attempt's own claim-time snapshot
+  (`claim_work`'s, per §11.1). `approve_review` re-evaluates the review
+  target's own snapshot instead, frozen when the request was created or
+  replaced (§7.6, docs/02 §17.6): the purposes that request covers are the
+  evidence, so a request can only approve purposes it was already required
+  (and validated, at creation) to cover. `complete_work_to_done` also checks
+  `review_approval` requirements, but against a live, issue-scoped lookup of
+  granted approvals rather than any snapshot, since a plain work attempt
+  completing directly to `done` has no review target of its own. An unmet
   requirement fails the call with `WORKFLOW_GATE_UNSATISFIED` and leaves the
-  attempt active. Interim note (ISSUE-172, until ISSUE-173 lands): review
-  targets do not yet snapshot their own requirement set, so `approve_review`
-  is evaluated against the reviewing attempt's own claim-time snapshot
-  (`claim_work`'s, per §11.1) instead -- still frozen and snapshot-based, not
-  a live-policy read, but not yet the purpose-scoped review-target snapshot
-  ISSUE-173 will add.
+  attempt active.
 
 ### 11.5. `get_work_context`
 

@@ -26,7 +26,11 @@ type CreateReviewRequestInput struct {
 	TargetIssueVersion int64
 	TargetEventID      int64
 	ArtifactIDs        []string
-	SupersedesID       *string
+	// Purposes is optional: empty defaults to domain.DefaultReviewPurposes()
+	// (docs/02 §17.5's compatibility default). A non-empty list is validated
+	// and normalized by domain.ValidateReviewPurposes.
+	Purposes     []string
+	SupersedesID *string
 }
 
 // CreateReviewRequestResult contains the persisted review request and claimability state.
@@ -105,6 +109,16 @@ func (service *ReviewService) CreateReviewRequest(ctx context.Context, input Cre
 	if len(input.ArtifactIDs) > 20 {
 		return CreateReviewRequestResult{}, domain.NewError(domain.CodeLimitExceeded, "artifact_ids exceeds the maximum size of 20", false)
 	}
+	purposes := input.Purposes
+	if len(purposes) == 0 {
+		purposes = domain.DefaultReviewPurposes()
+	} else {
+		var err error
+		purposes, err = domain.ValidateReviewPurposes(purposes)
+		if err != nil {
+			return CreateReviewRequestResult{}, err
+		}
+	}
 	identifier, err := domain.ParseIssueIdentifier(input.IssueID)
 	if err != nil {
 		return CreateReviewRequestResult{}, err
@@ -132,6 +146,7 @@ func (service *ReviewService) CreateReviewRequest(ctx context.Context, input Cre
 		TargetIssueVersion: input.TargetIssueVersion,
 		TargetEventID:      input.TargetEventID,
 		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
+		Purposes:           purposes,
 		SupersedesID:       copyOptionalString(input.SupersedesID),
 		OccurredAt:         service.clock.Now().UTC(),
 	})
@@ -224,7 +239,11 @@ type ReplaceReviewRequestInput struct {
 	TargetIssueVersion         int64
 	TargetEventID              int64
 	ArtifactIDs                []string
-	IdempotencyKey             string
+	// Purposes is optional: empty means "inherit the predecessor's
+	// purposes", resolved by the repository. A non-empty list is validated
+	// and normalized by domain.ReplaceReviewRequestInput.Validate.
+	Purposes       []string
+	IdempotencyKey string
 }
 
 // ReplaceReviewRequestResult contains the persisted predecessor and successor
@@ -246,6 +265,7 @@ func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input Re
 		TargetIssueVersion:         input.TargetIssueVersion,
 		TargetEventID:              input.TargetEventID,
 		ArtifactIDs:                input.ArtifactIDs,
+		Purposes:                   input.Purposes,
 		IdempotencyKey:             input.IdempotencyKey,
 	}.Validate()
 	if err != nil {
@@ -281,6 +301,7 @@ func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input Re
 		TargetIssueVersion:         normalized.TargetIssueVersion,
 		TargetEventID:              normalized.TargetEventID,
 		ArtifactIDs:                normalized.ArtifactIDs,
+		Purposes:                   normalized.Purposes,
 		OccurredAt:                 service.clock.Now().UTC(),
 		IdempotencyKey:             normalized.IdempotencyKey,
 		RequestHash:                requestHash,

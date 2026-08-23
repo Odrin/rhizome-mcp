@@ -84,6 +84,15 @@ const (
 	// no request bound to it while an open or claimed request exists for the
 	// issue -- approving would silently strand that request.
 	CodeReviewRequestRequired = "REVIEW_REQUEST_REQUIRED"
+	// CodeReviewPurposeRequired identifies a review request (create or
+	// replace) whose purposes do not cover every purpose an active
+	// review_approval policy currently requires for its target (docs/02
+	// §17.5, ISSUE-173). This is a request-shape validation, not one of the
+	// four gate enforcement points (docs/02 §17.1): it exists so a request
+	// that omits a required purpose is rejected up front, before an approval
+	// against it could ever satisfy that policy at complete_work_to_done or
+	// approve_review.
+	CodeReviewPurposeRequired = "REVIEW_PURPOSE_REQUIRED"
 	// CodePolicyNotFound identifies a workflow policy reference that is not present.
 	CodePolicyNotFound = "POLICY_NOT_FOUND"
 	// CodePolicyArchived identifies a workflow policy that cannot be mutated

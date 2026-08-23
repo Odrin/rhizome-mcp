@@ -133,6 +133,7 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 		t.Fatalf("new review repository: %v", err)
 	}
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
 		TargetIssueVersion: 2,
 		TargetEventID:      0,

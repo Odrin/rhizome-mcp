@@ -54,6 +54,7 @@ func TestActivityRepositoryLoadsReviewRequestEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: "01ARZ3NDEKTSV4RRFFQ69G5FA1",
 		TargetID:  "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:   issue.ID, TargetIssueVersion: 1, TargetEventID: 0,
@@ -103,6 +104,7 @@ func TestActivityRepositoryUnfilteredFeedIncludesReviews(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
 		RequestID: "01ARZ3NDEKTSV4RRFFQ69G5FA1",
 		TargetID:  "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:   issue.ID, TargetIssueVersion: 1, TargetEventID: 0,

@@ -247,11 +247,17 @@ func TestCompleteWorkToDoneRejectsMissingAttemptEvidenceAndLeavesAttemptActive(t
 	}
 }
 
-// TestApproveReviewRejectsUnsatisfiableReviewApproval documents ISSUE-172's
-// interim behavior for review_approval (see evaluateGateAgainstAttemptSnapshot's
-// doc comment): with no approval-recording mechanism until ISSUE-173 lands,
-// a policy requiring review_approval can never be satisfied, so it always
-// blocks approve_review while active -- fail rather than silently bypass.
+// TestApproveReviewRejectsUnsatisfiableReviewApproval covers approve_review
+// with no review request ever bound to the attempt ("review is optional"
+// backward compat, ISSUE-173): with no request, there is no review target to
+// freeze or read a snapshot from, so this falls back to re-evaluating the
+// reviewing attempt's own claim-time snapshot (evaluateGateAgainstAttemptSnapshot),
+// exactly like ISSUE-172's original interim behavior. ReviewApprovalPurposes
+// stays empty on that path -- nothing was ever granted -- so an active
+// review_approval requirement can never be satisfied this way; fail rather
+// than silently bypass. A request that IS bound instead evaluates against
+// its own review target's frozen snapshot, using the purposes the request
+// itself covers as evidence (see review_purpose_test.go).
 func TestApproveReviewRejectsUnsatisfiableReviewApproval(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "gate-approve-review")
 	defer fixture.close()

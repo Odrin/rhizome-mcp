@@ -76,6 +76,29 @@ func evaluateGateAgainstAttemptSnapshot(
 	return evaluateGate(point, snapshot.Requirements, evidence)
 }
 
+// evaluateGateAgainstReviewTargetSnapshot is approve_review's choke point
+// once a review request is actually bound (ISSUE-173, replacing the
+// ISSUE-172 interim behavior of reusing the reviewing attempt's own
+// claim-time snapshot -- decision 01M0Q4ZVHAAR8ZVGYX33X0V46M): it
+// re-evaluates the review target's own frozen review_approval requirement
+// snapshot (docs/02 §17.6), never the resolving attempt's claim-time
+// snapshot and never live policy state. A missing snapshot is treated as
+// zero requirements, matching evaluateGateAgainstAttemptSnapshot's identical
+// defensive handling -- every target created through ensureTarget always
+// has one, so this only guards a target that somehow predates that code
+// path.
+func evaluateGateAgainstReviewTargetSnapshot(ctx context.Context, tx Executor, targetID string, evidence domain.GateEvidence) error {
+	snapshot, err := loadGateSnapshot(ctx, tx, "review_target_gate_snapshots", "target_id", targetID)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) && domainErr.Code == domain.CodeGateSnapshotNotFound {
+			return evaluateGate(domain.EnforcementPointApproveReview, nil, evidence)
+		}
+		return err
+	}
+	return evaluateGate(domain.EnforcementPointApproveReview, snapshot.Requirements, evidence)
+}
+
 func evaluateGate(point domain.EnforcementPoint, requirements []domain.PolicyRequirement, evidence domain.GateEvidence) error {
 	evaluation, err := domain.EvaluateGate(point, requirements, evidence)
 	if err != nil {

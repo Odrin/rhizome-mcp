@@ -51,6 +51,9 @@ var gateEvidenceSQL string
 //go:embed sql/011_reservations.sql
 var reservationsSQL string
 
+//go:embed sql/012_review_purpose_approvals.sql
+var reviewPurposeApprovalsSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
@@ -64,6 +67,7 @@ const unifyEventLogChecksum = "0ef17a2f161d5d72f35993f8e80637ce8bb3306f89437df83
 const workflowGatesChecksum = "8880161636fe7b99c367e706d8dde2235fd3647837b5c70076c4b2394111c2b2"
 const gateEvidenceChecksum = "ca820e1992d2384f798a7e268119b36962b7dc830a02d70b10e212a4a4ba10b7"
 const reservationsChecksum = "a2bc262cdf41e6f643d7daba0f5cafa19636b28cdb8c194299a17e0951437207"
+const reviewPurposeApprovalsChecksum = "7babb65d28af851c17b4c791c301b2acf0ed5300ce8154eccd433a892997b126"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -133,6 +137,12 @@ var (
 			name:     "resource_reservations",
 			checksum: reservationsChecksum,
 			sql:      reservationsSQL,
+		},
+		{
+			version:  12,
+			name:     "review_purpose_approvals",
+			checksum: reviewPurposeApprovalsChecksum,
+			sql:      reviewPurposeApprovalsSQL,
 		},
 	}
 )

@@ -1036,6 +1036,7 @@ func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmc
 		TargetIssueVersion:         input.TargetIssueVersion,
 		TargetEventID:              input.TargetEventID,
 		ArtifactIDs:                append([]string(nil), input.ArtifactIDs...),
+		Purposes:                   append([]string(nil), input.Purposes...),
 		IdempotencyKey:             input.IdempotencyKey,
 	})
 	if err != nil {

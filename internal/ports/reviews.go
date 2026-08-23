@@ -16,8 +16,12 @@ type CreateReviewRequestCommand struct {
 	TargetIssueVersion int64
 	TargetEventID      int64
 	ArtifactIDs        []string
-	SupersedesID       *string
-	OccurredAt         time.Time
+	// Purposes is required and already validated/normalized by the caller
+	// (domain.ValidateReviewPurposes); the repository re-validates it inline
+	// like every other field on this command.
+	Purposes     []string
+	SupersedesID *string
+	OccurredAt   time.Time
 }
 
 // CreateReviewRequestResult is the durable request and target snapshot produced by creation.
@@ -92,9 +96,12 @@ type ReplaceReviewRequestCommand struct {
 	TargetIssueVersion         int64
 	TargetEventID              int64
 	ArtifactIDs                []string
-	OccurredAt                 time.Time
-	IdempotencyKey             string
-	RequestHash                []byte
+	// Purposes is optional: nil means "inherit the predecessor's purposes",
+	// resolved by the repository once it has loaded the predecessor.
+	Purposes       []string
+	OccurredAt     time.Time
+	IdempotencyKey string
+	RequestHash    []byte
 }
 
 // ReplaceReviewRequestResult is the persisted predecessor and successor

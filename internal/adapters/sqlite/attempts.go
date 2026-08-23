@@ -1064,7 +1064,31 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 					}
 					finishEvidence.AttemptEvidenceKeys = evidenceKeys
 				}
-				if err := evaluateGateAgainstAttemptSnapshot(ctx, tx, point, command.AttemptID, finishEvidence); err != nil {
+				if point == domain.EnforcementPointCompleteWorkToDone {
+					approvalPurposes, err := loadIssueReviewApprovalPurposes(ctx, tx, issue.ID)
+					if err != nil {
+						return err
+					}
+					finishEvidence.ReviewApprovalPurposes = approvalPurposes
+				}
+				// approve_review with a request actually bound re-evaluates
+				// against that request's own review target snapshot
+				// (ISSUE-173, decision 01M0Q4ZVHAAR8ZVGYX33X0V46M), using the
+				// purposes the request itself covers as evidence -- a
+				// request cannot reach this point without already covering
+				// every purpose its target's frozen snapshot requires
+				// (requireReviewPurposeCoverage, checked at creation). Every
+				// other case, including approve_review with no request
+				// bound at all ("review is optional" backward compat, no
+				// target ever existed to snapshot), keeps evaluating the
+				// resolving attempt's own claim-time snapshot exactly as
+				// before.
+				if point == domain.EnforcementPointApproveReview && reviewRequest != nil {
+					finishEvidence.ReviewApprovalPurposes = reviewPurposeSet(reviewRequest.Purposes)
+					if err := evaluateGateAgainstReviewTargetSnapshot(ctx, tx, reviewRequest.TargetID, finishEvidence); err != nil {
+						return err
+					}
+				} else if err := evaluateGateAgainstAttemptSnapshot(ctx, tx, point, command.AttemptID, finishEvidence); err != nil {
 					return err
 				}
 			}
@@ -1373,40 +1397,13 @@ func reviewedWorkChangedSince(ctx context.Context, tx Queryer, issueID string, a
 }
 
 func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptID string) (*domain.ReviewRequest, error) {
-	var request domain.ReviewRequest
-	var artifactIDsJSON []byte
-	var status string
-	var supersedesID sql.NullString
-	var activeAttemptID sql.NullString
-	var createdAtText string
-	var resolvedAtText sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at
-		FROM review_requests WHERE active_attempt_id = ? AND status = 'claimed'`, attemptID).Scan(
-		&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText,
-	)
+	request, err := scanReviewRequestRow(tx.QueryRowContext(ctx, `SELECT `+reviewRequestColumns+`
+		FROM review_requests WHERE active_attempt_id = ? AND status = 'claimed'`, attemptID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
-	if err != nil {
-		return nil, err
-	}
-	request.Status = domain.ReviewRequestStatus(status)
-	if supersedesID.Valid {
-		value := supersedesID.String
-		request.SupersedesID = &value
-	}
-	if activeAttemptID.Valid {
-		value := activeAttemptID.String
-		request.ActiveAttemptID = &value
-	}
-	request.CreatedAt = parseTimestamp(createdAtText)
-	if resolvedAtText.Valid {
-		value := parseTimestamp(resolvedAtText.String)
-		request.ResolvedAt = &value
 	}
 	return &request, nil
 }
@@ -1454,6 +1451,11 @@ func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request do
 	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review event: %w", err)
+	}
+	if outcome == domain.ReviewOutcomeApproved {
+		if err := insertReviewApprovals(ctx, tx, request, attemptID, occurredAt); err != nil {
+			return fmt.Errorf("insert review approvals: %w", err)
+		}
 	}
 	return nil
 }
