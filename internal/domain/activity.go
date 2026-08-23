@@ -24,13 +24,17 @@ const (
 	// reserved for the categories above (ISSUE-216); this is the first
 	// category appended under that convention.
 	ActivityCategoryGateEvidence ActivityCategory = "gate_evidence"
+	// ActivityCategoryReservations is rank 9 in the sqlite activity registry
+	// (ISSUE-182): resource reservation entities. The reserved/released
+	// events themselves already surface under ActivityCategoryEvents.
+	ActivityCategoryReservations ActivityCategory = "reservations"
 )
 
 func (value ActivityCategory) Valid() bool {
 	switch value {
 	case ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryReviews,
 		ActivityCategoryAttempts, ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts,
-		ActivityCategoryGateEvidence:
+		ActivityCategoryGateEvidence, ActivityCategoryReservations:
 		return true
 	default:
 		return false
@@ -48,6 +52,7 @@ var AllActivityCategories = []ActivityCategory{
 	ActivityCategoryEvents,
 	ActivityCategoryArtifacts,
 	ActivityCategoryGateEvidence,
+	ActivityCategoryReservations,
 }
 
 // ActivityEntityType identifies the concrete entity represented by an item.
@@ -62,13 +67,14 @@ const (
 	ActivityEntityTypeEvent        ActivityEntityType = "event"
 	ActivityEntityTypeArtifact     ActivityEntityType = "artifact"
 	ActivityEntityTypeGateEvidence ActivityEntityType = "gate_evidence"
+	ActivityEntityTypeReservation  ActivityEntityType = "reservation"
 )
 
 func (value ActivityEntityType) Valid() bool {
 	switch value {
 	case ActivityEntityTypeComment, ActivityEntityTypeDecision, ActivityEntityTypeReview,
 		ActivityEntityTypeAttempt, ActivityEntityTypeAttemptNote, ActivityEntityTypeEvent, ActivityEntityTypeArtifact,
-		ActivityEntityTypeGateEvidence:
+		ActivityEntityTypeGateEvidence, ActivityEntityTypeReservation:
 		return true
 	default:
 		return false
@@ -163,18 +169,19 @@ func (input GetIssueActivityInput) Validate() (GetIssueActivityInput, error) {
 
 // ActivityItem is one typed, heterogeneous activity result.
 type ActivityItem struct {
-	EntityType   ActivityEntityType `json:"entity_type"`
-	EntityID     string             `json:"entity_id"`
-	IssueID      string             `json:"issue_id"`
-	OccurredAt   time.Time          `json:"occurred_at"`
-	Comment      *Comment           `json:"comment,omitempty"`
-	Decision     *Decision          `json:"decision,omitempty"`
-	Attempt      *WorkAttempt       `json:"attempt,omitempty"`
-	AttemptNote  *AttemptNote       `json:"attempt_note,omitempty"`
-	Event        *IssueEvent        `json:"event,omitempty"`
-	Artifact     *Artifact          `json:"artifact,omitempty"`
-	Review       *ReviewRequest     `json:"review,omitempty"`
-	GateEvidence *AttemptEvidence   `json:"gate_evidence,omitempty"`
+	EntityType   ActivityEntityType  `json:"entity_type"`
+	EntityID     string              `json:"entity_id"`
+	IssueID      string              `json:"issue_id"`
+	OccurredAt   time.Time           `json:"occurred_at"`
+	Comment      *Comment            `json:"comment,omitempty"`
+	Decision     *Decision           `json:"decision,omitempty"`
+	Attempt      *WorkAttempt        `json:"attempt,omitempty"`
+	AttemptNote  *AttemptNote        `json:"attempt_note,omitempty"`
+	Event        *IssueEvent         `json:"event,omitempty"`
+	Artifact     *Artifact           `json:"artifact,omitempty"`
+	Review       *ReviewRequest      `json:"review,omitempty"`
+	GateEvidence *AttemptEvidence    `json:"gate_evidence,omitempty"`
+	Reservation  *ReservationSummary `json:"reservation,omitempty"`
 }
 
 // IssueActivity is one cursor-paginated activity result.
@@ -223,6 +230,9 @@ func ValidateActivityItem(item ActivityItem) error {
 		payloads++
 	}
 	if item.GateEvidence != nil {
+		payloads++
+	}
+	if item.Reservation != nil {
 		payloads++
 	}
 	if payloads != 1 {
@@ -322,6 +332,24 @@ func ValidateActivityItem(item ActivityItem) error {
 			!item.GateEvidence.UpdatedAt.Equal(item.OccurredAt) {
 			return validationError("gate_evidence", "MISMATCH", "does not match activity identity, scope, or timestamp")
 		}
+	case ActivityEntityTypeReservation:
+		if item.Reservation == nil {
+			return validationError("reservation", "REQUIRED", "is required for reservation activity")
+		}
+		if err := validateActivityULID("entity_id", item.EntityID); err != nil {
+			return err
+		}
+		// OccurredAt tracks COALESCE(released_at, created_at): a released
+		// reservation is new activity at its release time, mirroring how
+		// gate_evidence tracks UpdatedAt rather than CreatedAt.
+		expectedOccurredAt := item.Reservation.CreatedAt
+		if item.Reservation.ReleasedAt != nil {
+			expectedOccurredAt = *item.Reservation.ReleasedAt
+		}
+		if item.Reservation.ID != item.EntityID || item.Reservation.IssueID != item.IssueID ||
+			!expectedOccurredAt.Equal(item.OccurredAt) {
+			return validationError("reservation", "MISMATCH", "does not match activity identity, scope, or timestamp")
+		}
 	}
 	return nil
 }
@@ -351,7 +379,26 @@ func CloneActivityItem(item ActivityItem) ActivityItem {
 	item.Artifact = cloneActivityArtifact(item.Artifact)
 	item.Review = cloneActivityReview(item.Review)
 	item.GateEvidence = cloneActivityGateEvidence(item.GateEvidence)
+	item.Reservation = cloneActivityReservation(item.Reservation)
 	return item
+}
+
+func cloneActivityReservation(value *ReservationSummary) *ReservationSummary {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.ReleasedAt = cloneActivityTime(value.ReleasedAt)
+	result.ReleaseReason = cloneActivityReservationReleaseReason(value.ReleaseReason)
+	return &result
+}
+
+func cloneActivityReservationReleaseReason(value *ReservationReleaseReason) *ReservationReleaseReason {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
 }
 
 func cloneActivityGateEvidence(value *AttemptEvidence) *AttemptEvidence {

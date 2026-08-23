@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -285,4 +286,74 @@ func MarshalLogicalProjectDocument(document LogicalProjectDocument) ([]byte, err
 		normalized.Events = []LogicalEvent{}
 	}
 	return json.MarshalIndent(normalized, "", "  ")
+}
+
+// Logical interchange extension namespaces. Extensions is the version-2
+// escape hatch ISSUE-215 reserved so a feature can add its own interchange
+// section without redefining v2 for everyone or forcing a version bump.
+// Each namespace carries its own independent version, so reservations can
+// evolve their payload without touching the document version or any other
+// namespace.
+const (
+	// LogicalReservationsExtensionKey is the Extensions key resource
+	// reservations are carried under.
+	LogicalReservationsExtensionKey = "reservations"
+	// LogicalReservationsExtensionVersion is the current version of the
+	// reservations namespace payload.
+	LogicalReservationsExtensionVersion = 1
+)
+
+// LogicalReservationsExtension is the payload stored under
+// Extensions["reservations"]. Version is the namespace's own version, not
+// the document's.
+type LogicalReservationsExtension struct {
+	Version int                  `json:"version"`
+	Records []LogicalReservation `json:"records"`
+}
+
+// LogicalReservation is one exported resource reservation. Only released
+// reservations are exported and only released reservations import: an
+// active reservation is owned by an active attempt, and active attempts do
+// not cross the interchange boundary (see LogicalAttempt and
+// readLogicalAttempts' status filter). ComparisonValue and NormalizedJSON
+// are carried so an import is a faithful insert rather than a
+// re-normalization under whatever rules happen to be current; they are
+// inert for a released row (the active-identity unique index is partial on
+// status = 'active'), and they are deliberately absent from the activity
+// and search projections, which expose display values only.
+type LogicalReservation struct {
+	ID              string          `json:"id"`
+	IssueID         string          `json:"issue_id"`
+	AttemptID       string          `json:"attempt_id"`
+	Kind            string          `json:"kind"`
+	DisplayValue    string          `json:"display_value"`
+	ComparisonValue string          `json:"comparison_value"`
+	NormalizedJSON  json.RawMessage `json:"normalized_json"`
+	Status          string          `json:"status"`
+	CreatedAt       string          `json:"created_at"`
+	ReleasedAt      string          `json:"released_at"`
+	ReleaseReason   string          `json:"release_reason"`
+}
+
+// DecodeReservationsExtension returns the reservations carried in
+// Extensions["reservations"], or nil when the namespace is absent. It is
+// strict: unknown keys and a namespace version this build does not
+// understand are errors, so a document written by a newer build fails
+// loudly instead of importing with silently dropped reservations.
+func (document LogicalProjectDocument) DecodeReservationsExtension() ([]LogicalReservation, error) {
+	raw, present := document.Extensions[LogicalReservationsExtensionKey]
+	if !present || len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	path := "$.extensions." + LogicalReservationsExtensionKey
+	var extension LogicalReservationsExtension
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&extension); err != nil {
+		return nil, decodeError(err, path)
+	}
+	if extension.Version != LogicalReservationsExtensionVersion {
+		return nil, unsupportedFormatVersionError(path + ".version")
+	}
+	return extension.Records, nil
 }

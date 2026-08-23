@@ -116,6 +116,129 @@ func TestSearchIndexTracksSourceMutationsTransactionallyAndRebuilds(t *testing.T
 	}
 }
 
+// TestSearchIndexTracksReservationLifecycleAndRebuildAgrees covers
+// ISSUE-182 AC4: a reservation is indexed on creation with its display
+// value searchable, releasing it makes the release reason searchable too,
+// comparison_value and normalized_json are never findable, and a full
+// Rebuild reproduces exactly what the live triggers already wrote.
+func TestSearchIndexTracksReservationLifecycleAndRebuildAgrees(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "reservation issue", Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	const (
+		attemptID     = "01ARZ3NDEKTSV4RRFFQ69G5FHA"
+		reservationID = "01ARZ3NDEKTSV4RRFFQ69G5FHB"
+	)
+	timestamp := sqlite.FormatStorageTime(now)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, X'05', ?, ?, ?)`,
+			attemptID, issue.ID, timestamp, timestamp, timestamp); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(
+			id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at
+		) VALUES (?, ?, ?, 'file', 'searchable reservation display', 'zqxcomparisonmarker', '{"zqxjsonmarker":true}', 'active', 1, ?)`,
+			reservationID, issue.ID, attemptID, timestamp)
+		return err
+	}); err != nil {
+		t.Fatalf("insert reservation: %v", err)
+	}
+
+	active := searchIndexRows(t, db)
+	activeRow := findSearchIndexRow(active, "reservation", reservationID)
+	if activeRow == nil {
+		t.Fatalf("reservation row not indexed after insert: %#v", active)
+	}
+	if activeRow.Title != "searchable reservation display" {
+		t.Fatalf("reservation title = %q, want the display value", activeRow.Title)
+	}
+	if activeRow.Content != "file\n" {
+		t.Fatalf("reservation content while active = %q, want kind plus an empty release reason", activeRow.Content)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE resource_reservations SET status = 'released', released_at = ?, release_reason = 'completed' WHERE id = ?`,
+			timestamp, reservationID)
+		return err
+	}); err != nil {
+		t.Fatalf("release reservation: %v", err)
+	}
+
+	released := searchIndexRows(t, db)
+	releasedRow := findSearchIndexRow(released, "reservation", reservationID)
+	if releasedRow == nil {
+		t.Fatalf("reservation row not indexed after release: %#v", released)
+	}
+	if releasedRow.Content != "file\ncompleted" {
+		t.Fatalf("reservation content after release = %q, want the release reason appended", releasedRow.Content)
+	}
+
+	searchRepository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchRepository() error = %v", err)
+	}
+	foundByComparisonValue, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "zqxcomparisonmarker", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by comparison_value: %v", err)
+	}
+	if len(foundByComparisonValue.Results) != 0 {
+		t.Fatalf("comparison_value was searchable: %#v", foundByComparisonValue.Results)
+	}
+	foundByNormalizedJSON, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "zqxjsonmarker", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by normalized_json: %v", err)
+	}
+	if len(foundByNormalizedJSON.Results) != 0 {
+		t.Fatalf("normalized_json was searchable: %#v", foundByNormalizedJSON.Results)
+	}
+	foundByDisplayValue, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "searchable", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by display value: %v", err)
+	}
+	if !containsReservationResult(foundByDisplayValue, reservationID) {
+		t.Fatalf("search by display value = %#v, want reservation %q present", foundByDisplayValue, reservationID)
+	}
+
+	indexRepository, err := sqlite.NewSearchIndexRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchIndexRepository() error = %v", err)
+	}
+	if err := indexRepository.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild() error = %v", err)
+	}
+	rebuilt := searchIndexRows(t, db)
+	if !reflect.DeepEqual(rebuilt, released) {
+		t.Fatalf("rebuilt search index rows = %#v, want %#v (trigger and Rebuild must agree)", rebuilt, released)
+	}
+}
+
+func findSearchIndexRow(rows []searchIndexRow, entityType, entityID string) *searchIndexRow {
+	for index := range rows {
+		if rows[index].EntityType == entityType && rows[index].EntityID == entityID {
+			return &rows[index]
+		}
+	}
+	return nil
+}
+
+func containsReservationResult(page domain.SearchPage, reservationID string) bool {
+	for _, result := range page.Results {
+		if result.EntityType == domain.SearchEntityTypeReservation && result.EntityID == reservationID {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSearchIndexReviewRowFollowsIssueRename is the ISSUE-214 regression:
 // the FTS review row denormalizes the parent issue title, and nothing used
 // to refresh it when the issue was renamed, leaving the review indexed

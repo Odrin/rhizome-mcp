@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	checkDatabaseWritable      = "database_writable"
-	checkDataDirectoryWritable = "data_directory_writable"
-	checkFreeDiskSpace         = "free_disk_space"
-	checkWALSize               = "wal_size"
-	checkExpiredActiveAttempts = "expired_active_attempts"
-	checkHTTPAddress           = "http_address"
-	checkIntegrity             = "integrity_check"
+	checkDatabaseWritable        = "database_writable"
+	checkDataDirectoryWritable   = "data_directory_writable"
+	checkFreeDiskSpace           = "free_disk_space"
+	checkWALSize                 = "wal_size"
+	checkExpiredActiveAttempts   = "expired_active_attempts"
+	checkOrphanedReservations    = "active_reservations_without_live_attempt"
+	checkReservationReleaseState = "reservation_release_state_consistency"
+	checkHTTPAddress             = "http_address"
+	checkIntegrity               = "integrity_check"
 )
 
 // DoctorCheck is one deterministic, named doctor verification result.
@@ -147,6 +149,12 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 		{checkExpiredActiveAttempts, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			return checkExpiredActiveAttemptsQuery(ctx, query, project.clock)
 		}},
+		{checkOrphanedReservations, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			return checkOrphanedReservationsQuery(ctx, query, project.clock)
+		}},
+		{checkReservationReleaseState, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			return checkReservationReleaseStateQuery(ctx, query)
+		}},
 		{checkHTTPAddress, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			_ = ctx
 			_ = query
@@ -261,6 +269,42 @@ func checkExpiredActiveAttemptsQuery(ctx context.Context, query sqlite.Queryer, 
 	}
 	if count != 0 {
 		return "", fmt.Errorf("expired active attempts=%d", count)
+	}
+	return fmt.Sprintf("count=%d", count), nil
+}
+
+func checkOrphanedReservationsQuery(ctx context.Context, query sqlite.Queryer, clock clock.Clock) (string, error) {
+	if clock == nil {
+		return "", errors.New("project clock is unavailable")
+	}
+	now := clock.Now().UTC().Format(time.RFC3339Nano)
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM resource_reservations r
+		WHERE r.status = 'active' AND (
+			NOT EXISTS (SELECT 1 FROM work_attempts a WHERE a.id = r.attempt_id)
+			OR EXISTS (
+				SELECT 1 FROM work_attempts a
+				WHERE a.id = r.attempt_id
+				AND (a.status != 'active' OR a.lease_expires_at <= ?)
+			)
+		)`, now).Scan(&count); err != nil {
+		return "", err
+	}
+	if count != 0 {
+		return "", fmt.Errorf("active reservations without a live attempt=%d", count)
+	}
+	return fmt.Sprintf("count=%d", count), nil
+}
+
+func checkReservationReleaseStateQuery(ctx context.Context, query sqlite.Queryer) (string, error) {
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM resource_reservations
+		WHERE (status = 'released' AND (released_at IS NULL OR released_at = '' OR release_reason IS NULL OR release_reason = ''))
+		OR (status = 'active' AND (released_at IS NOT NULL OR release_reason IS NOT NULL))`).Scan(&count); err != nil {
+		return "", err
+	}
+	if count != 0 {
+		return "", fmt.Errorf("reservations with inconsistent release state=%d", count)
 	}
 	return fmt.Sprintf("count=%d", count), nil
 }

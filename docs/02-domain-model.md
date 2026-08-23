@@ -1215,7 +1215,84 @@ max logical namespace length             64 runes ([a-z][a-z0-9.-]{0,63})
 max logical name length                  256 runes
 ```
 
-### 18.7. Resolved decisions
+### 18.7. Operational surfaces
+
+A reservation is visible on four durable surfaces. All four expose the
+*display* value and never the comparison key or the normalized automaton
+form -- those are internal comparison machinery (§18.2/§18.4), meaningless
+as text and misleading if a reader could match on one.
+
+**Issue activity.** Reservations appear as their own activity entity kind
+(`entity_type: "reservation"`, category `reservations`), carrying the
+reservation summary: id, issue, attempt, kind, display value, status, and
+the release timestamp and reason when released. An item's activity
+timestamp is `released_at` when the reservation has been released and
+`created_at` otherwise, so releasing a reservation is itself new activity.
+The `reservation_reserved` / `reservation_released` events are separate
+items under the `events` category and are not duplicated here.
+
+**Search.** Indexed as `entity_type: "reservation"`, with the display value
+as the document title and the resource kind plus the release reason (when
+present) as its content. `comparison_value` and `normalized_json` are never
+indexed. Live indexing and index rebuild produce identical documents.
+
+**Logical interchange.** Reservations cross the interchange boundary in the
+version-2 `extensions` map under the `reservations` namespace, rather than
+as a top-level array (docs/07 §7, option 1; ISSUE-215). The namespace
+carries its own `version`, independent of the document version:
+
+```json
+"extensions": {
+  "reservations": {
+    "version": 1,
+    "records": [
+      {
+        "id": "01J1RESERVATIONAAAAAAAAAAA",
+        "issue_id": "01J1ISSUEAAAAAAAAAAAAAAAAA",
+        "attempt_id": "01J1ATTEMPTAAAAAAAAAAAAAAA",
+        "kind": "file",
+        "display_value": "src/main.go",
+        "comparison_value": "src/main.go",
+        "normalized_json": {"kind": "file", "segments": ["src", "main.go"]},
+        "status": "released",
+        "created_at": "2026-01-01T00:00:00.000000000Z",
+        "released_at": "2026-01-01T01:00:00.000000000Z",
+        "release_reason": "completed"
+      }
+    ]
+  }
+}
+```
+
+Only *released* reservations are exported and only released reservations
+import. An active reservation is owned by an active attempt, active
+attempts do not cross the boundary (docs/07 §5), and importing an active
+row would resurrect a live claim on resources that nothing in the
+destination holds a lease for -- so `status: "active"` is rejected
+explicitly rather than silently downgraded. A released reservation whose
+owning attempt is still active is excluded from export for the same
+reason: its attempt is not in the document, so the row would import
+dangling. Import additionally rejects a record whose `issue_id` disagrees
+with its own attempt's issue. Unlike activity and search, interchange does
+carry `comparison_value` and `normalized_json`, so an import is a faithful
+insert rather than a re-normalization under whatever rules are current;
+both are inert for a released row, since the active-identity unique index
+is partial on `status = 'active'`.
+
+The reserved/released events are not carried in the namespace: they are
+ordinary `issue_events` rows and are already in the document's `events`
+array, exactly as review events are.
+
+**Backup and doctor.** Backup needs no reservation-specific path -- SQLite
+online backup copies the table with everything else. Doctor validates two
+invariants that the storage CHECK constraints cannot catch in a restored
+or externally-modified file: no active reservation is owned by a missing,
+non-active, or lease-expired attempt; and every row's release state is
+self-consistent (released implies both `released_at` and `release_reason`;
+active implies neither). Search-index rebuild recreates reservation
+documents.
+
+### 18.8. Resolved decisions
 
 No case-sensitivity, symlink, glob, or namespace question is left open by
 this contract: case sensitivity is the ASCII-fold rule in §18.2; symlinks

@@ -213,6 +213,34 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 			exportedAt = latest
 		}
 
+		// Reservations ride in the version-2 extensions map rather than a
+		// top-level array (ISSUE-215). The namespace is emitted only when
+		// there is something to carry, so a project that never reserved a
+		// resource exports exactly the document it exported before.
+		// Reservation reserved/released events are not carried here: like
+		// review events, they are already in document.Events, which
+		// exports issue_events wholesale.
+		reservations, latest, err := readLogicalReservations(ctx, query)
+		if err != nil {
+			return err
+		}
+		if len(reservations) > 0 {
+			payload, err := json.Marshal(domain.LogicalReservationsExtension{
+				Version: domain.LogicalReservationsExtensionVersion,
+				Records: reservations,
+			})
+			if err != nil {
+				return err
+			}
+			if document.Extensions == nil {
+				document.Extensions = make(map[string]json.RawMessage, 1)
+			}
+			document.Extensions[domain.LogicalReservationsExtensionKey] = payload
+		}
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
 		document.ExportedAt = formatLogicalProjectTimestamp(exportedAt)
 		return nil
 	})
@@ -670,6 +698,38 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
 				reviewOutcomeDestIDs[outcome.ID], reviewRequestDestIDs[outcome.RequestID], attemptDestIDs[outcome.AttemptID], outcome.Outcome, nullableString(outcome.Reason), formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+
+		// Reservations arrive in the extensions namespace, not a top-level
+		// array, so they are decoded rather than ranged over. Parsing has
+		// already validated the namespace (released-only, references
+		// resolvable and consistent with the owning attempt's issue), so
+		// this is a plain insert.
+		reservations, err := plan.Document.DecodeReservationsExtension()
+		if err != nil {
+			return err
+		}
+		reservationDestIDs := plan.DestinationIDs.ReservationIDs
+		for _, reservation := range reservations {
+			if _, ok := reservationDestIDs[reservation.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination reservation identifier", false)
+			}
+		}
+		for _, reservation := range reservations {
+			createdAt, err := parseLogicalProjectTimestamp("reservations.created_at", reservation.CreatedAt)
+			if err != nil {
+				return err
+			}
+			releasedAt, err := parseLogicalProjectTimestamp("reservations.released_at", reservation.ReleasedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at, released_at, release_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+				reservationDestIDs[reservation.ID], issueDestIDs[reservation.IssueID], attemptDestIDs[reservation.AttemptID],
+				reservation.Kind, reservation.DisplayValue, reservation.ComparisonValue, string(reservation.NormalizedJSON),
+				reservation.Status, formatStorageTime(createdAt), formatStorageTime(releasedAt), reservation.ReleaseReason); err != nil {
 				return err
 			}
 		}
@@ -1270,6 +1330,80 @@ func readLogicalArtifacts(ctx context.Context, query Queryer) ([]domain.LogicalA
 		return nil, time.Time{}, err
 	}
 	return artifacts, latest, nil
+}
+
+// readLogicalReservations exports released reservations whose owning
+// attempt itself crosses the interchange boundary. Two filters matter:
+// active reservations are excluded because nothing in the destination
+// database would hold their lease, and a released reservation whose
+// attempt is still active is excluded too, because readLogicalAttempts
+// drops active attempts and the row would import as a dangling reference.
+func readLogicalReservations(ctx context.Context, query Queryer) ([]domain.LogicalReservation, time.Time, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT r.id, r.issue_id, r.attempt_id, r.kind, r.display_value, r.comparison_value, r.normalized_json, r.status, r.created_at, r.released_at, r.release_reason
+		FROM resource_reservations r
+		JOIN issues i ON r.issue_id = i.id
+		JOIN work_attempts a ON r.attempt_id = a.id
+		WHERE i.archived_at IS NULL AND a.status <> 'active' AND r.status = 'released'
+		ORDER BY r.created_at ASC, r.id ASC`)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	reservations := make([]domain.LogicalReservation, 0)
+	var latest time.Time
+	for rows.Next() {
+		var (
+			id, issueID, attemptID, kind, displayValue string
+			comparisonValue, normalizedJSON, status    string
+			createdAtText                              string
+			releasedAtText, releaseReason              sql.NullString
+		)
+		if err := rows.Scan(&id, &issueID, &attemptID, &kind, &displayValue, &comparisonValue, &normalizedJSON, &status, &createdAtText, &releasedAtText, &releaseReason); err != nil {
+			return nil, time.Time{}, corruptLogicalProjectValue(err, "reservations")
+		}
+		// The storage CHECK pairs status = 'released' with both release
+		// columns, so a row reaching here without them is corruption, not
+		// a shape this exporter should paper over.
+		if !releasedAtText.Valid || !releaseReason.Valid {
+			return nil, time.Time{}, corruptLogicalProjectField(nil, "reservations", "INVALID_VALUE")
+		}
+		if !json.Valid([]byte(normalizedJSON)) {
+			return nil, time.Time{}, corruptLogicalProjectField(nil, "normalized_json", "INVALID_JSON")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		releasedAt, err := parseLogicalProjectTimestamp("released_at", releasedAtText.String)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if createdAt.After(latest) {
+			latest = createdAt
+		}
+		if releasedAt.After(latest) {
+			latest = releasedAt
+		}
+		reservations = append(reservations, domain.LogicalReservation{
+			ID:              id,
+			IssueID:         issueID,
+			AttemptID:       attemptID,
+			Kind:            kind,
+			DisplayValue:    displayValue,
+			ComparisonValue: comparisonValue,
+			NormalizedJSON:  json.RawMessage(normalizedJSON),
+			Status:          status,
+			CreatedAt:       formatLogicalProjectTimestamp(createdAt),
+			ReleasedAt:      formatLogicalProjectTimestamp(releasedAt),
+			ReleaseReason:   releaseReason.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return reservations, latest, nil
 }
 
 func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEvent, time.Time, error) {

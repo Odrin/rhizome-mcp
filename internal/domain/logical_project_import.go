@@ -52,6 +52,10 @@ type LogicalProjectImportDestinationIDs struct {
 	ReviewTargetIDs  map[string]string
 	ReviewRequestIDs map[string]string
 	ReviewOutcomeIDs map[string]string
+
+	// ReservationIDs maps the extensions["reservations"] records; empty
+	// when that namespace is absent.
+	ReservationIDs map[string]string
 }
 
 // NewLogicalProjectImportDestinationIDs builds one destination ID for every
@@ -102,10 +106,25 @@ func NewLogicalProjectImportDestinationIDs(document LogicalProjectDocument, gene
 	if err != nil {
 		return LogicalProjectImportDestinationIDs{}, err
 	}
+	// Reservations live in the extensions namespace rather than in a
+	// top-level array, so they are decoded here instead of ranged over
+	// directly. A malformed namespace is not diagnosed here -- parsing has
+	// already validated it by the time a caller mints destination IDs from
+	// a plan's document -- so a decode failure surfaces as the same error
+	// the parse pass would have raised.
+	reservations, err := document.DecodeReservationsExtension()
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	reservationIDs, err := logicalDestinationIDs(reservations, func(item LogicalReservation) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
 	return LogicalProjectImportDestinationIDs{
 		IssueIDs: issueIDs, LabelIDs: labelIDs, RelationIDs: relationIDs, CommentIDs: commentIDs,
 		DecisionIDs: decisionIDs, AttemptIDs: attemptIDs, AttemptNoteIDs: attemptNoteIDs, ArtifactIDs: artifactIDs,
 		ReviewTargetIDs: reviewTargetIDs, ReviewRequestIDs: reviewRequestIDs, ReviewOutcomeIDs: reviewOutcomeIDs,
+		ReservationIDs: reservationIDs,
 	}, nil
 }
 
@@ -156,6 +175,11 @@ type LogicalProjectImportCounts struct {
 	ReviewRequests int `json:"review_requests"`
 	ReviewOutcomes int `json:"review_outcomes"`
 	ReviewEvents   int `json:"review_events"`
+
+	// Reservations is the extensions["reservations"] namespace's record
+	// count; zero for a version 1 document or a v2 document that carries
+	// no reservations namespace.
+	Reservations int `json:"reservations"`
 }
 
 // LogicalProjectImportConflict is one deterministic dry-run conflict.
@@ -196,6 +220,12 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 	if err := validateLogicalProjectDocumentSemantics(&parsed); err != nil {
 		return plan, err
 	}
+	// Safe to decode unchecked: the semantic pass above has already
+	// decoded and fully validated the namespace, so this cannot fail.
+	reservations, err := parsed.DecodeReservationsExtension()
+	if err != nil {
+		return plan, err
+	}
 	plan.Document = parsed
 	plan.DryRun = LogicalProjectImportDryRun{
 		Counts: LogicalProjectImportCounts{
@@ -215,6 +245,8 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 			ReviewRequests: len(parsed.ReviewRequests),
 			ReviewOutcomes: len(parsed.ReviewOutcomes),
 			ReviewEvents:   len(parsed.ReviewEvents),
+
+			Reservations: len(reservations),
 		},
 		Conflicts: nil,
 		Writes:    LogicalProjectImportWrites{Count: 0},
@@ -762,6 +794,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 	commentIDs := make(map[string]struct{})
 	decisionIDs := make(map[string]struct{})
 	attemptIDs := make(map[string]struct{})
+	attemptIssueIDs := make(map[string]string)
 	attemptNoteIDs := make(map[string]struct{})
 	artifactIDs := make(map[string]struct{})
 	for index, issue := range document.Issues {
@@ -1031,6 +1064,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 		if err := validateReference(path+".issue_id", attempt.IssueID, issueIDs, "issue"); err != nil {
 			return err
 		}
+		attemptIssueIDs[attempt.ID] = attempt.IssueID
 		if attempt.Status == "active" {
 			return invalidArgumentPath(path+".status", "UNSUPPORTED_ACTIVE_ATTEMPT", "active attempts are not supported")
 		}
@@ -1322,8 +1356,100 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 				return err
 			}
 		}
+
+		if err := validateLogicalReservations(document, seenIDs, issueIDs, attemptIDs, attemptIssueIDs); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+// validateLogicalReservations validates the extensions["reservations"]
+// namespace. It is version-2 only: v1 has no extensions map at all, and
+// the v1 key table stays frozen, so a v1 document cannot smuggle
+// reservations in.
+//
+// The importer accepts released reservations only. An active reservation
+// is owned by an active attempt, active attempts are already rejected
+// above, and importing an "active" row would resurrect a live claim on
+// resources in a database where nothing holds the corresponding lease --
+// so it is rejected explicitly rather than downgraded.
+func validateLogicalReservations(
+	document *LogicalProjectDocument,
+	seenIDs map[string]string,
+	issueIDs map[string]struct{},
+	attemptIDs map[string]struct{},
+	attemptIssueIDs map[string]string,
+) error {
+	reservations, err := document.DecodeReservationsExtension()
+	if err != nil {
+		return err
+	}
+	base := "$.extensions." + LogicalReservationsExtensionKey + ".records"
+	for index, reservation := range reservations {
+		path := fmt.Sprintf("%s[%d]", base, index)
+		if err := requireNonEmptyString(path+".id", reservation.ID); err != nil {
+			return err
+		}
+		if err := validateCanonicalULID(path+".id", reservation.ID); err != nil {
+			return err
+		}
+		if _, exists := seenIDs[reservation.ID]; exists {
+			return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+		}
+		seenIDs[reservation.ID] = "reservation"
+		if err := validateReference(path+".issue_id", reservation.IssueID, issueIDs, "issue"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".attempt_id", reservation.AttemptID, attemptIDs, "attempt"); err != nil {
+			return err
+		}
+		// A reservation is owned by an attempt, and that attempt belongs to
+		// exactly one issue. A record naming a different issue than its own
+		// attempt does would import as a row the acquisition path could
+		// never have produced.
+		if owner := attemptIssueIDs[reservation.AttemptID]; owner != reservation.IssueID {
+			return invalidArgumentPath(path+".issue_id", "INCONSISTENT_REFERENCE", "must match the owning attempt's issue")
+		}
+		if !ResourceKind(reservation.Kind).Valid() {
+			return invalidArgumentPath(path+".kind", "INVALID_ENUM", "unsupported resource kind")
+		}
+		if err := requireNonEmptyString(path+".display_value", reservation.DisplayValue); err != nil {
+			return err
+		}
+		if err := requireNonEmptyString(path+".comparison_value", reservation.ComparisonValue); err != nil {
+			return err
+		}
+		if !isJSONObject(reservation.NormalizedJSON) {
+			return invalidArgumentPath(path+".normalized_json", "INVALID_JSON", "normalized_json must be a JSON object")
+		}
+		if reservation.Status == string(ReservationStatusActive) {
+			return invalidArgumentPath(path+".status", "UNSUPPORTED_ACTIVE_RESERVATION", "active reservations are not supported")
+		}
+		if reservation.Status != string(ReservationStatusReleased) {
+			return invalidArgumentPath(path+".status", "INVALID_ENUM", "unsupported reservation status")
+		}
+		if err := validateUTCTimestamp(path+".created_at", reservation.CreatedAt); err != nil {
+			return err
+		}
+		// A released row must carry both release fields: the storage CHECK
+		// enforces exactly this pairing, so a record missing one would fail
+		// at insert time with an opaque constraint error instead of a
+		// located validation error.
+		if err := requireNonEmptyString(path+".released_at", reservation.ReleasedAt); err != nil {
+			return err
+		}
+		if err := validateUTCTimestamp(path+".released_at", reservation.ReleasedAt); err != nil {
+			return err
+		}
+		if err := requireNonEmptyString(path+".release_reason", reservation.ReleaseReason); err != nil {
+			return err
+		}
+		if !ReservationReleaseReason(reservation.ReleaseReason).Valid() {
+			return invalidArgumentPath(path+".release_reason", "INVALID_ENUM", "unsupported release reason")
+		}
+	}
 	return nil
 }
 
@@ -1387,6 +1513,18 @@ func validateArtifactMetadata(path string, metadata json.RawMessage) error {
 		return invalidArgumentPath(path, "INVALID_JSON_TYPE", "artifact metadata must be a JSON object")
 	}
 	return nil
+}
+
+// isJSONObject is stricter than isValidEventPayload: the normalized
+// resource form is always an object, and SQLite's json_valid() would
+// happily accept a bare string or number, so the domain is the only place
+// that can hold the shape.
+func isJSONObject(payload json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	return json.Valid(trimmed)
 }
 
 func isValidEventPayload(payload json.RawMessage) bool {

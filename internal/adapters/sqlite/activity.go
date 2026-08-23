@@ -190,10 +190,9 @@ const (
 //
 // Rank is append-only and must never be renumbered: it is embedded in the SQL
 // union arm text and round-trips through client-held cursors. New entity
-// kinds (e.g. ISSUE-175's gate/evidence events, ISSUE-182's reservation
-// events) must append new specs with the next unused rank (currently 8, 9,
-// ...) in registration order; existing ranks 1-7 are permanently reserved for
-// the specs below.
+// kinds must append new specs with the next unused rank (currently 10, ...)
+// in registration order; existing ranks 1-8 are permanently reserved for the
+// specs below.
 type activityEntitySpec struct {
 	Category   domain.ActivityCategory
 	EntityType domain.ActivityEntityType
@@ -323,6 +322,25 @@ var activityRegistry = []activityEntitySpec{
 				return err
 			}
 			item.GateEvidence = &evidence
+			return nil
+		},
+	},
+	{
+		Category:   domain.ActivityCategoryReservations,
+		EntityType: domain.ActivityEntityTypeReservation,
+		Rank:       9,
+		// occurred_at uses COALESCE(released_at, created_at): a reservation
+		// moves in the timeline when it is released, mirroring how
+		// gate_evidence uses updated_at.
+		Arm:        `SELECT 'reservation' AS entity_type, resource_reservations.id AS entity_id, COALESCE(resource_reservations.released_at, resource_reservations.created_at) AS occurred_at, 9 AS type_rank, resource_reservations.id AS sort_id FROM resource_reservations WHERE resource_reservations.issue_id = ?`,
+		SortIDKind: activitySortIDULID,
+		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
+			reservation, err := loadActivityReservation(ctx, query, entityID)
+			if err != nil {
+				return err
+			}
+			summary := domain.SummarizeReservation(reservation)
+			item.Reservation = &summary
 			return nil
 		},
 	},
@@ -1044,6 +1062,82 @@ func scanActivityArtifact(scanner scanner) (domain.Artifact, error) {
 	}
 	artifactInput := validated[0]
 	return domain.Artifact{ID: id, IssueID: issueID, AttemptID: attemptIDValue, Type: artifactInput.Type, URI: artifactInput.URI, Title: artifactInput.Title, Metadata: artifactInput.Metadata, CreatedAt: created}, nil
+}
+
+// loadActivityReservation reads only the columns domain.SummarizeReservation
+// needs: comparison_value and normalized_json are intentionally excluded so
+// they never reach activity payloads (ISSUE-181/ISSUE-182). This is a
+// deliberately narrower scan than reservations.go's scanReservationRow,
+// which loads the full row including those internal-only columns.
+func loadActivityReservation(ctx context.Context, query Queryer, id string) (domain.Reservation, error) {
+	reservation, err := scanActivityReservation(query.QueryRowContext(ctx,
+		`SELECT id, issue_id, attempt_id, kind, display_value, status, created_at, released_at, release_reason FROM resource_reservations WHERE id = ?`, id))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Reservation{}, activityCorrupt(err)
+		}
+		return domain.Reservation{}, err
+	}
+	return reservation, nil
+}
+
+func scanActivityReservation(scanner scanner) (domain.Reservation, error) {
+	var (
+		id, issueID, attemptID, kindText, displayValue, statusText, createdAt string
+		releasedAt, releaseReasonText                                         sql.NullString
+	)
+	if err := scanner.Scan(&id, &issueID, &attemptID, &kindText, &displayValue, &statusText, &createdAt, &releasedAt, &releaseReasonText); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Reservation{}, err
+		}
+		return domain.Reservation{}, activityCorrupt(err)
+	}
+	if _, err := ids.ParseStrict(id); err != nil {
+		return domain.Reservation{}, activityCorruptField(err, "id", "INVALID_ULID")
+	}
+	if _, err := ids.ParseStrict(issueID); err != nil {
+		return domain.Reservation{}, activityCorruptField(err, "issue_id", "INVALID_ULID")
+	}
+	if _, err := ids.ParseStrict(attemptID); err != nil {
+		return domain.Reservation{}, activityCorruptField(err, "attempt_id", "INVALID_ULID")
+	}
+	kind := domain.ResourceKind(kindText)
+	if !kind.Valid() {
+		return domain.Reservation{}, activityCorruptField(nil, "kind", "INVALID_ENUM")
+	}
+	if strings.TrimSpace(displayValue) == "" {
+		return domain.Reservation{}, activityCorruptField(nil, "display_value", "REQUIRED")
+	}
+	status := domain.ReservationStatus(statusText)
+	if status != domain.ReservationStatusActive && status != domain.ReservationStatusReleased {
+		return domain.Reservation{}, activityCorruptField(nil, "status", "INVALID_ENUM")
+	}
+	created, err := parseIssueTimestamp("created_at", createdAt)
+	if err != nil {
+		return domain.Reservation{}, err
+	}
+	released, err := parseNullableIssueTimestamp("released_at", releasedAt)
+	if err != nil {
+		return domain.Reservation{}, err
+	}
+	var releaseReason *domain.ReservationReleaseReason
+	if releaseReasonText.Valid {
+		reason := domain.ReservationReleaseReason(releaseReasonText.String)
+		if !reason.Valid() {
+			return domain.Reservation{}, activityCorruptField(nil, "release_reason", "INVALID_ENUM")
+		}
+		releaseReason = &reason
+	}
+	if (status == domain.ReservationStatusActive) != (released == nil) {
+		return domain.Reservation{}, activityCorruptField(nil, "released_at", "STATUS_MISMATCH")
+	}
+	if (status == domain.ReservationStatusActive) != (releaseReason == nil) {
+		return domain.Reservation{}, activityCorruptField(nil, "release_reason", "STATUS_MISMATCH")
+	}
+	return domain.Reservation{
+		ID: id, IssueID: issueID, AttemptID: attemptID, Kind: kind, DisplayValue: displayValue,
+		Status: status, CreatedAt: created, ReleasedAt: released, ReleaseReason: releaseReason,
+	}, nil
 }
 
 func parseActivityNullableULID(field string, value sql.NullString) (*string, error) {

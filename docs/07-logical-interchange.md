@@ -12,6 +12,14 @@ returns a managed artifact URI, while `delivery: "inline"` returns the document
 when it is within the MCP inline limit. Artifact URIs are local runtime
 capabilities and are not fields in this document.
 
+Import caps the document at 1 MiB
+(`domain.MaxLogicalProjectImportBytes`). This is a guard against a
+malicious or runaway payload, not a capacity plan for any one section:
+every entity type -- comments, events, and the `extensions` namespaces
+alike -- shares that one budget, and the cap has deliberately not been
+raised as sections were added. A project large enough to exceed it needs a
+streaming importer, not a bigger constant.
+
 The top-level document (version 2) is:
 
 ```json
@@ -252,6 +260,8 @@ The following are intentionally excluded:
 - archived issues and their owned data;
 - active attempts, their leases, raw tokens, token hashes, heartbeat
   ownership, and their dependent history;
+- active resource reservations, and any reservation whose owning attempt is
+  still active (version 2 only -- see docs/02 §18.7);
 - claimed review requests and their active review attempt binding (version
   2 only -- see §4);
 - generated issue display IDs, source row versions, and source event IDs;
@@ -325,11 +335,16 @@ in order of preference:
    struct fields, semantic validation, export query, and import insertion),
    coordinating with whoever else is also extending version 2 at the same
    time -- **not** independently declaring a new "version 2" or bumping to
-   version 3. ISSUE-175 (workflow gates) and ISSUE-182 (reservations) are
-   the two features expected to do this next; both add sections to this
-   same shared version 2 definition rather than each claiming a version
-   number of their own (see ISSUE-215, which this section's policy exists
-   to settle).
+   version 3.
+
+Whichever option a feature takes, it adds to this same shared version 2
+definition rather than claiming a version number of its own -- see
+ISSUE-215, which this section's policy exists to settle. ISSUE-182
+(reservations) took option 1: reservations are self-contained history that
+needs no new reference-remapping machinery, so they ride in
+`extensions.reservations` with their own namespace version, and their shape
+is documented in docs/02 §18.7. ISSUE-175 (workflow gates) is the other
+feature expected to extend version 2.
 
 A version 3 is warranted only when a change cannot be expressed as an
 addition under version 2 -- for instance, changing the meaning or required

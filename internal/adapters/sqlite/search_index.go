@@ -43,6 +43,14 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 				SELECT 'attempt_note', attempt_notes.id, work_attempts.issue_id, '', attempt_notes.content
 				FROM attempt_notes
 				JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id`,
+			// Display values only. comparison_value and normalized_json are
+			// case-folded comparison keys and glob automaton internals; they
+			// are never indexed. This must stay byte-identical in effect to
+			// migration 013's triggers, or a rebuild would silently produce a
+			// different index than live writes do.
+			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
+				SELECT 'reservation', id, issue_id, display_value, kind || char(10) || COALESCE(release_reason, '')
+				FROM resource_reservations`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return err

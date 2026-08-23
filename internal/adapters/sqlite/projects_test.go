@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"path/filepath"
@@ -1000,6 +1001,411 @@ func TestProjectRepositoryAppliesVersion2ReviewEntitiesWithRemappedReferences(t 
 	}
 	if exported.Version != 2 || len(exported.ReviewTargets) != 1 || len(exported.ReviewRequests) != 1 || len(exported.ReviewOutcomes) != 1 {
 		t.Fatalf("re-exported document = %#v", exported)
+	}
+}
+
+// TestProjectRepositoryRoundTripsReleasedReservationThroughExtensionsNamespace
+// covers ISSUE-182 AC1: a released reservation owned by a finished attempt
+// crosses the interchange boundary via Extensions["reservations"], and an
+// import of that document lands the row with remapped issue_id/attempt_id
+// (destination IDs) while every other column survives unchanged.
+func TestProjectRepositoryRoundTripsReleasedReservationThroughExtensionsNamespace(t *testing.T) {
+	db, now := openProjectDatabase(t, "Reservations", "Instructions")
+	ctx := context.Background()
+
+	const (
+		issueID       = "01ARZ3NDEKTSV4RRFFQ69G5FEA"
+		attemptID     = "01ARZ3NDEKTSV4RRFFQ69G5FEB"
+		reservationID = "01ARZ3NDEKTSV4RRFFQ69G5FEC"
+	)
+	createdAt := now.Add(1 * time.Second)
+	finishedAt := now.Add(2 * time.Second)
+	releasedAt := now.Add(3 * time.Second)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'Reservation issue', 'done', 'medium', 1, ?, ?)`,
+			issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json
+		) VALUES (?, ?, 'work', 'completed', 1, 0, X'03', ?, ?, ?, ?, 'done', '[]', '[]')`,
+			attemptID, issueID,
+			sqlite.FormatStorageTime(finishedAt), sqlite.FormatStorageTime(createdAt),
+			sqlite.FormatStorageTime(finishedAt), sqlite.FormatStorageTime(finishedAt)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(
+			id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at, released_at, release_reason
+		) VALUES (?, ?, ?, 'file', 'src/a.go', 'src/a.go', '{"path":"src/a.go"}', 'released', 1, ?, ?, 'completed')`,
+			reservationID, issueID, attemptID,
+			sqlite.FormatStorageTime(createdAt), sqlite.FormatStorageTime(releasedAt))
+		return err
+	}); err != nil {
+		t.Fatalf("seed reservation fixture: %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	reservations, err := exported.DecodeReservationsExtension()
+	if err != nil {
+		t.Fatalf("DecodeReservationsExtension() error = %v", err)
+	}
+	if len(reservations) != 1 {
+		t.Fatalf("reservations = %#v, want exactly one", reservations)
+	}
+	got := reservations[0]
+	if got.ID != reservationID || got.IssueID != issueID || got.AttemptID != attemptID ||
+		got.Kind != "file" || got.DisplayValue != "src/a.go" || got.ComparisonValue != "src/a.go" ||
+		string(got.NormalizedJSON) != `{"path":"src/a.go"}` || got.Status != "released" ||
+		got.ReleaseReason != "completed" {
+		t.Fatalf("exported reservation = %#v", got)
+	}
+	rawExtension, ok := exported.Extensions[domain.LogicalReservationsExtensionKey]
+	if !ok {
+		t.Fatalf("extensions = %#v, want a %q key", exported.Extensions, domain.LogicalReservationsExtensionKey)
+	}
+	var extension domain.LogicalReservationsExtension
+	if err := json.Unmarshal(rawExtension, &extension); err != nil {
+		t.Fatalf("unmarshal raw extension payload: %v", err)
+	}
+	if extension.Version != domain.LogicalReservationsExtensionVersion {
+		t.Fatalf("extension version = %d, want %d", extension.Version, domain.LogicalReservationsExtensionVersion)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+	if plan.DryRun.Counts.Reservations != 1 {
+		t.Fatalf("dry run reservation count = %d, want 1", plan.DryRun.Counts.Reservations)
+	}
+	plan = assignImportDestinationIDs(t, plan)
+
+	destDB, _ := openProjectDatabase(t, "Reservations destination", "Instructions")
+	destRepository, err := sqlite.NewProjectRepository(destDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	result, err := destRepository.ApplyLogicalProjectImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+	if result.Counts.Reservations != 1 {
+		t.Fatalf("apply result reservation count = %d, want 1", result.Counts.Reservations)
+	}
+
+	destIssueID := plan.DestinationIDs.IssueIDs[issueID]
+	destAttemptID := plan.DestinationIDs.AttemptIDs[attemptID]
+	if destIssueID == "" || destIssueID == issueID || destAttemptID == "" || destAttemptID == attemptID {
+		t.Fatalf("destination ids not remapped: issue=%q attempt=%q", destIssueID, destAttemptID)
+	}
+
+	var rowIssueID, rowAttemptID, rowKind, rowDisplayValue, rowComparisonValue, rowNormalizedJSON, rowStatus, rowReleaseReason string
+	if err := destDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, release_reason FROM resource_reservations`).
+			Scan(&rowIssueID, &rowAttemptID, &rowKind, &rowDisplayValue, &rowComparisonValue, &rowNormalizedJSON, &rowStatus, &rowReleaseReason)
+	}); err != nil {
+		t.Fatalf("read imported reservation row: %v", err)
+	}
+	if rowIssueID != destIssueID {
+		t.Fatalf("imported reservation issue_id = %q, want remapped %q", rowIssueID, destIssueID)
+	}
+	if rowAttemptID != destAttemptID {
+		t.Fatalf("imported reservation attempt_id = %q, want remapped %q", rowAttemptID, destAttemptID)
+	}
+	if rowKind != "file" || rowDisplayValue != "src/a.go" || rowComparisonValue != "src/a.go" ||
+		rowStatus != "released" || rowReleaseReason != "completed" {
+		t.Fatalf("imported reservation columns = kind=%q display=%q comparison=%q status=%q reason=%q",
+			rowKind, rowDisplayValue, rowComparisonValue, rowStatus, rowReleaseReason)
+	}
+	// normalized_json is re-indented by MarshalLogicalProjectDocument's
+	// json.MarshalIndent on the way through the document, so it is no
+	// longer byte-identical to the compact form seeded above; assert JSON
+	// content survived rather than exact bytes.
+	if !strings.Contains(rowNormalizedJSON, "src/a.go") {
+		t.Fatalf("imported reservation normalized_json = %q, want to contain %q", rowNormalizedJSON, "src/a.go")
+	}
+}
+
+// TestProjectRepositoryExportOmitsReservationsExtensionWhenNothingCrossesTheBoundary
+// covers ISSUE-182 AC2: an active reservation, and a released reservation
+// whose owning attempt is still active, must never cross the interchange
+// boundary -- and when nothing is exportable the extensions map must not
+// carry an empty "reservations" key, preserving the existing deterministic
+// snapshot shape for projects that never touched a reservation.
+func TestProjectRepositoryExportOmitsReservationsExtensionWhenNothingCrossesTheBoundary(t *testing.T) {
+	db, now := openProjectDatabase(t, "Reservations exclusion", "Instructions")
+	ctx := context.Background()
+
+	const (
+		issueID                  = "01ARZ3NDEKTSV4RRFFQ69G5FFA"
+		attemptID                = "01ARZ3NDEKTSV4RRFFQ69G5FFB"
+		activeReservationID      = "01ARZ3NDEKTSV4RRFFQ69G5FFC"
+		releasedButActiveOwnerID = "01ARZ3NDEKTSV4RRFFQ69G5FFD"
+	)
+	timestamp := sqlite.FormatStorageTime(now)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'Excluded reservations issue', 'ready', 'medium', 1, ?, ?)`,
+			issueID, timestamp, timestamp); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, X'04', ?, ?, ?)`,
+			attemptID, issueID, timestamp, timestamp, timestamp); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(
+			id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at
+		) VALUES (?, ?, ?, 'file', 'src/active.go', 'src/active.go', '{}', 'active', 1, ?)`,
+			activeReservationID, issueID, attemptID, timestamp); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO resource_reservations(
+			id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at, released_at, release_reason
+		) VALUES (?, ?, ?, 'file', 'src/released.go', 'src/released.go', '{}', 'released', 1, ?, ?, 'completed')`,
+			releasedButActiveOwnerID, issueID, attemptID, timestamp, timestamp)
+		return err
+	}); err != nil {
+		t.Fatalf("seed exclusion fixture: %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if _, ok := exported.Extensions[domain.LogicalReservationsExtensionKey]; ok {
+		t.Fatalf("extensions = %#v, want no %q key when nothing is exportable", exported.Extensions, domain.LogicalReservationsExtensionKey)
+	}
+	if len(exported.Extensions) != 0 {
+		t.Fatalf("extensions = %#v, want empty", exported.Extensions)
+	}
+	reservations, err := exported.DecodeReservationsExtension()
+	if err != nil {
+		t.Fatalf("DecodeReservationsExtension() error = %v", err)
+	}
+	if reservations != nil {
+		t.Fatalf("reservations = %#v, want nil", reservations)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	if _, err := domain.ParseLogicalProjectImportPlan(data); err != nil {
+		t.Fatalf("re-parsing exported document failed: %v", err)
+	}
+}
+
+// TestProjectRepositoryImportRejectsInvalidReservationRecords covers
+// ISSUE-182 AC3: every reservation-shaped defect that
+// validateLogicalReservations (and DecodeReservationsExtension) rejects,
+// each isolated to a single hand-built document defect at a time.
+func TestProjectRepositoryImportRejectsInvalidReservationRecords(t *testing.T) {
+	const (
+		issueID       = "01ARZ3NDEKTSV4RRFFQ69G5FGA"
+		otherIssueID  = "01ARZ3NDEKTSV4RRFFQ69G5FGB"
+		attemptID     = "01ARZ3NDEKTSV4RRFFQ69G5FGC"
+		reservationID = "01ARZ3NDEKTSV4RRFFQ69G5FGD"
+		unknownID     = "01ARZ3NDEKTSV4RRFFQ69G5FGE"
+	)
+
+	validReservation := func() domain.LogicalReservation {
+		return domain.LogicalReservation{
+			ID: reservationID, IssueID: issueID, AttemptID: attemptID,
+			Kind: "file", DisplayValue: "src/a.go", ComparisonValue: "src/a.go",
+			NormalizedJSON: json.RawMessage(`{"path":"src/a.go"}`),
+			Status:         "released",
+			CreatedAt:      "2026-07-17T18:24:10Z",
+			ReleasedAt:     "2026-07-17T18:24:11Z",
+			ReleaseReason:  "completed",
+		}
+	}
+	baseDocument := func() domain.LogicalProjectDocument {
+		return domain.LogicalProjectDocument{
+			Format:     "rhizome-logical-project",
+			Version:    2,
+			ExportedAt: "2026-07-17T18:24:20Z",
+			Project: domain.LogicalProjectProject{
+				ID: sqliteTestProjectID, CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+			},
+			Issues: []domain.LogicalIssue{
+				{ID: issueID, Type: "task", Title: "Reservation owner", Status: "done", Priority: "medium",
+					CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"},
+				{ID: otherIssueID, Type: "task", Title: "Unrelated issue", Status: "done", Priority: "medium",
+					CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z"},
+			},
+			Attempts: []domain.LogicalAttempt{{
+				ID: attemptID, IssueID: issueID, Kind: "work", Status: "completed",
+				IssueVersionAtStart: 1, ContextEventIDAtStart: 0,
+				LeaseExpiresAt: "2026-07-17T18:24:09Z", StartedAt: "2026-07-17T18:24:09Z", LastHeartbeatAt: "2026-07-17T18:24:09Z",
+				FinishedAt: stringValuePointer("2026-07-17T18:24:10Z"), ResultSummary: stringValuePointer("done"),
+				NextSteps: []string{}, Verification: []string{},
+			}},
+		}
+	}
+	withExtension := func(payload json.RawMessage) []byte {
+		document := baseDocument()
+		document.Extensions = map[string]json.RawMessage{domain.LogicalReservationsExtensionKey: payload}
+		data, err := domain.MarshalLogicalProjectDocument(document)
+		if err != nil {
+			t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+		}
+		return data
+	}
+	marshalRecordsVersion := func(version int, records ...domain.LogicalReservation) json.RawMessage {
+		payload, err := json.Marshal(domain.LogicalReservationsExtension{Version: version, Records: records})
+		if err != nil {
+			t.Fatalf("marshal reservations extension: %v", err)
+		}
+		return payload
+	}
+	marshalRecords := func(records ...domain.LogicalReservation) json.RawMessage {
+		return marshalRecordsVersion(domain.LogicalReservationsExtensionVersion, records...)
+	}
+	mutate := func(fn func(*domain.LogicalReservation)) []byte {
+		reservation := validReservation()
+		fn(&reservation)
+		return withExtension(marshalRecords(reservation))
+	}
+	unknownKeyPayload := func() json.RawMessage {
+		var generic map[string]json.RawMessage
+		if err := json.Unmarshal(marshalRecords(validReservation()), &generic); err != nil {
+			t.Fatalf("unmarshal base extension payload: %v", err)
+		}
+		generic["unexpected"] = json.RawMessage(`true`)
+		payload, err := json.Marshal(generic)
+		if err != nil {
+			t.Fatalf("marshal extension payload with unknown key: %v", err)
+		}
+		return payload
+	}
+	// missingNormalizedJSONPayload drops the normalized_json key entirely
+	// rather than setting it to a malformed string: json.RawMessage forces
+	// any *present* value through Go's JSON tokenizer on the way in, so
+	// "invalid JSON" text can never survive a real marshal/parse round
+	// trip -- the only way isValidEventPayload's len(payload) == 0 branch
+	// (its "not valid JSON" case, since an absent key decodes to a nil
+	// RawMessage) is reachable from a real document is a missing key.
+	missingNormalizedJSONPayload := func() json.RawMessage {
+		recordBytes, err := json.Marshal(validReservation())
+		if err != nil {
+			t.Fatalf("marshal base reservation record: %v", err)
+		}
+		var recordFields map[string]json.RawMessage
+		if err := json.Unmarshal(recordBytes, &recordFields); err != nil {
+			t.Fatalf("unmarshal base reservation record: %v", err)
+		}
+		delete(recordFields, "normalized_json")
+		extension := struct {
+			Version int                          `json:"version"`
+			Records []map[string]json.RawMessage `json:"records"`
+		}{Version: domain.LogicalReservationsExtensionVersion, Records: []map[string]json.RawMessage{recordFields}}
+		payload, err := json.Marshal(extension)
+		if err != nil {
+			t.Fatalf("marshal extension payload with missing normalized_json: %v", err)
+		}
+		return payload
+	}
+
+	const recordsBase = "$.extensions." + domain.LogicalReservationsExtensionKey + ".records[0]"
+
+	cases := []struct {
+		name        string
+		data        []byte
+		wantTopCode string
+		wantCode    string
+		wantField   string
+	}{
+		{
+			name:        "active status is rejected outright",
+			data:        mutate(func(r *domain.LogicalReservation) { r.Status = "active" }),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "UNSUPPORTED_ACTIVE_RESERVATION", wantField: recordsBase + ".status",
+		},
+		{
+			name:        "attempt_id must resolve to an included attempt",
+			data:        mutate(func(r *domain.LogicalReservation) { r.AttemptID = unknownID }),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "INVALID_REFERENCE", wantField: recordsBase + ".attempt_id",
+		},
+		{
+			name:        "issue_id must match the owning attempt's issue",
+			data:        mutate(func(r *domain.LogicalReservation) { r.IssueID = otherIssueID }),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "INCONSISTENT_REFERENCE", wantField: recordsBase + ".issue_id",
+		},
+		{
+			name:        "release_reason is required on a released row",
+			data:        mutate(func(r *domain.LogicalReservation) { r.ReleaseReason = "" }),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "REQUIRED", wantField: recordsBase + ".release_reason",
+		},
+		{
+			name:        "release_reason must be one of the locked enum values",
+			data:        mutate(func(r *domain.LogicalReservation) { r.ReleaseReason = "bogus" }),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "INVALID_ENUM", wantField: recordsBase + ".release_reason",
+		},
+		{
+			name:        "normalized_json must be valid JSON",
+			data:        withExtension(missingNormalizedJSONPayload()),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "INVALID_JSON", wantField: recordsBase + ".normalized_json",
+		},
+		{
+			name:        "namespace version 2 is unsupported by this build",
+			data:        withExtension(marshalRecordsVersion(2, validReservation())),
+			wantTopCode: domain.CodeUnsupportedFormatVersion, wantCode: "UNSUPPORTED_FORMAT_VERSION",
+			wantField: "$.extensions." + domain.LogicalReservationsExtensionKey + ".version",
+		},
+		{
+			name:        "namespace payload rejects an unknown key",
+			data:        withExtension(unknownKeyPayload()),
+			wantTopCode: domain.CodeInvalidArgument, wantCode: "INVALID_JSON",
+			wantField: "$.extensions." + domain.LogicalReservationsExtensionKey,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := domain.ParseLogicalProjectImportPlan(testCase.data)
+			if err == nil {
+				t.Fatal("ParseLogicalProjectImportPlan() error = nil, want an error")
+			}
+			assertReservationImportDetail(t, err, testCase.wantTopCode, testCase.wantCode, testCase.wantField)
+		})
+	}
+}
+
+// assertReservationImportDetail asserts err is a *domain.Error carrying
+// wantTopCode as its top-level code and, as its first detail, wantCode at
+// wantField.
+func assertReservationImportDetail(t *testing.T, err error, wantTopCode, wantCode, wantField string) {
+	t.Helper()
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("error = %v (%T), want *domain.Error", err, err)
+	}
+	if domainErr.Code != wantTopCode {
+		t.Fatalf("error code = %q, want %q (error: %v)", domainErr.Code, wantTopCode, domainErr)
+	}
+	if len(domainErr.Details) == 0 {
+		t.Fatalf("error details = %#v, want at least one detail", domainErr.Details)
+	}
+	detail := domainErr.Details[0]
+	if detail.Code != wantCode || detail.Field != wantField {
+		t.Fatalf("error detail = %#v, want code %q field %q", detail, wantCode, wantField)
 	}
 }
 

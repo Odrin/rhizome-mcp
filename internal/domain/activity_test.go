@@ -24,6 +24,7 @@ func TestGetIssueActivityInputValidateDefaultsAndCopies(t *testing.T) {
 		!reflect.DeepEqual(got.Types, []ActivityCategory{
 			ActivityCategoryComments, ActivityCategoryDecisions, ActivityCategoryReviews, ActivityCategoryAttempts,
 			ActivityCategoryAttemptNotes, ActivityCategoryEvents, ActivityCategoryArtifacts, ActivityCategoryGateEvidence,
+			ActivityCategoryReservations,
 		}) {
 		t.Fatalf("normalized input = %#v", got)
 	}

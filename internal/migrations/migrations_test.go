@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 12}) {
-		t.Fatalf("Migrate() result = %+v, want current version with twelve applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 13}) {
+		t.Fatalf("Migrate() result = %+v, want current version with thirteen applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -100,10 +100,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "review_purpose_approvals" || checksum != reviewPurposeApprovalsChecksum {
+	if version != CurrentVersion() || name != "search_index_reservations" || checksum != searchIndexReservationsChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(reviewPurposeApprovalsSQL))
+	actualChecksum := sha256.Sum256([]byte(searchIndexReservationsSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -125,7 +125,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 12 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != 13 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -188,8 +188,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 11}) {
-		t.Fatalf("upgrade result = %+v, want eleven applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 12}) {
+		t.Fatalf("upgrade result = %+v, want twelve applied migrations", result)
 	}
 
 	var count int
@@ -266,8 +266,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 9}) {
-		t.Fatalf("upgrade result = %+v, want nine applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 10}) {
+		t.Fatalf("upgrade result = %+v, want ten applied migrations", result)
 	}
 
 	var after []struct {
@@ -296,15 +296,15 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+9 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+9)
+	if len(after) != len(before)+10 {
+		t.Fatalf("history rows = %d, want %d", len(after), len(before)+10)
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_purpose_approvals" || after[len(after)-1].checksum != reviewPurposeApprovalsChecksum {
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "search_index_reservations" || after[len(after)-1].checksum != searchIndexReservationsChecksum {
 		t.Fatalf("new history row = %+v, want review_purpose_approvals migration", after[len(after)-1])
 	}
 	var count int

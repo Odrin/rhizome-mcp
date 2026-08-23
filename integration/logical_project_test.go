@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"rhizome-mcp/internal/adapters/sqlite"
@@ -82,6 +83,14 @@ func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
 	claimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
 		"issue_id":      task.DisplayID,
 		"lease_seconds": 60,
+		// Reserved atomically with the claim so finish_attempt's automatic
+		// force-release (ISSUE-182) leaves behind a released reservation
+		// owned by a now-terminal attempt -- exactly the row shape that
+		// crosses the interchange boundary via Extensions["reservations"].
+		"resources": []map[string]any{{
+			"kind": "file",
+			"path": "docs/roundtrip.md",
+		}},
 	})
 	var claim struct {
 		Attempt struct {
@@ -136,12 +145,85 @@ func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
 	mustApplyLogicalProjectDocument(t, destEnv, sourceDocument)
 	destDocument := mustExportLogicalProjectDocument(t, destEnv)
 
+	// Assert both sides actually carry the reservation before comparing
+	// them. The canonical comparison below is symmetric, so an export that
+	// silently dropped the namespace would still match an import that
+	// never received one -- the round trip would pass while guaranteeing
+	// nothing about reservations at all.
+	assertRoundTripReservation(t, "source", sourceDocument)
+	assertRoundTripReservation(t, "dest", destDocument)
+
 	sourceCanonical := canonicalizeLogicalProjectDocumentWithMappings(sourceDocument, buildCanonicalIDMappings(sourceDocument))
 	destCanonical := canonicalizeLogicalProjectDocumentWithMappings(destDocument, mergeCanonicalIDMappings(buildCanonicalIDMappings(sourceDocument), buildCanonicalIDMappings(destDocument)))
 	sourceCanonicalJSON := mustMarshalDocument(t, sourceCanonical)
 	destCanonicalJSON := mustMarshalDocument(t, destCanonical)
 	if sourceCanonicalJSON != destCanonicalJSON {
 		t.Fatalf("round-trip logical content mismatch\nsource=%s\ndest=%s\nsource-canonical=%s\ndest-canonical=%s", mustMarshalDocument(t, sourceDocument), mustMarshalDocument(t, destDocument), sourceCanonicalJSON, destCanonicalJSON)
+	}
+}
+
+// assertRoundTripReservation fails unless document carries exactly the one
+// released reservation the round-trip fixture creates, with the display
+// value it was reserved under.
+func assertRoundTripReservation(t *testing.T, side string, document domain.LogicalProjectDocument) {
+	t.Helper()
+	reservations, err := document.DecodeReservationsExtension()
+	if err != nil {
+		t.Fatalf("%s DecodeReservationsExtension() error = %v", side, err)
+	}
+	if len(reservations) != 1 {
+		t.Fatalf("%s reservations = %d, want 1", side, len(reservations))
+	}
+	reservation := reservations[0]
+	if reservation.DisplayValue != "docs/roundtrip.md" || reservation.Kind != "file" {
+		t.Fatalf("%s reservation = %#v", side, reservation)
+	}
+	if reservation.Status != "released" || reservation.ReleasedAt == "" || reservation.ReleaseReason == "" {
+		t.Fatalf("%s reservation release state = %#v", side, reservation)
+	}
+}
+
+// TestIntegrationLogicalProjectVersion1DocumentImportsWithoutExtensions is
+// the ISSUE-182 v1-compatibility guarantee: a version 1 document, which
+// never carries an "extensions" key at all (the v1 key table is frozen --
+// see docs/07 §7), must still import successfully now that the importer
+// also understands version 2's reservations namespace.
+func TestIntegrationLogicalProjectVersion1DocumentImportsWithoutExtensions(t *testing.T) {
+	destEnv := newIntegrationEnvironment(t)
+
+	const issueID = "01ARZ3NDEKTSV4RRFFQ69G5FJB"
+	document := domain.LogicalProjectDocument{
+		Format:     "rhizome-logical-project",
+		Version:    1,
+		ExportedAt: "2026-07-17T18:24:20Z",
+		Project: domain.LogicalProjectProject{
+			ID: "01ARZ3NDEKTSV4RRFFQ69G5FJA", CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+		},
+		Issues: []domain.LogicalIssue{{
+			ID: issueID, Type: "task", Title: "v1 compatibility issue", Status: "ready", Priority: "medium",
+			CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+		}},
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(document)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	if strings.Contains(string(data), `"extensions"`) {
+		t.Fatalf("version 1 document unexpectedly carries an extensions key: %s", data)
+	}
+
+	mustApplyLogicalProjectDocument(t, destEnv, document)
+
+	imported := mustExportLogicalProjectDocument(t, destEnv)
+	var found bool
+	for _, issue := range imported.Issues {
+		if issue.Title == "v1 compatibility issue" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("imported issues = %#v, want the v1 document's issue to have been applied", imported.Issues)
 	}
 }
 
@@ -223,9 +305,16 @@ type canonicalIDMappings struct {
 	attemptIDs     map[string]string
 	attemptNoteIDs map[string]string
 	artifactIDs    map[string]string
+	reservationIDs map[string]string
 }
 
 func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalIDMappings {
+	// DecodeReservationsExtension is safe to call unchecked here: by the
+	// time a document reaches this test helper it has already round-tripped
+	// through ParseLogicalProjectImportPlan (via mustApplyLogicalProjectDocument)
+	// or come straight out of ExportLogicalProject, both of which guarantee
+	// a well-formed (or absent) reservations namespace.
+	reservations, _ := document.DecodeReservationsExtension()
 	mappings := canonicalIDMappings{
 		issueIDs:       make(map[string]string, len(document.Issues)),
 		labelIDs:       make(map[string]string, len(document.Labels)),
@@ -235,6 +324,7 @@ func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalI
 		attemptIDs:     make(map[string]string, len(document.Attempts)),
 		attemptNoteIDs: make(map[string]string, len(document.AttemptNotes)),
 		artifactIDs:    make(map[string]string, len(document.Artifacts)),
+		reservationIDs: make(map[string]string, len(reservations)),
 	}
 	for index := range document.Issues {
 		placeholder := fmt.Sprintf("issue-%d", index)
@@ -267,6 +357,10 @@ func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalI
 	for index := range document.Artifacts {
 		placeholder := fmt.Sprintf("artifact-%d", index)
 		mappings.artifactIDs[document.Artifacts[index].ID] = placeholder
+	}
+	for index := range reservations {
+		placeholder := fmt.Sprintf("reservation-%d", index)
+		mappings.reservationIDs[reservations[index].ID] = placeholder
 	}
 	return mappings
 }
@@ -367,6 +461,9 @@ func mergeCanonicalIDMappings(sourceMappings, destinationMappings canonicalIDMap
 	}
 	for id, placeholder := range sourceMappings.artifactIDs {
 		merged.artifactIDs[id] = placeholder
+	}
+	for id, placeholder := range sourceMappings.reservationIDs {
+		merged.reservationIDs[id] = placeholder
 	}
 	return merged
 }
@@ -546,5 +643,43 @@ func canonicalizeLogicalProjectDocumentWithMappings(document domain.LogicalProje
 	}
 
 	_ = artifactIDs
+
+	// Extensions["reservations"] (ISSUE-182) rides outside the top-level
+	// arrays canonicalized above, so it needs its own remap pass: swap the
+	// reservation's own ID plus its issue_id/attempt_id references for the
+	// same placeholders those maps already produced, then re-encode the
+	// namespace. comparison_value and normalized_json carry no IDs and are
+	// left untouched.
+	if reservations, err := normalized.DecodeReservationsExtension(); err == nil && len(reservations) > 0 {
+		reservationIDs := make(map[string]string, len(reservations)+len(mappings.reservationIDs))
+		for id, placeholder := range mappings.reservationIDs {
+			reservationIDs[id] = placeholder
+		}
+		canonicalReservations := make([]domain.LogicalReservation, len(reservations))
+		for index := range reservations {
+			reservation := reservations[index]
+			placeholder := fmt.Sprintf("reservation-%d", index)
+			if explicit, ok := mappings.reservationIDs[reservation.ID]; ok {
+				placeholder = explicit
+			}
+			reservationIDs[reservation.ID] = placeholder
+			reservation.ID = placeholder
+			reservation.IssueID = issueIDs[reservation.IssueID]
+			reservation.AttemptID = attemptIDs[reservation.AttemptID]
+			canonicalReservations[index] = reservation
+		}
+		if payload, err := json.Marshal(domain.LogicalReservationsExtension{
+			Version: domain.LogicalReservationsExtensionVersion,
+			Records: canonicalReservations,
+		}); err == nil {
+			extensions := make(map[string]json.RawMessage, len(normalized.Extensions))
+			for key, value := range normalized.Extensions {
+				extensions[key] = value
+			}
+			extensions[domain.LogicalReservationsExtensionKey] = payload
+			normalized.Extensions = extensions
+		}
+	}
+
 	return normalized
 }
