@@ -1921,6 +1921,26 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 	return true, err
 }
 
+// appendAttemptCancelledEvent records that a review attempt was terminated
+// because the review request it was bound to was cancelled. It is the
+// attempt-side counterpart of the attempt_expired event expireAttempt writes,
+// and is attributed to the cancelled review attempt so review staleness
+// ignores it (reviewedWorkChangedSince skips events owned by review
+// attempts): cancelling one request must not invalidate another issue's
+// pending review target.
+func appendAttemptCancelledEvent(ctx context.Context, tx Executor, issueID, attemptID, timestamp string) error {
+	payload, err := json.Marshal(struct {
+		AttemptID string `json:"attempt_id"`
+		Reason    string `json:"reason"`
+	}{AttemptID: attemptID, Reason: "review_request_cancelled"})
+	if err != nil {
+		return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt cancellation event", false)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+		VALUES (?, 'attempt_cancelled', NULL, ?, ?, ?)`, issueID, attemptID, string(payload), timestamp)
+	return err
+}
+
 func isActiveAttemptConstraint(err error) bool {
 	code, ok := sqliteCode(err)
 	return ok && code&0xff == 19

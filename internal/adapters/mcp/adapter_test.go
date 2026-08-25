@@ -4184,3 +4184,102 @@ func TestProjectOutputAdvertisedContractIsDerived(t *testing.T) {
 		t.Errorf("max_collection_limit = %d, want %d (from domain.MaxCollectionLimit)", projectOutput.Limits.MaxCollectionLimit, domain.MaxCollectionLimit)
 	}
 }
+
+// ISSUE-228: cancelling a claimed review request through the MCP surface must
+// revoke the bound reviewer's authority. Before the fix, cancellation only
+// cleared active_attempt_id, so the still-active review lease looked like an
+// unbound optional review and could finish with review_outcome=approved,
+// driving the reviewed issue to done after its review had been called off.
+func TestCancelReviewRequestRevokesClaimedReviewerAuthority(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "review-cancel-authority.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	created := call(t, client, "create_issue", map[string]any{"type": "task", "title": "Cancelled review target", "status": "review"})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue = %#v", created)
+	}
+
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	targetVersion, targetEventID := currentReviewTargetPosition(t, db, issue.ID)
+	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		Purposes:           []string{"implementation"},
+		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+		IssueID:            issue.ID,
+		TargetIssueVersion: targetVersion,
+		TargetEventID:      targetEventID,
+		OccurredAt:         source.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+
+	claimed := call(t, client, "claim_issue", map[string]any{"issue_id": issue.ID, "lease_seconds": 60})
+	var claim struct {
+		Attempt struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claimed, &claim)
+	if claimed.IsError || claim.Attempt.Kind != "review" || claim.LeaseToken == "" {
+		t.Fatalf("claim_issue on a review issue = %#v", claimed)
+	}
+
+	bound := call(t, client, "get_review_request", map[string]any{"review_request_id": createdReview.Request.ID})
+	var boundOutput struct {
+		Status          string  `json:"status"`
+		ActiveAttemptID *string `json:"active_attempt_id"`
+		Version         int64   `json:"version"`
+	}
+	decodeStructured(t, bound, &boundOutput)
+	if bound.IsError || boundOutput.Status != "claimed" || boundOutput.ActiveAttemptID == nil || *boundOutput.ActiveAttemptID != claim.Attempt.ID {
+		t.Fatalf("claim_issue did not bind the review request: %#v", boundOutput)
+	}
+
+	cancelled := call(t, client, "cancel_review_request", map[string]any{
+		"review_request_id": createdReview.Request.ID, "expected_version": boundOutput.Version,
+	})
+	var cancelledOutput struct {
+		Status          string  `json:"status"`
+		ActiveAttemptID *string `json:"active_attempt_id"`
+	}
+	decodeStructured(t, cancelled, &cancelledOutput)
+	if cancelled.IsError || cancelledOutput.Status != "cancelled" || cancelledOutput.ActiveAttemptID != nil {
+		t.Fatalf("cancel_review_request on a claimed request = %#v, output = %#v", cancelled, cancelledOutput)
+	}
+
+	approved := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken, "outcome": "completed",
+		"result_summary": "approving after my review was cancelled", "review_outcome": "approved",
+	})
+	if !approved.IsError {
+		t.Fatalf("finish_attempt with review_outcome=approved after cancellation = %#v, want an error", approved)
+	}
+	renewed := call(t, client, "renew_attempt", map[string]any{
+		"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken, "lease_seconds": 60,
+	})
+	if !renewed.IsError {
+		t.Fatalf("renew_attempt after cancellation = %#v, want an error", renewed)
+	}
+
+	after := call(t, client, "get_issue", map[string]any{"issue_id": issue.ID})
+	var afterOutput struct {
+		Status string `json:"status"`
+	}
+	decodeStructured(t, after, &afterOutput)
+	if after.IsError || afterOutput.Status != "review" {
+		t.Fatalf("reviewed issue after a cancelled reviewer tried to approve = %#v", afterOutput)
+	}
+}

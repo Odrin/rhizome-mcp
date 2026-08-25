@@ -288,11 +288,45 @@ func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, com
 			return domain.NewError(domain.CodeInvalidArgument, "review request cannot be cancelled", false)
 		}
 		resolvedAt := formatStorageTime(command.OccurredAt)
+		// Cancelling a claimed request must end the review attempt it bound,
+		// not merely detach it. A detached-but-active review lease keeps its
+		// full authority: FinishAttempt reads an unbound review attempt whose
+		// issue has no unresolved request as an *optional* review and accepts
+		// review_outcome=approved, so a cancelled reviewer could still drive
+		// the reviewed issue to done (ISSUE-228). Terminating the attempt in
+		// this same transaction revokes that authority irrevocably, because
+		// every attempt operation authenticates against status = 'active'
+		// first (authenticateActiveAttempt in attempts.go).
+		terminatedAttemptID := copyOptionalString(request.ActiveAttemptID)
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusCancelled, resolvedAt, request.ID, request.Version); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_cancelled", nil, payloadForReviewEvent(request.ID, request.TargetID, nil, nil, nil), resolvedAt); err != nil {
+		if terminatedAttemptID != nil {
+			// AttemptStatusCancelled deliberately does not abandon a review
+			// claim (terminalStatusAbandonsReviewClaim): the request is
+			// already resolved as cancelled above and must not be handed back
+			// to the next reviewer as open. Review attempts hold no
+			// reservations (docs/12 §12.3), so the release reason only
+			// matters if that rule is ever relaxed; force_released matches
+			// the other termination a party outside the lease performs.
+			terminated, err := terminateAttempt(ctx, tx, *terminatedAttemptID, domain.AttemptStatusCancelled,
+				terminateAttemptReason{ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, command.OccurredAt)
+			if err != nil {
+				return err
+			}
+			// A bound attempt that was not active is already terminal; its
+			// authority is gone and there is nothing to record.
+			if !terminated {
+				terminatedAttemptID = nil
+			}
+		}
+		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_cancelled", terminatedAttemptID, payloadForReviewEvent(request.ID, request.TargetID, terminatedAttemptID, nil, nil), resolvedAt); err != nil {
 			return err
+		}
+		if terminatedAttemptID != nil {
+			if err := appendAttemptCancelledEvent(ctx, tx, request.IssueID, *terminatedAttemptID, resolvedAt); err != nil {
+				return err
+			}
 		}
 		request.Status = domain.ReviewRequestStatusCancelled
 		request.ActiveAttemptID = nil

@@ -55,7 +55,7 @@ when its request content is identical; otherwise it fails with
 | claimed | approve | approved | reviewed issue becomes `done` |
 | claimed | request changes | changes_requested | reviewed issue becomes `ready`; creates linked follow-up |
 | claimed | block | blocked | reviewed issue becomes `blocked` with reason |
-| open, claimed | cancel | cancelled | no issue status change |
+| open, claimed | cancel | cancelled | no issue status change; a claimed request's review attempt is cancelled with it |
 | open, claimed | target becomes stale | superseded | request is no longer claimable |
 | open | claim with a stale target | superseded | claim fails with `STALE_REVIEW_TARGET`; no review attempt is bound |
 | approved, changes_requested, blocked, cancelled, superseded | request re-review | open | creates a new request with a new exact target |
@@ -69,6 +69,19 @@ resolved as `superseded` instead, so the next reviewer is never handed work
 that can only end in `STALE_REVIEW_TARGET`. Only a completed attempt
 (`approved`, `changes_requested`, or `blocked`) resolves the request
 otherwise. No table stores `in_progress`.
+
+Cancellation runs the relationship the other way: it ends the request, so it
+must also end the review attempt bound to it. `cancel_review_request` on a
+`claimed` request terminates that attempt (status `cancelled`, recorded as an
+`attempt_cancelled` event) in the same transaction that resolves the request.
+The cancelled request is *not* returned to `open` — nobody is being asked to
+review it any more — and the revoked lease can no longer approve, request
+changes, block, renew, or otherwise act, because every attempt operation
+requires an `active` attempt. Detaching the attempt without ending it would
+leave a lease that `finish_attempt` reads as an unbound *optional* review,
+which is exactly how a cancelled reviewer could still mark the issue `done`
+(ISSUE-228). Cancelling an `open` request terminates nothing, since no
+attempt is bound to it.
 
 ## Operational guide: request, discover, claim, complete, follow-up, and re-request
 

@@ -3517,3 +3517,113 @@ func TestFinishAttemptBlockerAndCompletionUpdateRace(t *testing.T) {
 		}
 	})
 }
+
+// ISSUE-228: cancelling a *claimed* review request must terminate the review
+// attempt it bound, not merely detach it. A detached-but-active review lease
+// keeps full authority -- FinishAttempt reads an unbound review attempt whose
+// issue has no unresolved request as an optional review -- so a cancelled
+// reviewer could otherwise still approve the reviewed issue to done.
+func TestCancelledReviewRequestTerminatesBoundAttemptAndRevokesAuthority(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-cancelled")
+	defer fixture.close()
+
+	issue, claim, reviewRepository, requestID := claimedReviewFixture(t, fixture, "review cancelled")
+	current, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := reviewRepository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: requestID, ExpectedVersion: current.Request.Version, OccurredAt: fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatalf("cancel claimed review request: %v", err)
+	}
+	if cancelled.Request.Status != domain.ReviewRequestStatusCancelled || cancelled.Request.ActiveAttemptID != nil {
+		t.Fatalf("cancelled request = %+v, want cancelled with no active attempt", cancelled.Request)
+	}
+
+	// AC1/AC3: the bound attempt is terminal, and the reviewed issue keeps
+	// the status it had -- cancellation still changes no issue status.
+	var attemptStatus, issueStatus string
+	var finishedAt sql.NullString
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status, finished_at FROM work_attempts WHERE id = ?`, claim.Attempt.ID).
+			Scan(&attemptStatus, &finishedAt); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != string(domain.AttemptStatusCancelled) || !finishedAt.Valid {
+		t.Fatalf("bound attempt after cancellation = status %q finished_at %#v, want cancelled and finished", attemptStatus, finishedAt)
+	}
+	if issueStatus != string(domain.StatusReview) {
+		t.Fatalf("reviewed issue status after cancellation = %q, want review", issueStatus)
+	}
+	if count := countAttemptEvents(t, fixture, claim.Attempt.ID, "attempt_cancelled"); count != 1 {
+		t.Fatalf("attempt_cancelled events = %d, want 1", count)
+	}
+
+	// AC2: the revoked lease cannot resolve the review any longer. All three
+	// review outcomes fail on the same active-attempt gate.
+	for _, outcome := range []domain.ReviewOutcome{domain.ReviewOutcomeApproved, domain.ReviewOutcomeChangesRequested, domain.ReviewOutcomeBlocked} {
+		input := finishInput(claim, domain.AttemptOutcomeCompleted)
+		input.ReviewOutcome = reviewPointer(outcome)
+		if outcome == domain.ReviewOutcomeBlocked {
+			input.BlockedReason = reviewStringPtr("blocked by the cancelled reviewer")
+		}
+		if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+			t.Fatalf("finish with review outcome %q after cancellation = %v, want ATTEMPT_NOT_ACTIVE", outcome, err)
+		}
+	}
+	// ... nor renew itself back into authority.
+	requireAttemptInactive(t, fixture, claim)
+
+	// AC2: nothing the revoked lease attempted moved the reviewed issue.
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issueStatus != string(domain.StatusReview) {
+		t.Fatalf("reviewed issue status after revoked finishes = %q, want review", issueStatus)
+	}
+}
+
+// ISSUE-228: cancelling an *open* (never claimed) request keeps its existing
+// behavior -- there is no attempt to terminate and none is invented.
+func TestCancelledOpenReviewRequestLeavesUnboundAttemptsAlone(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-cancelled-open")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "review cancelled open", domain.StatusReview)
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewRepository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: created.Request.ID, ExpectedVersion: created.Request.Version, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatalf("cancel open review request: %v", err)
+	}
+	var cancelledAttempts int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM work_attempts WHERE status = 'cancelled'`).Scan(&cancelledAttempts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cancelledAttempts != 0 {
+		t.Fatalf("cancelled attempts after cancelling an open request = %d, want 0", cancelledAttempts)
+	}
+}

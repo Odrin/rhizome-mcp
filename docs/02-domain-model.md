@@ -1144,7 +1144,10 @@ contract: `archive_issue` (only writes `archived_at`); `ExpireAttempts` and
 the background cleanup loop (only write `work_attempts.status`, never
 `issues.status` -- an issue whose attempt lease expires keeps its current
 stored status); `ForceReleaseAttempt` (same, plus an `attempt_interrupted`
-event); `doctor` (read-only diagnostics). None of these require a gate hook.
+event); `CancelReviewRequest` (resolves the review request and terminates any
+review attempt bound to it, plus an `attempt_cancelled` event, but never
+touches the reviewed issue's status -- docs/09); `doctor` (read-only
+diagnostics). None of these require a gate hook.
 
 ## 18. Resource identity and reservation overlap
 
