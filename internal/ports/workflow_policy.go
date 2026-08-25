@@ -68,11 +68,13 @@ type GetReviewTargetGateSnapshotCommand struct {
 }
 
 // GateDiagnosticCommand requests the read-only inputs of a gate decision.
+// Identifier accepts either form the public contract advertises (ULID or
+// ISSUE-N); the repository resolves it exactly like every other issue read.
 type GateDiagnosticCommand struct {
-	IssueID   string
-	Point     domain.EnforcementPoint
-	AttemptID *string // when set, use this attempt's frozen snapshot
-	TargetID  *string // when set, use this review target's frozen snapshot
+	Identifier domain.IssueIdentifier
+	Point      domain.EnforcementPoint
+	AttemptID  *string // when set, use this attempt's frozen snapshot
+	TargetID   *string // when set, use this review target's frozen snapshot
 }
 
 // GateDiagnosticResult carries the assembled inputs of a gate decision.

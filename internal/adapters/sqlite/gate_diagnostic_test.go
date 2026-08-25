@@ -2,6 +2,8 @@ package sqlite_test
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 
 	"rhizome-mcp/internal/adapters/sqlite"
@@ -40,8 +42,8 @@ func TestLoadGateDiagnosticWithLivePolicy(t *testing.T) {
 
 	// Load the gate diagnostic without a snapshot (use live policies).
 	diagnostic, err := repository.LoadGateDiagnostic(ctx, ports.GateDiagnosticCommand{
-		IssueID: issueResult.ID,
-		Point:   domain.EnforcementPointClaimWork,
+		Identifier: internalIssueIdentifier(issueResult.ID),
+		Point:      domain.EnforcementPointClaimWork,
 	})
 	if err != nil {
 		t.Fatalf("LoadGateDiagnostic() error = %v", err)
@@ -91,9 +93,9 @@ func TestLoadGateDiagnosticWithMissingSnapshotFallsBack(t *testing.T) {
 	// (no snapshot will be found, so it falls back to live policies).
 	attemptID := "nonexistent-attempt"
 	diagnostic, err := repository.LoadGateDiagnostic(ctx, ports.GateDiagnosticCommand{
-		IssueID:   issueResult.ID,
-		Point:     domain.EnforcementPointClaimWork,
-		AttemptID: &attemptID,
+		Identifier: internalIssueIdentifier(issueResult.ID),
+		Point:      domain.EnforcementPointClaimWork,
+		AttemptID:  &attemptID,
 	})
 	if err != nil {
 		t.Fatalf("LoadGateDiagnostic() error = %v", err)
@@ -117,8 +119,8 @@ func TestLoadGateDiagnosticRejectsNonexistentIssue(t *testing.T) {
 
 	// Try to load a diagnostic for a non-existent issue.
 	_, err := repository.LoadGateDiagnostic(ctx, ports.GateDiagnosticCommand{
-		IssueID: "nonexistent-issue",
-		Point:   domain.EnforcementPointClaimWork,
+		Identifier: internalIssueIdentifier("nonexistent-issue"),
+		Point:      domain.EnforcementPointClaimWork,
 	})
 
 	if err == nil {
@@ -169,7 +171,7 @@ func TestLoadGateDiagnosticPrefersFrozenSnapshotOverLivePolicies(t *testing.T) {
 	}
 
 	live, err := repository.LoadGateDiagnostic(fixture.ctx, ports.GateDiagnosticCommand{
-		IssueID: issueID, Point: domain.EnforcementPointCompleteWorkToDone,
+		Identifier: internalIssueIdentifier(issueID), Point: domain.EnforcementPointCompleteWorkToDone,
 	})
 	if err != nil {
 		t.Fatalf("LoadGateDiagnostic(live) error = %v", err)
@@ -179,7 +181,7 @@ func TestLoadGateDiagnosticPrefersFrozenSnapshotOverLivePolicies(t *testing.T) {
 	}
 
 	frozen, err := repository.LoadGateDiagnostic(fixture.ctx, ports.GateDiagnosticCommand{
-		IssueID: issueID, Point: domain.EnforcementPointCompleteWorkToDone, AttemptID: &claimed.Attempt.ID,
+		Identifier: internalIssueIdentifier(issueID), Point: domain.EnforcementPointCompleteWorkToDone, AttemptID: &claimed.Attempt.ID,
 	})
 	if err != nil {
 		t.Fatalf("LoadGateDiagnostic(snapshot) error = %v", err)
@@ -189,5 +191,86 @@ func TestLoadGateDiagnosticPrefersFrozenSnapshotOverLivePolicies(t *testing.T) {
 	}
 	if len(frozen.Requirements) != 1 || frozen.Requirements[0].Key != "impl" {
 		t.Fatalf("frozen requirements = %#v, want the single \"impl\" requirement frozen at claim time", frozen.Requirements)
+	}
+}
+
+// internalIssueIdentifier builds the ULID-form identifier these tests use when
+// the identifier form is not what is under test.
+func internalIssueIdentifier(value string) domain.IssueIdentifier {
+	return domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: value}
+}
+
+// TestLoadGateDiagnosticResolvesDisplayIdentifier is the ISSUE-174 review's
+// falsifying case: evaluate_gates advertises "ULID or ISSUE-N", but the
+// diagnostic queried `WHERE id = ?` with whatever string arrived, so an
+// ISSUE-N returned ISSUE_NOT_FOUND while the ULID for the same issue
+// succeeded. Both forms must now produce an identical diagnostic.
+func TestLoadGateDiagnosticResolvesDisplayIdentifier(t *testing.T) {
+	issueService, db, now := openIssueService(t)
+	repository, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyRepository() error = %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := repository.CreatePolicy(ctx, ports.CreateWorkflowPolicyCommand{
+		ID:        workflowPolicyTestID,
+		Input:     validPolicyInput(),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreatePolicy() error = %v", err)
+	}
+	issueResult, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:               domain.TypeTask,
+		Title:              "Display identifier issue",
+		AcceptanceCriteria: stringPtr("Some acceptance criteria"),
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	displayIdentifier, err := domain.ParseIssueIdentifier(issueResult.DisplayID)
+	if err != nil {
+		t.Fatalf("ParseIssueIdentifier(%q) error = %v", issueResult.DisplayID, err)
+	}
+	byDisplayID, err := repository.LoadGateDiagnostic(ctx, ports.GateDiagnosticCommand{
+		Identifier: displayIdentifier,
+		Point:      domain.EnforcementPointClaimWork,
+	})
+	if err != nil {
+		t.Fatalf("LoadGateDiagnostic(%s) error = %v, want the same result as the ULID form", issueResult.DisplayID, err)
+	}
+	byInternalID, err := repository.LoadGateDiagnostic(ctx, ports.GateDiagnosticCommand{
+		Identifier: internalIssueIdentifier(issueResult.ID),
+		Point:      domain.EnforcementPointClaimWork,
+	})
+	if err != nil {
+		t.Fatalf("LoadGateDiagnostic(ULID) error = %v", err)
+	}
+	if !reflect.DeepEqual(byDisplayID, byInternalID) {
+		t.Fatalf("diagnostic by display ID = %#v, want the same as by internal ID %#v", byDisplayID, byInternalID)
+	}
+	if len(byDisplayID.Requirements) == 0 {
+		t.Fatal("requirements are empty; the fixture policy should have matched, so this test would pass vacuously")
+	}
+}
+
+// TestLoadGateDiagnosticRejectsUnknownDisplayIdentifier pins that resolving
+// both forms did not turn a well-formed identifier that matches nothing into
+// anything other than ISSUE_NOT_FOUND.
+func TestLoadGateDiagnosticRejectsUnknownDisplayIdentifier(t *testing.T) {
+	repository, _, _ := openWorkflowPolicyRepository(t)
+
+	unknown, err := domain.ParseIssueIdentifier("ISSUE-999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.LoadGateDiagnostic(context.Background(), ports.GateDiagnosticCommand{
+		Identifier: unknown,
+		Point:      domain.EnforcementPointClaimWork,
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeIssueNotFound {
+		t.Fatalf("error = %v, want CodeIssueNotFound", err)
 	}
 }

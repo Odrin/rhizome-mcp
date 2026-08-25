@@ -236,14 +236,16 @@ func TestWorkflowPolicyServiceEvaluateGatesPerformsNoWrites(t *testing.T) {
 }
 
 type workflowPolicyRepositoryStub struct {
-	policy         domain.WorkflowPolicy
-	policyList     domain.WorkflowPolicyList
-	gateDiagnostic ports.GateDiagnosticResult
-	createCommand  ports.CreateWorkflowPolicyCommand
-	updateCommand  ports.UpdateWorkflowPolicyCommand
-	archiveCommand ports.ArchiveWorkflowPolicyCommand
-	listCommand    ports.ListWorkflowPoliciesCommand
-	err            error
+	policy            domain.WorkflowPolicy
+	policyList        domain.WorkflowPolicyList
+	gateDiagnostic    ports.GateDiagnosticResult
+	createCommand     ports.CreateWorkflowPolicyCommand
+	updateCommand     ports.UpdateWorkflowPolicyCommand
+	archiveCommand    ports.ArchiveWorkflowPolicyCommand
+	listCommand       ports.ListWorkflowPoliciesCommand
+	diagnosticCommand ports.GateDiagnosticCommand
+	diagnosticCalls   int
+	err               error
 }
 
 func (stub *workflowPolicyRepositoryStub) CreatePolicy(_ context.Context, command ports.CreateWorkflowPolicyCommand) (domain.WorkflowPolicy, error) {
@@ -299,9 +301,55 @@ func (stub *workflowPolicyRepositoryStub) GetReviewTargetGateSnapshot(_ context.
 	return domain.GateSnapshot{}, nil
 }
 
-func (stub *workflowPolicyRepositoryStub) LoadGateDiagnostic(_ context.Context, _ ports.GateDiagnosticCommand) (ports.GateDiagnosticResult, error) {
+func (stub *workflowPolicyRepositoryStub) LoadGateDiagnostic(_ context.Context, command ports.GateDiagnosticCommand) (ports.GateDiagnosticResult, error) {
+	stub.diagnosticCommand = command
+	stub.diagnosticCalls++
 	if stub.err != nil {
 		return ports.GateDiagnosticResult{}, stub.err
 	}
 	return stub.gateDiagnostic, nil
+}
+
+// TestWorkflowPolicyServiceEvaluateGatesParsesIssueIdentifier guards the
+// wiring the ISSUE-174 review found broken: evaluate_gates advertises both
+// identifier forms, so the service must hand the repository a parsed
+// identifier rather than the raw request string. Passing the string through
+// is what made an ISSUE-N return ISSUE_NOT_FOUND.
+func TestWorkflowPolicyServiceEvaluateGatesParsesIssueIdentifier(t *testing.T) {
+	fakeClock := clock.NewFakeClock(time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC))
+	generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+	repository := &workflowPolicyRepositoryStub{}
+	service, _ := NewWorkflowPolicyService(repository, fakeClock, generator)
+
+	if _, err := service.EvaluateGates(context.Background(), EvaluateGatesInput{
+		IssueID:          "ISSUE-174",
+		EnforcementPoint: domain.EnforcementPointClaimWork,
+	}); err != nil {
+		t.Fatalf("EvaluateGates() error = %v", err)
+	}
+	identifier := repository.diagnosticCommand.Identifier
+	if identifier.Kind != domain.IssueIdentifierDisplayID || identifier.SequenceNo != 174 {
+		t.Fatalf("identifier passed to the repository = %+v, want a display identifier with sequence 174", identifier)
+	}
+}
+
+// TestWorkflowPolicyServiceEvaluateGatesRejectsMalformedIdentifier pins that
+// a request the schema pattern would not accept is refused before any read
+// reaches storage.
+func TestWorkflowPolicyServiceEvaluateGatesRejectsMalformedIdentifier(t *testing.T) {
+	fakeClock := clock.NewFakeClock(time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC))
+	generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+	repository := &workflowPolicyRepositoryStub{}
+	service, _ := NewWorkflowPolicyService(repository, fakeClock, generator)
+
+	_, err := service.EvaluateGates(context.Background(), EvaluateGatesInput{
+		IssueID:          "not-an-identifier",
+		EnforcementPoint: domain.EnforcementPointClaimWork,
+	})
+	if err == nil {
+		t.Fatal("EvaluateGates() succeeded, want a rejection for a malformed identifier")
+	}
+	if repository.diagnosticCalls != 0 {
+		t.Fatalf("repository diagnostic calls = %d, want 0 for a malformed identifier", repository.diagnosticCalls)
+	}
 }

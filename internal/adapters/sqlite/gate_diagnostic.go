@@ -16,7 +16,9 @@ func (repository *WorkflowPolicyRepository) LoadGateDiagnostic(ctx context.Conte
 	var result ports.GateDiagnosticResult
 	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		// Load the issue to check if it exists and get its type and labels.
-		issue, err := loadIssueForGateDiagnostic(ctx, query, command.IssueID)
+		// This also resolves a display identifier to the internal ID every
+		// read below is keyed by.
+		issue, err := loadIssueForGateDiagnostic(ctx, query, command.Identifier)
 		if err != nil {
 			return err
 		}
@@ -24,18 +26,21 @@ func (repository *WorkflowPolicyRepository) LoadGateDiagnostic(ctx context.Conte
 		// Assemble evidence: acceptance criteria blankness, attempt evidence keys,
 		// and review approval purposes.
 		evidenceBlank := acceptanceCriteriaBlank(issue.AcceptanceCriteria)
+		// readSnapshot hands over a *sql.Conn, which implements Executor. A
+		// checked assertion keeps a future Queryer that does not from
+		// panicking inside a read-only diagnostic.
+		executor, ok := query.(Executor)
+		if !ok {
+			return domain.NewError(domain.CodeStorageConfiguration, "snapshot connection does not support statement execution", false)
+		}
 		attemptKeys := make(map[string]bool)
 		if command.AttemptID != nil {
-			// The query parameter is actually a *sql.Conn which implements Executor.
-			executor := query.(Executor)
 			attemptKeys, err = loadAttemptEvidenceKeys(ctx, executor, *command.AttemptID)
 			if err != nil {
 				return err
 			}
 		}
-		// The query parameter is actually a *sql.Conn which implements Executor.
-		executor := query.(Executor)
-		approvalPurposes, err := loadIssueReviewApprovalPurposes(ctx, executor, command.IssueID)
+		approvalPurposes, err := loadIssueReviewApprovalPurposes(ctx, executor, issue.ID)
 		if err != nil {
 			return err
 		}
@@ -91,23 +96,43 @@ func (repository *WorkflowPolicyRepository) LoadGateDiagnostic(ctx context.Conte
 	return result, nil
 }
 
-// loadIssueForGateDiagnostic loads only the fields needed for gate diagnostics:
-// type, labels, and acceptance criteria.
-func loadIssueForGateDiagnostic(ctx context.Context, query Queryer, issueID string) (struct {
+// gateDiagnosticIssue is the slice of an issue a gate decision reads. ID is
+// the resolved internal identifier, so callers keyed by it work whichever
+// form the request used.
+type gateDiagnosticIssue struct {
+	ID                 string
 	Type               domain.Type
 	Labels             []string
 	AcceptanceCriteria *string
-}, error) {
-	result := struct {
-		Type               domain.Type
-		Labels             []string
-		AcceptanceCriteria *string
-	}{}
+}
 
-	row := query.QueryRowContext(ctx, `SELECT type, acceptance_criteria FROM issues WHERE id = ?`, issueID)
+// loadIssueForGateDiagnostic loads only the fields needed for gate
+// diagnostics: internal ID, type, labels, and acceptance criteria. It accepts
+// either identifier form, branching exactly like IssueRepository.GetIssue --
+// the diagnostic's input schema advertises both, so resolving only the ULID
+// here would reject an ISSUE-N the contract promises to accept.
+func loadIssueForGateDiagnostic(ctx context.Context, query Queryer, identifier domain.IssueIdentifier) (gateDiagnosticIssue, error) {
+	result := gateDiagnosticIssue{}
+
+	const projection = `SELECT id, type, acceptance_criteria FROM issues`
+	var row *sql.Row
+	switch identifier.Kind {
+	case domain.IssueIdentifierInternalID:
+		row = query.QueryRowContext(ctx, projection+` WHERE id = ?`, identifier.Value)
+	case domain.IssueIdentifierDisplayID:
+		row = query.QueryRowContext(ctx, projection+` WHERE sequence_no = ?`, identifier.SequenceNo)
+	default:
+		return result, domain.NewError(
+			domain.CodeInvalidArgument,
+			"issue identifier is invalid",
+			false,
+			domain.Detail{Field: "issue_id", Code: "INVALID_IDENTIFIER"},
+		)
+	}
+
 	var issueType string
-	if err := row.Scan(&issueType, &result.AcceptanceCriteria); err != nil {
-		if err == sql.ErrNoRows {
+	if err := row.Scan(&result.ID, &issueType, &result.AcceptanceCriteria); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return result, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
 		}
 		return result, err
@@ -119,7 +144,7 @@ func loadIssueForGateDiagnostic(ctx context.Context, query Queryer, issueID stri
 	}
 
 	// Load labels from the issue_labels junction table.
-	labelObjects, err := loadIssueLabels(ctx, query, issueID)
+	labelObjects, err := loadIssueLabels(ctx, query, result.ID)
 	if err != nil {
 		return result, err
 	}

@@ -110,11 +110,15 @@ type EvaluateGatesInput struct {
 }
 
 func (service *WorkflowPolicyService) EvaluateGates(ctx context.Context, input EvaluateGatesInput) (GateDiagnosticEvaluation, error) {
+	identifier, err := domain.ParseIssueIdentifier(input.IssueID)
+	if err != nil {
+		return GateDiagnosticEvaluation{}, err
+	}
 	command := ports.GateDiagnosticCommand{
-		IssueID:   input.IssueID,
-		Point:     input.EnforcementPoint,
-		AttemptID: input.AttemptID,
-		TargetID:  input.ReviewTargetID,
+		Identifier: identifier,
+		Point:      input.EnforcementPoint,
+		AttemptID:  input.AttemptID,
+		TargetID:   input.ReviewTargetID,
 	}
 	diagnostic, err := service.repository.LoadGateDiagnostic(ctx, command)
 	if err != nil {
