@@ -14,8 +14,10 @@ argument-hint: "Describe the task, issue, or outcome to coordinate."
 
 Use:
 
-- [Task execution](./references/task-execution.md) for the complete workflow.
+- [Agent workflow](./references/agent-workflow.md) for the complete select/claim/execute/finish workflow.
 - [Issue lifecycle](./references/issue-lifecycle.md) for statuses, blockers, relations, and concurrency.
-- [Handoffs](./references/handoffs.md) for interruption, recovery, and review.
+- [Multi-agent handoff](./references/multi-agent-handoff.md) for interruption, recovery, and review.
+
+These three files are generated from the MCP server guides by `go generate ./internal/adapters/mcp/...` and must not be edited by hand.
 
 The equivalent server guides are linked in the metadata returned by `open_project` and `get_project`.

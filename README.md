@@ -129,7 +129,7 @@ config you do intend to share, provided every machine that uses it has
 Stdio is the default transport; protocol output goes to stdout, logs to
 stderr.
 
-That's it — connected agents start with `open_project` using the absolute repository root, retain its `project_ref`, and pass that reference to later project-scoped calls. The returned metadata links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
+That's it — connected agents start with `open_project` using the absolute repository root, retain its `project_ref`, and pass that reference to later project-scoped calls. See [the agent workflow guide](.github/skills/rhizome-task-workflow/references/agent-workflow.md) for the complete workflow. The returned metadata links the `rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff` resources, and repository agents can load the `rhizome-task-workflow` skill from `.github/skills/`.
 
 #### Install the agent workflow skill
 

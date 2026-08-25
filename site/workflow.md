@@ -6,13 +6,7 @@ By default, clients should use the stdio transport. If you need a local HTTP end
 
 ## The recommended loop
 
-1. Call `open_project` with the absolute repository root. Retain the returned `project_ref`; calling the tool does not select a project in transport or session state.
-2. Pass that `project_ref` to every later project-scoped call. Use `get_project` with `include_instructions=true` when you need project instructions.
-3. Review the planning graph with `get_planning_graph`, or use `list_issues` with `is_claimable=true` to find claimable entry points.
-4. Call `get_work_context` for the issue you want to act on so you can review blockers, prior results, and pending next steps.
-5. Claim the issue with `claim_issue`. That creates an attempt and returns a lease token.
-6. While the attempt is active, call `renew_attempt` and `save_attempt_note` as needed. Pass both `project_ref` and the private lease token to these attempt calls.
-7. Finish the attempt once with `finish_attempt`, again passing `project_ref`, after you have a result summary, verification, and any follow-up steps.
+Start with `open_project` to get a routing token for your project, then select a claimable issue with `get_planning_graph` or `list_issues`. Claim it with `claim_issue`, save restartable checkpoints with `save_attempt_note`, and finish with `finish_attempt` once you have a truthful result and verification. See [the agent workflow guide](https://github.com/Odrin/rhizome-mcp/blob/main/.github/skills/rhizome-task-workflow/references/agent-workflow.md) for the complete workflow.
 
 ## Logical interchange and recovery
 
@@ -73,11 +67,6 @@ Use durable decisions for product or technical choices that should survive futur
 
 ## Recovery and handoff
 
-If a session disappears, rely on the lease expiry and the saved checkpoint history instead of guessing. A safe handoff includes:
-
-- the last known issue state;
-- the latest checkpoint or attempt note;
-- any unresolved blocker or next step;
-- the result summary and verification from the last finished attempt.
+If a session disappears, rely on the lease expiry and the saved checkpoint history instead of guessing. See [the multi-agent handoff guide](https://github.com/Odrin/rhizome-mcp/blob/main/.github/skills/rhizome-task-workflow/references/multi-agent-handoff.md) for interruption, recovery, and durable checkpointing practices.
 
 Never expose lease tokens in logs or chat history. Treat them as temporary proof for the current attempt only.

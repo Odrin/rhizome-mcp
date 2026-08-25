@@ -4,12 +4,9 @@ Use the configured `rhizome-mcp` server as the source of truth for active work a
 
 ## Workflow
 
-1. Call `open_project` with the absolute repository root, retain its `project_ref`, and pass that reference to every subsequent project-scoped tool call.
-2. Use `get_planning_graph` or `list_issues` with the `project_ref` to select one claimable issue.
-3. Call `get_work_context` with the `project_ref` before `claim_issue`; load only context sections needed for the task.
-4. Claim before editing. Keep the lease token private, renew long attempts, and save restartable checkpoints.
-5. Use issue comments for collaboration and decisions for durable choices. Update issues with their current `version`.
-6. Call `finish_attempt` with the `project_ref` on completion, failure, blocking, or handoff. Include truthful verification, artifacts, and next steps.
+Claim tracked work through the rhizome-mcp server before editing. Keep the returned lease token private and available until the attempt completes, renewing before expiry and saving restartable checkpoints. Finish every attempt with its truthful outcome, verification actually performed, and next steps.
+
+See [the agent workflow guide](.github/skills/rhizome-task-workflow/references/agent-workflow.md) for the complete select/claim/execute/finish workflow.
 
 Never write `in_progress`; it is derived from an active lease. Never maintain the backlog or implementation status in Markdown.
 

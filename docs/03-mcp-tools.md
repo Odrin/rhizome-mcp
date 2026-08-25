@@ -504,7 +504,7 @@ annotation matrix.
 | sync | `get_changes` | no | no |
 | issues | `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
 | planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
-| review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `supersede_review_request`, `replace_review_request` | yes | no |
+| review | `get_review_request`, `list_review_requests`, `cancel_review_request`, `replace_review_request` | yes | no |
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
 | lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation`, `submit_gate_evidence`, `evaluate_gates` | yes | no |
 | governance | `manage_workflow_policy`, `get_workflow_policy`, `list_workflow_policies` | no | no |

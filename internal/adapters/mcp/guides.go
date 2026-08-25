@@ -2,17 +2,24 @@ package mcp
 
 import (
 	"context"
+	"embed"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const initializeInstructions = "Start with open_project using the absolute project root. Retain its project_ref and pass it to every subsequent project-scoped tool call; routing is stateless. Then use get_planning_graph or list_issues to find claimable work. Read get_work_context before claim_issue. While working, renew the lease and save restartable checkpoints; always finish_attempt on completion, failure, or handoff. Use expected_version for issue writes. Detailed guides: rhizome://guides/agent-workflow."
 
+//go:generate go run ./guidesync
+
+//go:embed guide_assets/*.md
+var guideAssetsFS embed.FS
+
 type guide struct {
 	URI         string
 	Name        string
 	Title       string
 	Description string
+	File        string
 	Content     string
 }
 
@@ -22,152 +29,33 @@ var guides = []guide{
 		Name:        "agent-workflow",
 		Title:       "Rhizome Agent Workflow",
 		Description: "End-to-end workflow for selecting, claiming, executing, and finishing tracked work.",
-		Content: `# Agent workflow
-
-## 1. Orient
-
-Call ` + "`open_project`" + ` with the absolute repository root. Retain the returned ` + "`project_ref`" + ` and pass it to every subsequent project-scoped tool call, including ` + "`get_project`" + `. Project routing is stateless: ` + "`open_project`" + ` does not select a project for later requests. Omit ` + "`project_ref`" + ` only when intentionally relying on a server configured with a default project.
-
-Call ` + "`get_project`" + ` with that ` + "`project_ref`" + ` when project instructions are needed. Use the metadata returned by ` + "`open_project`" + ` or ` + "`get_project`" + ` for limits, supported values, the latest event ID, and guide links. Read only the guide needed for the current operation.
-
-## 2. Find work
-
-- Use ` + "`get_planning_graph`" + ` for dependency-aware selection. Entry points are executable roots; blocking nodes explain stalled work.
-- Use ` + "`list_issues`" + ` with ` + "`is_claimable: true`" + ` for a narrow ready queue.
-- Use ` + "`search`" + ` for historical knowledge, not as the authoritative current state.
-- Follow cursors or event IDs when a result says more data exists.
-
-Pass the retained ` + "`project_ref`" + ` on discovery calls. Select one coherent issue. Do not begin blocked work or duplicate an active attempt.
-
-## 3. Load context
-
-Call ` + "`get_work_context`" + ` before claiming. Start with the default compact context, then request only needed sections such as parent epic, relations, recent comments, decision content, attempt history, artifacts, project instructions, or changes since the previous attempt. Use ` + "`get_issue_activity`" + ` for a chronological audit trail.
-
-Treat active decisions and acceptance criteria as durable constraints. If requirements are missing or contradictory, add a comment or record a decision instead of guessing.
-
-## 4. Claim before execution
-
-Call ` + "`claim_issue`" + ` only for a claimable ` + "`ready`" + ` or ` + "`review`" + ` issue. Keep the returned attempt ID and lease token private and available until the attempt ends. Effective ` + "`in_progress`" + ` is derived from this active lease; it is not a stored issue status.
-
-For long work, call ` + "`renew_attempt`" + ` before expiry. A lost or expired lease must not be treated as ownership.
-
-When other agents may work the same project concurrently, reserve the resources the attempt will edit: pass ` + "`resources`" + ` to ` + "`claim_issue`" + ` to acquire them atomically with the claim, or call ` + "`reserve_resources`" + ` later. Acquisition is all-or-nothing; a conflict fails the whole call with ` + "`RESOURCE_RESERVATION_CONFLICT`" + ` naming the reservation, its owning issue and attempt, and that lease's expiry. Diagnose a candidate set before claiming with ` + "`get_work_context`" + `'s ` + "`desired_resources`" + `. Reservations coordinate cooperating agents; they do not lock the filesystem against processes that bypass this server. They are released by ` + "`release_resources`" + `, by ` + "`finish_attempt`" + `, and by lease expiry, so a reserved resource is never permanently stuck.
-
-## 5. Execute durably
-
-- Use ` + "`save_attempt_note`" + ` for restartable checkpoints, important findings, warnings, and concrete next steps.
-- Attach useful artifacts such as commits, branches, pull requests, files, URLs, and logs.
-- Use comments for collaboration and decisions for durable architectural or product choices.
-- Use ` + "`update_issue`" + ` and ` + "`archive_issue`" + ` with the current issue version. On a version conflict, refetch, reconcile, and retry; never overwrite concurrent changes blindly.
-- Validate multi-issue plans before applying them atomically.
-
-## 6. Finish every attempt
-
-Call ` + "`finish_attempt`" + ` with the retained ` + "`project_ref`" + ` exactly once when work completes, fails, becomes blocked, or is handed off. Include a concise result, verification actually performed, artifacts, and actionable next steps.
-
-- Completed implementation normally targets ` + "`review`" + ` or ` + "`done`" + ` according to project policy.
-- Failed work records a failure reason and truthful details.
-- Handoffs use ` + "`outcome: interrupted`" + ` with ` + "`interruption_reason_code: handoff`" + `.
-- If relevant changes happened after the claim, inspect them and acknowledge the issue version and latest event ID.
-
-Never leave an attempt active merely because the agent is stopping.`,
+		File:        "agent-workflow.md",
+		Content:     mustReadGuideAsset("guide_assets/agent-workflow.md"),
 	},
 	{
 		URI:         "rhizome://guides/issue-lifecycle",
 		Name:        "issue-lifecycle",
 		Title:       "Rhizome Issue Lifecycle",
 		Description: "Status, dependency, review, versioning, and archival rules for issues.",
-		Content: `# Issue lifecycle
-
-## Project routing
-
-Call ` + "`open_project`" + ` with the absolute repository root before using lifecycle tools. Retain its ` + "`project_ref`" + ` and pass it to every subsequent project-scoped call. Routing is stateless, so an earlier call does not establish an implicit current project; omission is valid only when intentionally using a configured default project.
-
-## Types and hierarchy
-
-Issues are ` + "`epic`" + `, ` + "`task`" + `, or ` + "`bug`" + `. Use parent relationships for decomposition and ` + "`blocks`" + ` relations for execution order. ` + "`related_to`" + ` adds context without scheduling semantics; ` + "`duplicates`" + ` identifies equivalent work.
-
-## Stored statuses
-
-- ` + "`open`" + `: known work that is not yet executable.
-- ` + "`ready`" + `: implementation work may be claimed when dependencies permit.
-- ` + "`blocked`" + `: explicitly paused; provide a useful blocked reason.
-- ` + "`review`" + `: completed work awaiting review; review attempts may claim it.
-- ` + "`done`" + `: accepted terminal work.
-- ` + "`cancelled`" + `: intentionally abandoned terminal work.
-
-` + "`in_progress`" + ` is an effective status derived from an active leased attempt. Never write it as an issue status. If a lease expires, the effective status falls back to the stored state so work cannot remain permanently stuck.
-
-## Readiness and blockers
-
-An issue is claimable only when its stored status permits the requested attempt and unresolved blockers do not prevent execution. Use ` + "`get_planning_graph`" + ` or ` + "`list_issues`" + ` with claimability filters instead of inferring readiness from titles or comments.
-
-When adding a ` + "`blocks`" + ` relation, the source blocks the target. Keep dependency graphs acyclic and use the planning graph to confirm entry points.
-
-## Mutations and concurrency
-
-Issue updates and archival use optimistic concurrency:
-
-1. Read the issue and retain its ` + "`version`" + `.
-2. Submit that value as ` + "`expected_version`" + `.
-3. If the version conflicts, refetch and reconcile all intervening changes.
-
-Do not retry a stale patch blindly. Use bounded plan validation plus atomic plan application when creating several related issues, relations, and decisions together.
-
-## Review and completion
-
-Implementation attempts should record verification and artifacts before moving work to review or done. Review attempts finish with ` + "`approved`" + `, ` + "`changes_requested`" + `, or ` + "`blocked`" + ` and set the target issue status consistently.
-
-Use comments for transient collaboration. Use decisions for durable choices that future agents must follow. Supersede decisions append-only rather than rewriting history.
-
-## Archival
-
-Archival hides obsolete records from normal lists without deleting history. Archive only with the current version and include archived records explicitly when searching or listing them.`,
+		File:        "issue-lifecycle.md",
+		Content:     mustReadGuideAsset("guide_assets/issue-lifecycle.md"),
 	},
 	{
 		URI:         "rhizome://guides/multi-agent-handoff",
 		Name:        "multi-agent-handoff",
 		Title:       "Rhizome Multi-Agent Handoff",
 		Description: "Durable checkpoint, interruption, recovery, and review guidance across agents.",
-		Content: `# Multi-agent handoff
-
-## Project routing
-
-Each agent calls ` + "`open_project`" + ` with the absolute repository root, retains the returned ` + "`project_ref`" + `, and passes it to every subsequent project-scoped call. Project selection is not stored in MCP transport or session state. The ` + "`project_ref`" + ` is a routing token, not a lease token or secret.
-
-## Before handing off
-
-Preserve enough state for another agent to continue without reconstructing your session:
-
-1. Save an important checkpoint with ` + "`save_attempt_note`" + `.
-2. State what changed, what remains, current risks or blockers, and exact next steps.
-3. Attach durable artifacts: commit, branch, pull request, relevant file, URL, or verification log.
-4. Record durable design choices with ` + "`record_decision`" + `; do not bury them only in a checkpoint.
-5. Finish the attempt as ` + "`interrupted`" + ` with reason ` + "`handoff`" + `. Never transfer or publish the lease token.
-
-Keep notes factual and restartable. Avoid raw transcripts, speculative status, and duplicated repository documentation.
-
-## Receiving a handoff
-
-1. Call ` + "`open_project`" + ` for the target repository and retain its ` + "`project_ref`" + `.
-2. Refetch the issue with that ` + "`project_ref`" + ` and confirm it is claimable.
-3. Call ` + "`get_work_context`" + ` with the ` + "`project_ref`" + ` and request checkpoint, recent attempt notes, attempt history, artifacts, decisions, relations, and changes since the previous attempt as needed.
-4. Inspect referenced artifacts and verify the repository state; do not trust a summary as proof.
-5. Use ` + "`get_changes`" + ` from the prior context event ID or ` + "`get_issue_activity`" + ` when concurrent work may have changed assumptions.
-6. Claim a new attempt with the ` + "`project_ref`" + `. Never reuse another agent's attempt ID or lease token.
-
-## Concurrent changes
-
-Leases prevent duplicate active ownership of an issue, not edits elsewhere in the project. Before finishing, check relevant changes and reconcile newer issue versions, decisions, blockers, and artifacts. If the server requires acknowledgement, send the observed issue version and latest event ID.
-
-## Review handoff
-
-An implementation handoff should identify acceptance criteria covered, tests run, unverified behavior, and review entry points. A reviewer independently verifies artifacts and finishes its review attempt with an explicit review outcome. Changes requested should return the issue to an executable status with concrete next steps.
-
-## Failure and recovery
-
-If work cannot continue, finish the attempt truthfully as failed, interrupted, or blocked. Include a stable reason code, concise details, and next steps. Do not leave an active attempt as an implicit handoff; lease expiry is recovery protection, not a workflow.`,
+		File:        "multi-agent-handoff.md",
+		Content:     mustReadGuideAsset("guide_assets/multi-agent-handoff.md"),
 	},
+}
+
+func mustReadGuideAsset(path string) string {
+	contents, err := guideAssetsFS.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	return string(contents)
 }
 
 func registerGuides(server *sdkmcp.Server) {
