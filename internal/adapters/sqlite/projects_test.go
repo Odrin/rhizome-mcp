@@ -1641,3 +1641,147 @@ func TestProjectRepositoryOmitsTheDefaultIssueVersionFromExports(t *testing.T) {
 		t.Fatalf("exported document carries a default issue version: %s", data)
 	}
 }
+
+// TestProjectRepositoryRemapsReviewEventPayloadsSoReExportParses is
+// ISSUE-232's regression. Review event payloads are the only record of which
+// request and target a review event belongs to (migration 008 folded
+// review_events into issue_events and dropped those columns), and export
+// promotes them back out of the payload into typed, referentially-checked
+// review_events records. Imported verbatim they named source rows, so the
+// destination's own next export no longer parsed.
+func TestProjectRepositoryRemapsReviewEventPayloadsSoReExportParses(t *testing.T) {
+	db, now := openProjectDatabase(t, "payload source", "instructions")
+	ctx := context.Background()
+
+	const (
+		issueID   = "01ARZ3NDEKTSV4RRFFQ69G5JA1"
+		attemptID = "01ARZ3NDEKTSV4RRFFQ69G5JA2"
+		targetID  = "01ARZ3NDEKTSV4RRFFQ69G5JA3"
+		requestID = "01ARZ3NDEKTSV4RRFFQ69G5JA4"
+		outcomeID = "01ARZ3NDEKTSV4RRFFQ69G5JA5"
+	)
+	later := now.Add(2 * time.Second)
+	requestedPayload := `{"request_id":"` + requestID + `","target_id":"` + targetID + `"}`
+	approvedPayload := `{"request_id":"` + requestID + `","target_id":"` + targetID + `","attempt_id":"` + attemptID + `","outcome":"approved"}`
+
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		statements := []struct {
+			query string
+			args  []any
+		}{
+			{`INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'Payload issue', 'done', 'medium', 1, ?, ?)`,
+				[]any{issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'review', 'completed', 1, 0, X'05', ?, ?, ?, ?, 'approved', '[]', '[]')`,
+				[]any{attemptID, issueID, sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, 1, 0, '[]', '["implementation"]', 1, ?)`,
+				[]any{targetID, issueID, sqlite.FormatStorageTime(now)}},
+			{`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, 1, 0, '[]', '["implementation"]', 'approved', NULL, NULL, 1, ?, ?)`,
+				[]any{requestID, targetID, issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, 'approved', NULL, 1, ?)`,
+				[]any{outcomeID, requestID, attemptID, sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO issue_events(issue_id, event_type, attempt_id, payload, created_at, source) VALUES (?, 'review_requested', NULL, ?, ?, 'review')`,
+				[]any{issueID, requestedPayload, sqlite.FormatStorageTime(now)}},
+			{`INSERT INTO issue_events(issue_id, event_type, attempt_id, payload, created_at, source) VALUES (?, 'review_approved', ?, ?, ?, 'review')`,
+				[]any{issueID, attemptID, approvedPayload, sqlite.FormatStorageTime(later)}},
+		}
+		for _, statement := range statements {
+			if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed review payload fixture: %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if len(exported.ReviewEvents) != 2 {
+		t.Fatalf("exported review events = %#v, want 2", exported.ReviewEvents)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+	plan = assignImportDestinationIDs(t, plan)
+
+	destinationDB, _ := openProjectDatabase(t, "payload destination", "instructions")
+	destinationRepository, err := sqlite.NewProjectRepository(destinationDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := destinationRepository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+
+	var destRequestID, destTargetID, destAttemptID string
+	if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&destRequestID); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT id FROM review_targets`).Scan(&destTargetID); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT id FROM work_attempts`).Scan(&destAttemptID)
+	}); err != nil {
+		t.Fatalf("read imported review rows: %v", err)
+	}
+	if destRequestID == requestID || destTargetID == targetID || destAttemptID == attemptID {
+		t.Fatalf("destination IDs were not remapped: request %q target %q attempt %q", destRequestID, destTargetID, destAttemptID)
+	}
+
+	// AC3: the third leg must be a document that parses -- which is exactly
+	// what a payload naming a source request breaks, because export promotes
+	// it into review_events.request_id and referential closure is checked.
+	reExported, err := destinationRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("re-export ExportLogicalProject() error = %v", err)
+	}
+	reExportedData, err := domain.MarshalLogicalProjectDocument(reExported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() re-export error = %v", err)
+	}
+	if _, err := domain.ParseLogicalProjectImportPlan(reExportedData); err != nil {
+		t.Fatalf("re-exported document does not parse: %v", err)
+	}
+
+	if len(reExported.ReviewEvents) != 2 {
+		t.Fatalf("re-exported review events = %#v, want 2", reExported.ReviewEvents)
+	}
+	for _, event := range reExported.ReviewEvents {
+		if event.RequestID != destRequestID || event.TargetID != destTargetID {
+			t.Fatalf("re-exported %s names request %q / target %q, want the destination rows %q / %q",
+				event.EventType, event.RequestID, event.TargetID, destRequestID, destTargetID)
+		}
+	}
+
+	// AC1: the attempt identity inside the payload is remapped too, and AC2:
+	// the outcome the payload also carries is untouched.
+	var approvedPayloadText string
+	if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT payload FROM issue_events WHERE event_type = 'review_approved'`).Scan(&approvedPayloadText)
+	}); err != nil {
+		t.Fatalf("read imported payload: %v", err)
+	}
+	var approved map[string]string
+	if err := json.Unmarshal([]byte(approvedPayloadText), &approved); err != nil {
+		t.Fatalf("imported payload is not an object: %v", err)
+	}
+	if approved["attempt_id"] != destAttemptID {
+		t.Fatalf("imported payload attempt_id = %q, want the destination attempt %q", approved["attempt_id"], destAttemptID)
+	}
+	if approved["outcome"] != "approved" {
+		t.Fatalf("imported payload outcome = %q, want it preserved", approved["outcome"])
+	}
+}

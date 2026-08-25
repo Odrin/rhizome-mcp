@@ -213,11 +213,31 @@ destination repository; consumers must treat them as potentially missing.
 `attempt_id`, `payload`, and `created_at`. `source_id` is not a destination
 identity — the destination assigns its own monotonic event IDs — but it is
 not inert either: it is the key the importer remaps every event-log cursor
-through (see "Event cursor remapping" below). Event payloads are
-retained as opaque valid JSON after their referenced IDs are remapped where
-the event schema names an entity ID; `session_id` imports as `null`. Events
-with unknown types or unremappable payload references are rejected rather
-than silently corrupted. `events` includes review-workflow event types
+through (see "Event cursor remapping" below). `session_id` imports as
+`null`. Payloads are valid JSON and are otherwise carried byte-identically,
+with one deliberate exception: a **review** event's payload is rewritten so
+the identities its contract names (`request_id`, `target_id`, `attempt_id`,
+`issue_id`) address destination rows, while every other member of it is
+preserved untouched.
+
+That exception is required rather than cosmetic. A review event's request and
+target are recorded nowhere else -- migration 008 folded `review_events` into
+`issue_events` and dropped those columns -- so export promotes them back out
+of the payload into the typed `review_events` records (below), whose
+references are checked for referential closure like any other. Carried
+verbatim they name rows that do not exist in the destination, and the
+destination's own next export is a document that no longer parses
+(ISSUE-232).
+
+Every other event payload is a frozen audit fact naming the source project's
+rows, the same rule §4.1's snapshot blobs follow: nothing derives a reference
+field from one, so nothing is rewritten. And a reference a review payload
+names but the document does not carry -- a version 1 document has no review
+entities at all, and a claimed request is excluded (below) while the events
+naming it are not -- is left as history rather than rejected, which is what
+keeps both kinds of document importable.
+
+`events` includes review-workflow event types
 (`review_requested`, `review_claimed`, `review_approved`,
 `review_changes_requested`, `review_blocked`, `review_cancelled`,
 `review_superseded`) alongside issue-sourced ones.
@@ -297,9 +317,9 @@ payloads are carried verbatim and re-inserted verbatim: a snapshot's
 fingerprint is computed over its canonical payload, so rewriting the
 embedded policy identities to destination IDs would falsify it. Embedded
 policy IDs inside snapshots are therefore frozen audit identities naming the
-*source* document's policies -- the same rule event payloads already follow
--- while every reference *column* (attempt, target, request, issue, policy)
-is remapped like any other import.
+*source* document's policies -- the same rule non-review event payloads
+follow (§4) -- while every reference *column* (attempt, target, request,
+issue, policy) is remapped like any other import.
 
 Review targets and requests additionally carry an optional `purposes` field
 (docs/02 §17.5), omitted when it equals the `["implementation"]`

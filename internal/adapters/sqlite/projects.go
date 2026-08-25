@@ -647,9 +647,24 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			if source == "" {
 				source = domain.LogicalEventSourceIssue
 			}
+			// A review event's payload is the only record of which request
+			// and target it belongs to, and export promotes both back out of
+			// it into typed, referentially-checked review_events records.
+			// Carried verbatim they name source rows, so the destination's
+			// own next export would no longer parse (ISSUE-232). Every other
+			// payload is left byte-identical.
+			payload, err := domain.RemapLogicalEventPayload(event.EventType, event.Payload, domain.LogicalEventPayloadReferences{
+				Issues:         issueDestIDs,
+				Attempts:       attemptDestIDs,
+				ReviewTargets:  plan.DestinationIDs.ReviewTargetIDs,
+				ReviewRequests: plan.DestinationIDs.ReviewRequestIDs,
+			})
+			if err != nil {
+				return err
+			}
 			var destinationEventID int64
 			if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at, source) VALUES (?, ?, NULL, ?, ?, ?, ?) RETURNING id`,
-				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt), source).Scan(&destinationEventID); err != nil {
+				nullableString(issueID), event.EventType, nullableString(attemptID), string(payload), formatStorageTime(createdAt), source).Scan(&destinationEventID); err != nil {
 				return err
 			}
 			eventCursorEntries = append(eventCursorEntries, domain.LogicalEventCursorEntry{SourceID: event.SourceID, DestinationID: destinationEventID})
