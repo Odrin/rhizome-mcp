@@ -306,6 +306,9 @@ type canonicalIDMappings struct {
 	attemptNoteIDs map[string]string
 	artifactIDs    map[string]string
 	reservationIDs map[string]string
+	policyIDs      map[string]string
+	evidenceIDs    map[string]string
+	approvalIDs    map[string]string
 }
 
 func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalIDMappings {
@@ -315,6 +318,7 @@ func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalI
 	// or come straight out of ExportLogicalProject, both of which guarantee
 	// a well-formed (or absent) reservations namespace.
 	reservations, _ := document.DecodeReservationsExtension()
+	gates, _ := document.DecodeGatesExtension()
 	mappings := canonicalIDMappings{
 		issueIDs:       make(map[string]string, len(document.Issues)),
 		labelIDs:       make(map[string]string, len(document.Labels)),
@@ -325,6 +329,9 @@ func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalI
 		attemptNoteIDs: make(map[string]string, len(document.AttemptNotes)),
 		artifactIDs:    make(map[string]string, len(document.Artifacts)),
 		reservationIDs: make(map[string]string, len(reservations)),
+		policyIDs:      make(map[string]string, len(gates.Policies)),
+		evidenceIDs:    make(map[string]string, len(gates.Evidence)),
+		approvalIDs:    make(map[string]string, len(gates.ReviewApprovals)),
 	}
 	for index := range document.Issues {
 		placeholder := fmt.Sprintf("issue-%d", index)
@@ -361,6 +368,15 @@ func buildCanonicalIDMappings(document domain.LogicalProjectDocument) canonicalI
 	for index := range reservations {
 		placeholder := fmt.Sprintf("reservation-%d", index)
 		mappings.reservationIDs[reservations[index].ID] = placeholder
+	}
+	for index := range gates.Policies {
+		mappings.policyIDs[gates.Policies[index].ID] = fmt.Sprintf("policy-%d", index)
+	}
+	for index := range gates.Evidence {
+		mappings.evidenceIDs[gates.Evidence[index].ID] = fmt.Sprintf("evidence-%d", index)
+	}
+	for index := range gates.ReviewApprovals {
+		mappings.approvalIDs[gates.ReviewApprovals[index].ID] = fmt.Sprintf("approval-%d", index)
 	}
 	return mappings
 }
@@ -464,6 +480,15 @@ func mergeCanonicalIDMappings(sourceMappings, destinationMappings canonicalIDMap
 	}
 	for id, placeholder := range sourceMappings.reservationIDs {
 		merged.reservationIDs[id] = placeholder
+	}
+	for id, placeholder := range sourceMappings.policyIDs {
+		merged.policyIDs[id] = placeholder
+	}
+	for id, placeholder := range sourceMappings.evidenceIDs {
+		merged.evidenceIDs[id] = placeholder
+	}
+	for id, placeholder := range sourceMappings.approvalIDs {
+		merged.approvalIDs[id] = placeholder
 	}
 	return merged
 }
@@ -677,6 +702,64 @@ func canonicalizeLogicalProjectDocumentWithMappings(document domain.LogicalProje
 				extensions[key] = value
 			}
 			extensions[domain.LogicalReservationsExtensionKey] = payload
+			normalized.Extensions = extensions
+		}
+	}
+
+	// Extensions["gates"] (ISSUE-175) follows the reservations pass: swap
+	// each record's own ID and its reference columns for the placeholders
+	// the maps above already produced, and normalize the audit events'
+	// autoincrement source IDs. The frozen requirement/source-policy blobs
+	// are deliberately left untouched -- they are carried and re-inserted
+	// verbatim on import, so both sides hold identical bytes.
+	if gates, err := normalized.DecodeGatesExtension(); err == nil && !gates.IsEmpty() {
+		remap := func(table map[string]string, id string) string {
+			if placeholder, ok := table[id]; ok {
+				return placeholder
+			}
+			return id
+		}
+		for index := range gates.Policies {
+			gates.Policies[index].ID = remap(mappings.policyIDs, gates.Policies[index].ID)
+		}
+		for index := range gates.PolicyEvents {
+			gates.PolicyEvents[index].SourceID = int64(index + 1)
+			gates.PolicyEvents[index].PolicyID = remap(mappings.policyIDs, gates.PolicyEvents[index].PolicyID)
+		}
+		for index := range gates.AttemptSnapshots {
+			gates.AttemptSnapshots[index].AttemptID = remap(attemptIDs, gates.AttemptSnapshots[index].AttemptID)
+		}
+		for index := range gates.Evidence {
+			evidence := gates.Evidence[index]
+			evidence.ID = remap(mappings.evidenceIDs, evidence.ID)
+			evidence.AttemptID = remap(attemptIDs, evidence.AttemptID)
+			evidence.IssueID = remap(issueIDs, evidence.IssueID)
+			for artifactIndex := range evidence.ArtifactIDs {
+				evidence.ArtifactIDs[artifactIndex] = remap(artifactIDs, evidence.ArtifactIDs[artifactIndex])
+			}
+			gates.Evidence[index] = evidence
+		}
+		for index := range gates.EvidenceEvents {
+			event := gates.EvidenceEvents[index]
+			event.SourceID = int64(index + 1)
+			event.EvidenceID = remap(mappings.evidenceIDs, event.EvidenceID)
+			event.AttemptID = remap(attemptIDs, event.AttemptID)
+			event.IssueID = remap(issueIDs, event.IssueID)
+			gates.EvidenceEvents[index] = event
+		}
+		for index := range gates.ReviewApprovals {
+			approval := gates.ReviewApprovals[index]
+			approval.ID = remap(mappings.approvalIDs, approval.ID)
+			approval.IssueID = remap(issueIDs, approval.IssueID)
+			approval.AttemptID = remap(attemptIDs, approval.AttemptID)
+			gates.ReviewApprovals[index] = approval
+		}
+		if payload, err := json.Marshal(gates); err == nil {
+			extensions := make(map[string]json.RawMessage, len(normalized.Extensions))
+			for key, value := range normalized.Extensions {
+				extensions[key] = value
+			}
+			extensions[domain.LogicalGatesExtensionKey] = payload
 			normalized.Extensions = extensions
 		}
 	}

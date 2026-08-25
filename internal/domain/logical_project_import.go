@@ -56,6 +56,14 @@ type LogicalProjectImportDestinationIDs struct {
 	// ReservationIDs maps the extensions["reservations"] records; empty
 	// when that namespace is absent.
 	ReservationIDs map[string]string
+
+	// Gates namespace records with their own identifiers (ISSUE-175);
+	// empty when extensions["gates"] is absent. Snapshots are keyed by
+	// their owning attempt/target and need no IDs of their own, and both
+	// event tables use autoincrement rowids like issue_events.
+	WorkflowPolicyIDs map[string]string
+	GateEvidenceIDs   map[string]string
+	ReviewApprovalIDs map[string]string
 }
 
 // NewLogicalProjectImportDestinationIDs builds one destination ID for every
@@ -120,11 +128,28 @@ func NewLogicalProjectImportDestinationIDs(document LogicalProjectDocument, gene
 	if err != nil {
 		return LogicalProjectImportDestinationIDs{}, err
 	}
+	gates, err := document.DecodeGatesExtension()
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	workflowPolicyIDs, err := logicalDestinationIDs(gates.Policies, func(item LogicalWorkflowPolicy) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	gateEvidenceIDs, err := logicalDestinationIDs(gates.Evidence, func(item LogicalGateEvidence) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
+	reviewApprovalIDs, err := logicalDestinationIDs(gates.ReviewApprovals, func(item LogicalReviewApproval) string { return item.ID }, generate)
+	if err != nil {
+		return LogicalProjectImportDestinationIDs{}, err
+	}
 	return LogicalProjectImportDestinationIDs{
 		IssueIDs: issueIDs, LabelIDs: labelIDs, RelationIDs: relationIDs, CommentIDs: commentIDs,
 		DecisionIDs: decisionIDs, AttemptIDs: attemptIDs, AttemptNoteIDs: attemptNoteIDs, ArtifactIDs: artifactIDs,
 		ReviewTargetIDs: reviewTargetIDs, ReviewRequestIDs: reviewRequestIDs, ReviewOutcomeIDs: reviewOutcomeIDs,
-		ReservationIDs: reservationIDs,
+		ReservationIDs:    reservationIDs,
+		WorkflowPolicyIDs: workflowPolicyIDs, GateEvidenceIDs: gateEvidenceIDs, ReviewApprovalIDs: reviewApprovalIDs,
 	}, nil
 }
 
@@ -180,6 +205,16 @@ type LogicalProjectImportCounts struct {
 	// count; zero for a version 1 document or a v2 document that carries
 	// no reservations namespace.
 	Reservations int `json:"reservations"`
+
+	// Gates namespace record counts (extensions["gates"], ISSUE-175); all
+	// zero for a version 1 document or a v2 document without the namespace.
+	WorkflowPolicies          int `json:"workflow_policies"`
+	WorkflowPolicyEvents      int `json:"workflow_policy_events"`
+	AttemptGateSnapshots      int `json:"attempt_gate_snapshots"`
+	ReviewTargetGateSnapshots int `json:"review_target_gate_snapshots"`
+	GateEvidence              int `json:"gate_evidence"`
+	GateEvidenceEvents        int `json:"gate_evidence_events"`
+	ReviewApprovals           int `json:"review_approvals"`
 }
 
 // LogicalProjectImportConflict is one deterministic dry-run conflict.
@@ -221,8 +256,12 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 		return plan, err
 	}
 	// Safe to decode unchecked: the semantic pass above has already
-	// decoded and fully validated the namespace, so this cannot fail.
+	// decoded and fully validated the namespaces, so these cannot fail.
 	reservations, err := parsed.DecodeReservationsExtension()
+	if err != nil {
+		return plan, err
+	}
+	gates, err := parsed.DecodeGatesExtension()
 	if err != nil {
 		return plan, err
 	}
@@ -247,6 +286,14 @@ func ParseLogicalProjectImportPlan(document []byte) (LogicalProjectImportPlan, e
 			ReviewEvents:   len(parsed.ReviewEvents),
 
 			Reservations: len(reservations),
+
+			WorkflowPolicies:          len(gates.Policies),
+			WorkflowPolicyEvents:      len(gates.PolicyEvents),
+			AttemptGateSnapshots:      len(gates.AttemptSnapshots),
+			ReviewTargetGateSnapshots: len(gates.ReviewTargetSnapshots),
+			GateEvidence:              len(gates.Evidence),
+			GateEvidenceEvents:        len(gates.EvidenceEvents),
+			ReviewApprovals:           len(gates.ReviewApprovals),
 		},
 		Conflicts: nil,
 		Writes:    LogicalProjectImportWrites{Count: 0},
@@ -550,7 +597,10 @@ func validateLogicalReviewTargetArray(decoder *json.Decoder, path string) error 
 			"issue_version":   validateAnyJSONValue,
 			"latest_event_id": validateAnyJSONValue,
 			"artifact_ids":    validateAnyJSONValue,
-			"created_at":      validateAnyJSONValue,
+			// Optional (ISSUE-175): absent means the [implementation]
+			// compatibility default, so pre-gates v2 documents stay valid.
+			"purposes":   validateAnyJSONValue,
+			"created_at": validateAnyJSONValue,
 		}, []string{"id", "issue_id", "issue_version", "latest_event_id", "artifact_ids", "created_at"})
 	})
 }
@@ -564,10 +614,13 @@ func validateLogicalReviewRequestArray(decoder *json.Decoder, path string) error
 			"target_issue_version": validateAnyJSONValue,
 			"target_event_id":      validateAnyJSONValue,
 			"artifact_ids":         validateAnyJSONValue,
-			"status":               validateAnyJSONValue,
-			"supersedes_id":        validateAnyJSONValue,
-			"created_at":           validateAnyJSONValue,
-			"resolved_at":          validateAnyJSONValue,
+			// Optional (ISSUE-175): absent means the [implementation]
+			// compatibility default, so pre-gates v2 documents stay valid.
+			"purposes":      validateAnyJSONValue,
+			"status":        validateAnyJSONValue,
+			"supersedes_id": validateAnyJSONValue,
+			"created_at":    validateAnyJSONValue,
+			"resolved_at":   validateAnyJSONValue,
 		}, []string{"id", "target_id", "issue_id", "target_issue_version", "target_event_id", "artifact_ids", "status", "supersedes_id", "created_at", "resolved_at"})
 	})
 }
@@ -1235,6 +1288,11 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			if target.LatestEventID < 0 {
 				return invalidArgumentPath(path+".latest_event_id", "INVALID", "must be >= 0")
 			}
+			if target.Purposes != nil {
+				if _, err := ValidateReviewPurposes(target.Purposes); err != nil {
+					return invalidArgumentPath(path+".purposes", "INVALID", "invalid purposes list")
+				}
+			}
 			if err := validateUTCTimestamp(path+".created_at", target.CreatedAt); err != nil {
 				return err
 			}
@@ -1265,6 +1323,11 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			}
 			if request.TargetEventID < 0 {
 				return invalidArgumentPath(path+".target_event_id", "INVALID", "must be >= 0")
+			}
+			if request.Purposes != nil {
+				if _, err := ValidateReviewPurposes(request.Purposes); err != nil {
+					return invalidArgumentPath(path+".purposes", "INVALID", "invalid purposes list")
+				}
 			}
 			if !ReviewRequestStatus(request.Status).Valid() {
 				return invalidArgumentPath(path+".status", "INVALID_ENUM", "unsupported review request status")
@@ -1360,6 +1423,10 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 		if err := validateLogicalReservations(document, seenIDs, issueIDs, attemptIDs, attemptIssueIDs); err != nil {
 			return err
 		}
+
+		if err := validateLogicalGates(document, seenIDs, issueIDs, attemptIDs, attemptIssueIDs); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -1451,6 +1518,316 @@ func validateLogicalReservations(
 		}
 	}
 	return nil
+}
+
+// validateLogicalGates validates the extensions["gates"] namespace
+// (ISSUE-175 AC3). Version-2 only, like reservations: v1's frozen key table
+// has no extensions map at all. Every record must reference entities that
+// exist in this document, and cross-entity identities must be consistent,
+// so the apply pass is a plain insert. Snapshot requirement and
+// source-policy blobs are shape-checked but otherwise carried verbatim --
+// their embedded policy identities are frozen audit facts protected by the
+// snapshot fingerprint, not references to remap (see
+// LogicalAttemptGateSnapshot).
+func validateLogicalGates(
+	document *LogicalProjectDocument,
+	seenIDs map[string]string,
+	issueIDs map[string]struct{},
+	attemptIDs map[string]struct{},
+	attemptIssueIDs map[string]string,
+) error {
+	gates, err := document.DecodeGatesExtension()
+	if err != nil {
+		return err
+	}
+	base := "$.extensions." + LogicalGatesExtensionKey
+
+	// Review target/request lookups rebuilt locally so this validator stays
+	// self-contained; both arrays were fully validated just above.
+	reviewTargetIDs := make(map[string]struct{}, len(document.ReviewTargets))
+	reviewTargetIssueIDs := make(map[string]string, len(document.ReviewTargets))
+	for _, target := range document.ReviewTargets {
+		reviewTargetIDs[target.ID] = struct{}{}
+		reviewTargetIssueIDs[target.ID] = target.IssueID
+	}
+	reviewRequestIDs := make(map[string]struct{}, len(document.ReviewRequests))
+	reviewRequestTargetIDs := make(map[string]string, len(document.ReviewRequests))
+	for _, request := range document.ReviewRequests {
+		reviewRequestIDs[request.ID] = struct{}{}
+		reviewRequestTargetIDs[request.ID] = request.TargetID
+	}
+
+	policyIDs := make(map[string]struct{}, len(gates.Policies))
+	for index, policy := range gates.Policies {
+		path := fmt.Sprintf("%s.policies[%d]", base, index)
+		if err := requireNonEmptyString(path+".id", policy.ID); err != nil {
+			return err
+		}
+		if err := validateCanonicalULID(path+".id", policy.ID); err != nil {
+			return err
+		}
+		if _, exists := seenIDs[policy.ID]; exists {
+			return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+		}
+		seenIDs[policy.ID] = "workflow_policy"
+		policyIDs[policy.ID] = struct{}{}
+		if !isJSONObject(policy.SelectorJSON) {
+			return invalidArgumentPath(path+".selector_json", "INVALID_JSON", "selector_json must be a JSON object")
+		}
+		if !isJSONArray(policy.RequirementsJSON) {
+			return invalidArgumentPath(path+".requirements_json", "INVALID_JSON", "requirements_json must be a JSON array")
+		}
+		if !PolicyStatus(policy.Status).Valid() {
+			return invalidArgumentPath(path+".status", "INVALID_ENUM", "unsupported policy status")
+		}
+		if policy.Version < 1 {
+			return invalidArgumentPath(path+".version", "INVALID", "must be >= 1")
+		}
+		if err := validateUTCTimestamp(path+".created_at", policy.CreatedAt); err != nil {
+			return err
+		}
+		if err := validateUTCTimestamp(path+".updated_at", policy.UpdatedAt); err != nil {
+			return err
+		}
+	}
+
+	for index, event := range gates.PolicyEvents {
+		path := fmt.Sprintf("%s.policy_events[%d]", base, index)
+		if event.SourceID < 0 {
+			return invalidArgumentPath(path+".source_id", "INVALID", "must be >= 0")
+		}
+		if err := validateReference(path+".policy_id", event.PolicyID, policyIDs, "workflow_policy"); err != nil {
+			return err
+		}
+		switch event.EventType {
+		case "policy_created":
+			if event.PriorVersion != nil {
+				return invalidArgumentPath(path+".prior_version", "INVALID", "must be absent for policy_created")
+			}
+		case "policy_updated", "policy_archived":
+			if event.PriorVersion == nil || *event.PriorVersion < 1 {
+				return invalidArgumentPath(path+".prior_version", "INVALID", "must be >= 1 for non-created events")
+			}
+		default:
+			return invalidArgumentPath(path+".event_type", "INVALID_ENUM", "unsupported policy event type")
+		}
+		if event.NewVersion < 1 {
+			return invalidArgumentPath(path+".new_version", "INVALID", "must be >= 1")
+		}
+		if !isValidEventPayload(event.Payload) {
+			return invalidArgumentPath(path+".payload", "INVALID_JSON", "payload must be valid JSON")
+		}
+		if err := validateUTCTimestamp(path+".created_at", event.CreatedAt); err != nil {
+			return err
+		}
+	}
+
+	snapshotAttempts := make(map[string]struct{}, len(gates.AttemptSnapshots))
+	for index, snapshot := range gates.AttemptSnapshots {
+		path := fmt.Sprintf("%s.attempt_snapshots[%d]", base, index)
+		if err := validateReference(path+".attempt_id", snapshot.AttemptID, attemptIDs, "attempt"); err != nil {
+			return err
+		}
+		if _, exists := snapshotAttempts[snapshot.AttemptID]; exists {
+			return invalidArgumentPath(path+".attempt_id", "DUPLICATE_ID", "one snapshot per attempt")
+		}
+		snapshotAttempts[snapshot.AttemptID] = struct{}{}
+		if err := validateLogicalGateSnapshotBody(path, snapshot.RequirementsJSON, snapshot.SourcePoliciesJSON, snapshot.Fingerprint, snapshot.IssueVersion, snapshot.CreatedAt); err != nil {
+			return err
+		}
+	}
+
+	snapshotTargets := make(map[string]struct{}, len(gates.ReviewTargetSnapshots))
+	for index, snapshot := range gates.ReviewTargetSnapshots {
+		path := fmt.Sprintf("%s.review_target_snapshots[%d]", base, index)
+		if err := validateReference(path+".target_id", snapshot.TargetID, reviewTargetIDs, "review_target"); err != nil {
+			return err
+		}
+		if _, exists := snapshotTargets[snapshot.TargetID]; exists {
+			return invalidArgumentPath(path+".target_id", "DUPLICATE_ID", "one snapshot per review target")
+		}
+		snapshotTargets[snapshot.TargetID] = struct{}{}
+		if err := validateLogicalGateSnapshotBody(path, snapshot.RequirementsJSON, snapshot.SourcePoliciesJSON, snapshot.Fingerprint, snapshot.IssueVersion, snapshot.CreatedAt); err != nil {
+			return err
+		}
+	}
+
+	evidenceIDs := make(map[string]struct{}, len(gates.Evidence))
+	evidenceAttemptIDs := make(map[string]string, len(gates.Evidence))
+	evidenceKeys := make(map[string]struct{}, len(gates.Evidence))
+	for index, evidence := range gates.Evidence {
+		path := fmt.Sprintf("%s.evidence[%d]", base, index)
+		if err := requireNonEmptyString(path+".id", evidence.ID); err != nil {
+			return err
+		}
+		if err := validateCanonicalULID(path+".id", evidence.ID); err != nil {
+			return err
+		}
+		if _, exists := seenIDs[evidence.ID]; exists {
+			return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+		}
+		seenIDs[evidence.ID] = "gate_evidence"
+		evidenceIDs[evidence.ID] = struct{}{}
+		evidenceAttemptIDs[evidence.ID] = evidence.AttemptID
+		if err := validateReference(path+".attempt_id", evidence.AttemptID, attemptIDs, "attempt"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".issue_id", evidence.IssueID, issueIDs, "issue"); err != nil {
+			return err
+		}
+		if owner := attemptIssueIDs[evidence.AttemptID]; owner != evidence.IssueID {
+			return invalidArgumentPath(path+".issue_id", "INCONSISTENT_REFERENCE", "must match the owning attempt's issue")
+		}
+		if err := requireNonEmptyString(path+".key", evidence.Key); err != nil {
+			return err
+		}
+		attemptKey := evidence.AttemptID + "\x00" + evidence.Key
+		if _, exists := evidenceKeys[attemptKey]; exists {
+			return invalidArgumentPath(path+".key", "DUPLICATE_ID", "one evidence record per attempt and key")
+		}
+		evidenceKeys[attemptKey] = struct{}{}
+		if !EvidenceResult(evidence.Result).Valid() {
+			return invalidArgumentPath(path+".result", "INVALID_ENUM", "unsupported evidence result")
+		}
+		if err := requireNonEmptyString(path+".summary", evidence.Summary); err != nil {
+			return err
+		}
+		if evidence.Version < 1 {
+			return invalidArgumentPath(path+".version", "INVALID", "must be >= 1")
+		}
+		if err := validateUTCTimestamp(path+".created_at", evidence.CreatedAt); err != nil {
+			return err
+		}
+		if err := validateUTCTimestamp(path+".updated_at", evidence.UpdatedAt); err != nil {
+			return err
+		}
+	}
+
+	for index, event := range gates.EvidenceEvents {
+		path := fmt.Sprintf("%s.evidence_events[%d]", base, index)
+		if event.SourceID < 0 {
+			return invalidArgumentPath(path+".source_id", "INVALID", "must be >= 0")
+		}
+		if err := validateReference(path+".evidence_id", event.EvidenceID, evidenceIDs, "gate_evidence"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".attempt_id", event.AttemptID, attemptIDs, "attempt"); err != nil {
+			return err
+		}
+		if owner := evidenceAttemptIDs[event.EvidenceID]; owner != event.AttemptID {
+			return invalidArgumentPath(path+".attempt_id", "INCONSISTENT_REFERENCE", "must match the evidence record's attempt")
+		}
+		if err := validateReference(path+".issue_id", event.IssueID, issueIDs, "issue"); err != nil {
+			return err
+		}
+		if err := requireNonEmptyString(path+".key", event.Key); err != nil {
+			return err
+		}
+		if event.EventType != "evidence_submitted" && event.EventType != "evidence_replaced" {
+			return invalidArgumentPath(path+".event_type", "INVALID_ENUM", "unsupported evidence event type")
+		}
+		if event.Version < 1 {
+			return invalidArgumentPath(path+".version", "INVALID", "must be >= 1")
+		}
+		if !isValidEventPayload(event.Payload) {
+			return invalidArgumentPath(path+".payload", "INVALID_JSON", "payload must be valid JSON")
+		}
+		if err := validateUTCTimestamp(path+".created_at", event.CreatedAt); err != nil {
+			return err
+		}
+	}
+
+	approvalPurposes := make(map[string]struct{}, len(gates.ReviewApprovals))
+	for index, approval := range gates.ReviewApprovals {
+		path := fmt.Sprintf("%s.review_approvals[%d]", base, index)
+		if err := requireNonEmptyString(path+".id", approval.ID); err != nil {
+			return err
+		}
+		if err := validateCanonicalULID(path+".id", approval.ID); err != nil {
+			return err
+		}
+		if _, exists := seenIDs[approval.ID]; exists {
+			return invalidArgumentPath(path+".id", "DUPLICATE_ID", "duplicate logical ID")
+		}
+		seenIDs[approval.ID] = "review_approval"
+		if err := validateReference(path+".issue_id", approval.IssueID, issueIDs, "issue"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".target_id", approval.TargetID, reviewTargetIDs, "review_target"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".request_id", approval.RequestID, reviewRequestIDs, "review_request"); err != nil {
+			return err
+		}
+		if err := validateReference(path+".attempt_id", approval.AttemptID, attemptIDs, "attempt"); err != nil {
+			return err
+		}
+		if reviewRequestTargetIDs[approval.RequestID] != approval.TargetID {
+			return invalidArgumentPath(path+".target_id", "INCONSISTENT_REFERENCE", "must match the request's review target")
+		}
+		if reviewTargetIssueIDs[approval.TargetID] != approval.IssueID {
+			return invalidArgumentPath(path+".issue_id", "INCONSISTENT_REFERENCE", "must match the review target's issue")
+		}
+		if err := requireNonEmptyString(path+".purpose", approval.Purpose); err != nil {
+			return err
+		}
+		requestPurpose := approval.RequestID + "\x00" + approval.Purpose
+		if _, exists := approvalPurposes[requestPurpose]; exists {
+			return invalidArgumentPath(path+".purpose", "DUPLICATE_ID", "a request grants each purpose exactly once")
+		}
+		approvalPurposes[requestPurpose] = struct{}{}
+		if approval.TargetIssueVersion < 1 {
+			return invalidArgumentPath(path+".target_issue_version", "INVALID", "must be >= 1")
+		}
+		if approval.TargetEventID < 0 {
+			return invalidArgumentPath(path+".target_event_id", "INVALID", "must be >= 0")
+		}
+		if approval.Version < 1 {
+			return invalidArgumentPath(path+".version", "INVALID", "must be >= 1")
+		}
+		if err := validateUTCTimestamp(path+".created_at", approval.CreatedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateLogicalGateSnapshotBody validates the fields the two snapshot
+// tables share. Fingerprint length matches the storage CHECK (64), and the
+// blobs are shape-checked only -- they are frozen audit facts carried
+// verbatim. JSON null is accepted alongside an array because the snapshot
+// writer marshals a nil source-policy slice as null (a shape live rows
+// really hold), and rewriting it to [] on export would stop the carried
+// bytes matching what the fingerprint was computed over.
+func validateLogicalGateSnapshotBody(path string, requirements, sourcePolicies json.RawMessage, fingerprint string, issueVersion int64, createdAt string) error {
+	if !isJSONArrayOrNull(requirements) {
+		return invalidArgumentPath(path+".requirements_json", "INVALID_JSON", "requirements_json must be a JSON array or null")
+	}
+	if !isJSONArrayOrNull(sourcePolicies) {
+		return invalidArgumentPath(path+".source_policies_json", "INVALID_JSON", "source_policies_json must be a JSON array or null")
+	}
+	if len(fingerprint) != 64 {
+		return invalidArgumentPath(path+".fingerprint", "INVALID", "must be 64 characters")
+	}
+	if issueVersion < 1 {
+		return invalidArgumentPath(path+".issue_version", "INVALID", "must be >= 1")
+	}
+	return validateUTCTimestamp(path+".created_at", createdAt)
+}
+
+// isJSONArray reports whether payload is a valid JSON array.
+func isJSONArray(payload json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return false
+	}
+	return json.Valid(trimmed)
+}
+
+// isJSONArrayOrNull additionally accepts the literal null; see
+// validateLogicalGateSnapshotBody for why snapshot blobs allow it.
+func isJSONArrayOrNull(payload json.RawMessage) bool {
+	return isJSONArray(payload) || string(bytes.TrimSpace(payload)) == "null"
 }
 
 func validateDecisionSupersedesReference(path, target string, current LogicalDecision, decisions []LogicalDecision) error {

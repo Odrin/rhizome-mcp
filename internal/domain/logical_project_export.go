@@ -187,12 +187,21 @@ const (
 
 // LogicalReviewTarget is the exported immutable review-target snapshot
 // (version 2). Mirrors domain.ReviewTarget.
+//
+// Purposes is the purpose set the target covers (docs/02 §17.5). It is
+// omitted when it equals the compatibility default [implementation], so a
+// project that never named a purpose exports exactly the document it
+// exported before ISSUE-175 -- and a document that does carry a non-default
+// purpose set fails loudly in an older build (whose frozen key table
+// rejects the key) instead of silently importing with a security-review
+// scope downgraded to the default.
 type LogicalReviewTarget struct {
 	ID            string   `json:"id"`
 	IssueID       string   `json:"issue_id"`
 	IssueVersion  int64    `json:"issue_version"`
 	LatestEventID int64    `json:"latest_event_id"`
 	ArtifactIDs   []string `json:"artifact_ids"`
+	Purposes      []string `json:"purposes,omitempty"`
 	CreatedAt     string   `json:"created_at"`
 }
 
@@ -209,10 +218,13 @@ type LogicalReviewRequest struct {
 	TargetIssueVersion int64    `json:"target_issue_version"`
 	TargetEventID      int64    `json:"target_event_id"`
 	ArtifactIDs        []string `json:"artifact_ids"`
-	Status             string   `json:"status"`
-	SupersedesID       *string  `json:"supersedes_id"`
-	CreatedAt          string   `json:"created_at"`
-	ResolvedAt         *string  `json:"resolved_at"`
+	// Purposes follows LogicalReviewTarget.Purposes: omitted when it equals
+	// the [implementation] compatibility default.
+	Purposes     []string `json:"purposes,omitempty"`
+	Status       string   `json:"status"`
+	SupersedesID *string  `json:"supersedes_id"`
+	CreatedAt    string   `json:"created_at"`
+	ResolvedAt   *string  `json:"resolved_at"`
 }
 
 // LogicalReviewOutcome is the exported review resolution record (version 2).
@@ -333,6 +345,173 @@ type LogicalReservation struct {
 	CreatedAt       string          `json:"created_at"`
 	ReleasedAt      string          `json:"released_at"`
 	ReleaseReason   string          `json:"release_reason"`
+}
+
+// Workflow-gate interchange (ISSUE-175 AC3). Gates ride in the version-2
+// extensions map under their own namespace, following the reservations
+// precedent -- no document version bump (docs/07 §7).
+const (
+	// LogicalGatesExtensionKey is the Extensions key workflow-gate state is
+	// carried under.
+	LogicalGatesExtensionKey = "gates"
+	// LogicalGatesExtensionVersion is the current version of the gates
+	// namespace payload.
+	LogicalGatesExtensionVersion = 1
+)
+
+// LogicalGatesExtension is the payload stored under Extensions["gates"]:
+// the durable workflow-gate state -- policies with their audit trail,
+// frozen requirement snapshots, attempt evidence with its audit trail, and
+// purpose-scoped review approvals. Version is the namespace's own version,
+// not the document's.
+type LogicalGatesExtension struct {
+	Version               int                               `json:"version"`
+	Policies              []LogicalWorkflowPolicy           `json:"policies"`
+	PolicyEvents          []LogicalWorkflowPolicyEvent      `json:"policy_events"`
+	AttemptSnapshots      []LogicalAttemptGateSnapshot      `json:"attempt_snapshots"`
+	ReviewTargetSnapshots []LogicalReviewTargetGateSnapshot `json:"review_target_snapshots"`
+	Evidence              []LogicalGateEvidence             `json:"evidence"`
+	EvidenceEvents        []LogicalGateEvidenceEvent        `json:"evidence_events"`
+	ReviewApprovals       []LogicalReviewApproval           `json:"review_approvals"`
+}
+
+// LogicalWorkflowPolicy is one exported workflow policy. Selector and
+// requirements are carried as their stored JSON, so an import is a faithful
+// insert rather than a re-normalization under whatever rules happen to be
+// current -- the same rule LogicalReservation applies to NormalizedJSON.
+type LogicalWorkflowPolicy struct {
+	ID               string          `json:"id"`
+	SelectorJSON     json.RawMessage `json:"selector_json"`
+	RequirementsJSON json.RawMessage `json:"requirements_json"`
+	Status           string          `json:"status"`
+	Version          int64           `json:"version"`
+	CreatedAt        string          `json:"created_at"`
+	UpdatedAt        string          `json:"updated_at"`
+}
+
+// LogicalWorkflowPolicyEvent is one exported policy audit event. SourceID
+// plays the same role LogicalEvent.SourceID does (a stable reference to the
+// original row, not reused as a destination ID); SessionID imports as NULL
+// like every other session reference, since agent sessions do not cross the
+// interchange boundary.
+type LogicalWorkflowPolicyEvent struct {
+	SourceID     int64           `json:"source_id"`
+	PolicyID     string          `json:"policy_id"`
+	EventType    string          `json:"event_type"`
+	SessionID    *string         `json:"session_id"`
+	PriorVersion *int64          `json:"prior_version"`
+	NewVersion   int64           `json:"new_version"`
+	Payload      json.RawMessage `json:"payload"`
+	CreatedAt    string          `json:"created_at"`
+}
+
+// LogicalAttemptGateSnapshot is one exported claim-time requirement
+// snapshot (docs/02 §17.6). The requirement and source-policy blobs are
+// carried verbatim: the fingerprint is SHA-256 over the canonical snapshot
+// payload, so rewriting embedded policy identities to destination IDs would
+// falsify it. Embedded policy IDs are therefore frozen audit identities
+// naming the source document's policies, exactly as issue-event payloads
+// already keep their source-document references.
+type LogicalAttemptGateSnapshot struct {
+	AttemptID          string          `json:"attempt_id"`
+	RequirementsJSON   json.RawMessage `json:"requirements_json"`
+	SourcePoliciesJSON json.RawMessage `json:"source_policies_json"`
+	Fingerprint        string          `json:"fingerprint"`
+	IssueVersion       int64           `json:"issue_version"`
+	CreatedAt          string          `json:"created_at"`
+}
+
+// LogicalReviewTargetGateSnapshot is one exported review-target requirement
+// snapshot; see LogicalAttemptGateSnapshot for the verbatim-blob rule.
+type LogicalReviewTargetGateSnapshot struct {
+	TargetID           string          `json:"target_id"`
+	RequirementsJSON   json.RawMessage `json:"requirements_json"`
+	SourcePoliciesJSON json.RawMessage `json:"source_policies_json"`
+	Fingerprint        string          `json:"fingerprint"`
+	IssueVersion       int64           `json:"issue_version"`
+	CreatedAt          string          `json:"created_at"`
+}
+
+// LogicalGateEvidence is one exported attempt evidence record. Only
+// evidence owned by an exported (non-active) attempt crosses the boundary,
+// the same rule reservations follow. ArtifactIDs are carried as the
+// source-document identifiers, matching how review targets and requests
+// carry theirs.
+type LogicalGateEvidence struct {
+	ID          string   `json:"id"`
+	AttemptID   string   `json:"attempt_id"`
+	IssueID     string   `json:"issue_id"`
+	Key         string   `json:"key"`
+	Result      string   `json:"result"`
+	Summary     string   `json:"summary"`
+	Details     *string  `json:"details"`
+	ArtifactIDs []string `json:"artifact_ids"`
+	Version     int64    `json:"version"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+// LogicalGateEvidenceEvent is one exported evidence audit event; see
+// LogicalWorkflowPolicyEvent for the SourceID rule.
+type LogicalGateEvidenceEvent struct {
+	SourceID   int64           `json:"source_id"`
+	EvidenceID string          `json:"evidence_id"`
+	AttemptID  string          `json:"attempt_id"`
+	IssueID    string          `json:"issue_id"`
+	Key        string          `json:"key"`
+	EventType  string          `json:"event_type"`
+	Version    int64           `json:"version"`
+	Payload    json.RawMessage `json:"payload"`
+	CreatedAt  string          `json:"created_at"`
+}
+
+// LogicalReviewApproval is one exported immutable purpose-scoped review
+// approval (docs/02 §17.5). Round-tripping these is what keeps a satisfied
+// review_approval requirement satisfied after a restore.
+type LogicalReviewApproval struct {
+	ID                 string `json:"id"`
+	IssueID            string `json:"issue_id"`
+	TargetID           string `json:"target_id"`
+	RequestID          string `json:"request_id"`
+	AttemptID          string `json:"attempt_id"`
+	Purpose            string `json:"purpose"`
+	TargetIssueVersion int64  `json:"target_issue_version"`
+	TargetEventID      int64  `json:"target_event_id"`
+	Version            int64  `json:"version"`
+	CreatedAt          string `json:"created_at"`
+}
+
+// DecodeGatesExtension returns the workflow-gate state carried in
+// Extensions["gates"], or the zero extension when the namespace is absent.
+// Strict like DecodeReservationsExtension: unknown keys and an unsupported
+// namespace version fail loudly instead of importing with silently dropped
+// gate state.
+func (document LogicalProjectDocument) DecodeGatesExtension() (LogicalGatesExtension, error) {
+	raw, present := document.Extensions[LogicalGatesExtensionKey]
+	if !present || len(bytes.TrimSpace(raw)) == 0 {
+		return LogicalGatesExtension{}, nil
+	}
+	path := "$.extensions." + LogicalGatesExtensionKey
+	var extension LogicalGatesExtension
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&extension); err != nil {
+		return LogicalGatesExtension{}, decodeError(err, path)
+	}
+	if extension.Version != LogicalGatesExtensionVersion {
+		return LogicalGatesExtension{}, unsupportedFormatVersionError(path + ".version")
+	}
+	return extension, nil
+}
+
+// IsEmpty reports whether the extension carries no records at all, so the
+// exporter can skip emitting the namespace and a gate-free project exports
+// exactly the document it exported before.
+func (extension LogicalGatesExtension) IsEmpty() bool {
+	return len(extension.Policies) == 0 && len(extension.PolicyEvents) == 0 &&
+		len(extension.AttemptSnapshots) == 0 && len(extension.ReviewTargetSnapshots) == 0 &&
+		len(extension.Evidence) == 0 && len(extension.EvidenceEvents) == 0 &&
+		len(extension.ReviewApprovals) == 0
 }
 
 // DecodeReservationsExtension returns the reservations carried in

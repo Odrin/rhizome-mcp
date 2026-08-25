@@ -244,11 +244,45 @@ or every review event would be duplicated. Referential integrity
 `review_targets` records) is still validated on parse regardless.
 
 `extensions` is a reserved top-level object, present only in version 2. Its
-values are namespaced by owning feature (for example a future `gates` or
-`reservations` key) and are not otherwise interpreted or validated by this
-format; each namespace defines and validates its own value shape. See §7 for
-when a feature should add a namespace to `extensions` versus a new top-level
-array.
+values are namespaced by owning feature (currently `reservations` and
+`gates`) and are not otherwise interpreted or validated by this format; each
+namespace defines and validates its own value shape. See §7 for when a
+feature should add a namespace to `extensions` versus a new top-level array.
+
+### 4.1. The `gates` namespace (ISSUE-175)
+
+`extensions.gates` carries the durable workflow-gate state of docs/02 §17,
+with its own namespace `version` (currently 1): `policies` and
+`policy_events` (the policy table and its append-only audit trail),
+`attempt_snapshots` and `review_target_snapshots` (the frozen requirement
+snapshots of docs/02 §17.6), `evidence` and `evidence_events`
+(attempt-authenticated gate evidence and its audit trail), and
+`review_approvals` (the immutable purpose-scoped approvals of docs/02
+§17.5). The namespace is emitted only when at least one record exists, so a
+project that never configured a gate exports exactly the document it
+exported before.
+
+Attempt-owned records (attempt snapshots, evidence, evidence events) follow
+the reservations rule: only rows whose owning attempt itself crosses the
+boundary are exported. Approvals additionally require their approving
+attempt to be exported. Policy selector/requirement blobs and both snapshot
+payloads are carried verbatim and re-inserted verbatim: a snapshot's
+fingerprint is computed over its canonical payload, so rewriting the
+embedded policy identities to destination IDs would falsify it. Embedded
+policy IDs inside snapshots are therefore frozen audit identities naming the
+*source* document's policies -- the same rule event payloads already follow
+-- while every reference *column* (attempt, target, request, issue, policy)
+is remapped like any other import.
+
+Review targets and requests additionally carry an optional `purposes` field
+(docs/02 §17.5), omitted when it equals the `["implementation"]`
+compatibility default. On import, an absent `purposes` and an absent `gates`
+namespace both produce exactly what a pre-gates project holds after
+migration 012: implementation-only purposes, no policies, and -- for every
+imported review target without a carried snapshot -- the same empty sentinel
+snapshot the migration backfill writes, which evaluates identically to the
+row's absence (zero requirements). A version 1 document therefore imports
+with no gate state and unchanged behavior.
 
 ## 5. Explicit exclusions
 

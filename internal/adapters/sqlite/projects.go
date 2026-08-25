@@ -241,6 +241,29 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 			exportedAt = latest
 		}
 
+		// Workflow-gate state rides in its own extensions namespace
+		// (ISSUE-175 AC3), following the reservations pattern exactly: the
+		// namespace is emitted only when there is something to carry, so a
+		// project that never configured a gate exports exactly the document
+		// it exported before.
+		gatesExtension, latest, err := readLogicalGates(ctx, query)
+		if err != nil {
+			return err
+		}
+		if !gatesExtension.IsEmpty() {
+			payload, err := json.Marshal(gatesExtension)
+			if err != nil {
+				return err
+			}
+			if document.Extensions == nil {
+				document.Extensions = make(map[string]json.RawMessage, 1)
+			}
+			document.Extensions[domain.LogicalGatesExtensionKey] = payload
+		}
+		if latest.After(exportedAt) {
+			exportedAt = latest
+		}
+
 		document.ExportedAt = formatLogicalProjectTimestamp(exportedAt)
 		return nil
 	})
@@ -656,8 +679,12 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
-				reviewTargetDestIDs[target.ID], issueDestIDs[target.IssueID], target.IssueVersion, target.LatestEventID, string(artifactIDsJSON), formatStorageTime(createdAt)); err != nil {
+			purposesJSON, err := logicalPurposesJSONForImport(target.Purposes)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+				reviewTargetDestIDs[target.ID], issueDestIDs[target.IssueID], target.IssueVersion, target.LatestEventID, string(artifactIDsJSON), purposesJSON, formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -685,8 +712,12 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
-				reviewRequestDestIDs[request.ID], reviewTargetDestIDs[request.TargetID], issueDestIDs[request.IssueID], request.TargetIssueVersion, request.TargetEventID, string(artifactIDsJSON), request.Status, nullableString(supersedesID), formatStorageTime(createdAt), nullableString(resolvedAt)); err != nil {
+			purposesJSON, err := logicalPurposesJSONForImport(request.Purposes)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
+				reviewRequestDestIDs[request.ID], reviewTargetDestIDs[request.TargetID], issueDestIDs[request.IssueID], request.TargetIssueVersion, request.TargetEventID, string(artifactIDsJSON), purposesJSON, request.Status, nullableString(supersedesID), formatStorageTime(createdAt), nullableString(resolvedAt)); err != nil {
 				return err
 			}
 		}
@@ -730,6 +761,153 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				reservationDestIDs[reservation.ID], issueDestIDs[reservation.IssueID], attemptDestIDs[reservation.AttemptID],
 				reservation.Kind, reservation.DisplayValue, reservation.ComparisonValue, string(reservation.NormalizedJSON),
 				reservation.Status, formatStorageTime(createdAt), formatStorageTime(releasedAt), reservation.ReleaseReason); err != nil {
+				return err
+			}
+		}
+
+		// Workflow-gate state arrives in its own extensions namespace
+		// (ISSUE-175 AC3). Parsing has already validated every record and
+		// its references, so this is a plain insert with ID remapping on
+		// the reference columns. Snapshot and audit payload blobs are
+		// inserted verbatim: their embedded identities are frozen audit
+		// facts protected by the snapshot fingerprint (see
+		// domain.LogicalAttemptGateSnapshot).
+		gates, err := plan.Document.DecodeGatesExtension()
+		if err != nil {
+			return err
+		}
+		workflowPolicyDestIDs := plan.DestinationIDs.WorkflowPolicyIDs
+		gateEvidenceDestIDs := plan.DestinationIDs.GateEvidenceIDs
+		reviewApprovalDestIDs := plan.DestinationIDs.ReviewApprovalIDs
+		for _, policy := range gates.Policies {
+			if _, ok := workflowPolicyDestIDs[policy.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination workflow policy identifier", false)
+			}
+		}
+		for _, evidence := range gates.Evidence {
+			if _, ok := gateEvidenceDestIDs[evidence.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination gate evidence identifier", false)
+			}
+		}
+		for _, approval := range gates.ReviewApprovals {
+			if _, ok := reviewApprovalDestIDs[approval.ID]; !ok {
+				return domain.NewError(domain.CodeStorageCorrupt, "import plan is missing a destination review approval identifier", false)
+			}
+		}
+
+		for _, policy := range gates.Policies {
+			createdAt, err := parseLogicalProjectTimestamp("gates.policies.created_at", policy.CreatedAt)
+			if err != nil {
+				return err
+			}
+			updatedAt, err := parseLogicalProjectTimestamp("gates.policies.updated_at", policy.UpdatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				workflowPolicyDestIDs[policy.ID], string(policy.SelectorJSON), string(policy.RequirementsJSON),
+				policy.Status, policy.Version, formatStorageTime(createdAt), formatStorageTime(updatedAt)); err != nil {
+				return err
+			}
+		}
+		for _, event := range gates.PolicyEvents {
+			createdAt, err := parseLogicalProjectTimestamp("gates.policy_events.created_at", event.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_policy_events(policy_id, event_type, session_id, prior_version, new_version, payload, created_at) VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+				workflowPolicyDestIDs[event.PolicyID], event.EventType, nullableInt64Pointer(event.PriorVersion),
+				event.NewVersion, string(event.Payload), formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+		for _, snapshot := range gates.AttemptSnapshots {
+			createdAt, err := parseLogicalProjectTimestamp("gates.attempt_snapshots.created_at", snapshot.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_gate_snapshots(attempt_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+				attemptDestIDs[snapshot.AttemptID], string(snapshot.RequirementsJSON), string(snapshot.SourcePoliciesJSON),
+				snapshot.Fingerprint, snapshot.IssueVersion, formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+
+		// Every imported review target gets a snapshot row, restoring the
+		// invariant migration 012 established (every target has one, so
+		// reading a target snapshot stays an unconditional read). Targets
+		// the document carries a snapshot for get that snapshot; the rest
+		// -- v1 documents and pre-gates v2 documents -- get the same empty
+		// sentinel backfill the migration wrote, which evaluates exactly
+		// like the missing row would (zero requirements), so their
+		// behaviour is unchanged.
+		targetSnapshots := make(map[string]domain.LogicalReviewTargetGateSnapshot, len(gates.ReviewTargetSnapshots))
+		for _, snapshot := range gates.ReviewTargetSnapshots {
+			targetSnapshots[snapshot.TargetID] = snapshot
+		}
+		for _, target := range plan.Document.ReviewTargets {
+			snapshot, carried := targetSnapshots[target.ID]
+			if !carried {
+				snapshot = domain.LogicalReviewTargetGateSnapshot{
+					TargetID:           target.ID,
+					RequirementsJSON:   json.RawMessage("[]"),
+					SourcePoliciesJSON: json.RawMessage("[]"),
+					Fingerprint:        "0000000000000000000000000000000000000000000000000000000000000000",
+					IssueVersion:       target.IssueVersion,
+					CreatedAt:          target.CreatedAt,
+				}
+			}
+			createdAt, err := parseLogicalProjectTimestamp("gates.review_target_snapshots.created_at", snapshot.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_target_gate_snapshots(target_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+				reviewTargetDestIDs[target.ID], string(snapshot.RequirementsJSON), string(snapshot.SourcePoliciesJSON),
+				snapshot.Fingerprint, snapshot.IssueVersion, formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+
+		for _, evidence := range gates.Evidence {
+			createdAt, err := parseLogicalProjectTimestamp("gates.evidence.created_at", evidence.CreatedAt)
+			if err != nil {
+				return err
+			}
+			updatedAt, err := parseLogicalProjectTimestamp("gates.evidence.updated_at", evidence.UpdatedAt)
+			if err != nil {
+				return err
+			}
+			artifactIDsJSON, err := json.Marshal(evidence.ArtifactIDs)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, details, artifact_ids_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				gateEvidenceDestIDs[evidence.ID], attemptDestIDs[evidence.AttemptID], issueDestIDs[evidence.IssueID],
+				evidence.Key, evidence.Result, evidence.Summary, nullableString(evidence.Details), string(artifactIDsJSON),
+				evidence.Version, formatStorageTime(createdAt), formatStorageTime(updatedAt)); err != nil {
+				return err
+			}
+		}
+		for _, event := range gates.EvidenceEvents {
+			createdAt, err := parseLogicalProjectTimestamp("gates.evidence_events.created_at", event.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO gate_evidence_events(evidence_id, attempt_id, issue_id, key, event_type, version, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				gateEvidenceDestIDs[event.EvidenceID], attemptDestIDs[event.AttemptID], issueDestIDs[event.IssueID],
+				event.Key, event.EventType, event.Version, string(event.Payload), formatStorageTime(createdAt)); err != nil {
+				return err
+			}
+		}
+		for _, approval := range gates.ReviewApprovals {
+			createdAt, err := parseLogicalProjectTimestamp("gates.review_approvals.created_at", approval.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_approvals(id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				reviewApprovalDestIDs[approval.ID], issueDestIDs[approval.IssueID], reviewTargetDestIDs[approval.TargetID],
+				reviewRequestDestIDs[approval.RequestID], attemptDestIDs[approval.AttemptID], approval.Purpose,
+				approval.TargetIssueVersion, approval.TargetEventID, approval.Version, formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -1463,7 +1641,7 @@ func readLogicalEvents(ctx context.Context, query Queryer) ([]domain.LogicalEven
 
 func readLogicalReviewTargets(ctx context.Context, query Queryer) ([]domain.LogicalReviewTarget, time.Time, error) {
 	rows, err := query.QueryContext(ctx, `
-		SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, created_at
+		SELECT id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, created_at
 		FROM review_targets
 		WHERE issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
 		ORDER BY created_at ASC, id ASC`)
@@ -1476,10 +1654,10 @@ func readLogicalReviewTargets(ctx context.Context, query Queryer) ([]domain.Logi
 	var latest time.Time
 	for rows.Next() {
 		var (
-			id, issueID, artifactIDsJSON, createdAtText string
-			issueVersion, latestEventID                 int64
+			id, issueID, artifactIDsJSON, purposesJSON, createdAtText string
+			issueVersion, latestEventID                               int64
 		)
-		if err := rows.Scan(&id, &issueID, &issueVersion, &latestEventID, &artifactIDsJSON, &createdAtText); err != nil {
+		if err := rows.Scan(&id, &issueID, &issueVersion, &latestEventID, &artifactIDsJSON, &purposesJSON, &createdAtText); err != nil {
 			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_targets")
 		}
 		if _, err := ids.ParseStrict(id); err != nil {
@@ -1499,12 +1677,17 @@ func readLogicalReviewTargets(ctx context.Context, query Queryer) ([]domain.Logi
 		if err != nil {
 			return nil, time.Time{}, err
 		}
+		purposes, err := parseLogicalStringArray("purposes", purposesJSON)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
 		targets = append(targets, domain.LogicalReviewTarget{
 			ID:            id,
 			IssueID:       issueID,
 			IssueVersion:  issueVersion,
 			LatestEventID: latestEventID,
 			ArtifactIDs:   artifactIDs,
+			Purposes:      logicalPurposesForExport(purposes),
 			CreatedAt:     formatLogicalProjectTimestamp(createdAt),
 		})
 	}
@@ -1516,7 +1699,7 @@ func readLogicalReviewTargets(ctx context.Context, query Queryer) ([]domain.Logi
 
 func readLogicalReviewRequests(ctx context.Context, query Queryer) ([]domain.LogicalReviewRequest, time.Time, error) {
 	rows, err := query.QueryContext(ctx, `
-		SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, created_at, resolved_at
+		SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, created_at, resolved_at
 		FROM review_requests
 		WHERE issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
 			AND status <> 'claimed'
@@ -1530,11 +1713,11 @@ func readLogicalReviewRequests(ctx context.Context, query Queryer) ([]domain.Log
 	var latest time.Time
 	for rows.Next() {
 		var (
-			id, targetID, issueID, status, artifactIDsJSON, createdAtText string
-			targetIssueVersion, targetEventID                             int64
-			supersedesID, resolvedAtText                                  sql.NullString
+			id, targetID, issueID, status, artifactIDsJSON, purposesJSON, createdAtText string
+			targetIssueVersion, targetEventID                                           int64
+			supersedesID, resolvedAtText                                                sql.NullString
 		)
-		if err := rows.Scan(&id, &targetID, &issueID, &targetIssueVersion, &targetEventID, &artifactIDsJSON, &status, &supersedesID, &createdAtText, &resolvedAtText); err != nil {
+		if err := rows.Scan(&id, &targetID, &issueID, &targetIssueVersion, &targetEventID, &artifactIDsJSON, &purposesJSON, &status, &supersedesID, &createdAtText, &resolvedAtText); err != nil {
 			return nil, time.Time{}, corruptLogicalProjectValue(err, "review_requests")
 		}
 		if _, err := ids.ParseStrict(id); err != nil {
@@ -1557,6 +1740,10 @@ func readLogicalReviewRequests(ctx context.Context, query Queryer) ([]domain.Log
 		if err != nil {
 			return nil, time.Time{}, err
 		}
+		purposes, err := parseLogicalStringArray("purposes", purposesJSON)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
 		request := domain.LogicalReviewRequest{
 			ID:                 id,
 			TargetID:           targetID,
@@ -1564,6 +1751,7 @@ func readLogicalReviewRequests(ctx context.Context, query Queryer) ([]domain.Log
 			TargetIssueVersion: targetIssueVersion,
 			TargetEventID:      targetEventID,
 			ArtifactIDs:        artifactIDs,
+			Purposes:           logicalPurposesForExport(purposes),
 			Status:             status,
 			SupersedesID:       nullableLogicalString(supersedesID),
 			CreatedAt:          formatLogicalProjectTimestamp(createdAt),
@@ -1728,6 +1916,354 @@ func parseLogicalJSONBytes(field, value string) (json.RawMessage, error) {
 		return nil, corruptLogicalProjectField(fmt.Errorf("invalid JSON for %s", field), field, "INVALID_JSON")
 	}
 	return json.RawMessage(value), nil
+}
+
+// logicalPurposesJSONForImport renders the purposes column value for an
+// imported review target or request: the document's normalized list when it
+// carries one, otherwise the [implementation] compatibility default --
+// exactly what the column DEFAULT would have written (docs/02 §17.5).
+func logicalPurposesJSONForImport(purposes []string) (string, error) {
+	if purposes == nil {
+		purposes = domain.DefaultReviewPurposes()
+	} else {
+		normalized, err := domain.ValidateReviewPurposes(purposes)
+		if err != nil {
+			return "", err
+		}
+		purposes = normalized
+	}
+	payload, err := json.Marshal(purposes)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+// logicalPurposesForExport returns nil when purposes equals the
+// [implementation] compatibility default, so the field is omitted and a
+// project that never named a purpose exports exactly the document it
+// exported before ISSUE-175 (see LogicalReviewTarget.Purposes).
+func logicalPurposesForExport(purposes []string) []string {
+	defaults := domain.DefaultReviewPurposes()
+	if len(purposes) == len(defaults) {
+		match := true
+		for index := range purposes {
+			if purposes[index] != defaults[index] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return nil
+		}
+	}
+	return purposes
+}
+
+// readLogicalGates exports the durable workflow-gate state (ISSUE-175 AC3).
+// The attempt-owned entities (attempt snapshots, evidence, evidence events)
+// follow readLogicalReservations' rule: only rows whose owning attempt
+// itself crosses the boundary (non-active, unarchived issue) are exported.
+// Review-target snapshots and approvals follow the review entities'
+// unarchived-issue filter; approvals additionally require their approving
+// attempt to be exported.
+func readLogicalGates(ctx context.Context, query Queryer) (domain.LogicalGatesExtension, time.Time, error) {
+	extension := domain.LogicalGatesExtension{
+		Version:               domain.LogicalGatesExtensionVersion,
+		Policies:              []domain.LogicalWorkflowPolicy{},
+		PolicyEvents:          []domain.LogicalWorkflowPolicyEvent{},
+		AttemptSnapshots:      []domain.LogicalAttemptGateSnapshot{},
+		ReviewTargetSnapshots: []domain.LogicalReviewTargetGateSnapshot{},
+		Evidence:              []domain.LogicalGateEvidence{},
+		EvidenceEvents:        []domain.LogicalGateEvidenceEvent{},
+		ReviewApprovals:       []domain.LogicalReviewApproval{},
+	}
+	var latest time.Time
+	observe := func(moments ...time.Time) {
+		for _, moment := range moments {
+			if moment.After(latest) {
+				latest = moment
+			}
+		}
+	}
+
+	rows, err := query.QueryContext(ctx, `
+		SELECT id, selector_json, requirements_json, status, version, created_at, updated_at
+		FROM workflow_policies
+		ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id, selectorJSON, requirementsJSON, status string
+			version                                    int64
+			createdAtText, updatedAtText               string
+		)
+		if err := rows.Scan(&id, &selectorJSON, &requirementsJSON, &status, &version, &createdAtText, &updatedAtText); err != nil {
+			return extension, time.Time{}, corruptLogicalProjectValue(err, "workflow_policies")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		updatedAt, err := parseLogicalProjectTimestamp("updated_at", updatedAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt, updatedAt)
+		extension.Policies = append(extension.Policies, domain.LogicalWorkflowPolicy{
+			ID: id, SelectorJSON: json.RawMessage(selectorJSON), RequirementsJSON: json.RawMessage(requirementsJSON),
+			Status: status, Version: version,
+			CreatedAt: formatLogicalProjectTimestamp(createdAt), UpdatedAt: formatLogicalProjectTimestamp(updatedAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	eventRows, err := query.QueryContext(ctx, `
+		SELECT id, policy_id, event_type, session_id, prior_version, new_version, payload, created_at
+		FROM workflow_policy_events
+		ORDER BY id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer eventRows.Close()
+	for eventRows.Next() {
+		var (
+			sourceID, newVersion int64
+			policyID, eventType  string
+			sessionID            sql.NullString
+			priorVersion         sql.NullInt64
+			payload              string
+			createdAtText        string
+		)
+		if err := eventRows.Scan(&sourceID, &policyID, &eventType, &sessionID, &priorVersion, &newVersion, &payload, &createdAtText); err != nil {
+			return extension, time.Time{}, corruptLogicalProjectValue(err, "workflow_policy_events")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt)
+		event := domain.LogicalWorkflowPolicyEvent{
+			SourceID: sourceID, PolicyID: policyID, EventType: eventType,
+			SessionID: nullableLogicalString(sessionID), NewVersion: newVersion,
+			Payload: json.RawMessage(payload), CreatedAt: formatLogicalProjectTimestamp(createdAt),
+		}
+		if priorVersion.Valid {
+			value := priorVersion.Int64
+			event.PriorVersion = &value
+		}
+		extension.PolicyEvents = append(extension.PolicyEvents, event)
+	}
+	if err := eventRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	attemptSnapshotRows, err := query.QueryContext(ctx, `
+		SELECT s.attempt_id, s.requirements_json, s.source_policies_json, s.fingerprint, s.issue_version, s.created_at
+		FROM attempt_gate_snapshots s
+		JOIN work_attempts a ON s.attempt_id = a.id
+		JOIN issues i ON a.issue_id = i.id
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
+		ORDER BY s.created_at ASC, s.attempt_id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer attemptSnapshotRows.Close()
+	for attemptSnapshotRows.Next() {
+		snapshot, createdAt, err := scanLogicalGateSnapshot(attemptSnapshotRows, "attempt_gate_snapshots")
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt)
+		extension.AttemptSnapshots = append(extension.AttemptSnapshots, domain.LogicalAttemptGateSnapshot{
+			AttemptID: snapshot.ownerID, RequirementsJSON: snapshot.requirements, SourcePoliciesJSON: snapshot.sourcePolicies,
+			Fingerprint: snapshot.fingerprint, IssueVersion: snapshot.issueVersion, CreatedAt: snapshot.createdAt,
+		})
+	}
+	if err := attemptSnapshotRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	targetSnapshotRows, err := query.QueryContext(ctx, `
+		SELECT s.target_id, s.requirements_json, s.source_policies_json, s.fingerprint, s.issue_version, s.created_at
+		FROM review_target_gate_snapshots s
+		JOIN review_targets t ON s.target_id = t.id
+		WHERE t.issue_id IN (SELECT id FROM issues WHERE archived_at IS NULL)
+		ORDER BY s.created_at ASC, s.target_id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer targetSnapshotRows.Close()
+	for targetSnapshotRows.Next() {
+		snapshot, createdAt, err := scanLogicalGateSnapshot(targetSnapshotRows, "review_target_gate_snapshots")
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt)
+		extension.ReviewTargetSnapshots = append(extension.ReviewTargetSnapshots, domain.LogicalReviewTargetGateSnapshot{
+			TargetID: snapshot.ownerID, RequirementsJSON: snapshot.requirements, SourcePoliciesJSON: snapshot.sourcePolicies,
+			Fingerprint: snapshot.fingerprint, IssueVersion: snapshot.issueVersion, CreatedAt: snapshot.createdAt,
+		})
+	}
+	if err := targetSnapshotRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	evidenceRows, err := query.QueryContext(ctx, `
+		SELECT e.id, e.attempt_id, e.issue_id, e.key, e.result, e.summary, e.details, e.artifact_ids_json, e.version, e.created_at, e.updated_at
+		FROM gate_evidence e
+		JOIN work_attempts a ON e.attempt_id = a.id
+		JOIN issues i ON e.issue_id = i.id
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
+		ORDER BY e.created_at ASC, e.id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer evidenceRows.Close()
+	for evidenceRows.Next() {
+		var (
+			id, attemptID, issueID, key, result, summary string
+			details                                      sql.NullString
+			artifactIDsJSON                              string
+			version                                      int64
+			createdAtText, updatedAtText                 string
+		)
+		if err := evidenceRows.Scan(&id, &attemptID, &issueID, &key, &result, &summary, &details, &artifactIDsJSON, &version, &createdAtText, &updatedAtText); err != nil {
+			return extension, time.Time{}, corruptLogicalProjectValue(err, "gate_evidence")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		updatedAt, err := parseLogicalProjectTimestamp("updated_at", updatedAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		artifactIDs, err := parseLogicalStringArray("artifact_ids", artifactIDsJSON)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt, updatedAt)
+		extension.Evidence = append(extension.Evidence, domain.LogicalGateEvidence{
+			ID: id, AttemptID: attemptID, IssueID: issueID, Key: key, Result: result, Summary: summary,
+			Details: nullableLogicalString(details), ArtifactIDs: artifactIDs, Version: version,
+			CreatedAt: formatLogicalProjectTimestamp(createdAt), UpdatedAt: formatLogicalProjectTimestamp(updatedAt),
+		})
+	}
+	if err := evidenceRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	evidenceEventRows, err := query.QueryContext(ctx, `
+		SELECT ev.id, ev.evidence_id, ev.attempt_id, ev.issue_id, ev.key, ev.event_type, ev.version, ev.payload, ev.created_at
+		FROM gate_evidence_events ev
+		JOIN work_attempts a ON ev.attempt_id = a.id
+		JOIN issues i ON ev.issue_id = i.id
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
+		ORDER BY ev.id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer evidenceEventRows.Close()
+	for evidenceEventRows.Next() {
+		var (
+			sourceID, version                              int64
+			evidenceID, attemptID, issueID, key, eventType string
+			payload, createdAtText                         string
+		)
+		if err := evidenceEventRows.Scan(&sourceID, &evidenceID, &attemptID, &issueID, &key, &eventType, &version, &payload, &createdAtText); err != nil {
+			return extension, time.Time{}, corruptLogicalProjectValue(err, "gate_evidence_events")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt)
+		extension.EvidenceEvents = append(extension.EvidenceEvents, domain.LogicalGateEvidenceEvent{
+			SourceID: sourceID, EvidenceID: evidenceID, AttemptID: attemptID, IssueID: issueID, Key: key,
+			EventType: eventType, Version: version, Payload: json.RawMessage(payload),
+			CreatedAt: formatLogicalProjectTimestamp(createdAt),
+		})
+	}
+	if err := evidenceEventRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	approvalRows, err := query.QueryContext(ctx, `
+		SELECT ap.id, ap.issue_id, ap.target_id, ap.request_id, ap.attempt_id, ap.purpose, ap.target_issue_version, ap.target_event_id, ap.version, ap.created_at
+		FROM review_approvals ap
+		JOIN work_attempts a ON ap.attempt_id = a.id
+		JOIN issues i ON ap.issue_id = i.id
+		WHERE i.archived_at IS NULL AND a.status <> 'active'
+		ORDER BY ap.created_at ASC, ap.id ASC`)
+	if err != nil {
+		return extension, time.Time{}, err
+	}
+	defer approvalRows.Close()
+	for approvalRows.Next() {
+		var (
+			id, issueID, targetID, requestID, attemptID, purpose string
+			targetIssueVersion, targetEventID, version           int64
+			createdAtText                                        string
+		)
+		if err := approvalRows.Scan(&id, &issueID, &targetID, &requestID, &attemptID, &purpose, &targetIssueVersion, &targetEventID, &version, &createdAtText); err != nil {
+			return extension, time.Time{}, corruptLogicalProjectValue(err, "review_approvals")
+		}
+		createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+		if err != nil {
+			return extension, time.Time{}, err
+		}
+		observe(createdAt)
+		extension.ReviewApprovals = append(extension.ReviewApprovals, domain.LogicalReviewApproval{
+			ID: id, IssueID: issueID, TargetID: targetID, RequestID: requestID, AttemptID: attemptID,
+			Purpose: purpose, TargetIssueVersion: targetIssueVersion, TargetEventID: targetEventID,
+			Version: version, CreatedAt: formatLogicalProjectTimestamp(createdAt),
+		})
+	}
+	if err := approvalRows.Err(); err != nil {
+		return extension, time.Time{}, err
+	}
+
+	return extension, latest, nil
+}
+
+// scannedGateSnapshot carries one scanned snapshot row shared by the two
+// snapshot tables.
+type scannedGateSnapshot struct {
+	ownerID        string
+	requirements   json.RawMessage
+	sourcePolicies json.RawMessage
+	fingerprint    string
+	issueVersion   int64
+	createdAt      string
+}
+
+func scanLogicalGateSnapshot(rows *sql.Rows, table string) (scannedGateSnapshot, time.Time, error) {
+	var (
+		ownerID, requirementsJSON, sourcePoliciesJSON, fingerprint string
+		issueVersion                                               int64
+		createdAtText                                              string
+	)
+	if err := rows.Scan(&ownerID, &requirementsJSON, &sourcePoliciesJSON, &fingerprint, &issueVersion, &createdAtText); err != nil {
+		return scannedGateSnapshot{}, time.Time{}, corruptLogicalProjectValue(err, table)
+	}
+	createdAt, err := parseLogicalProjectTimestamp("created_at", createdAtText)
+	if err != nil {
+		return scannedGateSnapshot{}, time.Time{}, err
+	}
+	return scannedGateSnapshot{
+		ownerID:        ownerID,
+		requirements:   json.RawMessage(requirementsJSON),
+		sourcePolicies: json.RawMessage(sourcePoliciesJSON),
+		fingerprint:    fingerprint,
+		issueVersion:   issueVersion,
+		createdAt:      formatLogicalProjectTimestamp(createdAt),
+	}, createdAt, nil
 }
 
 func parseLogicalStringArray(field, value string) ([]string, error) {
