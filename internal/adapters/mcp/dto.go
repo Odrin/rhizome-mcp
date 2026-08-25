@@ -976,15 +976,17 @@ type issueListItemDTO struct {
 // issueListItemCompactDTO is the list_issues "compact" projection: the
 // default, and the projection returned when view is omitted entirely. It
 // intentionally contains only identifiers, title, type, status, effective
-// status, priority, claimability, blocker count, labels, and the update
-// timestamp, per ISSUE-63's minimal field contract. Description and
+// status, priority, claimability, blocker count, labels, version, and the
+// update timestamp, per ISSUE-63's minimal field contract. Description and
 // acceptance_criteria (unbounded free text) are never present in this shape,
 // which is what keeps list_issues response size predictable regardless of
 // backlog size or issue body length.
 //
-// parent_issue_id, blocked_reason, created_at, closed_at, archived_at,
-// version, and active_attempt_id are deliberately excluded too: none of them
-// are in ISSUE-63's minimal field list, and none are needed to decide what to
+// version is included so the natural list -> mutate flow (update_issue,
+// archive_issue, and every other expected_version precondition) needs no
+// interposed get_issue call just to learn the version. parent_issue_id,
+// blocked_reason, created_at, closed_at, archived_at, and active_attempt_id
+// remain deliberately excluded: none of them are needed to decide what to
 // work on next from a list view (get_work_context or view: "full" cover
 // them). Callers that need any of these fields pass view: "full".
 type issueListItemCompactDTO struct {
@@ -1000,6 +1002,7 @@ type issueListItemCompactDTO struct {
 	IsClaimable            bool       `json:"is_claimable"`
 	UnresolvedBlockerCount int64      `json:"unresolved_blocker_count"`
 	Labels                 []labelDTO `json:"labels"`
+	Version                int64      `json:"version"`
 	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
@@ -1021,6 +1024,7 @@ func issueListItemCompactDTOFromDomain(item domain.IssueProjection) issueListIte
 		IsClaimable:            item.IsClaimable,
 		UnresolvedBlockerCount: item.UnresolvedBlockerCount,
 		Labels:                 labels,
+		Version:                item.Issue.Version,
 		UpdatedAt:              item.Issue.UpdatedAt,
 	}
 }

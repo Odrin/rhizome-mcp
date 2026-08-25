@@ -10,19 +10,24 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/ports"
 )
 
 // TestOutputSchemaConformance implements ISSUE-199 AC1: success() always
 // passes a nil typed output to the go-sdk (see success() in adapter.go), so
-// the SDK's own output-schema validation path never runs -- an advertised
-// OutputSchema can drift from what a handler actually returns with nothing
+// the SDK's own output-schema validation path never runs -- a declared
+// output schema can drift from what a handler actually returns with nothing
 // catching it. This test drives every registered tool -- and, where a tool
 // accepts a view parameter, each view variant -- through a single coherent
-// fixture scenario via the in-process client, resolves each tool's
-// advertised OutputSchema with jsonschema.Resolve, and validates the real
-// returned structuredContent against it.
+// fixture scenario via the in-process client, resolves each tool's strict
+// output schema (the pre-projection original behind the advertised compact
+// catalog schema; see advertisedOutputSchema) with jsonschema.Resolve, and
+// validates the real returned structuredContent against both the strict
+// schema and the advertised projection. The strict pass preserves full
+// missing-field and extra-field drift detection; the advertised pass proves
+// the projection never rejects an output the strict contract accepts.
 //
 // Steps run in one fixed sequence (conformanceSteps below) because most
 // tools need state a prior tool created (an issue ID, a lease token, a
@@ -54,16 +59,26 @@ func TestOutputSchemaConformance(t *testing.T) {
 		t.Fatalf("ListTools() error = %v", err)
 	}
 	resolved := make(map[string]*jsonschema.Resolved, len(tools.Tools))
+	advertised := make(map[string]*jsonschema.Resolved, len(tools.Tools))
 	for _, tool := range tools.Tools {
-		schema := decodeOutputSchema(t, tool)
+		schema := mcp.StrictOutputSchemaForTest(tool.Name)
 		if schema == nil {
-			continue
+			t.Fatalf("no strict output schema registered for advertised tool %q", tool.Name)
 		}
 		r, err := schema.Resolve(nil)
 		if err != nil {
-			t.Fatalf("resolve %s output schema: %v", tool.Name, err)
+			t.Fatalf("resolve %s strict output schema: %v", tool.Name, err)
 		}
 		resolved[tool.Name] = r
+		advertisedSchema := decodeOutputSchema(t, tool)
+		if advertisedSchema == nil {
+			continue
+		}
+		a, err := advertisedSchema.Resolve(nil)
+		if err != nil {
+			t.Fatalf("resolve %s advertised output schema: %v", tool.Name, err)
+		}
+		advertised[tool.Name] = a
 	}
 
 	state := &conformanceState{}
@@ -82,10 +97,15 @@ func TestOutputSchemaConformance(t *testing.T) {
 			}
 			schema, ok := resolved[step.tool]
 			if !ok {
-				t.Fatalf("no advertised output schema found for tool %q (renamed or removed from the catalog?)", step.tool)
+				t.Fatalf("no strict output schema found for tool %q (renamed or removed from the catalog?)", step.tool)
 			}
 			if err := schema.Validate(result.StructuredContent); err != nil {
-				t.Errorf("%s structuredContent failed its own advertised OutputSchema: %v\noutput: %#v", step.tool, err, result.StructuredContent)
+				t.Errorf("%s structuredContent failed its own strict output schema: %v\noutput: %#v", step.tool, err, result.StructuredContent)
+			}
+			if advertisedSchema, ok := advertised[step.tool]; ok {
+				if err := advertisedSchema.Validate(result.StructuredContent); err != nil {
+					t.Errorf("%s structuredContent failed the advertised (projected) OutputSchema: %v\noutput: %#v", step.tool, err, result.StructuredContent)
+				}
 			}
 			if step.capture != nil {
 				step.capture(t, state, result)
@@ -503,28 +523,14 @@ func TestOutputSchemaConformanceApplyImport(t *testing.T) {
 		t.Fatalf("export_project = %#v", exported)
 	}
 
-	// Resolve schemas to validate the import result.
-	allTools, err := exportClient.ListTools(ctx, nil)
+	// Resolve the strict apply_import schema to validate the import result.
+	schema := mcp.StrictOutputSchemaForTest("apply_import")
+	if schema == nil {
+		t.Fatalf("apply_import has no strict output schema")
+	}
+	importToolSchema, err := schema.Resolve(nil)
 	if err != nil {
-		t.Fatalf("ListTools() error = %v", err)
-	}
-	var importToolSchema *jsonschema.Resolved
-	for _, tool := range allTools.Tools {
-		if tool.Name == "apply_import" {
-			schema := decodeOutputSchema(t, tool)
-			if schema == nil {
-				t.Fatalf("apply_import has no output schema")
-			}
-			resolved, err := schema.Resolve(nil)
-			if err != nil {
-				t.Fatalf("resolve apply_import output schema: %v", err)
-			}
-			importToolSchema = resolved
-			break
-		}
-	}
-	if importToolSchema == nil {
-		t.Fatalf("apply_import tool not found in catalog")
+		t.Fatalf("resolve apply_import output schema: %v", err)
 	}
 
 	// Create client from empty import DB and apply the export.
@@ -563,25 +569,18 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	client, stop := newClient(t, composeServices(t, db, source))
 	defer stop()
 
-	// Resolve all schemas for review-request tools.
-	allTools, err := client.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools() error = %v", err)
-	}
+	// Resolve the strict schemas for the review-request tools.
 	resolved := make(map[string]*jsonschema.Resolved)
-	for _, tool := range allTools.Tools {
-		if tool.Name == "get_review_request" || tool.Name == "list_review_requests" ||
-			tool.Name == "cancel_review_request" || tool.Name == "replace_review_request" {
-			schema := decodeOutputSchema(t, tool)
-			if schema == nil {
-				continue
-			}
-			r, err := schema.Resolve(nil)
-			if err != nil {
-				t.Fatalf("resolve %s output schema: %v", tool.Name, err)
-			}
-			resolved[tool.Name] = r
+	for _, name := range []string{"get_review_request", "list_review_requests", "cancel_review_request", "replace_review_request"} {
+		schema := mcp.StrictOutputSchemaForTest(name)
+		if schema == nil {
+			t.Fatalf("%s has no strict output schema", name)
 		}
+		r, err := schema.Resolve(nil)
+		if err != nil {
+			t.Fatalf("resolve %s output schema: %v", name, err)
+		}
+		resolved[name] = r
 	}
 
 	// Create a review request using direct repository access (create_review_request MCP tool is deprecated).

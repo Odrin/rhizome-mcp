@@ -953,11 +953,11 @@ func TestListIssuesViewProjections(t *testing.T) {
 	compactFields := []string{
 		"id", "display_id", "sequence_no", "type", "title", "status",
 		"effective_status", "priority", "is_blocked", "is_claimable",
-		"unresolved_blocker_count", "labels", "updated_at",
+		"unresolved_blocker_count", "labels", "version", "updated_at",
 	}
 	fullOnlyFields := []string{
 		"description", "acceptance_criteria", "parent_issue_id", "blocked_reason",
-		"version", "created_at", "closed_at", "archived_at", "active_attempt_id",
+		"created_at", "closed_at", "archived_at", "active_attempt_id",
 	}
 
 	for _, request := range []map[string]any{

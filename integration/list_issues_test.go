@@ -71,7 +71,7 @@ func TestIntegrationListIssuesCompactViewStaysWithinByteBudget(t *testing.T) {
 	// Documented budget: docs/03-mcp-tools.md section 5.4 commits to a
 	// 100-issue default (compact) listing staying under 64 KB, regardless of
 	// how large each issue's description/acceptance_criteria bodies are.
-	// Measured: ~46 KB for 100 items with one label each (~470 bytes/item);
+	// Measured: ~48 KB for 100 items with one label each (~480 bytes/item);
 	// 64 KB leaves headroom for longer titles and more labels per issue.
 	const compactByteBudget = 64 * 1024
 	if len(compactBytes) > compactByteBudget {

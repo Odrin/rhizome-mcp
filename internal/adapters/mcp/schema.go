@@ -3,6 +3,8 @@ package mcp
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -10,11 +12,96 @@ import (
 	"rhizome-mcp/internal/domain"
 )
 
+// strictOutputSchemas retains every tool's full (strict) output schema, keyed
+// by tool name. tools/list advertises the compact projection produced by
+// advertisedOutputSchema; the strict original stays the validation contract —
+// the output-conformance suite resolves it from here and validates every real
+// response against it, so trimming the advertisement never weakens what CI
+// proves about actual outputs.
+var strictOutputSchemas sync.Map
+
 func tool(name, description string, input, output *jsonschema.Schema, hints *sdkmcp.ToolAnnotations) *sdkmcp.Tool {
 	if name != "open_project" {
 		input = withProjectRef(input)
 	}
-	return &sdkmcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: output, Annotations: hints}
+	strictOutputSchemas.Store(name, output)
+	return &sdkmcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: advertisedOutputSchema(output), Annotations: hints}
+}
+
+// advertisedShallowMarker tags a strict-schema branch whose full field detail
+// is intentionally withheld from the advertised catalog. The text after the
+// marker becomes the advertised branch's description.
+const advertisedShallowMarker = "advertise-shallow:"
+
+// advertisedOutputSchema derives the catalog-advertised projection of a
+// strict output schema. The projection is lossless for what an agent uses —
+// every field name, type, nullability, enum, and description survives — but
+// drops pure validator strictness that repeats information or encodes none:
+// per-object `required` arrays (each one re-lists every property name) and
+// `additionalProperties: false`. Branches tagged with advertisedShallowMarker
+// (legacy view:"full" payloads, the inline export document) collapse to a
+// one-line described object, and `oneOf` relaxes to `anyOf` so a shallow
+// branch can never make the advertised union unsatisfiable. Server-side
+// behavior and the strict validation contract are unchanged: responses are
+// still validated against the strict original (see strictOutputSchemas).
+func advertisedOutputSchema(strict *jsonschema.Schema) *jsonschema.Schema {
+	if strict == nil {
+		return nil
+	}
+	data, err := json.Marshal(strict)
+	if err != nil {
+		panic(err)
+	}
+	var tree any
+	if err := json.Unmarshal(data, &tree); err != nil {
+		panic(err)
+	}
+	tree = compactAdvertisedNode(tree)
+	compacted, err := json.Marshal(tree)
+	if err != nil {
+		panic(err)
+	}
+	advertised := &jsonschema.Schema{}
+	if err := json.Unmarshal(compacted, advertised); err != nil {
+		panic(err)
+	}
+	return advertised
+}
+
+func compactAdvertisedNode(node any) any {
+	switch typed := node.(type) {
+	case map[string]any:
+		if comment, ok := typed["$comment"].(string); ok && strings.HasPrefix(comment, advertisedShallowMarker) {
+			return map[string]any{"type": "object", "description": strings.TrimPrefix(comment, advertisedShallowMarker)}
+		}
+		delete(typed, "required")
+		delete(typed, "additionalProperties")
+		if branches, ok := typed["oneOf"]; ok {
+			typed["anyOf"] = branches
+			delete(typed, "oneOf")
+		}
+		for key, value := range typed {
+			typed[key] = compactAdvertisedNode(value)
+		}
+		return typed
+	case []any:
+		for index, value := range typed {
+			typed[index] = compactAdvertisedNode(value)
+		}
+		return typed
+	default:
+		return node
+	}
+}
+
+// legacyFullViewBranch marks the strict schema of a view:"full" response
+// shape so the advertised catalog replaces it with a one-line described
+// object. The compact default stays fully specified in the advertisement;
+// the legacy payload keeps its complete strict schema for validation and is
+// documented field-by-field in docs/03-mcp-tools.md.
+func legacyFullViewBranch(schema *jsonschema.Schema) *jsonschema.Schema {
+	schema.Comment = advertisedShallowMarker + `Legacy full payload returned only for view:"full"; field-level detail in docs/03-mcp-tools.md.`
+	return schema
 }
 
 // toolHints is the one explicit, reviewable annotation decision required for
@@ -154,7 +241,9 @@ func schemaExportProject() *jsonschema.Schema {
 }
 
 func schemaExportProjectOutput() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", AnyOf: []*jsonschema.Schema{typedSchema[domain.LogicalProjectDocument](), typedSchema[exportArtifactOutput]()}}
+	document := typedSchema[domain.LogicalProjectDocument]()
+	document.Comment = advertisedShallowMarker + `Complete logical project document returned only for delivery:"inline"; format specified in docs/07-logical-interchange.md.`
+	return &jsonschema.Schema{Type: "object", AnyOf: []*jsonschema.Schema{typedSchema[exportArtifactOutput](), document}}
 }
 
 func schemaValidateImport() *jsonschema.Schema {
@@ -625,23 +714,23 @@ func schemaGetWorkContextOutput() *jsonschema.Schema { return typedSchema[workCo
 func schemaUpdateOutput() *jsonschema.Schema         { return schemaUpdateIssueUnion() }
 
 func schemaCreateIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[createIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[createIssueCompactOutput](), legacyFullViewBranch(typedSchema[issueDTO]())}}
 }
 
 func schemaUpdateIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[updateIssueOutput](), typedSchema[updateIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[updateIssueCompactOutput](), legacyFullViewBranch(typedSchema[updateIssueOutput]())}}
 }
 
 func schemaArchiveIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[issueDTO](), typedSchema[archiveIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[archiveIssueCompactOutput](), legacyFullViewBranch(typedSchema[issueDTO]())}}
 }
 
 func schemaClaimIssueUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[claimIssueOutput](), typedSchema[claimIssueCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[claimIssueCompactOutput](), legacyFullViewBranch(typedSchema[claimIssueOutput]())}}
 }
 
 func schemaFinishAttemptUnion() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[finishAttemptOutput](), typedSchema[finishAttemptCompactOutput]()}}
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[finishAttemptCompactOutput](), legacyFullViewBranch(typedSchema[finishAttemptOutput]())}}
 }
 
 // schemaIssueListItem describes one list_issues item. list_issues returns one
@@ -649,11 +738,12 @@ func schemaFinishAttemptUnion() *jsonschema.Schema {
 // or full), so this schema is hand-built rather than derived from a single Go
 // type via typedSchema: its required fields are exactly the compact
 // projection (identifiers, title, type, status, effective_status, priority,
-// claimability, blocker count, labels, updated_at), and every full-only field
-// (description, acceptance_criteria, parent_issue_id, blocked_reason,
-// version, created_at, closed_at, archived_at, active_attempt_id) is declared
-// as an optional property. A compact item satisfies this schema by omitting
-// the optional properties; a full item satisfies it by including them all.
+// claimability, blocker count, labels, version, updated_at), and every
+// full-only field (description, acceptance_criteria, parent_issue_id,
+// blocked_reason, created_at, closed_at, archived_at, active_attempt_id) is
+// declared as an optional property. A compact item satisfies this schema by
+// omitting the optional properties; a full item satisfies it by including
+// them all.
 func schemaIssueListItem() *jsonschema.Schema {
 	properties := map[string]*jsonschema.Schema{
 		"id":                       stringSchema(),
@@ -668,13 +758,13 @@ func schemaIssueListItem() *jsonschema.Schema {
 		"is_blocked":               booleanSchema(),
 		"is_claimable":             booleanSchema(),
 		"labels":                   &jsonschema.Schema{Type: "array", Items: typedSchema[labelDTO]()},
+		"version":                  integerSchema(),
 		"updated_at":               stringSchema(),
 		// Present only when view: "full" is requested.
 		"description":         nullableStringSchema(),
 		"acceptance_criteria": nullableStringSchema(),
 		"parent_issue_id":     nullableStringSchema(),
 		"blocked_reason":      nullableStringSchema(),
-		"version":             integerSchema(),
 		"created_at":          stringSchema(),
 		"closed_at":           nullableStringSchema(),
 		"archived_at":         nullableStringSchema(),
@@ -683,7 +773,7 @@ func schemaIssueListItem() *jsonschema.Schema {
 	return object(properties,
 		"id", "display_id", "sequence_no", "type", "title", "status", "priority",
 		"effective_status", "unresolved_blocker_count", "is_blocked", "is_claimable",
-		"labels", "updated_at",
+		"labels", "version", "updated_at",
 	)
 }
 

@@ -1,10 +1,24 @@
 package mcp
 
 import (
+	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/internal/domain"
 )
+
+// StrictOutputSchemaForTest returns the strict (pre-projection) output schema
+// registered for a tool, or nil when the tool is unknown. tools/list
+// advertises the compact projection; conformance tests validate real
+// responses against this strict original so advertisement trimming never
+// weakens the validation contract.
+func StrictOutputSchemaForTest(name string) *jsonschema.Schema {
+	value, ok := strictOutputSchemas.Load(name)
+	if !ok {
+		return nil
+	}
+	return value.(*jsonschema.Schema)
+}
 
 // TrackedSessionCounts is retained for external test compatibility. Explicit
 // handles have no connection-derived adapter state to track.

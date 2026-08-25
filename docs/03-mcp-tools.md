@@ -166,6 +166,11 @@ Client guidance:
 
 Audited baselines from prior review work are informative but are not current default-response guarantees: a 20-node planning graph was observed at approximately 26 KiB, and a pre-ISSUE-154 inline export was observed at approximately 981 KiB.
 
+**Catalog budget.** The advertised tool catalog is itself a bounded payload: a client sends the entire `tools/list` result to its model before any work happens, so the catalog is part of every agent session's fixed token cost and gets the same budget-plus-test treatment as response payloads. Two mechanisms keep it compact without losing anything an agent uses:
+
+- **Advertised output schemas are compact projections of the strict schemas.** Field names, types, nullability, enums, and descriptions are advertised in full; per-object `required` arrays (which re-list every property name) and `additionalProperties` markers — validator strictness, not caller information — are stripped, `oneOf` unions are advertised as `anyOf`, and two intentionally shallow branches replace bulky legacy payloads: the `view: "full"` response shapes of `create_issue`, `update_issue`, `archive_issue`, `claim_issue`, and `finish_attempt` (their compact defaults stay fully specified) and `export_project`'s inline logical document (specified in [docs/07](07-logical-interchange.md)). The strict originals remain the validation contract: the output-conformance suite (`TestOutputSchemaConformance` and its companions in `internal/adapters/mcp/output_conformance_test.go`) validates every real response against the strict schema, so trimming the advertisement never weakens what CI proves about actual outputs. Input schemas are advertised unmodified — their `required` lists and closed-property sets are caller-facing contract.
+- **Enforced budgets.** The full-profile catalog stays within **112 KiB** total and **16 KiB** per tool, asserted by `TestToolCatalogStaysWithinByteBudget`; `TestAdvertisedOutputSchemasAreCompactProjections` (both in `internal/adapters/mcp/catalog_budget_test.go`) structurally guarantees the projection is applied to every advertised output schema. Measured after this compaction: approximately 96 KiB across 42 tools, down from approximately 129 KiB before it.
+
 ## 3.1. Tool inventory
 
 The catalog exposes 42 full tools, 35 agent tools, 5 migration tools, and 21 read-only tools:
@@ -338,22 +343,27 @@ independent patterns earn a `true` here:
 - **Fail-safe-on-retry gating** — a mutation guarded by a precondition that
   the first successful call itself invalidates: optimistic-concurrency
   `expected_version` (`update_issue`, `archive_issue`,
-  `cancel_review_request`, `supersede_review_request`,
-  `replace_review_request`'s predecessor), a claimability check
-  (`claim_issue`), an active-lease check (`finish_attempt`), or a storage
-  constraint (`manage_issue_relation`'s unique `(source, target, type)` index
-  on add, not-found on remove; `apply_import`'s empty-destination
-  requirement). After the first call, the precondition no longer holds, so a
-  bare repeat with identical arguments fails without any further write —
-  analogous to the MCP specification's own `delete_file` example.
-  `replace_review_request` satisfies both patterns at once: the mandatory
-  key gives replay, and the predecessor's `expected_version` additionally
-  fails safe if a caller races without noticing the key collision.
+  `cancel_review_request`, `replace_review_request`'s predecessor), a
+  claimability check (`claim_issue`), an active-lease check
+  (`finish_attempt`, `release_resources`), an ended-state check
+  (`end_agent_session`, which replays the already-ended session unchanged),
+  an upsert key (`submit_gate_evidence`, keyed by attempt and requirement
+  key), or a storage constraint (`manage_issue_relation`'s unique
+  `(source, target, type)` index on add, not-found on remove;
+  `apply_import`'s empty-destination requirement). After the first call, the
+  precondition no longer holds, so a bare repeat with identical arguments
+  fails without any further write — analogous to the MCP specification's own
+  `delete_file` example. `replace_review_request` satisfies both patterns at
+  once: the mandatory key gives replay, and the predecessor's
+  `expected_version` additionally fails safe if a caller races without
+  noticing the key collision.
 
 Tools that only ever append or insert with no such gate and no mandatory key
-(`create_issue`, `create_review_request`, `add_comment`, `record_decision`,
-`save_attempt_note`, `renew_attempt`) are `idempotentHint: false`: a bare
-repeat creates a second issue, comment, decision, or note, or (for
+(`create_agent_session`, `create_issue`, `add_comment`, `record_decision`,
+`save_attempt_note`, `renew_attempt`, `reserve_resources`, and
+`manage_workflow_policy`, whose `create` action makes a new policy each
+call) are `idempotentHint: false`: a bare repeat creates a second session,
+issue, comment, decision, note, policy, or reservation set, or (for
 `renew_attempt`) pushes the lease expiry further out again. An optional
 `idempotency_key` on these tools changes behavior only when the caller
 actually supplies one — it is not part of the unconditional invocation
@@ -365,8 +375,8 @@ rather than the tool's read/write split alone:
 
 - `update_issue` can overwrite title, description, status, and
   `blocked_reason`.
-- `archive_issue`, `cancel_review_request`, and `supersede_review_request`
-  each end the prior lifecycle state of their target.
+- `archive_issue` and `cancel_review_request` each end the prior lifecycle
+  state of their target.
 - `manage_issue_relation` can remove an existing relation (`action: "remove"`).
 - `apply_import` and `apply_issue_plan` are bulk-apply operations with a wide
   blast radius even though individual writes are additive.
@@ -374,18 +384,20 @@ rather than the tool's read/write split alone:
   overwriting a prior `blocked_reason`) as part of ending the lease.
 - `record_decision` can flip an existing decision's `status` to `superseded`
   in the same transaction when `supersedes_id` is supplied.
-- `create_review_request` is **not** destructive: it only records a
-  `supersedes_id` link and never closes the predecessor itself — that split
-  responsibility is exactly what `replace_review_request` replaces (see
-  section 7.6 for the deprecation policy).
 - `replace_review_request` is destructive: a successful call ends the
   predecessor's lifecycle (superseded) as part of creating its successor,
   in the same transaction.
+- `release_resources` ends the lifecycle of every reservation it releases;
+  released reservations can never be reactivated.
+- `manage_workflow_policy` can overwrite a policy's requirements
+  (`action: "update"`) or retire it irreversibly (`action: "archive"`).
 
 ### 4.1. Annotation matrix
 
 | Tool | readOnly | destructive | idempotent | openWorld |
 | --- | --- | --- | --- | --- |
+| `create_agent_session` | | | | |
+| `end_agent_session` | | | ✓ | |
 | `open_project` | ✓ | | ✓ | |
 | `get_project` | ✓ | | ✓ | |
 | `export_project` | | | ✓ | |
@@ -397,11 +409,9 @@ rather than the tool's read/write split alone:
 | `get_issue` | ✓ | | ✓ | |
 | `list_issues` | ✓ | | ✓ | |
 | `archive_issue` | | ✓ | ✓ | |
-| `create_review_request` | | | | |
 | `get_review_request` | ✓ | | ✓ | |
 | `list_review_requests` | ✓ | | ✓ | |
 | `cancel_review_request` | | ✓ | ✓ | |
-| `supersede_review_request` | | ✓ | ✓ | |
 | `replace_review_request` | | ✓ | ✓ | |
 | `manage_issue_relation` | | ✓ | ✓ | |
 | `get_issue_graph` | ✓ | | ✓ | |
@@ -423,9 +433,21 @@ rather than the tool's read/write split alone:
 | `get_resource_reservation` | ✓ | | ✓ | |
 | `search` | ✓ | | ✓ | |
 | `get_changes` | ✓ | | ✓ | |
+| `manage_workflow_policy` | | ✓ | | |
+| `get_workflow_policy` | ✓ | | ✓ | |
+| `list_workflow_policies` | ✓ | | ✓ | |
+| `submit_gate_evidence` | | | ✓ | |
+| `evaluate_gates` | ✓ | | ✓ | |
 
 A blank cell means the hint is `false`. `openWorldHint` is `false` for every
-tool, per the local-first rationale above.
+tool, per the local-first rationale above. This matrix is kept from drifting
+by two tests: `TestToolAnnotationMatrixMatchesCatalog` asserts the in-code
+matrix against the live `tools/list` catalog, and
+`TestAnnotationMatrixDocMatchesExpectedHints` parses this table and asserts
+it against that same in-code matrix (both in
+`internal/adapters/mcp/annotations_test.go` /
+`annotations_doc_test.go`) — the same pattern
+`TestErrorCodesDocMatchesDomain` applies to section 13.
 
 ---
 
@@ -953,8 +975,9 @@ field with a structured validation error. `full` still honors the same
 `limit`/cursor pagination bounds as `compact` — it is not a way to bypass
 paging.
 
-**`compact` (default) field set** — identifiers, title, classification, and
-computed status/claimability fields only. No free-text issue bodies:
+**`compact` (default) field set** — identifiers, title, classification,
+computed status/claimability fields, and the optimistic-concurrency version.
+No free-text issue bodies:
 
 ```text
 id
@@ -969,8 +992,15 @@ is_blocked
 is_claimable
 unresolved_blocker_count
 labels
+version
 updated_at
 ```
+
+`version` is included in the compact projection so the natural list-then-
+mutate flow needs no extra round-trip: `update_issue` and `archive_issue`
+require `expected_version`, and without `version` in list items every
+mutation reached from a list would first need a `get_issue` call just to
+learn it.
 
 **`full` field set** — the complete issue record plus every computed field,
 byte-identical to the pre-1.0 default response shape:
@@ -1001,7 +1031,7 @@ active_attempt_id
 ```
 
 `full` adds `description`, `acceptance_criteria`, `parent_issue_id`,
-`blocked_reason`, `version`, `created_at`, `closed_at`, `archived_at`, and
+`blocked_reason`, `created_at`, `closed_at`, `archived_at`, and
 `active_attempt_id` on top of every `compact` field; nothing in `compact` is
 ever different from its `full` value, and `full` is never missing a field
 `compact` has.
@@ -1011,11 +1041,13 @@ it silently returned every field listed above (including full `description`
 and `acceptance_criteria` bodies) for every item — a project with a real
 backlog could produce a response of tens to hundreds of kilobytes from a
 single default `list_issues` call. If an existing client relied on full issue
-bodies (or on `parent_issue_id`, `blocked_reason`, `version`, `created_at`,
+bodies (or on `parent_issue_id`, `blocked_reason`, `created_at`,
 `closed_at`, `archived_at`, or `active_attempt_id`) being present in
 `list_issues` items, pass `view: "full"` to get that exact shape back
 unchanged; no other input changes are required. Clients that only ever used
-the fields now in the `compact` set need no changes at all.
+the fields now in the `compact` set need no changes at all. (`version` was
+originally excluded from `compact` and later added back — see the note
+above; its value is identical in both views.)
 
 **Response budget.** A 100-issue `list_issues` call in the default (`compact`)
 view stays under **64 KB** of structured-content JSON regardless of how large
@@ -1025,8 +1057,8 @@ integration test (`TestIntegrationListIssuesCompactViewStaysWithinByteBudget`
 in `integration/list_issues_test.go`) that creates 100 issues with multi-kilobyte
 description and acceptance-criteria bodies and asserts the default response
 stays within budget; measured response size for that fixture is approximately
-46 KB. The equivalent `view: "full"` call over the same 100 issues measures
-approximately 582 KB in the same test — illustrating why `full` is opt-in.
+48 KB. The equivalent `view: "full"` call over the same 100 issues measures
+approximately 596 KB in the same test — illustrating why `full` is opt-in.
 
 ### 7.5. `archive_issue`
 
