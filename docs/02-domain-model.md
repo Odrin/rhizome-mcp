@@ -645,6 +645,33 @@ rejected with `INVALID_STATUS_TRANSITION` -- the same error code
 support, now also covering these two. `review -> done` requires going
 through `approve_review`.
 
+**This guard is scoped to executable issue types (task and bug).** Its whole
+justification is that a gated status must be earned through a work attempt,
+which presupposes the issue can hold one. An epic cannot: `EvaluateClaim`
+rejects a claim on any non-executable type with `issue type is not executable`,
+so for an epic the guard forbade a route that does not exist, and the two rules
+together left a finished epic with no path to a terminal status at all
+(ISSUE-224). For a non-executable type, `update_issue` may therefore patch
+status directly to `done`. A direct patch to `review` stays rejected for every
+type, including epics: `review` means "inspect this attempt's result", and a
+type that cannot hold an attempt has nothing to inspect.
+
+The patch path additionally permits `open -> done` for non-executable types
+only. `CanTransition` refuses it, correctly, because for executable work
+`ready` means "queued for an attempt" and finishing without ever being queued
+is incoherent. An epic is never queued, and forcing `open -> ready -> done`
+would park it in `ready` -- a status a non-executable type can never be claimed
+out of. `CanTransition` itself is unchanged, since `finish_attempt` and other
+direct writes share it; the allowance lives only in the patch path.
+
+An epic already sitting in `ready` (a state `apply_issue_plan` and older data
+both produce) is not rejected and is not a trap: `ready -> done` is already a
+valid transition, and with the guard scoped it now succeeds.
+
+Closing an epic does **not** verify that its children are terminal. That is
+deliberate -- an epic may legitimately close with a cancelled or descoped child
+-- so confirming a child set is complete remains the caller's responsibility.
+
 `claim_work`, `complete_work_to_review`, `complete_work_to_done`, and
 `approve_review` are not four separate functions in the current
 implementation: `claim_issue` is one call chain (`AttemptRepository.ClaimIssue`),

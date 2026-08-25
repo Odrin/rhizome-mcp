@@ -209,15 +209,24 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 	}
 
 	if patch.Status.Set {
-		if patch.Status.Value == StatusReview || patch.Status.Value == StatusDone {
-			// docs/02 §17.1 (locked): a direct patch targeting review or done is
-			// rejected unconditionally, regardless of the current stored status
-			// or any workflow policy -- those two statuses are reachable only
-			// through claim_issue/finish_attempt's gated enforcement points.
-			// This is stricter than "gate-evaluate and fail without an attempt"
-			// (ISSUE-172's own prose loosely describes it that way): an issue
-			// with zero matching policies would trivially pass a gate
-			// evaluation, but must still be rejected here.
+		// docs/02 §17.1 (locked): a direct patch targeting review or done is
+		// rejected, regardless of the current stored status or any workflow
+		// policy -- those two statuses are reachable only through
+		// claim_issue/finish_attempt's gated enforcement points. This is
+		// stricter than "gate-evaluate and fail without an attempt"
+		// (ISSUE-172's own prose loosely describes it that way): an issue with
+		// zero matching policies would trivially pass a gate evaluation, but
+		// must still be rejected here.
+		//
+		// The guard is scoped to executable types (ISSUE-224). Its whole
+		// rationale is that a gated status must be earned through an attempt,
+		// which presupposes the issue can hold one. An epic cannot, so for a
+		// non-executable type the guard was forbidding a route that does not
+		// exist and, together with EvaluateClaim's "issue type is not
+		// executable", left no way to close a finished epic at all. `review`
+		// stays forbidden for every type: it means "inspect this attempt's
+		// result", and an epic has no attempt to inspect.
+		if patch.Status.Value == StatusReview || (patch.Status.Value == StatusDone && current.Type.Executable()) {
 			return Issue{}, nil, directTransitionToGatedStatusForbidden(current.Status, patch.Status.Value)
 		}
 		if patch.Status.Value == StatusBlocked {
@@ -234,7 +243,7 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 			if patch.BlockedReason.Set && patch.BlockedReason.Value != nil {
 				return Issue{}, nil, blockedReasonForbidden()
 			}
-			reason, err := ApplyStatusTransition(current.Status, patch.Status.Value, "")
+			reason, err := ApplyPatchStatusTransition(current.Type, current.Status, patch.Status.Value, "")
 			if err != nil {
 				return Issue{}, nil, err
 			}

@@ -22,7 +22,7 @@ func EvaluateClaim(issue Issue, unresolvedBlockers int64, hasActiveAttempt bool)
 	if issue.ArchivedAt != nil {
 		return "", NewError(CodeIssueArchived, "issue is archived", false)
 	}
-	if issue.Type != TypeTask && issue.Type != TypeBug {
+	if !issue.Type.Executable() {
 		return "", NewError(CodeInvalidArgument, "issue type is not executable", false,
 			Detail{Field: "issue_id", Code: "NOT_EXECUTABLE"})
 	}

@@ -32,6 +32,14 @@ func (t Type) Valid() bool {
 	return enumValid(t, AllIssueTypes)
 }
 
+// Executable reports whether issues of this type can hold a work attempt.
+// Only executable issues are claimable, and only they can earn the gated
+// statuses review and done through claim_issue/finish_attempt. An epic
+// organizes work rather than being work, so it is not executable.
+func (t Type) Executable() bool {
+	return t == TypeTask || t == TypeBug
+}
+
 // Status is an issue status persisted in storage.
 type Status string
 
@@ -181,6 +189,23 @@ func CanTransition(from, to Status) bool {
 // other direct status write keep today's semantics.
 func ApplyFinishTransition(from, to Status, blockedReason string) (string, error) {
 	if from == StatusReady && to == StatusReady {
+		return "", nil
+	}
+	return ApplyStatusTransition(from, to, blockedReason)
+}
+
+// ApplyPatchStatusTransition validates a direct status patch, adding one
+// allowance that is scoped to non-executable issue types: open -> done.
+//
+// CanTransition refuses open -> done because for executable work `ready` means
+// "queued for an attempt", so finishing without ever being queued is
+// incoherent. An epic is never queued. Forcing open -> ready -> done would park
+// it in `ready`, which for a non-executable type is a status it can never be
+// claimed out of -- exactly the trap ISSUE-176 fell into. CanTransition itself
+// is deliberately left alone, because finish_attempt and other direct writes
+// share it; the allowance belongs to the patch path (ISSUE-224).
+func ApplyPatchStatusTransition(issueType Type, from, to Status, blockedReason string) (string, error) {
+	if !issueType.Executable() && from == StatusOpen && to == StatusDone {
 		return "", nil
 	}
 	return ApplyStatusTransition(from, to, blockedReason)

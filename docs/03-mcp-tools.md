@@ -773,7 +773,17 @@ Patch semantics:
 
 Changing `type` away from `epic` fails with `INVALID_EPIC_PARENT` (detail field `type`, code `HAS_CHILDREN`) while the epic still has non-archived children.
 
-A status patch targeting `review` or `done` fails with `INVALID_STATUS_TRANSITION` (detail field `changes.status`, code `UNSUPPORTED_DIRECT_TRANSITION`) regardless of the current stored status. Those two statuses are reachable only through `claim_issue`/`finish_attempt`'s gated enforcement points (docs/02 §17.1), never through a direct patch.
+On an executable issue (`task` or `bug`), a status patch targeting `review` or `done` fails with `INVALID_STATUS_TRANSITION` (detail field `changes.status`, code `UNSUPPORTED_DIRECT_TRANSITION`) regardless of the current stored status. Those two statuses are reachable only through `claim_issue`/`finish_attempt`'s gated enforcement points (docs/02 §17.1), never through a direct patch.
+
+**Closing an epic.** An `epic` is not executable, so it can never be claimed and can never reach `done` through an attempt. A completed epic is therefore closed with an ordinary status patch:
+
+```json
+{ "issue_id": "ISSUE-158", "expected_version": 3, "changes": { "status": "done" } }
+```
+
+This is permitted from `open` and from `ready`. A direct patch to `review` remains rejected for every issue type, epics included, because `review` means "inspect this attempt's result" and an epic has no attempt to inspect.
+
+An epic sitting in `ready` is meaningless but harmless: `is_claimable` is `false` for non-executable types, so it is never offered as work, and it closes with the same patch. Closing an epic does not check that its children are terminal — an epic may legitimately close with a cancelled or descoped child — so confirm the child set yourself before closing.
 
 A status patch targeting `cancelled` fails with `ACTIVE_ATTEMPT_EXISTS` while the issue has an active work attempt -- the same guard `archive_issue` applies (§7.5) -- so cancelling an issue can never orphan its active attempt's lease or reservations. As with `archive_issue`, an attempt whose lease has already lapsed is swept first, so a truly-expired attempt never blocks the cancellation.
 
