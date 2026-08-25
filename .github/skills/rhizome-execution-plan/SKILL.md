@@ -67,6 +67,10 @@ its Execution notes comment".
 
 ## Routing and cost rules (summary; details in `references/routing.md`)
 
+- "Orchestrator" and "executor" are roles, not agent names — notes must not assume a specific
+  harness. `references/routing.md` defines the resolution order (named `Rhizome Implementer`
+  subagent → any generic subagent on a Haiku-class model → orchestrator implements the brief
+  itself and records the deviation).
 - Executor (Haiku-class) gets fully specified briefs: exact files, symbols, acceptance criteria,
   commands. It never authors migrations, transaction boundaries, or public schema decisions.
 - Orchestrator (Sonnet-class) does the slice that requires a decision, then hands the mechanical

@@ -1,5 +1,21 @@
 # Routing and cost rules
 
+## Role resolution (harness-neutral)
+
+"Orchestrator" and "executor" are roles, not agent names. Notes may say "Sonnet", "Haiku", or
+"Rhizome Implementer" as shorthand; resolve them in whatever harness is running:
+
+1. A subagent type named `Rhizome Implementer` exists (GitHub Copilot with this repo's
+   `.github/agents/`): delegate executor briefs to it.
+2. Otherwise, a generic subagent mechanism exists (e.g. Claude Code's Agent tool): spawn a
+   general-purpose subagent on the cheapest capable model (Haiku-class), give it the brief as its
+   entire task, and require the standard report (Summary / Files changed / Tests / Deviations).
+3. Otherwise (no subagents at all): the orchestrator implements the brief itself, exactly as
+   written, and records `Cost inefficiencies: no executor available` in the finish summary.
+
+The routing rules below are about *who decides*, not which product runs the code: H means "fully
+specified, needs no decisions", and stays H even when case 3 forces the orchestrator to type it in.
+
 ## Routes
 
 | Route | Meaning | Use when |
