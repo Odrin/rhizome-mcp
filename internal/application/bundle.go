@@ -46,6 +46,11 @@ func (bundle Bundle) Validate() error {
 		{"reservation service", bundle.ReservationService != nil},
 		{"session service", bundle.SessionService != nil},
 		{"work context service", bundle.WorkContextService != nil},
+		// Required from ISSUE-174 on: manage_workflow_policy,
+		// get_workflow_policy, list_workflow_policies and evaluate_gates are
+		// advertised tools, so a bundle without this service would fail at
+		// request time rather than at startup.
+		{"workflow policy service", bundle.WorkflowPolicyService != nil},
 	} {
 		if !required.present {
 			return domain.NewError(domain.CodeInvalidArgument, required.name+" is required", false)

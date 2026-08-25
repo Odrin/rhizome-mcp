@@ -141,8 +141,8 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 			if err := json.Unmarshal(envelope.Result, &toolsResponse); err != nil {
 				t.Fatalf("decode tools/list result: %v", err)
 			}
-			if len(toolsResponse.Tools) != 37 {
-				t.Fatalf("tools/list tool count = %d, want 37", len(toolsResponse.Tools))
+			if len(toolsResponse.Tools) != 42 {
+				t.Fatalf("tools/list tool count = %d, want 42", len(toolsResponse.Tools))
 			}
 
 			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-open", "tools/call", map[string]any{

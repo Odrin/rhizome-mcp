@@ -232,10 +232,16 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 
 // SubmitGateEvidence validates and idempotently upserts one lease-authenticated
 // evidence record (ISSUE-171).
-func (service *AttemptService) SubmitGateEvidence(ctx context.Context, input domain.SubmitGateEvidenceInput) (ports.SubmitGateEvidenceResult, error) {
+// SubmitGateEvidenceResult is the application-level result of an evidence
+// submission, so the MCP and CLI adapters never name a ports type (ISSUE-203).
+type SubmitGateEvidenceResult struct {
+	Evidence domain.AttemptEvidence
+}
+
+func (service *AttemptService) SubmitGateEvidence(ctx context.Context, input domain.SubmitGateEvidenceInput) (SubmitGateEvidenceResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
-		return ports.SubmitGateEvidenceResult{}, err
+		return SubmitGateEvidenceResult{}, err
 	}
 
 	var idempotencyKey string
@@ -243,26 +249,26 @@ func (service *AttemptService) SubmitGateEvidence(ctx context.Context, input dom
 	if normalized.IdempotencyKey != nil {
 		canonical, err := domain.CanonicalSubmitGateEvidenceRequest(normalized)
 		if err != nil {
-			return ports.SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode submit gate evidence request", false)
+			return SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode submit gate evidence request", false)
 		}
 		hash := sha256.Sum256(canonical)
 		requestHash = append([]byte(nil), hash[:]...)
 		idempotencyKey = *normalized.IdempotencyKey
 		result, found, err := service.repository.LookupSubmitGateEvidence(ctx, idempotencyKey, requestHash)
 		if err != nil {
-			return ports.SubmitGateEvidenceResult{}, err
+			return SubmitGateEvidenceResult{}, err
 		}
 		if found {
-			return result, nil
+			return SubmitGateEvidenceResult{Evidence: result.Evidence}, nil
 		}
 	}
 
 	id, err := service.ids.New()
 	if err != nil {
-		return ports.SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate evidence identifier", false)
+		return SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate evidence identifier", false)
 	}
 	if _, err := ids.ParseStrict(id); err != nil {
-		return ports.SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate evidence identifier", false)
+		return SubmitGateEvidenceResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate evidence identifier", false)
 	}
 	now := service.clock.Now().UTC()
 	tokenHash := sha256.Sum256([]byte(normalized.LeaseToken))
@@ -272,9 +278,9 @@ func (service *AttemptService) SubmitGateEvidence(ctx context.Context, input dom
 		OccurredAt: now, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 	if err != nil {
-		return ports.SubmitGateEvidenceResult{}, err
+		return SubmitGateEvidenceResult{}, err
 	}
-	return result, nil
+	return SubmitGateEvidenceResult{Evidence: result.Evidence}, nil
 }
 
 // ListAttemptEvidence returns every current evidence record for one attempt.

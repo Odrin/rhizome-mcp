@@ -1974,3 +1974,221 @@ func graphOutputFromDomain(graph domain.GraphResult) graphOutput {
 		Warnings: append([]string{}, graph.Warnings...), Truncated: graph.Truncated, TruncationReason: graph.TruncationReason,
 	}
 }
+
+// --- ISSUE-174: workflow policy and gate DTOs ---
+
+type policySelectorDTO struct {
+	IssueTypes []string `json:"issue_types"`
+	LabelsAll  []string `json:"labels_all"`
+}
+
+type policyRequirementDTO struct {
+	PolicyID           string `json:"policy_id"`
+	Key                string `json:"key"`
+	Kind               string `json:"kind"`
+	Field              string `json:"field,omitempty"`
+	EvidenceKey        string `json:"evidence_key,omitempty"`
+	Purpose            string `json:"purpose,omitempty"`
+	AllowNotApplicable bool   `json:"allow_not_applicable"`
+}
+
+// workflowPolicySummaryDTO is the compact default projection: identity,
+// selector and counts, without the requirement bodies. The full view is
+// explicit (view=full), so a list of policies stays inside the response
+// budget on a project with many policies.
+type workflowPolicySummaryDTO struct {
+	ID               string            `json:"id"`
+	Selector         policySelectorDTO `json:"selector"`
+	Status           string            `json:"status"`
+	Version          int64             `json:"version"`
+	RequirementCount int               `json:"requirement_count"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+}
+
+type workflowPolicyDTO struct {
+	workflowPolicySummaryDTO
+	Requirements []policyRequirementDTO `json:"requirements"`
+}
+
+type workflowPolicyListOutput struct {
+	Items      []workflowPolicySummaryDTO `json:"items"`
+	NextCursor *string                    `json:"next_cursor"`
+	HasMore    bool                       `json:"has_more"`
+}
+
+type unmetRequirementDTO struct {
+	PolicyID         string `json:"policy_id"`
+	RequirementKey   string `json:"requirement_key"`
+	EnforcementPoint string `json:"enforcement_point"`
+	Reason           string `json:"reason"`
+}
+
+type sourcePolicyRefDTO struct {
+	PolicyID string `json:"policy_id"`
+	Version  int64  `json:"version"`
+}
+
+type evaluateGatesOutput struct {
+	EnforcementPoint string                 `json:"enforcement_point"`
+	Passed           bool                   `json:"passed"`
+	SnapshotFound    bool                   `json:"snapshot_found"`
+	Satisfied        []policyRequirementDTO `json:"satisfied"`
+	Unmet            []unmetRequirementDTO  `json:"unmet"`
+	SourcePolicies   []sourcePolicyRefDTO   `json:"source_policies"`
+}
+
+func policySelectorDTOFromDomain(selector domain.PolicySelector) policySelectorDTO {
+	types := make([]string, len(selector.IssueTypes))
+	for index, issueType := range selector.IssueTypes {
+		types[index] = string(issueType)
+	}
+	labels := append([]string(nil), selector.LabelsAll...)
+	if labels == nil {
+		labels = []string{}
+	}
+	return policySelectorDTO{IssueTypes: types, LabelsAll: labels}
+}
+
+func policyRequirementDTOsFromDomain(requirements []domain.PolicyRequirement) []policyRequirementDTO {
+	items := make([]policyRequirementDTO, len(requirements))
+	for index, requirement := range requirements {
+		items[index] = policyRequirementDTO{
+			PolicyID: requirement.PolicyID, Key: requirement.Key, Kind: string(requirement.Kind),
+			Field: requirement.Field, EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose,
+			AllowNotApplicable: requirement.AllowNotApplicable,
+		}
+	}
+	return items
+}
+
+func workflowPolicySummaryDTOFromDomain(policy domain.WorkflowPolicy) workflowPolicySummaryDTO {
+	return workflowPolicySummaryDTO{
+		ID: policy.ID, Selector: policySelectorDTOFromDomain(policy.Selector), Status: string(policy.Status),
+		Version: policy.Version, RequirementCount: len(policy.Requirements),
+		CreatedAt: policy.CreatedAt, UpdatedAt: policy.UpdatedAt,
+	}
+}
+
+func workflowPolicyDTOFromDomain(policy domain.WorkflowPolicy) workflowPolicyDTO {
+	return workflowPolicyDTO{
+		workflowPolicySummaryDTO: workflowPolicySummaryDTOFromDomain(policy),
+		Requirements:             policyRequirementDTOsFromDomain(policy.Requirements),
+	}
+}
+
+func workflowPolicyListOutputFromDomain(list domain.WorkflowPolicyList) workflowPolicyListOutput {
+	items := make([]workflowPolicySummaryDTO, len(list.Items))
+	for index, policy := range list.Items {
+		items[index] = workflowPolicySummaryDTOFromDomain(policy)
+	}
+	return workflowPolicyListOutput{Items: items, NextCursor: list.NextCursor, HasMore: list.HasMore}
+}
+
+func evaluateGatesOutputFromApplication(result application.GateDiagnosticEvaluation) evaluateGatesOutput {
+	unmet := make([]unmetRequirementDTO, len(result.Evaluation.Unmet))
+	for index, item := range result.Evaluation.Unmet {
+		unmet[index] = unmetRequirementDTO{
+			PolicyID: item.PolicyID, RequirementKey: item.RequirementKey,
+			EnforcementPoint: string(item.EnforcementPoint), Reason: item.Reason,
+		}
+	}
+	sources := make([]sourcePolicyRefDTO, len(result.SourcePolicies))
+	for index, item := range result.SourcePolicies {
+		sources[index] = sourcePolicyRefDTO{PolicyID: item.PolicyID, Version: item.Version}
+	}
+	return evaluateGatesOutput{
+		EnforcementPoint: string(result.Evaluation.Point),
+		Passed:           result.Evaluation.Passed(),
+		SnapshotFound:    result.SnapshotFound,
+		Satisfied:        policyRequirementDTOsFromDomain(result.Evaluation.Satisfied),
+		Unmet:            unmet,
+		SourcePolicies:   sources,
+	}
+}
+
+type manageWorkflowPolicyInput struct {
+	Action          string                    `json:"action"`
+	PolicyID        *string                   `json:"policy_id,omitempty"`
+	ExpectedVersion *int64                    `json:"expected_version,omitempty"`
+	Selector        *workflowPolicySelectorIn `json:"selector,omitempty"`
+	Requirements    []workflowPolicyRequireIn `json:"requirements,omitempty"`
+	IdempotencyKey  *string                   `json:"idempotency_key,omitempty"`
+}
+
+type workflowPolicySelectorIn struct {
+	IssueTypes []string `json:"issue_types,omitempty"`
+	LabelsAll  []string `json:"labels_all,omitempty"`
+}
+
+type workflowPolicyRequireIn struct {
+	Key                string `json:"key"`
+	Kind               string `json:"kind"`
+	Field              string `json:"field,omitempty"`
+	EvidenceKey        string `json:"evidence_key,omitempty"`
+	Purpose            string `json:"purpose,omitempty"`
+	AllowNotApplicable bool   `json:"allow_not_applicable,omitempty"`
+}
+
+type getWorkflowPolicyInput struct {
+	PolicyID string `json:"policy_id"`
+	View     string `json:"view,omitempty"`
+}
+
+type listWorkflowPoliciesInput struct {
+	Status *string `json:"status,omitempty"`
+	Limit  int     `json:"limit,omitempty"`
+	Cursor *string `json:"cursor,omitempty"`
+}
+
+type evaluateGatesInput struct {
+	IssueID          string  `json:"issue_id"`
+	EnforcementPoint string  `json:"enforcement_point"`
+	AttemptID        *string `json:"attempt_id,omitempty"`
+	ReviewTargetID   *string `json:"review_target_id,omitempty"`
+}
+
+type submitGateEvidenceInput struct {
+	AttemptID      string   `json:"attempt_id"`
+	LeaseToken     string   `json:"lease_token"`
+	Key            string   `json:"key"`
+	Result         string   `json:"result"`
+	Summary        string   `json:"summary"`
+	Details        string   `json:"details,omitempty"`
+	ArtifactIDs    []string `json:"artifact_ids,omitempty"`
+	IdempotencyKey *string  `json:"idempotency_key,omitempty"`
+}
+
+// attemptEvidenceDTO deliberately carries no lease token: the submission is
+// lease-authenticated, but the token never travels back out. Only claim
+// results ever emit one (ISSUE-174 acceptance criterion 4).
+type attemptEvidenceDTO struct {
+	ID          string    `json:"id"`
+	AttemptID   string    `json:"attempt_id"`
+	IssueID     string    `json:"issue_id"`
+	Key         string    `json:"key"`
+	Result      string    `json:"result"`
+	Summary     string    `json:"summary"`
+	Details     string    `json:"details,omitempty"`
+	ArtifactIDs []string  `json:"artifact_ids"`
+	Version     int64     `json:"version"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type submitGateEvidenceOutput struct {
+	Evidence attemptEvidenceDTO `json:"evidence"`
+}
+
+func attemptEvidenceDTOFromDomain(evidence domain.AttemptEvidence) attemptEvidenceDTO {
+	artifacts := append([]string(nil), evidence.ArtifactIDs...)
+	if artifacts == nil {
+		artifacts = []string{}
+	}
+	return attemptEvidenceDTO{
+		ID: evidence.ID, AttemptID: evidence.AttemptID, IssueID: evidence.IssueID, Key: evidence.Key,
+		Result: string(evidence.Result), Summary: evidence.Summary, Details: evidence.Details,
+		ArtifactIDs: artifacts, Version: evidence.Version,
+		CreatedAt: evidence.CreatedAt, UpdatedAt: evidence.UpdatedAt,
+	}
+}

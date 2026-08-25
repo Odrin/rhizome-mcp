@@ -98,13 +98,30 @@ type GateDiagnosticEvaluation struct {
 	SnapshotFound  bool
 }
 
-func (service *WorkflowPolicyService) EvaluateGates(ctx context.Context, command ports.GateDiagnosticCommand) (GateDiagnosticEvaluation, error) {
+// EvaluateGatesInput is the application-level request for a gate diagnostic.
+// It exists so presentation adapters can ask for one without importing
+// internal/ports: a storage-contract change must not reach DTO code
+// (ISSUE-203).
+type EvaluateGatesInput struct {
+	IssueID          string
+	EnforcementPoint domain.EnforcementPoint
+	AttemptID        *string
+	ReviewTargetID   *string
+}
+
+func (service *WorkflowPolicyService) EvaluateGates(ctx context.Context, input EvaluateGatesInput) (GateDiagnosticEvaluation, error) {
+	command := ports.GateDiagnosticCommand{
+		IssueID:   input.IssueID,
+		Point:     input.EnforcementPoint,
+		AttemptID: input.AttemptID,
+		TargetID:  input.ReviewTargetID,
+	}
 	diagnostic, err := service.repository.LoadGateDiagnostic(ctx, command)
 	if err != nil {
 		return GateDiagnosticEvaluation{}, err
 	}
 
-	evaluation, err := domain.EvaluateGate(command.Point, diagnostic.Requirements, diagnostic.Evidence)
+	evaluation, err := domain.EvaluateGate(input.EnforcementPoint, diagnostic.Requirements, diagnostic.Evidence)
 	if err != nil {
 		return GateDiagnosticEvaluation{}, err
 	}

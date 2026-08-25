@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -220,6 +221,38 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	// add/remove are each gated (unique constraint on add, not-found on
 	// remove), so a bare repeat has no additional effect; remove can destroy
 	// an existing relation.
+	// submit_gate_evidence is groupLifecycle, not groupGovernance: it is how an
+	// agent satisfies a gate, so the agent profile must have it. It is
+	// lease-authenticated and an idempotent upsert on (attempt, key).
+	target.registerTool(server, groupLifecycle, tool("submit_gate_evidence", "Record lease-authenticated evidence satisfying one gate requirement on an active attempt.", schemaSubmitGateEvidence(), schemaSubmitGateEvidenceOutput(), toolHints(false, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[submitGateEvidenceInput, any](target, t, (*adapter).submitGateEvidence))
+	})
+	// Workflow policy administration is groupGovernance: excluded from the
+	// agent profile so an agent cannot rewrite or archive the gates that
+	// constrain it. create/update/archive share one action-dispatched tool the
+	// way manage_issue_relation does. Not idempotent: create with no
+	// idempotency_key makes a new policy each call, and archive is
+	// destructive in the sense that it retires a policy irreversibly.
+	target.registerTool(server, groupGovernance, tool("manage_workflow_policy", "Create, update, or archive one workflow policy defining quality gates.", schemaManageWorkflowPolicy(), schemaWorkflowPolicyOutput(), toolHints(false, true, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[manageWorkflowPolicyInput, any](target, t, (*adapter).manageWorkflowPolicy))
+	})
+	// The two policy reads are groupGovernance too, but readOnlyHint puts them
+	// in the read-only profile: read-only membership is decided before the
+	// group check, so an inspector sees the policy set without being able to
+	// change it.
+	target.registerTool(server, groupGovernance, tool("get_workflow_policy", "Read one workflow policy; compact omits requirement bodies.", schemaGetWorkflowPolicy(), schemaWorkflowPolicyOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[getWorkflowPolicyInput, any](target, t, (*adapter).getWorkflowPolicy))
+	})
+	target.registerTool(server, groupGovernance, tool("list_workflow_policies", "List workflow policies as compact summaries without requirement bodies.", schemaListWorkflowPolicies(), schemaWorkflowPolicyListOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[listWorkflowPoliciesInput, any](target, t, (*adapter).listWorkflowPolicies))
+	})
+	// evaluate_gates is groupLifecycle, not groupGovernance: an agent needs to
+	// see why its own gate failed, and this cannot change anything. It has no
+	// authority to transition state -- it reports what an enforcement point
+	// would decide, using the same evaluator the mutation path uses.
+	target.registerTool(server, groupLifecycle, tool("evaluate_gates", "Report what a workflow gate would decide at one enforcement point, without changing anything.", schemaEvaluateGates(), schemaEvaluateGatesOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[evaluateGatesInput, any](target, t, (*adapter).evaluateGates))
+	})
 	target.registerTool(server, groupIssues, tool("manage_issue_relation", "Add or remove one blocks, related_to, or duplicates relation.", schemaManageIssueRelation(), schemaManageIssueRelationOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[manageIssueRelationInput, any](target, t, (*adapter).manageIssueRelation))
 	})
@@ -1119,6 +1152,19 @@ func unsupportedField(field string) *domain.Error {
 		domain.Detail{Field: field, Code: "UNSUPPORTED"})
 }
 
+// requiredForAction reports that an action-dispatched tool was called without
+// the fields that action needs. The action lives in the payload rather than in
+// the tool name, so the JSON schema cannot express the dependency and the
+// handler has to.
+func requiredForAction(action string, fields ...string) *domain.Error {
+	details := make([]domain.Detail, len(fields))
+	for index, field := range fields {
+		details[index] = domain.Detail{Field: field, Code: "REQUIRED"}
+	}
+	return domain.NewError(domain.CodeInvalidArgument,
+		fmt.Sprintf("action %q requires %s", action, strings.Join(fields, " and ")), false, details...)
+}
+
 func stringValue(value *string) string {
 	if value == nil {
 		return ""
@@ -1156,4 +1202,116 @@ func stringsToPriorities(values []string) []domain.Priority {
 		result[i] = domain.Priority(value)
 	}
 	return result
+}
+
+// --- ISSUE-174: workflow policy and gate handlers ---
+
+func workflowPolicyInputFromDTO(selector *workflowPolicySelectorIn, requirements []workflowPolicyRequireIn) domain.WorkflowPolicyInput {
+	var selectorInput domain.PolicySelectorInput
+	if selector != nil {
+		types := make([]domain.Type, len(selector.IssueTypes))
+		for index, value := range selector.IssueTypes {
+			types[index] = domain.Type(value)
+		}
+		selectorInput = domain.PolicySelectorInput{IssueTypes: types, LabelsAll: append([]string(nil), selector.LabelsAll...)}
+	}
+	requirementInputs := make([]domain.PolicyRequirementInput, len(requirements))
+	for index, requirement := range requirements {
+		requirementInputs[index] = domain.PolicyRequirementInput{
+			Key: requirement.Key, Kind: domain.RequirementKind(requirement.Kind), Field: requirement.Field,
+			EvidenceKey: requirement.EvidenceKey, Purpose: requirement.Purpose,
+			AllowNotApplicable: requirement.AllowNotApplicable,
+		}
+	}
+	return domain.WorkflowPolicyInput{Selector: selectorInput, Requirements: requirementInputs}
+}
+
+func (adapter *adapter) manageWorkflowPolicy(ctx context.Context, request *sdkmcp.CallToolRequest, input manageWorkflowPolicyInput) (*sdkmcp.CallToolResult, any, error) {
+	sessionID := adapter.sessionIDForRequest(ctx, request)
+	idempotencyKey := stringValue(input.IdempotencyKey)
+	switch input.Action {
+	case "create":
+		policy, err := adapter.services.WorkflowPolicyService.CreatePolicy(ctx,
+			workflowPolicyInputFromDTO(input.Selector, input.Requirements), sessionID, idempotencyKey)
+		if err != nil {
+			return adapter.failure(err)
+		}
+		return success(workflowPolicyDTOFromDomain(policy), "workflow policy created")
+	case "update":
+		if input.PolicyID == nil || input.ExpectedVersion == nil {
+			return adapter.failure(requiredForAction("update", "policy_id", "expected_version"))
+		}
+		policy, err := adapter.services.WorkflowPolicyService.UpdatePolicy(ctx, *input.PolicyID, *input.ExpectedVersion,
+			workflowPolicyInputFromDTO(input.Selector, input.Requirements), sessionID, idempotencyKey)
+		if err != nil {
+			return adapter.failure(err)
+		}
+		return success(workflowPolicyDTOFromDomain(policy), "workflow policy updated")
+	case "archive":
+		if input.PolicyID == nil || input.ExpectedVersion == nil {
+			return adapter.failure(requiredForAction("archive", "policy_id", "expected_version"))
+		}
+		policy, err := adapter.services.WorkflowPolicyService.ArchivePolicy(ctx, *input.PolicyID, *input.ExpectedVersion, sessionID, idempotencyKey)
+		if err != nil {
+			return adapter.failure(err)
+		}
+		return success(workflowPolicyDTOFromDomain(policy), "workflow policy archived")
+	default:
+		return adapter.failure(unsupportedField("action"))
+	}
+}
+
+func (adapter *adapter) getWorkflowPolicy(ctx context.Context, request *sdkmcp.CallToolRequest, input getWorkflowPolicyInput) (*sdkmcp.CallToolResult, any, error) {
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
+	}
+	policy, err := adapter.services.WorkflowPolicyService.GetPolicy(ctx, input.PolicyID)
+	if err != nil {
+		return adapter.failure(err)
+	}
+	if view == "compact" {
+		return success(workflowPolicySummaryDTOFromDomain(policy), "workflow policy read")
+	}
+	return success(workflowPolicyDTOFromDomain(policy), "workflow policy read")
+}
+
+func (adapter *adapter) listWorkflowPolicies(ctx context.Context, request *sdkmcp.CallToolRequest, input listWorkflowPoliciesInput) (*sdkmcp.CallToolResult, any, error) {
+	var status *domain.PolicyStatus
+	if input.Status != nil {
+		parsed := domain.PolicyStatus(*input.Status)
+		status = &parsed
+	}
+	list, err := adapter.services.WorkflowPolicyService.ListPolicies(ctx, domain.ListWorkflowPoliciesInput{
+		Status: status, Limit: input.Limit, Cursor: stringValue(input.Cursor),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(workflowPolicyListOutputFromDomain(list), "workflow policies listed")
+}
+
+func (adapter *adapter) evaluateGates(ctx context.Context, request *sdkmcp.CallToolRequest, input evaluateGatesInput) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.services.WorkflowPolicyService.EvaluateGates(ctx, application.EvaluateGatesInput{
+		IssueID:          input.IssueID,
+		EnforcementPoint: domain.EnforcementPoint(input.EnforcementPoint),
+		AttemptID:        input.AttemptID,
+		ReviewTargetID:   input.ReviewTargetID,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(evaluateGatesOutputFromApplication(result), "workflow gates evaluated")
+}
+
+func (adapter *adapter) submitGateEvidence(ctx context.Context, request *sdkmcp.CallToolRequest, input submitGateEvidenceInput) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.services.AttemptService.SubmitGateEvidence(ctx, domain.SubmitGateEvidenceInput{
+		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Key: input.Key,
+		Result: domain.EvidenceResult(input.Result), Summary: input.Summary, Details: input.Details,
+		ArtifactIDs: append([]string(nil), input.ArtifactIDs...), IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(submitGateEvidenceOutput{Evidence: attemptEvidenceDTOFromDomain(result.Evidence)}, "gate evidence submitted")
 }

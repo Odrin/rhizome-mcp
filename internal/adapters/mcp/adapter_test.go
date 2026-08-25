@@ -336,7 +336,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	}
 	// The SDK's feature-set protocol listing is explicitly lexical; registration
 	// itself is kept in Phase 2 order in adapter.register.
-	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "end_agent_session", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_resource_reservation", "get_review_request", "get_work_context", "list_decisions", "list_issues", "list_labels", "list_resource_reservations", "list_review_requests", "manage_issue_relation", "open_project", "record_decision", "release_resources", "renew_attempt", "replace_review_request", "reserve_resources", "save_attempt_note", "search", "update_issue", "validate_import", "validate_issue_plan"}
+	wantNames := []string{"add_comment", "apply_import", "apply_issue_plan", "archive_issue", "cancel_review_request", "claim_issue", "create_agent_session", "create_issue", "end_agent_session", "evaluate_gates", "export_project", "finish_attempt", "get_changes", "get_issue", "get_issue_activity", "get_issue_graph", "get_planning_graph", "get_project", "get_resource_reservation", "get_review_request", "get_work_context", "get_workflow_policy", "list_decisions", "list_issues", "list_labels", "list_resource_reservations", "list_review_requests", "list_workflow_policies", "manage_issue_relation", "manage_workflow_policy", "open_project", "record_decision", "release_resources", "renew_attempt", "replace_review_request", "reserve_resources", "save_attempt_note", "search", "submit_gate_evidence", "update_issue", "validate_import", "validate_issue_plan"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("tools = %v, want %v", names, wantNames)
 	}
@@ -3721,7 +3721,15 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
+	workflowPolicyRepository, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowPolicies, err := application.NewWorkflowPolicyService(workflowPolicyRepository, source, generator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3800,6 +3808,8 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		ReservationService: reservations,
 		SessionService:     sessions,
 		WorkContextService: workContexts,
+
+		WorkflowPolicyService: workflowPolicies,
 	}
 	return mcpadapter.Options{
 		ProjectRouter:   projectrouting.NewStaticProjectRouter(projectID, "", services),

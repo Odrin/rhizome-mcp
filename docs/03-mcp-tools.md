@@ -168,7 +168,7 @@ Audited baselines from prior review work are informative but are not current def
 
 ## 3.1. Tool inventory
 
-The catalog exposes 37 full tools, 33 agent tools, 5 migration tools, and 18 read-only tools:
+The catalog exposes 42 full tools, 35 agent tools, 5 migration tools, and 21 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
@@ -207,6 +207,11 @@ The catalog exposes 37 full tools, 33 agent tools, 5 migration tools, and 18 rea
 35. `get_resource_reservation`
 36. `search`
 37. `get_changes`
+38. `manage_workflow_policy`
+39. `get_workflow_policy`
+40. `list_workflow_policies`
+41. `submit_gate_evidence`
+42. `evaluate_gates`
 
 ### 3.1. `create_agent_session`
 
@@ -501,13 +506,17 @@ annotation matrix.
 | planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
 | review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `supersede_review_request`, `replace_review_request` | yes | no |
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
-| lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation` | yes | no |
+| lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation`, `submit_gate_evidence`, `evaluate_gates` | yes | no |
+| governance | `manage_workflow_policy`, `get_workflow_policy`, `list_workflow_policies` | no | no |
 
-- **`full`** (default): every group, all 37 tools.
-- **`agent`** (33 tools): every group except `migration` and `sync` — the
-  complete ordinary issue discovery, planning, review, knowledge, and
-  leased work lifecycle workflow, without bulk project transfer or
-  incremental synchronization.
+- **`full`** (default): every group, all 42 tools.
+- **`agent`** (35 tools): every group except `migration`, `sync` and
+  `governance` — the complete ordinary issue discovery, planning, review,
+  knowledge, and leased work lifecycle workflow, without bulk project
+  transfer, incremental synchronization, or the ability to rewrite the
+  workflow policies that gate its own work. An agent still gets
+  `submit_gate_evidence` and `evaluate_gates`, so it can satisfy a gate and
+  see why one failed; it simply cannot change what the gates require.
 - **`read-only`**: exactly the tools with `readOnlyHint: true` in the
   section 4.1 matrix, spanning every group (including read operations
   inside `migration` and `sync`, e.g. `validate_import`,

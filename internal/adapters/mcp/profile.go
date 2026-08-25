@@ -29,12 +29,21 @@ const (
 	groupMigration toolCapabilityGroup = "migration"
 	// groupSync is incremental synchronization (get_changes). Excluded
 	// from the agent profile alongside groupMigration.
-	groupSync      toolCapabilityGroup = "sync"
-	groupIssues    toolCapabilityGroup = "issues"
-	groupPlanning  toolCapabilityGroup = "planning"
-	groupReview    toolCapabilityGroup = "review"
-	groupKnowledge toolCapabilityGroup = "knowledge"
-	groupLifecycle toolCapabilityGroup = "lifecycle"
+	groupSync toolCapabilityGroup = "sync"
+	// groupGovernance is project-wide workflow policy administration:
+	// defining, inspecting and archiving the gates that constrain every
+	// agent's work. It is excluded from the agent profile deliberately — an
+	// agent works WITHIN the gates a maintainer sets, and handing it the tools
+	// to rewrite or archive those gates would let it widen its own
+	// constraints. Its read tools still reach the read-only profile, because
+	// read-only membership is decided by readOnlyHint before any group check,
+	// so an inspector can see the policy set without being able to change it.
+	groupGovernance toolCapabilityGroup = "governance"
+	groupIssues     toolCapabilityGroup = "issues"
+	groupPlanning   toolCapabilityGroup = "planning"
+	groupReview     toolCapabilityGroup = "review"
+	groupKnowledge  toolCapabilityGroup = "knowledge"
+	groupLifecycle  toolCapabilityGroup = "lifecycle"
 )
 
 // toolProfileIncludes reports whether group (and, for the read-only
@@ -63,7 +72,7 @@ func toolProfileIncludes(profile domain.ToolProfile, group toolCapabilityGroup, 
 	case domain.ToolProfileMigration:
 		return group == groupMigration
 	case domain.ToolProfileAgent:
-		return group != groupMigration && group != groupSync
+		return group != groupMigration && group != groupSync && group != groupGovernance
 	default:
 		return false
 	}

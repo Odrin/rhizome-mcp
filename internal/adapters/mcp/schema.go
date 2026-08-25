@@ -818,3 +818,85 @@ func typedSchema[T any]() *jsonschema.Schema {
 	}
 	return schema
 }
+
+// --- ISSUE-174: workflow policy and gate schemas ---
+
+func schemaPolicyRequirement() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"key":                  boundedStringSchema(64),
+		"kind":                 enumSchema("issue_field_nonblank", "attempt_evidence", "review_approval"),
+		"field":                boundedStringSchema(64),
+		"evidence_key":         boundedStringSchema(64),
+		"purpose":              boundedStringSchema(64),
+		"allow_not_applicable": booleanSchema(),
+	}, "key", "kind")
+}
+
+func schemaPolicySelector() *jsonschema.Schema {
+	return object(map[string]*jsonschema.Schema{
+		"issue_types": &jsonschema.Schema{Type: "array", Items: enumSchema(domain.IssueTypeNames()...), UniqueItems: true},
+		"labels_all":  boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes),
+	})
+}
+
+func schemaManageWorkflowPolicy() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"action":           enumSchema("create", "update", "archive"),
+		"policy_id":        nullableBoundedStringSchema(26),
+		"expected_version": integerSchema(),
+		"selector":         schemaPolicySelector(),
+		"requirements": &jsonschema.Schema{
+			Type: "array", Items: schemaPolicyRequirement(), MaxItems: intPointer(domain.MaxPolicyRequirements),
+		},
+		"idempotency_key": nullableBoundedStringSchema(128),
+	}, "action"))
+}
+
+func schemaGetWorkflowPolicy() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"policy_id": boundedStringSchema(26),
+		"view":      enumSchema("compact", "full"),
+	}, "policy_id"))
+}
+
+func schemaListWorkflowPolicies() *jsonschema.Schema {
+	limit := boundedIntegerSchema(0, domain.MaxWorkflowPolicyListLimit)
+	limit.Description = "0 uses the default limit of 50; maximum is 100."
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"status": enumSchema("active", "archived"),
+		"limit":  limit,
+		"cursor": nullableBoundedStringSchema(4096),
+	}))
+}
+
+func schemaEvaluateGates() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"issue_id":          issueIdentifierSchema(),
+		"enforcement_point": enumSchema("claim_work", "complete_work_to_review", "complete_work_to_done", "approve_review"),
+		"attempt_id":        nullableBoundedStringSchema(26),
+		"review_target_id":  nullableBoundedStringSchema(26),
+	}, "issue_id", "enforcement_point"))
+}
+
+func schemaWorkflowPolicyOutput() *jsonschema.Schema { return typedSchema[workflowPolicyDTO]() }
+func schemaWorkflowPolicyListOutput() *jsonschema.Schema {
+	return typedSchema[workflowPolicyListOutput]()
+}
+func schemaEvaluateGatesOutput() *jsonschema.Schema { return typedSchema[evaluateGatesOutput]() }
+
+func schemaSubmitGateEvidence() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"attempt_id":      boundedStringSchema(26),
+		"lease_token":     boundedStringSchema(512),
+		"key":             boundedStringSchema(64),
+		"result":          enumSchema("satisfied", "not_applicable"),
+		"summary":         boundedStringSchema(2_000),
+		"details":         boundedStringSchema(50_000),
+		"artifact_ids":    boundedStringsSchema(20, 26),
+		"idempotency_key": nullableBoundedStringSchema(128),
+	}, "attempt_id", "lease_token", "key", "result", "summary"))
+}
+
+func schemaSubmitGateEvidenceOutput() *jsonschema.Schema {
+	return typedSchema[submitGateEvidenceOutput]()
+}

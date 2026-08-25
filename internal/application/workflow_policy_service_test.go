@@ -182,9 +182,9 @@ func TestWorkflowPolicyServiceEvaluateGatesReturnsEvaluation(t *testing.T) {
 	}
 	service, _ := NewWorkflowPolicyService(repository, fakeClock, generator)
 
-	result, err := service.EvaluateGates(context.Background(), ports.GateDiagnosticCommand{
-		IssueID: "issue-1",
-		Point:   domain.EnforcementPointClaimWork,
+	result, err := service.EvaluateGates(context.Background(), EvaluateGatesInput{
+		IssueID:          "issue-1",
+		EnforcementPoint: domain.EnforcementPointClaimWork,
 	})
 
 	if err != nil {
@@ -220,9 +220,9 @@ func TestWorkflowPolicyServiceEvaluateGatesPerformsNoWrites(t *testing.T) {
 	}
 	service, _ := NewWorkflowPolicyService(repository, fakeClock, generator)
 
-	_, err := service.EvaluateGates(context.Background(), ports.GateDiagnosticCommand{
-		IssueID: "issue-1",
-		Point:   domain.EnforcementPointClaimWork,
+	_, err := service.EvaluateGates(context.Background(), EvaluateGatesInput{
+		IssueID:          "issue-1",
+		EnforcementPoint: domain.EnforcementPointClaimWork,
 	})
 
 	if err != nil {

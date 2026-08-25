@@ -75,20 +75,21 @@ func (l *testLease) Release() error {
 
 func completeProjectServices() application.Bundle {
 	return application.Bundle{
-		IssueService:       new(application.IssueService),
-		ProjectService:     new(application.ProjectService),
-		RelationService:    new(application.RelationService),
-		GraphService:       new(application.GraphService),
-		PlanningService:    new(application.PlanningService),
-		CommentService:     new(application.CommentService),
-		DecisionService:    new(application.DecisionService),
-		ActivityService:    new(application.ActivityService),
-		SearchService:      new(application.SearchService),
-		ReviewService:      new(application.ReviewService),
-		AttemptService:     new(application.AttemptService),
-		ReservationService: new(application.ReservationService),
-		SessionService:     new(application.AgentSessionService),
-		WorkContextService: new(application.WorkContextService),
+		IssueService:          new(application.IssueService),
+		ProjectService:        new(application.ProjectService),
+		RelationService:       new(application.RelationService),
+		GraphService:          new(application.GraphService),
+		PlanningService:       new(application.PlanningService),
+		CommentService:        new(application.CommentService),
+		DecisionService:       new(application.DecisionService),
+		ActivityService:       new(application.ActivityService),
+		SearchService:         new(application.SearchService),
+		ReviewService:         new(application.ReviewService),
+		AttemptService:        new(application.AttemptService),
+		ReservationService:    new(application.ReservationService),
+		SessionService:        new(application.AgentSessionService),
+		WorkContextService:    new(application.WorkContextService),
+		WorkflowPolicyService: new(application.WorkflowPolicyService),
 	}
 }
 

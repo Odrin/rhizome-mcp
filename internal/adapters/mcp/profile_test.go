@@ -184,6 +184,11 @@ func TestToolProfileAgentExcludesBulkTransferAndSync(t *testing.T) {
 		"get_issue_activity", "search", "claim_issue", "renew_attempt", "save_attempt_note", "finish_attempt",
 		"get_work_context", "list_labels",
 		"reserve_resources", "release_resources", "list_resource_reservations", "get_resource_reservation",
+		// ISSUE-174: an agent must be able to satisfy a gate and to see why one
+		// failed. It must NOT be able to rewrite the policies that define the
+		// gates, so manage_workflow_policy and the two policy reads are
+		// groupGovernance and deliberately absent here.
+		"submit_gate_evidence", "evaluate_gates",
 	}
 	for _, name := range retained {
 		if !containsName(names, name) {
