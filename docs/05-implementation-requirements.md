@@ -394,6 +394,8 @@ mermaid
 
 ### Concurrency tests
 
+Concurrency tests run under the race detector in CI.
+
 - two agents claim the same issue;
 - claim races with blocker creation;
 - completion races with issue update;
@@ -408,6 +410,18 @@ mermaid
 - repeated failures;
 - cleanup loop;
 - lease renewal boundaries.
+
+### Fuzz testing
+
+CI runs three fuzz targets with a fixed `-fuzztime`:
+
+- `FuzzCodecDecode` in internal/pagination tests the cursor codec's robustness to malformed and adversarial input;
+- `FuzzCanonicalizer` in internal/normalization tests the JSON canonicalizer's resilience to deeply nested structures and boundary-condition payloads;
+- `FuzzParseLogicalProjectImportPlan` in internal/domain tests the logical project parser for panics and unbounded behavior on malformed documents.
+
+### Integration catalog walk
+
+The integration suite walks the advertised tool catalog over both stdio and HTTP transports, calling every tool with minimal schema-conformant input and verifying each result is a well-formed call outcome (success or structured domain error, never a protocol-level error).
 
 ### MCP contract tests
 

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,10 @@ import (
 )
 
 const integrationTimeout = 10 * time.Second
+
+// integrationCoverDirEnv names the directory that -cover-instrumented server
+// subprocesses write their counter files into. See integrationBuildArgs.
+const integrationCoverDirEnv = "RHIZOME_INTEGRATION_COVERDIR"
 
 var integrationBinary string
 
@@ -47,7 +52,12 @@ func TestMain(m *testing.M) {
 		binaryName += ".exe"
 	}
 	integrationBinary = filepath.Join(tempDir, binaryName)
-	command := exec.Command("go", "build", "-o", integrationBinary, "rhizome-mcp")
+	buildArgs, err := integrationBuildArgs(integrationBinary)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		exitIntegrationTests(tempDir, 1)
+	}
+	command := exec.Command("go", buildArgs...)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -57,6 +67,55 @@ func TestMain(m *testing.M) {
 	}
 
 	exitIntegrationTests(tempDir, m.Run())
+}
+
+// integrationBuildArgs assembles the "go build" arguments for the server
+// binary every test in this package drives.
+//
+// Two properties make this suite's own CI gates honest (ISSUE-210 AC1, AC2):
+//
+//   - When the test binary itself is race-instrumented, the server is built
+//     with -race too. Otherwise the harness would be checked while the process
+//     actually under test was not, and a clean run would mean nothing.
+//
+//   - When RHIZOME_INTEGRATION_COVERDIR is set, the server is built with
+//     -cover so statements executed inside the real subprocess are recorded.
+//     Without this the "integration coverage" profile only measured code the
+//     test process ran in-process, which is why it read the same as the unit
+//     profile.
+//
+// The coverage directory arrives in its own variable rather than in
+// GOCOVERDIR because "go test -coverprofile" overwrites GOCOVERDIR in the test
+// process with a build-cache temporary directory that is discarded when the
+// run ends; reading GOCOVERDIR here would silently funnel every subprocess
+// counter into a directory nothing ever merges. TestMain exports GOCOVERDIR
+// itself, as an absolute path, so commands spawned with an inherited
+// environment write where the merge step looks -- absolute because those
+// commands run with cmd.Dir set to the test repository.
+//
+// -coverpkg names the module path rather than ./... for the same
+// working-directory reason: this build runs from the integration package's
+// directory, where ./... would match only that package and instrument nothing
+// in the server.
+func integrationBuildArgs(binaryPath string) ([]string, error) {
+	args := []string{"build"}
+	if integrationRaceEnabled {
+		args = append(args, "-race")
+	}
+	if coverDir := strings.TrimSpace(os.Getenv(integrationCoverDirEnv)); coverDir != "" {
+		absoluteCoverDir, err := filepath.Abs(coverDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s %q: %w", integrationCoverDirEnv, coverDir, err)
+		}
+		if err := os.MkdirAll(absoluteCoverDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create %s %q: %w", integrationCoverDirEnv, absoluteCoverDir, err)
+		}
+		if err := os.Setenv("GOCOVERDIR", absoluteCoverDir); err != nil {
+			return nil, fmt.Errorf("export GOCOVERDIR: %w", err)
+		}
+		args = append(args, "-cover", "-covermode=atomic", "-coverpkg=rhizome-mcp/...")
+	}
+	return append(args, "-o", binaryPath, "rhizome-mcp"), nil
 }
 
 func exitIntegrationTests(tempDir string, exitCode int) {

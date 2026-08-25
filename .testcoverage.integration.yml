@@ -1,6 +1,29 @@
 profile: integration-coverage.out
 threshold:
-  total: 80
+  # This gate measures the integration suite alone, merged with counters from
+  # the real server subprocess. It reads far lower than the unit gate by
+  # design: the previous 80 was not an end-to-end measurement at all, because
+  # the integration build tag only adds files, so the profile re-ran every unit
+  # test and reproduced the unit number under a second badge.
+  #
+  # Measured honestly: 17.2% in-process, 51.9% once the -cover instrumented
+  # subprocess counters are merged in -- the difference is exactly the code
+  # that only ever runs in a real process, which this gate now sees.
+  total: 50
 exclude:
   paths:
     - ^editors/vscode/node_modules/
+# Measured statement coverage in this profile, rounded down to the nearest 5.
+override:
+  # measured 73.4% (package main)
+  - path: ^rhizome-mcp$
+    threshold: 70
+  # measured 77.1%
+  - path: ^rhizome-mcp/internal/adapters/mcp$
+    threshold: 75
+  # measured 48.2%
+  - path: ^rhizome-mcp/internal/adapters/cli$
+    threshold: 45
+  # measured 63.4%
+  - path: ^rhizome-mcp/internal/runtime$
+    threshold: 60

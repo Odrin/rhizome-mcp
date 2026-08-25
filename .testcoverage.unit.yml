@@ -4,3 +4,20 @@ threshold:
 exclude:
   paths:
     - ^editors/vscode/node_modules/
+# Per-package floors keep thin adapter and CLI coverage from hiding behind the
+# project-wide number. Each is the package's measured statement coverage in
+# this profile, rounded down to the nearest 5, so the gate ratchets what
+# already exists rather than failing on the day it lands.
+override:
+  # measured 69.7% (package main)
+  - path: ^rhizome-mcp$
+    threshold: 65
+  # measured 85.3%
+  - path: ^rhizome-mcp/internal/adapters/mcp$
+    threshold: 85
+  # measured 82.7%
+  - path: ^rhizome-mcp/internal/adapters/cli$
+    threshold: 80
+  # measured 75.6%
+  - path: ^rhizome-mcp/internal/runtime$
+    threshold: 75

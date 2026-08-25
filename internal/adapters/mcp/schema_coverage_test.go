@@ -3,25 +3,15 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
-)
 
-// placeholderULIDs are syntactically valid canonical ULIDs (Crockford base32,
-// excluding I/L/O/U) used as generic placeholders for pattern-constrained
-// identifier fields that require a bare ULID rather than an ISSUE-N display ID.
-var placeholderULIDs = []string{
-	"01ARZ3NDEKTSV4RRFFQ69G5FAV",
-	"01ARZ3NDEKTSV4RRFFQ69G5FAW",
-	"01ARZ3NDEKTSV4RRFFQ69G5FAX",
-	"01ARZ3NDEKTSV4RRFFQ69G5FAY",
-	"01ARZ3NDEKTSV4RRFFQ69G5FAZ",
-}
+	"rhizome-mcp/internal/testutil"
+)
 
 func TestAdvertisedOutputSchemasAreTopLevelObjects(t *testing.T) {
 	ctx := context.Background()
@@ -249,71 +239,17 @@ func TestNamedToolInputPropertiesAreDescribed(t *testing.T) {
 	}
 }
 
-// decodeInputSchema decodes the client-side JSON representation of a tool's
-// input schema (a map[string]any, per the SDK's Tool.InputSchema contract)
-// back into a typed jsonschema.Schema for property introspection.
 func decodeInputSchema(t *testing.T, tool *sdkmcp.Tool) *jsonschema.Schema {
 	t.Helper()
-	if tool.InputSchema == nil {
-		return nil
-	}
-	data, err := json.Marshal(tool.InputSchema)
+	schema, err := testutil.DecodeInputSchema(tool)
 	if err != nil {
-		t.Fatalf("marshal %s input schema: %v", tool.Name, err)
+		t.Fatalf("decode %s input schema: %v", tool.Name, err)
 	}
-	var schema jsonschema.Schema
-	if err := json.Unmarshal(data, &schema); err != nil {
-		t.Fatalf("unmarshal %s input schema: %v", tool.Name, err)
-	}
-	return &schema
+	return schema
 }
 
-// placeholderValue derives a schema-conformant placeholder for one property
-// schema. It favors declared enum values, then pattern-aware identifiers, then
-// a generic value for the declared JSON type. Fidelity beyond "passes JSON
-// schema validation" is not required: business-level rejections downstream of
-// the handler are an acceptable, non-failing outcome for this test.
 func placeholderValue(schema *jsonschema.Schema, counter *int) any {
-	if schema == nil {
-		return "placeholder"
-	}
-	if len(schema.Enum) > 0 {
-		return schema.Enum[0]
-	}
-	if schema.Pattern != "" {
-		*counter++
-		if strings.Contains(schema.Pattern, "ISSUE-") {
-			return fmt.Sprintf("ISSUE-%d", *counter)
-		}
-		return placeholderULIDs[(*counter-1)%len(placeholderULIDs)]
-	}
-	if len(schema.OneOf) > 0 {
-		// null is a member of every OneOf union used by this catalog
-		// (nullable acknowledgement/metadata shapes).
-		return nil
-	}
-	types := schema.Types
-	if len(types) == 0 && schema.Type != "" {
-		types = []string{schema.Type}
-	}
-	for _, kind := range types {
-		switch kind {
-		case "string":
-			return "placeholder"
-		case "integer", "number":
-			if schema.Minimum != nil {
-				return *schema.Minimum
-			}
-			return float64(1)
-		case "boolean":
-			return true
-		case "array":
-			return []any{}
-		case "object":
-			return map[string]any{}
-		}
-	}
-	return "placeholder"
+	return testutil.PlaceholderValue(schema, counter)
 }
 
 // unsupportedFieldRejected reports the field named by a domain-error-shaped

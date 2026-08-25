@@ -18,7 +18,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The race detector runs on Linux only: it is the cheapest runner and
+        # already exercises every concurrency test, while -race roughly triples
+        # macOS and Windows job time for no additional signal.
+        include:
+          - os: ubuntu-latest
+            race: "-race"
+          - os: macos-latest
+            race: ""
+          - os: windows-latest
+            race: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -31,10 +40,23 @@ jobs:
         run: go vet ./...
 
       - name: Run unit tests
-        run: go test ./...
+        run: go test ${{ matrix.race }} ./...
 
+      # A race-instrumented harness builds a race-instrumented server; see
+      # integrationBuildArgs in integration/environment_test.go.
       - name: Run integration tests
-        run: go test -tags=integration ./...
+        run: go test ${{ matrix.race }} -tags=integration ./...
+
+      # Seed corpora run everywhere as ordinary unit tests; the generative pass
+      # costs wall-clock time, so it runs on Linux only with a short fixed
+      # budget. A crash writes its input under testdata/, which then becomes a
+      # permanent seed on every platform.
+      - name: Fuzz untrusted-input parsers
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go test ./internal/pagination/ -run='^$' -fuzz=FuzzCodecDecode -fuzztime=30s
+          go test ./internal/normalization/ -run='^$' -fuzz=FuzzCanonicalizer -fuzztime=30s
+          go test ./internal/domain/ -run='^$' -fuzz=FuzzParseLogicalProjectImportPlan -fuzztime=30s
 
   coverage:
     name: Coverage
@@ -58,8 +80,33 @@ jobs:
         with:
           config: .testcoverage.unit.yml
 
+      # The integration profile must measure the integration suite only, and
+      # must include statements executed inside the real server subprocess.
+      # -run '^TestIntegration' stops it from re-running every unit test (the
+      # integration build tag only adds files, so ./... alone would), and
+      # RHIZOME_INTEGRATION_COVERDIR makes the harness build a -cover
+      # instrumented server that writes counters somewhere the merge step can
+      # find them. It is deliberately not GOCOVERDIR: go test -coverprofile
+      # overwrites GOCOVERDIR in the test process with a temporary build-cache
+      # directory that is discarded when the run ends.
       - name: Generate integration test coverage
-        run: go test -tags=integration ./... -covermode=atomic -coverpkg=./... -coverprofile=integration-coverage.out
+        env:
+          RHIZOME_INTEGRATION_COVERDIR: ${{ github.workspace }}/integration-covdata
+        run: |
+          mkdir -p "$RHIZOME_INTEGRATION_COVERDIR"
+          go test -tags=integration -run '^TestIntegration' ./... \
+            -covermode=atomic -coverpkg=./... -coverprofile=integration-inprocess.out
+
+      # Both halves are mode: atomic, so appending the subprocess profile
+      # without its mode line yields one profile whose duplicate blocks the
+      # cover parser sums.
+      - name: Merge subprocess coverage into the integration profile
+        env:
+          RHIZOME_INTEGRATION_COVERDIR: ${{ github.workspace }}/integration-covdata
+        run: |
+          go tool covdata textfmt -i="$RHIZOME_INTEGRATION_COVERDIR" -o=integration-subprocess.out
+          cp integration-inprocess.out integration-coverage.out
+          tail -n +2 integration-subprocess.out >> integration-coverage.out
 
       - name: Check integration test coverage
         id: integration-coverage
