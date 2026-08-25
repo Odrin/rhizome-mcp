@@ -261,14 +261,14 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 		}
 		return traversal.ExcludeReview && node.Status == StatusReview
 	}
-	// deferred preserves snapshot order so the second pass stays deterministic.
+	// deferred preserves discovery order so the second pass stays deterministic.
 	deferred := make([]string, 0)
-	isDeferrable := func(id string) bool {
-		if !traversal.PreferNonTerminal || id == traversal.ExplicitRootID {
-			return false
-		}
+	isTerminalNode := func(id string) bool {
 		node, found := nodesByID[id]
 		return found && (node.Status == StatusDone || node.Status == StatusCancelled)
+	}
+	isDeferrable := func(id string) bool {
+		return traversal.PreferNonTerminal && id != traversal.ExplicitRootID && isTerminalNode(id)
 	}
 	allowedNode := func(id string, root bool) bool {
 		if _, found := nodesByID[id]; !found {
@@ -282,17 +282,29 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	// the first case and stop in the second.
 	budgetExhausted := false
 	addNode := func(id string, depth int, root bool) bool {
-		if visited[id] || !allowedNode(id, root) {
-			return visited[id]
+		if visited[id] {
+			return true
+		}
+		if _, found := nodesByID[id]; !found {
+			return false
 		}
 		if isDeferrable(id) {
-			// Terminal work never competes with open work for the budget; it
-			// gets a second chance below only if an edge to a retained node
-			// makes it worth showing.
+			// Terminal work never competes with open work for the budget, but
+			// it is still traversed *through* (enqueued without being emitted),
+			// so work reachable only via a finished parent or blocker stays
+			// discoverable. The node itself gets a second chance below only if
+			// it is includable at all and an allowed edge attaches it to a
+			// pass-1 retained node.
 			if !deferredSeen[id] {
 				deferredSeen[id] = true
-				deferred = append(deferred, id)
+				queue = append(queue, queued{id: id, depth: depth})
+				if allowedNode(id, root) {
+					deferred = append(deferred, id)
+				}
 			}
+			return false
+		}
+		if !allowedNode(id, root) {
 			return false
 		}
 		if len(result.Nodes) >= traversal.MaxNodes {
@@ -307,25 +319,29 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	}
 
 	for _, root := range traversal.RootIssueIDs {
-		if visited[root] || !allowedNode(root, root == traversal.ExplicitRootID) {
+		if visited[root] {
 			continue
 		}
-		if !addNode(root, 0, root == traversal.ExplicitRootID) {
-			if budgetExhausted {
-				break
-			}
-			// Deferred to the second pass; other roots may still fit.
+		if !allowedNode(root, root == traversal.ExplicitRootID) && !isDeferrable(root) {
 			continue
+		}
+		if !addNode(root, 0, root == traversal.ExplicitRootID) && budgetExhausted {
+			break
 		}
 		for len(queue) > 0 {
 			current := queue[0]
 			queue = queue[1:]
-			if current.depth >= traversal.Depth || nodeExcluded(current.id) {
+			if current.depth >= traversal.Depth {
+				continue
+			}
+			// Deferred terminal nodes expand even though they are excluded or
+			// not yet admitted; other exclusions (review) stay opaque.
+			if nodeExcluded(current.id) && !isDeferrable(current.id) {
 				continue
 			}
 			candidates := graphNeighbors(current.id, adjacency[current.id], nodesByID, traversal.Direction)
 			for _, candidate := range candidates {
-				if !allowedNode(candidate.neighborID, false) {
+				if !allowedNode(candidate.neighborID, false) && !isDeferrable(candidate.neighborID) {
 					continue
 				}
 				if !visited[candidate.neighborID] {
@@ -333,7 +349,9 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 						continue
 					}
 				}
-				if visited[candidate.neighborID] {
+				// Both endpoints must be emitted nodes; edges touching a
+				// deferred node are added in the second pass if it is admitted.
+				if visited[current.id] && visited[candidate.neighborID] {
 					result.Edges = appendGraphEdge(result.Edges, candidate.edge)
 				}
 			}
@@ -341,7 +359,13 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	}
 
 	// Second pass: whatever budget survived pass 1 goes to deferred terminal
-	// nodes, and only to those an allowed edge attaches to a retained node.
+	// nodes, and only to those an allowed edge attaches to a node retained by
+	// pass 1. Attachment is judged against the pass-1 set, not the growing
+	// visited set, so admission cannot depend on snapshot order.
+	retainedByPassOne := make(map[string]bool, len(visited))
+	for id := range visited {
+		retainedByPassOne[id] = true
+	}
 	for _, id := range deferred {
 		if len(result.Nodes) >= traversal.MaxNodes {
 			truncated = true
@@ -353,7 +377,7 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 			if other == id {
 				other = edge.TargetIssueID
 			}
-			if other != id && visited[other] {
+			if other != id && retainedByPassOne[other] {
 				attached = true
 				break
 			}
@@ -379,9 +403,11 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	if traversal.PreferNonTerminal {
 		// Entry points answer "what can I claim", so truncation must not shrink
 		// them: they are computed over the whole snapshot, which means a
-		// truncated graph can report an entry point that is not in Nodes.
+		// truncated graph can report an entry point that is not in Nodes. A
+		// status the caller excluded (review) is still excluded here — the
+		// snapshot-wide scan must not resurrect filtered-out work.
 		for _, node := range snapshot.Nodes {
-			if node.IsClaimable && node.Status != StatusDone && node.Status != StatusCancelled {
+			if node.IsClaimable && node.Status != StatusDone && node.Status != StatusCancelled && !nodeExcluded(node.ID) {
 				result.EntryPoints = append(result.EntryPoints, node.ID)
 			}
 		}

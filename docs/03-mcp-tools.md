@@ -1388,7 +1388,7 @@ Behavior:
 - highlights claimable entry points;
 - includes active attempt summaries;
 - excludes full descriptions;
-- **node selection**: when the graph is bounded (planning graph context), non-terminal work (open, ready, in progress, blocked, review) claims the node budget first. Terminal work (done, cancelled) is retained only as relation endpoints of retained nodes, not as independent budget consumers. This ensures the planning projection answers "what can I work on" without finished issues consuming room for open work.
+- **node selection**: when the graph is bounded (planning graph context), non-terminal work (open, ready, in progress, blocked, review) claims the node budget first. Terminal work (done, cancelled) is retained only as relation endpoints of first-pass retained nodes, not as independent budget consumers — and it is still traversed *through*, so work reachable only via a finished parent or blocker stays in the graph. This ensures the planning projection answers "what can I work on" without finished issues consuming room for open work.
 
 Output:
 
@@ -1405,7 +1405,7 @@ truncation_reason
 
 **Entry points and truncation.** `entry_points` is computed over the entire snapshot of claimable issues, not merely over retained `nodes`. An entry point may therefore name an issue absent from `nodes` — whenever the graph is truncated by the node budget, and equally whenever an issue simply lies outside the traversal's `depth` from any root. This guarantees that truncation never shrinks the set of claimable work the client can claim, even when the node budget is exhausted by lower-priority items.
 
-`include_terminal` (optional, default `true`): Include done and cancelled issues in the node selection. Set to `false` to exclude terminal work entirely, as the board CLI does; this causes only non-terminal work to count against the node budget.
+`include_terminal` (optional, default `true`): Include done and cancelled issues in the node selection. Set to `false` to exclude terminal work from the returned nodes entirely, as the board CLI does; this causes only non-terminal work to count against the node budget. Excluded terminal issues are still traversed through, so non-terminal work connected only via finished issues remains in the graph.
 
 **Response budget.** Shares the same bounded node projection and the same
 100-node `structuredContent` 96 KiB budget documented in section 8.2 for

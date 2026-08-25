@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -168,10 +169,17 @@ func TestBoardTableFormatShowsTruncationMarkerWhenTruncated(t *testing.T) {
 		},
 	}
 
-	var tableOutput strings.Builder
-	boardResponseFromDomain(result)
-	// Test that the table format includes truncation info
-	// This would require testing the actual CLI table output
+	// Asserted on the rendered table, so this fails if writeBoardTable stops
+	// printing the docs/06 §7 truncation marker.
+	var stdout bytes.Buffer
+	cli := New(Services{}, &stdout, nil, nil, nil)
+	if err := cli.writeBoardTable(result); err != nil {
+		t.Fatalf("writeBoardTable: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "truncated\ttrue\t(2 retained)") {
+		t.Fatalf("table output = %q, want a truncated row with the retained count", stdout.String())
+	}
+
 	response := boardResponseFromDomain(result)
 	if !response.PlanningGraph.Truncated {
 		t.Fatal("expected Truncated to be true in BoardResponse")
@@ -179,7 +187,6 @@ func TestBoardTableFormatShowsTruncationMarkerWhenTruncated(t *testing.T) {
 	if response.PlanningGraph.RetainedNodeCount != 2 {
 		t.Fatalf("expected RetainedNodeCount to be 2, got %d", response.PlanningGraph.RetainedNodeCount)
 	}
-	_ = tableOutput
 }
 
 func TestBoardTableFormatHidesTruncationMarkerWhenNotTruncated(t *testing.T) {
@@ -210,6 +217,15 @@ func TestBoardTableFormatHidesTruncationMarkerWhenNotTruncated(t *testing.T) {
 			Warnings:  []string{},
 			Truncated: false,
 		},
+	}
+
+	var stdout bytes.Buffer
+	cli := New(Services{}, &stdout, nil, nil, nil)
+	if err := cli.writeBoardTable(result); err != nil {
+		t.Fatalf("writeBoardTable: %v", err)
+	}
+	if strings.Contains(stdout.String(), "truncated") {
+		t.Fatalf("table output = %q, want no truncation row", stdout.String())
 	}
 
 	response := boardResponseFromDomain(result)

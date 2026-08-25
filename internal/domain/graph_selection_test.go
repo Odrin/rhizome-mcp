@@ -198,3 +198,125 @@ func TestBuildGraphIssueGraphSelectionIsUnchanged(t *testing.T) {
 		t.Fatalf("entry_points = %v, want [ready-child]", result.EntryPoints)
 	}
 }
+
+// TestBuildGraphPlanningTraversesThroughTerminalParents is the review
+// regression for ISSUE-219: a deferred terminal node must still be traversed
+// through, so claimable work reachable only via a finished parent stays in the
+// graph instead of appearing as an entry point that resolves to nothing.
+func TestBuildGraphPlanningTraversesThroughTerminalParents(t *testing.T) {
+	snapshot := domain.GraphSnapshot{
+		Nodes: []domain.IssueProjection{
+			planningNode("done-epic", domain.StatusDone, false),
+			planningNode("ready-child", domain.StatusReady, true),
+		},
+		Edges: []domain.GraphEdge{
+			{SourceIssueID: "done-epic", TargetIssueID: "ready-child", Type: "contains"},
+		},
+	}
+	traversal := domain.GraphTraversal{
+		// Only the epic is top-level, mirroring GetPlanningGraph's root seeding.
+		RootIssueIDs:      []string{"done-epic"},
+		Depth:             3,
+		MaxNodes:          100,
+		Direction:         domain.GraphDirectionBoth,
+		RelationTypes:     []domain.RelationType{domain.RelationTypeBlocks},
+		IncludeHierarchy:  true,
+		IncludeTerminal:   true,
+		PreferNonTerminal: true,
+	}
+
+	result := domain.BuildGraph(snapshot, traversal)
+
+	retained := nodeIDs(result)
+	if !containsID(retained, "ready-child") {
+		t.Fatalf("nodes = %v, want ready-child discovered through its done parent", retained)
+	}
+	if !containsID(retained, "done-epic") {
+		t.Fatalf("nodes = %v, want done-epic retained as a relation endpoint", retained)
+	}
+	if len(result.Edges) != 1 {
+		t.Fatalf("edges = %v, want the contains edge between epic and child", result.Edges)
+	}
+	if result.Truncated {
+		t.Fatal("truncated = true, want false: everything fits the budget")
+	}
+
+	// The board's configuration excludes terminal nodes entirely; the child
+	// must still be discoverable, without the epic and without truncation.
+	traversal.IncludeTerminal = false
+	result = domain.BuildGraph(snapshot, traversal)
+	retained = nodeIDs(result)
+	if len(retained) != 1 || retained[0] != "ready-child" {
+		t.Fatalf("nodes = %v, want only ready-child when terminal nodes are excluded", retained)
+	}
+	if len(result.EntryPoints) != 1 || result.EntryPoints[0] != "ready-child" {
+		t.Fatalf("entry_points = %v, want [ready-child]", result.EntryPoints)
+	}
+	if result.Truncated {
+		t.Fatal("truncated = true, want false: excluded nodes are not truncation")
+	}
+}
+
+// TestBuildGraphPlanningEntryPointsHonorExcludeReview pins that the
+// snapshot-wide entry-point scan respects the caller's include_review=false:
+// a claimable review issue must not be resurrected as an entry point after its
+// node was filtered out.
+func TestBuildGraphPlanningEntryPointsHonorExcludeReview(t *testing.T) {
+	snapshot := domain.GraphSnapshot{
+		Nodes: []domain.IssueProjection{
+			planningNode("ready-1", domain.StatusReady, true),
+			planningNode("review-1", domain.StatusReview, true),
+		},
+	}
+	traversal := planningTraversal(snapshot, 100, true)
+	traversal.ExcludeReview = true
+
+	result := domain.BuildGraph(snapshot, traversal)
+
+	if containsID(nodeIDs(result), "review-1") {
+		t.Fatalf("nodes = %v, want review-1 excluded", nodeIDs(result))
+	}
+	if len(result.EntryPoints) != 1 || result.EntryPoints[0] != "ready-1" {
+		t.Fatalf("entry_points = %v, want [ready-1]: excluded review work must not be an entry point", result.EntryPoints)
+	}
+}
+
+// TestBuildGraphPlanningSecondPassIsOrderIndependent pins that terminal
+// admission is judged against the pass-1 retained set: a terminal node whose
+// only edges reach other terminal nodes is dropped no matter where it sits in
+// snapshot order.
+func TestBuildGraphPlanningSecondPassIsOrderIndependent(t *testing.T) {
+	build := func(nodes []domain.IssueProjection) domain.GraphResult {
+		snapshot := domain.GraphSnapshot{
+			Nodes: nodes,
+			Edges: []domain.GraphEdge{
+				{SourceIssueID: "done-epic", TargetIssueID: "done-task", Type: "contains"},
+				{SourceIssueID: "done-task", TargetIssueID: "ready-1", Type: string(domain.RelationTypeBlocks)},
+			},
+		}
+		return domain.BuildGraph(snapshot, planningTraversal(snapshot, 100, true))
+	}
+	forward := build([]domain.IssueProjection{
+		planningNode("done-epic", domain.StatusDone, false),
+		planningNode("done-task", domain.StatusDone, false),
+		planningNode("ready-1", domain.StatusReady, true),
+	})
+	backward := build([]domain.IssueProjection{
+		planningNode("ready-1", domain.StatusReady, true),
+		planningNode("done-task", domain.StatusDone, false),
+		planningNode("done-epic", domain.StatusDone, false),
+	})
+
+	for name, result := range map[string]domain.GraphResult{"forward": forward, "backward": backward} {
+		retained := nodeIDs(result)
+		if !containsID(retained, "ready-1") || !containsID(retained, "done-task") {
+			t.Fatalf("%s: nodes = %v, want ready-1 and its terminal endpoint done-task", name, retained)
+		}
+		if containsID(retained, "done-epic") {
+			t.Fatalf("%s: nodes = %v, want done-epic dropped: it only attaches to another terminal node", name, retained)
+		}
+		if !result.Truncated {
+			t.Fatalf("%s: truncated = false, want true: an includable node was dropped", name)
+		}
+	}
+}

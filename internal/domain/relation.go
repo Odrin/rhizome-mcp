@@ -17,12 +17,7 @@ const (
 
 // Valid reports whether relationType is supported.
 func (relationType RelationType) Valid() bool {
-	switch relationType {
-	case RelationTypeBlocks, RelationTypeRelatedTo, RelationTypeDuplicates:
-		return true
-	default:
-		return false
-	}
+	return enumValid(relationType, AllRelationTypes)
 }
 
 // ParseRelationType parses a supported relation type.

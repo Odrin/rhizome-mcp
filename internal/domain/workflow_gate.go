@@ -48,9 +48,11 @@ type GateEvidence struct {
 	ReviewApprovalPurposes map[string]bool
 }
 
-// UnmetRequirement is one unsatisfied requirement at one enforcement point,
-// matching the WORKFLOW_GATE_UNSATISFIED detail shape (docs/02 §17.7)
-// exactly: policy_id, requirement_key, enforcement_point, reason.
+// UnmetRequirement is one unsatisfied requirement at one enforcement point.
+// All four dimensions are structured here in the domain; the
+// WORKFLOW_GATE_UNSATISFIED error transport packs them into the project-wide
+// {field, code, message} detail shape — requirement_key in field, the rest in
+// message (docs/02 §17.7, docs/03 §13).
 type UnmetRequirement struct {
 	PolicyID         string
 	RequirementKey   string

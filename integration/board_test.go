@@ -1064,18 +1064,8 @@ func TestIntegrationBoardTruncationReportsTrueEntryPoints(t *testing.T) {
 	if len(board.PlanningGraph.EntryPoints) != 110 {
 		t.Fatalf("len(entry_points) = %d, want 110", len(board.PlanningGraph.EntryPoints))
 	}
-	if len(board.PlanningGraph.EntryPoints) != 110 {
-		t.Fatalf("len(entry_points) = %d, want 110", len(board.PlanningGraph.EntryPoints))
-	}
 	for _, readyIssue := range readyIssues {
-		found := false
-		for _, entryPoint := range board.PlanningGraph.EntryPoints {
-			if entryPoint == readyIssue.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !containsString(board.PlanningGraph.EntryPoints, readyIssue.ID) {
 			t.Fatalf("entry_points missing ready issue %s (%s)", readyIssue.DisplayID, readyIssue.ID)
 		}
 	}
