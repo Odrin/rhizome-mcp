@@ -26,11 +26,17 @@ const BINARY_REL_PATH = process.platform === 'win32' ? 'bin/rhizome-mcp.exe' : '
 const REAL_BINARY_PATH = path.join(PLATFORM_PKG_DIR, BINARY_REL_PATH);
 
 const NPM_CMD = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const NPM_SPAWN_OPTIONS = {
+  encoding: 'utf8',
+  shell: process.platform === 'win32',
+};
 
 function npmPack(pkgDir, destDir) {
-  const result = spawnSync(NPM_CMD, ['pack', pkgDir, '--pack-destination', destDir, '--json'], {
-    encoding: 'utf8',
-  });
+  const result = spawnSync(
+    NPM_CMD,
+    ['pack', pkgDir, '--pack-destination', destDir, '--json'],
+    NPM_SPAWN_OPTIONS
+  );
   assert.equal(result.status, 0, `npm pack failed for ${pkgDir}:\n${result.stderr}`);
   const parsed = JSON.parse(result.stdout);
   // npm's `pack --json` output shape has varied across versions: some emit
@@ -44,7 +50,7 @@ function npmInstall(prefixDir, tarballs) {
   const result = spawnSync(
     NPM_CMD,
     ['install', '--prefix', prefixDir, '--no-save', '--no-optional', '--no-audit', '--no-fund', ...tarballs],
-    { encoding: 'utf8' }
+    NPM_SPAWN_OPTIONS
   );
   assert.equal(result.status, 0, `npm install failed:\n${result.stderr}`);
 }
