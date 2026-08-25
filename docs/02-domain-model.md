@@ -1067,9 +1067,14 @@ have no requirement snapshot; they are treated as an empty requirement set
 at their respective enforcement points (equivalent to "no policy matched"),
 never as an error condition.
 
-Logical interchange (docs/07), work context, and board visibility for gate
-state are explicitly out of scope for this contract and are specified by
-ISSUE-175, not here.
+Logical interchange, work context, and board visibility for gate state are
+specified by their own surface contracts, delivered by ISSUE-175: the
+`extensions.gates` interchange namespace in docs/07 §4.1, the always-present
+`gates` summary in `get_work_context`'s output (docs/03 §11), and the
+board's gate-progress rows in docs/13 §7. All three carry the same no-policy
+compatibility behavior this section defines: zero policies means an empty
+summary, an absent interchange namespace, and a board that states no gate
+requirements apply.
 
 ### 17.11. Current call sites gates must reach
 
