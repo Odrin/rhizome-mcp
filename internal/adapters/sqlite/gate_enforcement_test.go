@@ -3,6 +3,9 @@ package sqlite_test
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -21,36 +24,115 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+// issueWriteSite is one source location whose SQL text can write the issues
+// table, resolved to the function that encloses it.
+type issueWriteSite struct {
+	File     string
+	Function string
+	Line     int
+}
+
+func (site issueWriteSite) key() string { return site.File + ":" + site.Function }
+
+// allowedIssueWriteSites is the complete set of functions permitted to write
+// the issues table, each with what makes it legitimate. Adding an entry here
+// is the conscious act TestGateEnforcementNoStatusWriteOutsideTheChokePoint
+// exists to force.
+var allowedIssueWriteSites = map[string]string{
+	"attempts.go:FinishAttempt":              "gated: enforcementPointForFinish + evaluateGateAgainstAttemptSnapshot",
+	"issues.go:CreateIssue":                  "gated: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
+	"planning.go:applyPlan":                  "gated per entry: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
+	"issues.go:UpdateIssue":                  "ungated by design: domain.ApplyIssuePatch (internal/domain/issue_patch.go) rejects a status patch to review/done unconditionally, before this file runs, so no gated status can reach here (docs/02 §17.1)",
+	"projects.go:ApplyLogicalProjectImport":  "ungated by design: import is exempt from gate evaluation (docs/02 §17.1, ISSUE-201); it still runs domain.CreateIssueInput{}.Validate() on every imported issue",
+	"unit_of_work.go:ConditionalUpdateIssue": "generic caller-parameterized helper (ports.UnitOfWork) with a dynamic SET clause; it does not itself write status, and TestConditionalUpdateIssueHasNoUngatedCallers guards its callers",
+}
+
 // TestGateEnforcementNoStatusWriteOutsideTheChokePoint is ISSUE-172's
 // requested regression tripwire: "a repo-wide test fails on any SET status
-// outside the choke point." It scans this package's own (non-test) source
-// for every site that can write issues.status and asserts the set of files
-// matches exactly what ISSUE-172 wired -- so a new site, wherever it lands,
-// forces a conscious update to this test and a look at whether it is gated.
+// outside the choke point."
 //
-// Every current site and what covers it:
-//   - attempts.go   FinishAttempt:   enforcementPointForFinish + evaluateGateAgainstAttemptSnapshot
-//   - issues.go     CreateIssue:     enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies
-//   - issues.go     UpdateIssue:     never sets status to review/done -- domain.ApplyIssuePatch
-//     (internal/domain/issue_patch.go) rejects that patch unconditionally before this file runs
-//   - planning.go   applyPlan:       enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies, per entry
-//   - projects.go   ApplyLogicalProjectImport: exempt by design (docs/02 §17.1, ISSUE-201),
-//     but runs domain.CreateIssueInput{}.Validate() on every imported issue
-//   - unit_of_work.go ConditionalUpdateIssue: a generic, caller-parameterized helper
-//     (ports.UnitOfWork) with a dynamic SET clause. It has zero callers today (see
-//     TestConditionalUpdateIssueHasNoUngatedCallers below) -- it is listed here only
-//     because its own literal SQL text contains "UPDATE issues SET", not because it
-//     itself writes status.
+// Granularity, stated honestly (ISSUE-221). The scan resolves every line of
+// this package's non-test source whose text contains "UPDATE issues SET" or
+// "INSERT INTO issues(" to its enclosing function, and compares the resulting
+// (file, function) set against allowedIssueWriteSites. A new write added
+// inside an already-listed *file* therefore fails, as long as it lives in a
+// function that is not itself listed.
+//
+// What it still cannot catch, and what covers that instead:
+//   - a new write added inside an already-allowlisted *function* -- reviewed
+//     by hand; the allowlist entry records why that function is legitimate;
+//   - SQL assembled from a variable, a helper, or fragments that never spell
+//     the marker literally -- ConditionalUpdateIssue is the one such helper
+//     that exists, and TestConditionalUpdateIssueHasNoUngatedCallers guards it;
+//   - writes from outside this package -- the issues table is only reachable
+//     through this package's repositories.
+//
+// TestGateEnforcementScanReportsUngatedSiteInsideAnAllowlistedFile proves the
+// first of the guarantees above against a fixture rather than asserting it.
 func TestGateEnforcementNoStatusWriteOutsideTheChokePoint(t *testing.T) {
-	wantFiles := map[string]bool{
-		"attempts.go": true, "issues.go": true, "planning.go": true, "projects.go": true, "unit_of_work.go": true,
+	seen := map[string]bool{}
+	for _, site := range scanIssueWriteSites(t, ".") {
+		if _, allowed := allowedIssueWriteSites[site.key()]; !allowed {
+			t.Errorf("%s:%d: %s writes the issues table but is not an allowlisted site -- gate it through gate_enforcement.go (evaluateGateAgainstLivePolicies or evaluateGateAgainstAttemptSnapshot), or, if it is exempt, add %q to allowedIssueWriteSites with the docs/02 §17.1 justification",
+				site.File, site.Line, site.Function, site.key())
+			continue
+		}
+		seen[site.key()] = true
 	}
-	gotFiles := scanPackageSourceFiles(t, func(text string) bool {
-		return strings.Contains(text, "INSERT INTO issues(") || strings.Contains(text, "UPDATE issues SET")
-	})
-	if !reflect.DeepEqual(gotFiles, wantFiles) {
-		t.Fatalf("files writing to the issues table = %v, want exactly %v -- a new site must be gated via gate_enforcement.go (or explicitly exempted with a docs/02 §17.1 citation) and added to this test's allowlist", gotFiles, wantFiles)
+	for key := range allowedIssueWriteSites {
+		if !seen[key] {
+			t.Errorf("allowlisted site %s no longer writes the issues table -- remove its allowedIssueWriteSites entry so the allowlist keeps meaning something", key)
+		}
 	}
+}
+
+// TestGateEnforcementScanReportsUngatedSiteInsideAnAllowlistedFile is the
+// falsifying case for the scan above (ISSUE-221 AC1): testdata/ungated_fixture
+// holds an issues.go with an allowlisted function plus a second, ungated
+// status write in the same file. A file-granularity scan sees one file it
+// already trusts; this scan must report the new function by name and line.
+func TestGateEnforcementScanReportsUngatedSiteInsideAnAllowlistedFile(t *testing.T) {
+	sites := scanIssueWriteSites(t, filepath.Join("testdata", "ungated_fixture"))
+	var unallowed []issueWriteSite
+	for _, site := range sites {
+		if _, allowed := allowedIssueWriteSites[site.key()]; !allowed {
+			unallowed = append(unallowed, site)
+		}
+	}
+	if len(unallowed) != 1 {
+		t.Fatalf("unallowlisted sites in the fixture = %+v, want exactly one", unallowed)
+	}
+	got := unallowed[0]
+	if got.File != "issues.go" || got.Function != "sneakUngatedStatusWrite" {
+		t.Fatalf("reported site = %s:%s, want issues.go:sneakUngatedStatusWrite", got.File, got.Function)
+	}
+	wantLine := fixtureUpdateLine(t)
+	if got.Line != wantLine {
+		t.Fatalf("reported line = %d, want %d (the fixture's UPDATE line)", got.Line, wantLine)
+	}
+	// The allowlisted twin in the same file must not be reported: proving the
+	// scan discriminates by function, not by file.
+	if len(sites) != 2 {
+		t.Fatalf("all fixture sites = %+v, want two (the allowlisted CreateIssue and the ungated one)", sites)
+	}
+}
+
+// fixtureUpdateLine reports which line of the fixture holds its ungated
+// UPDATE, so the expectation above tracks the fixture instead of a constant
+// that goes stale the moment a comment line is added to it.
+func fixtureUpdateLine(t *testing.T) int {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("testdata", "ungated_fixture", "issues.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, line := range strings.Split(string(content), "\n") {
+		if strings.Contains(line, "UPDATE issues SET") {
+			return index + 1
+		}
+	}
+	t.Fatal("fixture no longer contains an UPDATE issues SET line")
+	return 0
 }
 
 // TestConditionalUpdateIssueHasNoUngatedCallers guards the one generic,
@@ -67,6 +149,78 @@ func TestConditionalUpdateIssueHasNoUngatedCallers(t *testing.T) {
 	if len(callers) != 0 {
 		t.Fatalf("ConditionalUpdateIssue call sites = %v, want none; if this is a new, intentional caller, confirm its SET clause does not touch status without going through gate_enforcement.go, then update this test", callers)
 	}
+}
+
+// scanIssueWriteSites returns every line in dir's non-test .go files whose
+// text contains an issues-table write marker, resolved to the function that
+// encloses it and sorted by file then line. A marker outside any function
+// body is reported with the function name "(package level)", which no
+// allowlist entry names, so it fails loudly rather than passing unseen.
+func scanIssueWriteSites(t *testing.T, dir string) []issueWriteSite {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSet := token.NewFileSet()
+	var sites []issueWriteSite
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := parser.ParseFile(fileSet, path, content, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, line := range issueWriteMarkerLines(string(content)) {
+			sites = append(sites, issueWriteSite{
+				File:     filepath.Base(path),
+				Function: enclosingFunctionName(fileSet, file, line),
+				Line:     line,
+			})
+		}
+	}
+	slices.SortFunc(sites, func(left, right issueWriteSite) int {
+		if left.File != right.File {
+			return strings.Compare(left.File, right.File)
+		}
+		return left.Line - right.Line
+	})
+	return sites
+}
+
+// issueWriteMarkerLines returns the 1-based line numbers whose text writes the
+// issues table. Both markers on one line count once: they cannot both start a
+// statement.
+func issueWriteMarkerLines(content string) []int {
+	var lines []int
+	for index, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "INSERT INTO issues(") || strings.Contains(line, "UPDATE issues SET") {
+			lines = append(lines, index+1)
+		}
+	}
+	return lines
+}
+
+// enclosingFunctionName returns the name of the function or method whose body
+// spans line, or "(package level)" when the line sits outside every function.
+func enclosingFunctionName(fileSet *token.FileSet, file *ast.File, line int) string {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		start := fileSet.Position(function.Body.Lbrace).Line
+		end := fileSet.Position(function.Body.Rbrace).Line
+		if line >= start && line <= end {
+			return function.Name.Name
+		}
+	}
+	return "(package level)"
 }
 
 // scanPackageSourceFiles returns the set of this package's own (non-test)
