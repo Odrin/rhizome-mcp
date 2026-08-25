@@ -210,8 +210,10 @@ Repository-relative `file` and `directory` URIs remain relative to the
 destination repository; consumers must treat them as potentially missing.
 
 `events` records contain `source_id`, `issue_id`, `event_type`, `session_id`,
-`attempt_id`, `payload`, and `created_at`. `source_id` is historical only:
-the destination assigns its own monotonic event IDs. Event payloads are
+`attempt_id`, `payload`, and `created_at`. `source_id` is not a destination
+identity — the destination assigns its own monotonic event IDs — but it is
+not inert either: it is the key the importer remaps every event-log cursor
+through (see "Event cursor remapping" below). Event payloads are
 retained as opaque valid JSON after their referenced IDs are remapped where
 the event schema names an entity ID; `session_id` imports as `null`. Events
 with unknown types or unremappable payload references are rejected rather
@@ -309,6 +311,37 @@ snapshot the migration backfill writes, which evaluates identically to the
 row's absence (zero requirements). A version 1 document therefore imports
 with no gate state and unchanged behavior.
 
+### 4.2. Event cursor remapping
+
+Four durable columns name a position in the event log rather than an entity:
+`review_targets.latest_event_id`, `review_requests.target_event_id`,
+`attempts[].context_event_id_at_start`, and, in the `gates` namespace,
+`review_approvals[].target_event_id`. Each answers one question — *has
+anything happened after this position?* — and review-target staleness is
+decided by asking it (docs/09).
+
+Imported events receive fresh destination IDs, so a cursor carried verbatim
+answers that question against a log it does not belong to. When the source
+log has run past the destination's, the cursor sits above every ID the
+destination will ever assign and the answer is "no" forever: an imported
+review request stays claimable no matter what happens to the reviewed issue
+afterwards (ISSUE-231).
+
+The importer therefore builds a source-to-destination event ID mapping while
+it replays `events`, and translates all four cursors through it. The rule is
+a floor: a cursor becomes the highest destination ID among the events whose
+`source_id` is at or below it, and `0` when no exported event is. A cursor of
+`0` — "nothing has happened yet" — stays `0`.
+
+The floor rule is what makes sparse documents well-defined, and documents are
+sparse by construction: archived issues and active attempts are excluded with
+their events (§5), so a cursor naming an event the document does not carry is
+ordinary rather than exceptional. It also covers a version 1 document
+unchanged: version 1 has `events` and `attempts` but no review entities, so
+only `context_event_id_at_start` is remapped, by the same rule. A document
+with no events at all maps every cursor to `0`, which is correct — nothing
+has been accounted for, so any later destination activity counts.
+
 ## 5. Explicit exclusions
 
 The following are intentionally excluded:
@@ -323,8 +356,10 @@ The following are intentionally excluded:
   still active (version 2 only -- see docs/02 §18.7);
 - claimed review requests and their active review attempt binding (version
   2 only -- see §4);
-- generated issue display IDs and source event IDs, and every source row
-  version other than the issue version a version 2 document carries (§3);
+- generated issue display IDs, source event IDs as destination identities
+  (they survive only as `events[].source_id`, the key cursors are remapped
+  through -- §4.2), and every source row version other than the issue version
+  a version 2 document carries (§3);
 - binary artifact content, filesystem contents, absolute local paths, and
   machine-specific credentials;
 - SQLite internals, WAL files, query plans, and implementation indexes.

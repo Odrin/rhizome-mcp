@@ -325,3 +325,165 @@ func TestProjectRepositoryGateFreeExportAndPreGatesImportStayCompatible(t *testi
 		t.Fatalf("read imported rows: %v", err)
 	}
 }
+
+// TestProjectRepositoryRemapsEventCursorsOnImport is ISSUE-231's regression.
+// Imported events get fresh destination IDs, but every durable cursor that
+// names an event-log position used to be restored verbatim. A source project
+// whose log had run past the destination's (here: source IDs 900 and 4100
+// replayed into a two-event destination) therefore left cursors above every
+// ID the destination could ever assign, so the "did anything happen after
+// this position" question they exist to answer stayed answered "no" forever.
+func TestProjectRepositoryRemapsEventCursorsOnImport(t *testing.T) {
+	db, now := openProjectDatabase(t, "Cursors", "Instructions")
+	ctx := context.Background()
+
+	const (
+		issueID    = "01ARZ3NDEKTSV4RRFFQ69G5HA1"
+		attemptID  = "01ARZ3NDEKTSV4RRFFQ69G5HA2"
+		targetID   = "01ARZ3NDEKTSV4RRFFQ69G5HA3"
+		requestID  = "01ARZ3NDEKTSV4RRFFQ69G5HA4"
+		approvalID = "01ARZ3NDEKTSV4RRFFQ69G5HA5"
+		// Deliberately non-contiguous and far above anything an empty
+		// destination will assign.
+		firstSourceEventID  = 900
+		secondSourceEventID = 4100
+	)
+	later := now.Add(2 * time.Second)
+
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		statements := []struct {
+			query string
+			args  []any
+		}{
+			{`INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'Cursor issue', 'review', 'medium', 2, ?, ?)`,
+				[]any{issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO issue_events(id, issue_id, event_type, payload, created_at, source) VALUES (?, ?, 'issue_created', '{}', ?, 'issue')`,
+				[]any{firstSourceEventID, issueID, sqlite.FormatStorageTime(now)}},
+			{`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'work', 'completed', 1, ?, X'04', ?, ?, ?, ?, 'done', '[]', '[]')`,
+				[]any{attemptID, issueID, firstSourceEventID, sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO issue_events(id, issue_id, event_type, payload, created_at, source) VALUES (?, ?, 'issue_updated', '{}', ?, 'issue')`,
+				[]any{secondSourceEventID, issueID, sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, 2, ?, '[]', '["implementation"]', 1, ?)`,
+				[]any{targetID, issueID, secondSourceEventID, sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, 2, ?, '[]', '["implementation"]', 'open', NULL, NULL, 1, ?, NULL)`,
+				[]any{requestID, targetID, issueID, secondSourceEventID, sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_approvals(id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at) VALUES (?, ?, ?, ?, ?, 'implementation', 2, ?, 1, ?)`,
+				[]any{approvalID, issueID, targetID, requestID, attemptID, secondSourceEventID, sqlite.FormatStorageTime(later)}},
+		}
+		for _, statement := range statements {
+			if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed cursor fixture: %v", err)
+	}
+
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if len(exported.Events) != 2 || exported.Events[0].SourceID != firstSourceEventID || exported.Events[1].SourceID != secondSourceEventID {
+		t.Fatalf("exported events = %#v, want the two seeded source IDs", exported.Events)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+	plan = assignImportDestinationIDs(t, plan)
+
+	destDB, _ := openProjectDatabase(t, "Cursors destination", "Instructions")
+	destRepository, err := sqlite.NewProjectRepository(destDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := destRepository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+
+	var latestDestEventID, firstDestEventID, attemptCursor, targetCursor, requestCursor, approvalCursor int64
+	var destRequestID, destIssueID string
+	if err := destDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM issue_events`).Scan(&firstDestEventID, &latestDestEventID); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT context_event_id_at_start FROM work_attempts`).Scan(&attemptCursor); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT latest_event_id FROM review_targets`).Scan(&targetCursor); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT id, issue_id, target_event_id FROM review_requests`).Scan(&destRequestID, &destIssueID, &requestCursor); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT target_event_id FROM review_approvals`).Scan(&approvalCursor)
+	}); err != nil {
+		t.Fatalf("read imported cursors: %v", err)
+	}
+
+	// AC1/AC3: not one cursor still names a source-log position.
+	for _, cursor := range []struct {
+		name string
+		got  int64
+		want int64
+	}{
+		{name: "work_attempts.context_event_id_at_start", got: attemptCursor, want: firstDestEventID},
+		{name: "review_targets.latest_event_id", got: targetCursor, want: latestDestEventID},
+		{name: "review_requests.target_event_id", got: requestCursor, want: latestDestEventID},
+		{name: "review_approvals.target_event_id", got: approvalCursor, want: latestDestEventID},
+	} {
+		if cursor.got != cursor.want {
+			t.Fatalf("%s = %d, want the destination position %d (destination log ends at %d)", cursor.name, cursor.got, cursor.want, latestDestEventID)
+		}
+	}
+
+	destReviews, err := sqlite.NewReviewRepository(destDB)
+	if err != nil {
+		t.Fatalf("NewReviewRepository() error = %v", err)
+	}
+	imported, err := destReviews.GetReviewRequest(ctx, destRequestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() error = %v", err)
+	}
+	if imported.TargetStale {
+		t.Fatalf("imported review request is stale immediately after import")
+	}
+
+	// AC5: the third leg keeps the destination's own positions rather than
+	// resurrecting the source's.
+	reExported, err := destRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("re-export ExportLogicalProject() error = %v", err)
+	}
+	if len(reExported.ReviewTargets) != 1 || reExported.ReviewTargets[0].LatestEventID != latestDestEventID {
+		t.Fatalf("re-exported review target = %#v, want latest_event_id %d", reExported.ReviewTargets, latestDestEventID)
+	}
+
+	// AC2: post-import implementation activity disqualifies the imported
+	// review exactly as it would a natively created one -- the whole point
+	// of a cursor the destination log can actually pass.
+	if err := destDB.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'issue_updated', '{}', ?, 'issue')`,
+			destIssueID, sqlite.FormatStorageTime(later.Add(time.Minute)))
+		return err
+	}); err != nil {
+		t.Fatalf("record post-import activity: %v", err)
+	}
+	afterActivity, err := destReviews.GetReviewRequest(ctx, destRequestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() after activity error = %v", err)
+	}
+	if !afterActivity.TargetStale {
+		t.Fatalf("imported review request survived post-import implementation activity; its cursor is still unreachable")
+	}
+}

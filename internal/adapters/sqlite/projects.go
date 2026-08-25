@@ -621,6 +621,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			}
 		}
 
+		eventCursorEntries := make([]domain.LogicalEventCursorEntry, 0, len(plan.Document.Events))
 		for _, event := range plan.Document.Events {
 			createdAt, err := parseLogicalProjectTimestamp("events.created_at", event.CreatedAt)
 			if err != nil {
@@ -646,8 +647,28 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			if source == "" {
 				source = domain.LogicalEventSourceIssue
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at, source) VALUES (?, ?, NULL, ?, ?, ?, ?)`,
-				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt), source); err != nil {
+			var destinationEventID int64
+			if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at, source) VALUES (?, ?, NULL, ?, ?, ?, ?) RETURNING id`,
+				nullableString(issueID), event.EventType, nullableString(attemptID), string(event.Payload), formatStorageTime(createdAt), source).Scan(&destinationEventID); err != nil {
+				return err
+			}
+			eventCursorEntries = append(eventCursorEntries, domain.LogicalEventCursorEntry{SourceID: event.SourceID, DestinationID: destinationEventID})
+		}
+
+		// Every durable cursor that names an issue_events position has to be
+		// translated into the destination's own log, or it keeps naming a
+		// position the destination may never reach and the "did anything
+		// happen after this" question it exists to answer is answered wrong
+		// forever (ISSUE-231). Built here, once the replay has assigned every
+		// destination event ID, and applied to all four cursor columns below.
+		eventCursors := domain.NewLogicalEventCursorMapping(eventCursorEntries)
+
+		// work_attempts is the one cursor holder that must be written before
+		// the events (they carry an attempt_id foreign key), so its cursor is
+		// remapped in a second pass rather than at insert time.
+		for _, attempt := range plan.Document.Attempts {
+			if _, err := tx.ExecContext(ctx, `UPDATE work_attempts SET context_event_id_at_start = ? WHERE id = ?`,
+				eventCursors.Remap(attempt.ContextEventIDAtStart), attemptDestIDs[attempt.ID]); err != nil {
 				return err
 			}
 		}
@@ -685,7 +706,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-				reviewTargetDestIDs[target.ID], issueDestIDs[target.IssueID], target.IssueVersion, target.LatestEventID, string(artifactIDsJSON), purposesJSON, formatStorageTime(createdAt)); err != nil {
+				reviewTargetDestIDs[target.ID], issueDestIDs[target.IssueID], target.IssueVersion, eventCursors.Remap(target.LatestEventID), string(artifactIDsJSON), purposesJSON, formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}
@@ -718,7 +739,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
-				reviewRequestDestIDs[request.ID], reviewTargetDestIDs[request.TargetID], issueDestIDs[request.IssueID], request.TargetIssueVersion, request.TargetEventID, string(artifactIDsJSON), purposesJSON, request.Status, nullableString(supersedesID), formatStorageTime(createdAt), nullableString(resolvedAt)); err != nil {
+				reviewRequestDestIDs[request.ID], reviewTargetDestIDs[request.TargetID], issueDestIDs[request.IssueID], request.TargetIssueVersion, eventCursors.Remap(request.TargetEventID), string(artifactIDsJSON), purposesJSON, request.Status, nullableString(supersedesID), formatStorageTime(createdAt), nullableString(resolvedAt)); err != nil {
 				return err
 			}
 		}
@@ -908,7 +929,7 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_approvals(id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				reviewApprovalDestIDs[approval.ID], issueDestIDs[approval.IssueID], reviewTargetDestIDs[approval.TargetID],
 				reviewRequestDestIDs[approval.RequestID], attemptDestIDs[approval.AttemptID], approval.Purpose,
-				approval.TargetIssueVersion, approval.TargetEventID, approval.Version, formatStorageTime(createdAt)); err != nil {
+				approval.TargetIssueVersion, eventCursors.Remap(approval.TargetEventID), approval.Version, formatStorageTime(createdAt)); err != nil {
 				return err
 			}
 		}

@@ -883,3 +883,128 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 		t.Fatalf("imported target_issue_version = %d, want %d", reviewOutput.TargetIssueVersion, sourceVersion)
 	}
 }
+
+// TestIntegrationLogicalProjectRemapsEventCursorsAcrossASparseExport is
+// ISSUE-231's integration regression. An archived issue is exported without
+// its events (docs/07 §5), so the document's review cursor names a source
+// position well past the end of the shorter log the destination replays.
+// Restored verbatim, that cursor could never be passed: post-import activity
+// on the reviewed issue left the request looking fresh forever.
+func TestIntegrationLogicalProjectRemapsEventCursorsAcrossASparseExport(t *testing.T) {
+	sourceEnv := newIntegrationEnvironment(t)
+	destEnv := newIntegrationEnvironment(t)
+	session := sourceEnv.connect(t)
+
+	noise := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type": "task", "title": "Archived noise", "status": "ready",
+	})
+	var noiseIssue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+		Version   int64  `json:"version"`
+	}
+	decodeIntegrationResult(t, noise, &noiseIssue)
+	if noise.IsError || noiseIssue.ID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", noise, noiseIssue)
+	}
+	for index := 0; index < 3; index++ {
+		if result := callIntegrationTool(t, session, "add_comment", map[string]any{
+			"issue_id": noiseIssue.DisplayID,
+			"content":  fmt.Sprintf("Event-log padding %d.", index),
+		}); result.IsError {
+			t.Fatalf("add_comment result = %#v", result)
+		}
+	}
+	if result := callIntegrationTool(t, session, "archive_issue", map[string]any{
+		"issue_id": noiseIssue.DisplayID, "expected_version": noiseIssue.Version,
+	}); result.IsError {
+		t.Fatalf("archive_issue result = %#v", result)
+	}
+
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type": "task", "title": "Sparse cursor review target", "status": "review",
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+
+	db, err := sqlite.Open(context.Background(), mustProjectDatabasePath(t, sourceEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open source project database: %v", err)
+	}
+	sourceVersion, sourceEventID := currentReviewTarget(t, db, issue.ID)
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	if _, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
+		Purposes:           []string{"implementation"},
+		IssueID:            issue.ID,
+		TargetIssueVersion: sourceVersion,
+		TargetEventID:      sourceEventID,
+		ArtifactIDs:        []string{},
+		OccurredAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatalf("close source project database: %v", err)
+	}
+
+	document := mustExportLogicalProjectDocument(t, sourceEnv)
+	if int64(len(document.Events)) >= sourceEventID {
+		t.Fatalf("exported %d events for a source cursor of %d; the fixture must leave a gap", len(document.Events), sourceEventID)
+	}
+	mustApplyLogicalProjectDocument(t, destEnv, document)
+
+	destDB, err := sqlite.Open(context.Background(), mustProjectDatabasePath(t, destEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open destination project database: %v", err)
+	}
+	var destRequestID, destIssueID string
+	if err := destDB.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&destRequestID); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT id FROM issues WHERE title = 'Sparse cursor review target'`).Scan(&destIssueID)
+	}); err != nil {
+		t.Fatalf("read imported rows: %v", err)
+	}
+	if err := destDB.Close(context.Background()); err != nil {
+		t.Fatalf("close destination project database: %v", err)
+	}
+
+	destSession := destEnv.connect(t)
+	fresh := callIntegrationTool(t, destSession, "get_review_request", map[string]any{"review_request_id": destRequestID})
+	var freshOutput struct {
+		Claimable bool `json:"claimable"`
+	}
+	decodeIntegrationResult(t, fresh, &freshOutput)
+	if fresh.IsError || !freshOutput.Claimable {
+		t.Fatalf("imported review request = %#v, decoded = %#v; want it claimable on arrival", fresh, freshOutput)
+	}
+
+	// A comment changes the reviewed work without touching the issue
+	// version, so only the event cursor can disqualify the request.
+	if result := callIntegrationTool(t, destSession, "add_comment", map[string]any{
+		"issue_id": destIssueID,
+		"content":  "Post-import implementation note.",
+	}); result.IsError {
+		t.Fatalf("add_comment result = %#v", result)
+	}
+	after := callIntegrationTool(t, destSession, "get_review_request", map[string]any{"review_request_id": destRequestID})
+	var afterOutput struct {
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeIntegrationResult(t, after, &afterOutput)
+	if after.IsError || afterOutput.Claimable {
+		t.Fatalf("imported review request = %#v, decoded = %#v; post-import activity must disqualify it exactly as it would a native request", after, afterOutput)
+	}
+}
