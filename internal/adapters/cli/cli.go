@@ -1393,6 +1393,7 @@ type BoardResponse struct {
 	GeneratedAt        time.Time            `json:"generated_at"`
 	StatusCounts       []BoardStatusCount   `json:"status_counts"`
 	ActiveAttempts     []BoardActiveAttempt `json:"active_attempts"`
+	AttemptGates       []BoardAttemptGates  `json:"attempt_gates"`
 	ActiveReservations []BoardReservation   `json:"active_reservations"`
 	BlockedIssues      []IssueSummary       `json:"blocked_issues"`
 	ReviewRequests     []BoardReviewRequest `json:"review_requests"`
@@ -1417,6 +1418,32 @@ type BoardActiveAttempt struct {
 	SessionLabel   *string   `json:"session_label,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+// BoardAttemptGates is a stable CLI projection of one active attempt's
+// workflow-gate progress (ISSUE-175 AC2): the enforcement point the attempt
+// holder will hit, the frozen snapshot fingerprint when one supplied the
+// requirements, progress counts, and each unmet requirement with the same
+// key and reason the WORKFLOW_GATE_UNSATISFIED error reports. One row per
+// active attempt, joined to active_attempts by attempt_id. Next actions are
+// deliberately not projected here; they live on the issue-detail page and in
+// get_work_context.
+type BoardAttemptGates struct {
+	AttemptID           string                  `json:"attempt_id"`
+	IssueID             string                  `json:"issue_id"`
+	IssueDisplayID      string                  `json:"issue_display_id"`
+	EnforcementPoint    string                  `json:"enforcement_point"`
+	SnapshotFingerprint *string                 `json:"snapshot_fingerprint,omitempty"`
+	RequirementCount    int64                   `json:"requirement_count"`
+	SatisfiedCount      int64                   `json:"satisfied_count"`
+	Unmet               []BoardUnmetRequirement `json:"unmet"`
+}
+
+// BoardUnmetRequirement is one failing gate requirement on a board row.
+type BoardUnmetRequirement struct {
+	PolicyID       string `json:"policy_id"`
+	RequirementKey string `json:"requirement_key"`
+	Reason         string `json:"reason"`
 }
 
 // BoardReservation is a stable CLI projection of one active resource
@@ -1473,6 +1500,7 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 	for _, attempt := range result.ActiveAttempts {
 		issueDisplayIDByAttempt[attempt.AttemptID] = attempt.IssueDisplayID
 	}
+	attemptGates := boardAttemptGatesFromDomain(result.AttemptGates)
 	reservations := make([]BoardReservation, len(result.ActiveReservations))
 	for index, item := range result.ActiveReservations {
 		reservations[index] = BoardReservation{
@@ -1499,6 +1527,7 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 		GeneratedAt:        result.GeneratedAt.UTC(),
 		StatusCounts:       counts,
 		ActiveAttempts:     attempts,
+		AttemptGates:       attemptGates,
 		ActiveReservations: reservations,
 		BlockedIssues:      blocked,
 		ReviewRequests:     reviews,
@@ -1508,6 +1537,29 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 			RetainedNodeCount: len(result.PlanningGraph.Nodes),
 		},
 	}
+}
+
+// boardAttemptGatesFromDomain projects attempt gate-progress rows for the
+// CLI JSON, the served board API, and the board's semantic ETag payload.
+func boardAttemptGatesFromDomain(rows []domain.AttemptGateProgress) []BoardAttemptGates {
+	attemptGates := make([]BoardAttemptGates, len(rows))
+	for index, item := range rows {
+		unmet := make([]BoardUnmetRequirement, len(item.Gates.Unmet))
+		for unmetIndex, requirement := range item.Gates.Unmet {
+			unmet[unmetIndex] = BoardUnmetRequirement{
+				PolicyID: requirement.PolicyID, RequirementKey: requirement.RequirementKey, Reason: requirement.Reason,
+			}
+		}
+		attemptGates[index] = BoardAttemptGates{
+			AttemptID: item.AttemptID, IssueID: item.IssueID, IssueDisplayID: item.IssueDisplayID,
+			EnforcementPoint:    string(item.Gates.Point),
+			SnapshotFingerprint: copyOptionalString(item.Gates.SnapshotFingerprint),
+			RequirementCount:    item.Gates.RequirementCount,
+			SatisfiedCount:      item.Gates.SatisfiedCount,
+			Unmet:               unmet,
+		}
+	}
+	return attemptGates
 }
 
 func writeJSON(w io.Writer, value any) error {

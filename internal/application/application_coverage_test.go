@@ -17,7 +17,7 @@ import (
 
 func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 	t.Run("constructor rejects nil dependencies", func(t *testing.T) {
-		_, err := NewIssueDetailService(nil, nil, nil, nil)
+		_, err := NewIssueDetailService(nil, nil, nil, nil, nil)
 		if err == nil {
 			t.Fatal("expected constructor error")
 		}
@@ -51,7 +51,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 				graphRepo := &recordingIssueDetailGraphService{graph: domain.GraphResult{}, err: tc.graphErr}
 				activityRepo := &recordingIssueDetailActivityService{activity: domain.IssueActivity{}, err: tc.activityErr}
 				reservationRepo := &recordingIssueDetailReservationService{err: tc.reservationErr}
-				service, err := NewIssueDetailService(issueRepo, graphRepo, activityRepo, reservationRepo)
+				service, err := NewIssueDetailService(issueRepo, graphRepo, activityRepo, reservationRepo, &stubGateSummaryService{})
 				if err != nil {
 					t.Fatalf("NewIssueDetailService returned error: %v", err)
 				}
@@ -77,7 +77,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 
 	t.Run("uses fallback root projection when graph has no root", func(t *testing.T) {
 		issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.StatusOpen}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{}, &stubGateSummaryService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}
@@ -95,7 +95,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 
 	t.Run("returns invalid effective status when issue status is invalid", func(t *testing.T) {
 		issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.Status("invalid")}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{}}, &recordingIssueDetailActivityService{activity: domain.IssueActivity{}}, &recordingIssueDetailReservationService{}, &stubGateSummaryService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}
@@ -116,7 +116,7 @@ func TestIssueDetailServiceConstructorAndBranches(t *testing.T) {
 			{EntityType: domain.ActivityEntityTypeDecision, EntityID: "01ARZ3NDEKTSV4RRFFQ69G5FB6", IssueID: issue.ID, OccurredAt: time.Unix(15, 0).UTC(), Decision: &domain.Decision{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB6", IssueID: &issue.ID, CreatedAt: time.Unix(15, 0).UTC()}},
 			{EntityType: domain.ActivityEntityTypeDecision, EntityID: "01ARZ3NDEKTSV4RRFFQ69G5FB7", IssueID: issue.ID, OccurredAt: time.Unix(16, 0).UTC(), Decision: &domain.Decision{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB7", IssueID: &issue.ID, CreatedAt: time.Unix(16, 0).UTC()}},
 		}}
-		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{RootIssueID: ptrString(issue.ID)}}, &recordingIssueDetailActivityService{activity: activity}, &recordingIssueDetailReservationService{})
+		service, err := NewIssueDetailService(&recordingIssueDetailIssueService{issue: issue}, &recordingIssueDetailGraphService{graph: domain.GraphResult{RootIssueID: ptrString(issue.ID)}}, &recordingIssueDetailActivityService{activity: activity}, &recordingIssueDetailReservationService{}, &stubGateSummaryService{})
 		if err != nil {
 			t.Fatalf("NewIssueDetailService returned error: %v", err)
 		}

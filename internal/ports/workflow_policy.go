@@ -77,6 +77,16 @@ type GateDiagnosticCommand struct {
 	TargetID   *string // when set, use this review target's frozen snapshot
 }
 
+// IssueGateSummaryCommand requests one issue's compact gate summary -- the
+// same projection get_work_context reports (ISSUE-175 AC1), reused by the
+// board and issue-detail surfaces (AC2). Identifier accepts either public
+// form (ULID or ISSUE-N); Now anchors the active-attempt lease check, like
+// GetWorkContextCommand.Now.
+type IssueGateSummaryCommand struct {
+	Identifier domain.IssueIdentifier
+	Now        time.Time
+}
+
 // GateDiagnosticResult carries the assembled inputs of a gate decision.
 type GateDiagnosticResult struct {
 	Requirements   []domain.PolicyRequirement
@@ -100,4 +110,5 @@ type WorkflowPolicyRepository interface {
 	GetAttemptGateSnapshot(context.Context, GetAttemptGateSnapshotCommand) (domain.GateSnapshot, error)
 	GetReviewTargetGateSnapshot(context.Context, GetReviewTargetGateSnapshotCommand) (domain.GateSnapshot, error)
 	LoadGateDiagnostic(context.Context, GateDiagnosticCommand) (GateDiagnosticResult, error)
+	LoadIssueGateSummary(context.Context, IssueGateSummaryCommand) (domain.WorkContextGateSummary, error)
 }

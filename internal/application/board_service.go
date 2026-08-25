@@ -7,23 +7,31 @@ import (
 	"rhizome-mcp/internal/domain"
 )
 
+// issueGateSummaryGetter reads one issue's compact workflow-gate summary --
+// the same projection get_work_context carries (satisfied by
+// *WorkflowPolicyService).
+type issueGateSummaryGetter interface {
+	IssueGateSummary(context.Context, string) (domain.WorkContextGateSummary, error)
+}
+
 // BoardService composes the bounded, read-only project status board from
-// existing issue, attempt, reservation, review, and graph services. It
-// introduces no new business rules; it only aggregates already-bounded
-// projections for human-facing local status reporting (see the `board` CLI
-// command).
+// existing issue, attempt, reservation, review, graph, and workflow-policy
+// services. It introduces no new business rules; it only aggregates
+// already-bounded projections for human-facing local status reporting (see
+// the `board` CLI command).
 type BoardService struct {
 	issueService       *IssueService
 	attemptService     *AttemptService
 	reservationService *ReservationService
 	reviewService      *ReviewService
 	graphService       *GraphService
+	gateService        issueGateSummaryGetter
 	clock              clock.Clock
 }
 
 // NewBoardService composes the board use case from the services it aggregates.
-func NewBoardService(issueService *IssueService, attemptService *AttemptService, reservationService *ReservationService, reviewService *ReviewService, graphService *GraphService, source clock.Clock) (*BoardService, error) {
-	if issueService == nil || attemptService == nil || reservationService == nil || reviewService == nil || graphService == nil {
+func NewBoardService(issueService *IssueService, attemptService *AttemptService, reservationService *ReservationService, reviewService *ReviewService, graphService *GraphService, gateService issueGateSummaryGetter, source clock.Clock) (*BoardService, error) {
+	if issueService == nil || attemptService == nil || reservationService == nil || reviewService == nil || graphService == nil || gateService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "board dependencies are required", false)
 	}
 	if source == nil {
@@ -31,7 +39,7 @@ func NewBoardService(issueService *IssueService, attemptService *AttemptService,
 	}
 	return &BoardService{
 		issueService: issueService, attemptService: attemptService, reservationService: reservationService,
-		reviewService: reviewService, graphService: graphService, clock: source,
+		reviewService: reviewService, graphService: graphService, gateService: gateService, clock: source,
 	}, nil
 }
 
@@ -68,6 +76,24 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 	}
 	activeReservations := filterReservationsByActiveAttempts(reservationPage.Items, activeAttempts)
 
+	// One gate-progress row per active attempt (ISSUE-175 AC2): the gate the
+	// attempt holder will actually hit, evaluated against the attempt's
+	// frozen claim-time snapshot. Bounded by ActiveAttempts' own limit. Every
+	// other issue's summary is one click away on its detail page.
+	attemptGates := make([]domain.AttemptGateProgress, 0, len(activeAttempts))
+	for _, attempt := range activeAttempts {
+		summary, err := service.gateService.IssueGateSummary(ctx, attempt.IssueID)
+		if err != nil {
+			return domain.BoardResult{}, err
+		}
+		attemptGates = append(attemptGates, domain.AttemptGateProgress{
+			AttemptID:      attempt.AttemptID,
+			IssueID:        attempt.IssueID,
+			IssueDisplayID: attempt.IssueDisplayID,
+			Gates:          summary,
+		})
+	}
+
 	openStatus := string(domain.ReviewRequestStatusOpen)
 	reviewPage, err := service.reviewService.ListReviewRequests(ctx, ListReviewRequestsInput{
 		Status: &openStatus,
@@ -95,6 +121,7 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 		GeneratedAt:        service.clock.Now().UTC(),
 		StatusCounts:       statusCounts,
 		ActiveAttempts:     activeAttempts,
+		AttemptGates:       attemptGates,
 		ActiveReservations: activeReservations,
 		BlockedIssues:      blockedPage.Items,
 		ReviewRequests:     reviewRequests,

@@ -32,6 +32,18 @@
 <h2>{{.BlockedReason.Heading}}</h2>
 {{if .BlockedReason.IsEmpty}}<p class="empty">{{.BlockedReason.EmptyMessage}}</p>{{else}}<pre>{{.BlockedReason.Value}}</pre>{{end}}
 </section>
+<section>
+<h2>Workflow gates</h2>
+<p{{if .Gates.NoneApply}} class="empty"{{end}}>{{.Gates.StatusLine}}</p>
+{{if .Gates.HasUnmet}}
+<div class="table-scroll"><table>
+<thead><tr><th scope="col">Requirement</th><th scope="col">Reason</th><th scope="col">Next action</th></tr></thead>
+<tbody>
+{{range .Gates.Unmet}}<tr><td>{{.RequirementKey}}</td><td>{{.Reason}}</td><td>{{.NextAction}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{else if .Gates.Satisfied}}<p>All gate requirements are satisfied.</p>{{end}}
+</section>
 {{if .RootIssue}}<section>
 <h2>Root issue</h2>
 <p><a href="{{.RootIssue.Href}}">{{.RootIssue.Label}}</a></p>

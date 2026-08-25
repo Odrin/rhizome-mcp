@@ -393,7 +393,7 @@ func serveBoardAPI(w http.ResponseWriter, method string, boardService BoardHTTPS
 }
 
 func semanticBoardETag(result domain.BoardResult) string {
-	payload := boardETagPayload{StatusCounts: make([]boardETagStatusCount, len(result.StatusCounts)), ActiveAttempts: make([]boardETagActiveAttempt, len(result.ActiveAttempts)), ActiveReservations: make([]boardETagReservation, len(result.ActiveReservations)), BlockedIssues: make([]IssueSummary, len(result.BlockedIssues)), ReviewRequests: make([]boardETagReviewRequest, len(result.ReviewRequests)), PlanningGraph: boardETagGraph{Nodes: make([]IssueSummary, len(result.PlanningGraph.Nodes)), Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints, BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated, RetainedNodeCount: len(result.PlanningGraph.Nodes)}}
+	payload := boardETagPayload{StatusCounts: make([]boardETagStatusCount, len(result.StatusCounts)), ActiveAttempts: make([]boardETagActiveAttempt, len(result.ActiveAttempts)), AttemptGates: boardAttemptGatesFromDomain(result.AttemptGates), ActiveReservations: make([]boardETagReservation, len(result.ActiveReservations)), BlockedIssues: make([]IssueSummary, len(result.BlockedIssues)), ReviewRequests: make([]boardETagReviewRequest, len(result.ReviewRequests)), PlanningGraph: boardETagGraph{Nodes: make([]IssueSummary, len(result.PlanningGraph.Nodes)), Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints, BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated, RetainedNodeCount: len(result.PlanningGraph.Nodes)}}
 	for index, item := range result.StatusCounts {
 		payload.StatusCounts[index] = boardETagStatusCount{EffectiveStatus: string(item.EffectiveStatus), Count: item.Count}
 	}
@@ -447,6 +447,7 @@ func etagMatches(candidate string, actual string) bool {
 type boardETagPayload struct {
 	StatusCounts       []boardETagStatusCount   `json:"status_counts"`
 	ActiveAttempts     []boardETagActiveAttempt `json:"active_attempts"`
+	AttemptGates       []BoardAttemptGates      `json:"attempt_gates"`
 	ActiveReservations []boardETagReservation   `json:"active_reservations"`
 	BlockedIssues      []IssueSummary           `json:"blocked_issues"`
 	ReviewRequests     []boardETagReviewRequest `json:"review_requests"`

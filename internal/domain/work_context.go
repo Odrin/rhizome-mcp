@@ -344,21 +344,24 @@ type WorkContext struct {
 // bodies. Full requirement and evidence bodies stay behind get_workflow_policy
 // and evaluate_gates; this exists so discovering a missing requirement costs
 // no extra call.
+// The json tags exist for the surfaces that marshal this struct directly
+// (the served issue-detail API and the board CLI/HTTP JSON); the MCP adapter
+// keeps its own DTO.
 type WorkContextGateSummary struct {
 	// Point is the enforcement point actually evaluated, chosen from the
 	// issue's own state: complete_work_to_done against an active attempt's
 	// frozen snapshot, otherwise claim_work against live policies.
-	Point EnforcementPoint
+	Point EnforcementPoint `json:"enforcement_point"`
 	// SnapshotFingerprint is the frozen snapshot's fingerprint, set only
 	// when a snapshot was the source. Nil means live policies were used.
-	SnapshotFingerprint *string
-	RequirementCount    int64
-	SatisfiedCount      int64
+	SnapshotFingerprint *string `json:"snapshot_fingerprint,omitempty"`
+	RequirementCount    int64   `json:"requirement_count"`
+	SatisfiedCount      int64   `json:"satisfied_count"`
 	// Unmet carries one entry per failing requirement, in evaluation order.
-	Unmet []WorkContextUnmetRequirement
+	Unmet []WorkContextUnmetRequirement `json:"unmet"`
 	// NextActions states what clears each unmet requirement, in the same
 	// order as Unmet. Empty when nothing is unmet.
-	NextActions []string
+	NextActions []string `json:"next_actions"`
 }
 
 // WorkContextUnmetRequirement is one failing requirement, carrying the same
@@ -366,9 +369,9 @@ type WorkContextGateSummary struct {
 // so an agent reading context and an agent reading a rejection see the same
 // identity.
 type WorkContextUnmetRequirement struct {
-	PolicyID       string
-	RequirementKey string
-	Reason         string
+	PolicyID       string `json:"policy_id"`
+	RequirementKey string `json:"requirement_key"`
+	Reason         string `json:"reason"`
 }
 
 // NewEmptyWorkContext returns a work context with every list field initialized to an empty nonnil slice.

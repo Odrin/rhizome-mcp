@@ -23,20 +23,21 @@ type issueDetailReservationLister interface {
 }
 
 // IssueDetailService composes the bounded issue-detail use case from the
-// existing issue, graph, activity, and reservation services.
+// existing issue, graph, activity, reservation, and workflow-policy services.
 type IssueDetailService struct {
 	issueService       issueGetter
 	graphService       graphGetter
 	activityService    activityGetter
 	reservationService issueDetailReservationLister
+	gateService        issueGateSummaryGetter
 }
 
 // NewIssueDetailService composes issue detail reads from the existing bounded services.
-func NewIssueDetailService(issueService issueGetter, graphService graphGetter, activityService activityGetter, reservationService issueDetailReservationLister) (*IssueDetailService, error) {
-	if issueService == nil || graphService == nil || activityService == nil || reservationService == nil {
+func NewIssueDetailService(issueService issueGetter, graphService graphGetter, activityService activityGetter, reservationService issueDetailReservationLister, gateService issueGateSummaryGetter) (*IssueDetailService, error) {
+	if issueService == nil || graphService == nil || activityService == nil || reservationService == nil || gateService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "issue detail dependencies are required", false)
 	}
-	return &IssueDetailService{issueService: issueService, graphService: graphService, activityService: activityService, reservationService: reservationService}, nil
+	return &IssueDetailService{issueService: issueService, graphService: graphService, activityService: activityService, reservationService: reservationService, gateService: gateService}, nil
 }
 
 // GetIssueDetail returns a bounded detail projection for one issue.
@@ -82,6 +83,11 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		return domain.IssueDetail{}, err
 	}
 
+	gates, err := service.gateService.IssueGateSummary(ctx, issue.ID)
+	if err != nil {
+		return domain.IssueDetail{}, err
+	}
+
 	var latestAttempt *domain.WorkAttempt
 	var openReview *domain.ReviewRequest
 	var latestDecision *domain.Decision
@@ -106,5 +112,6 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		LatestDecision:      latestDecision,
 		Reservations:        domain.SummarizeReservations(reservationPage.Items),
 		HasMoreReservations: reservationPage.HasMore,
+		Gates:               gates,
 	}, nil
 }

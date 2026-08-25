@@ -37,7 +37,7 @@ func TestNewBoardServiceRejectsNilDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewBoardService(tt.issue, tt.attempt, tt.reservation, tt.review, tt.graph, tt.source)
+			_, err := NewBoardService(tt.issue, tt.attempt, tt.reservation, tt.review, tt.graph, &stubGateSummaryService{}, tt.source)
 			if !errors.Is(err, &domain.Error{Code: tt.wantCode}) {
 				t.Fatalf("NewBoardService() error = %v, want %q", err, tt.wantCode)
 			}
@@ -57,7 +57,7 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 	graphRepo := &boardRecordingGraphRepository{snapshot: domain.GraphSnapshot{RootIssueID: boardStringPointer("issue-1"), Nodes: []domain.IssueProjection{{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1"}}}}}
 
 	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
-	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, &stubGateSummaryService{}, source)
 	if err != nil {
 		t.Fatalf("NewBoardService() error = %v", err)
 	}
@@ -202,7 +202,7 @@ func TestBoardServiceShortCircuitsAtEachDependencyBoundary(t *testing.T) {
 			tt.configure(issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo)
 
 			issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
-			service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
+			service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, &stubGateSummaryService{}, source)
 			if err != nil {
 				t.Fatalf("NewBoardService() error = %v", err)
 			}
@@ -484,4 +484,63 @@ func (repository *boardRecordingGraphRepository) LoadGraph(_ context.Context, co
 func boardStringPointer(value string) *string {
 	copy := value
 	return &copy
+}
+
+// TestBoardServiceBuildsAttemptGateProgress pins ISSUE-175 AC2's board rows:
+// one gate-progress row per active attempt, in attempt order, carrying the
+// summary the gate service reports for that attempt's issue.
+func TestBoardServiceBuildsAttemptGateProgress(t *testing.T) {
+	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
+	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{
+		{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", Kind: domain.AttemptKindWork},
+		{AttemptID: "attempt-2", IssueID: "issue-2", IssueDisplayID: "ISSUE-2", Kind: domain.AttemptKindWork},
+	}}
+	gateService := &stubGateSummaryService{summary: domain.WorkContextGateSummary{
+		Point:            domain.EnforcementPointCompleteWorkToDone,
+		RequirementCount: 2,
+		SatisfiedCount:   1,
+		Unmet:            []domain.WorkContextUnmetRequirement{{PolicyID: "policy-1", RequirementKey: "impl", Reason: "attempt evidence \"impl\" missing"}},
+	}}
+
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, &boardRecordingIssueRepository{}, attemptRepo, &boardRecordingReservationRepository{}, &boardRecordingReviewRepository{}, &boardRecordingGraphRepository{}, now)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, gateService, source)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+
+	result, err := service.GetBoard(context.Background())
+	if err != nil {
+		t.Fatalf("GetBoard() error = %v", err)
+	}
+	if !reflect.DeepEqual(gateService.calls, []string{"issue-1", "issue-2"}) {
+		t.Fatalf("gate service calls = %#v, want one per active attempt's issue", gateService.calls)
+	}
+	if len(result.AttemptGates) != 2 {
+		t.Fatalf("AttemptGates = %#v, want 2 rows", result.AttemptGates)
+	}
+	first := result.AttemptGates[0]
+	if first.AttemptID != "attempt-1" || first.IssueID != "issue-1" || first.IssueDisplayID != "ISSUE-1" {
+		t.Fatalf("first row identity = %#v", first)
+	}
+	if !reflect.DeepEqual(first.Gates, gateService.summary) {
+		t.Fatalf("first row summary = %#v, want the gate service's summary", first.Gates)
+	}
+}
+
+// TestBoardServiceFailsWhenGateSummaryFails: the board is one consistent
+// aggregate; a gate read failure fails the board like any other collaborator.
+func TestBoardServiceFailsWhenGateSummaryFails(t *testing.T) {
+	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
+	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", Kind: domain.AttemptKindWork}}}
+	gateService := &stubGateSummaryService{err: domain.NewError(domain.CodeStorageUnavailable, "gate read failed", false)}
+
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, &boardRecordingIssueRepository{}, attemptRepo, &boardRecordingReservationRepository{}, &boardRecordingReviewRepository{}, &boardRecordingGraphRepository{}, now)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, gateService, source)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+
+	if _, err := service.GetBoard(context.Background()); !errors.Is(err, &domain.Error{Code: domain.CodeStorageUnavailable}) {
+		t.Fatalf("GetBoard() error = %v, want the gate service failure", err)
+	}
 }

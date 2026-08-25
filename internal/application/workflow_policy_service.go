@@ -90,6 +90,20 @@ func (service *WorkflowPolicyService) ArchivePolicy(ctx context.Context, policyI
 	})
 }
 
+// IssueGateSummary returns the issue's compact gate summary -- the same
+// projection get_work_context carries -- for the board and issue-detail
+// surfaces (ISSUE-175 AC2). It accepts either public identifier form.
+func (service *WorkflowPolicyService) IssueGateSummary(ctx context.Context, issueID string) (domain.WorkContextGateSummary, error) {
+	identifier, err := domain.ParseIssueIdentifier(issueID)
+	if err != nil {
+		return domain.WorkContextGateSummary{}, err
+	}
+	return service.repository.LoadIssueGateSummary(ctx, ports.IssueGateSummaryCommand{
+		Identifier: identifier,
+		Now:        service.clock.Now().UTC(),
+	})
+}
+
 // GateDiagnosticEvaluation carries the result of a gate diagnostic evaluation.
 type GateDiagnosticEvaluation struct {
 	Evaluation     domain.GateEvaluation

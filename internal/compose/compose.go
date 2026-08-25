@@ -203,11 +203,11 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	if err != nil {
 		return nil, err
 	}
-	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
+	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
 	if err != nil {
 		return nil, err
 	}
-	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService)
+	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService, workflowPolicyService)
 	if err != nil {
 		return nil, err
 	}

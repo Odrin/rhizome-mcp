@@ -24,6 +24,18 @@ type ActiveAttemptSummary struct {
 	LeaseExpiresAt time.Time   `json:"lease_expires_at"`
 }
 
+// AttemptGateProgress is one active attempt's workflow-gate progress row.
+// The summary is the same compact projection get_work_context carries
+// (ISSUE-175 AC2): the gate the attempt holder will actually hit, evaluated
+// against the attempt's frozen claim-time snapshot when one exists. One row
+// per active attempt, so the collection shares ActiveAttempts' bound.
+type AttemptGateProgress struct {
+	AttemptID      string                 `json:"attempt_id"`
+	IssueID        string                 `json:"issue_id"`
+	IssueDisplayID string                 `json:"issue_display_id"`
+	Gates          WorkContextGateSummary `json:"gates"`
+}
+
 // BoardResult is the bounded read-only project status board aggregate: issue
 // counts by effective status, currently leased attempts, active resource
 // reservations, blocked issues, open review requests, and the planning
@@ -39,6 +51,7 @@ type BoardResult struct {
 	GeneratedAt        time.Time              `json:"generated_at"`
 	StatusCounts       []EffectiveStatusCount `json:"status_counts"`
 	ActiveAttempts     []ActiveAttemptSummary `json:"active_attempts"`
+	AttemptGates       []AttemptGateProgress  `json:"attempt_gates"`
 	ActiveReservations []Reservation          `json:"active_reservations"`
 	BlockedIssues      []IssueProjection      `json:"blocked_issues"`
 	ReviewRequests     []ReviewRequest        `json:"review_requests"`

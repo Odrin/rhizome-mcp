@@ -106,7 +106,36 @@ Two properties of the graph's node selection matter to a board consumer:
   `entry_points` may name an issue that does not appear in `nodes` — under the
   node budget, and equally when an issue lies outside the traversal depth.
 
-## 7. Process lifetime and stdout contract
+## 7. Workflow gate visibility
+
+The board surfaces workflow-gate state (docs/02 §17) read-only, reusing the
+same compact summary `get_work_context` reports so a human reading the board
+and an agent reading context see identical state (ISSUE-175).
+
+- **Board pages and JSON** carry one gate-progress row per active attempt
+  (`attempt_gates`, joined to `active_attempts` by `attempt_id`): the
+  enforcement point the attempt holder will hit, the frozen snapshot
+  fingerprint when one supplied the requirements, requirement/satisfied
+  counts, and each unmet requirement's key and reason. The collection shares
+  the active-attempts bound. The HTML attempt table renders this as a
+  `Gates` column — progress as text (`1/2 satisfied`, or `none apply`), with
+  unmet requirement keys listed beneath. Issues without an active attempt
+  are not evaluated on the board; their summary is on their issue-detail
+  page.
+- **Issue-detail pages and JSON** always carry the issue's full summary
+  (`Gates`): the evaluated enforcement point (an active attempt evaluates
+  its frozen snapshot at `complete_work_to_done`, otherwise live policies at
+  `claim_work`), progress counts, and one row per unmet requirement with its
+  reason and the imperative next action that clears it. A project with no
+  matching policies reports `requirement_count` 0 and the page states that
+  no gate requirements apply — the no-policy compatibility case.
+
+Gate state participates in the semantic ETags of §4, so a polling client
+refreshes when a requirement is satisfied even if nothing else changed. The
+served board remains read-only: gate state is displayed, never mutated, from
+the browser.
+
+## 8. Process lifetime and stdout contract
 
 The served board is an independent process started by `rhizome-mcp board --serve` and is unrelated to any MCP session context. It holds no session state and terminates cleanly on interrupt (SIGINT/SIGTERM).
 
@@ -118,7 +147,7 @@ http://HOST:PORT/
 
 (with trailing slash). The VS Code extension parses this line to extract the server endpoint. Treat it as a stable contract: the format must not change.
 
-## 8. Scope exclusions
+## 9. Scope exclusions
 
 The status board explicitly does not include:
 

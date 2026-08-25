@@ -87,7 +87,15 @@ func newBoardReservationLifecycleFixture(t *testing.T) (*application.BoardServic
 	if err != nil {
 		t.Fatal(err)
 	}
-	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
+	workflowPolicyRepository, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowPolicyService, err := application.NewWorkflowPolicyService(workflowPolicyRepository, source, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
 	if err != nil {
 		t.Fatal(err)
 	}

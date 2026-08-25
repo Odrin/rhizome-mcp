@@ -19,4 +19,10 @@ type IssueDetail struct {
 	LatestDecision      *Decision
 	Reservations        []ReservationSummary
 	HasMoreReservations bool
+	// Gates is the issue's compact workflow-gate summary -- the same
+	// projection get_work_context carries -- so a human inspecting the
+	// issue page sees exactly what an agent sees in context (ISSUE-175
+	// AC2). Always populated; a project with no matching policies reports
+	// requirement_count 0 and an empty unmet list.
+	Gates WorkContextGateSummary
 }

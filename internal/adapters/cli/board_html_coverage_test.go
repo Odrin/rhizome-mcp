@@ -80,8 +80,8 @@ func TestRenderBoardHTMLCoverage(t *testing.T) {
 			t.Fatalf("static board rendered raw script-like reservation display value: %s", html)
 		}
 		reviewRow := tableRowFor(t, html, "attempt-review")
-		if strings.Count(reviewRow, "—") != 2 {
-			t.Fatalf("attempt-review row should show the empty placeholder for both session label and reservations, got: %s", reviewRow)
+		if strings.Count(reviewRow, "—") != 3 {
+			t.Fatalf("attempt-review row should show the empty placeholder for session label, reservations, and gates, got: %s", reviewRow)
 		}
 		if strings.Contains(reviewRow, "<li>") {
 			t.Fatalf("attempt-review has no reservations and should render no <li>: %s", reviewRow)

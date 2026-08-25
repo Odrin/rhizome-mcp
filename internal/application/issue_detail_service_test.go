@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -61,6 +62,20 @@ func (s *recordingReservationLister) ListReservations(ctx context.Context, input
 	return s.list, s.err
 }
 
+type stubGateSummaryService struct {
+	calls   []string
+	summary domain.WorkContextGateSummary
+	err     error
+}
+
+func (s *stubGateSummaryService) IssueGateSummary(_ context.Context, issueID string) (domain.WorkContextGateSummary, error) {
+	s.calls = append(s.calls, issueID)
+	if s.err != nil {
+		return domain.WorkContextGateSummary{}, s.err
+	}
+	return s.summary, nil
+}
+
 func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 	issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-10", Status: domain.StatusOpen, Priority: domain.PriorityHigh}
 	graphRootID := issue.ID
@@ -81,7 +96,7 @@ func TestIssueDetailServiceBuildsBoundedProjection(t *testing.T) {
 	reservations := domain.ReservationList{Items: []domain.Reservation{{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB5", IssueID: issue.ID, AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FB2", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}}, HasMore: true}
 	reservationService := &recordingReservationLister{list: reservations}
 
-	service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService)
+	service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService, &stubGateSummaryService{})
 	if err != nil {
 		t.Fatalf("NewIssueDetailService returned error: %v", err)
 	}
@@ -176,7 +191,7 @@ func TestIssueDetailServiceStopsOnErrors(t *testing.T) {
 			graphService := &recordingGraphService{graph: domain.GraphResult{RootIssueID: ptrString("01ARZ3NDEKTSV4RRFFQ69G5FAV")}, err: tt.graphErr}
 			activityService := &recordingActivityService{activity: domain.IssueActivity{}, err: tt.activityErr}
 			reservationService := &recordingReservationLister{err: tt.reservationErr}
-			service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService)
+			service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService, &stubGateSummaryService{})
 			if err != nil {
 				t.Fatalf("NewIssueDetailService returned error: %v", err)
 			}
@@ -202,4 +217,46 @@ func TestIssueDetailServiceStopsOnErrors(t *testing.T) {
 
 func ptrString(value string) *string {
 	return &value
+}
+
+// TestIssueDetailServiceIncludesGateSummary pins ISSUE-175 AC2: the detail
+// projection carries the same compact summary get_work_context reports,
+// requested by the issue's resolved internal ID.
+func TestIssueDetailServiceIncludesGateSummary(t *testing.T) {
+	issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", DisplayID: "ISSUE-10", Status: domain.StatusOpen}
+	gateService := &stubGateSummaryService{summary: domain.WorkContextGateSummary{
+		Point:            domain.EnforcementPointClaimWork,
+		RequirementCount: 1,
+		Unmet:            []domain.WorkContextUnmetRequirement{{PolicyID: "policy-1", RequirementKey: "acceptance_criteria", Reason: "issue field \"acceptance_criteria\" is blank"}},
+		NextActions:      []string{"set a non-blank acceptance_criteria on the issue with update_issue"},
+	}}
+	service, err := NewIssueDetailService(&recordingIssueService{issue: issue}, &recordingGraphService{}, &recordingActivityService{}, &recordingReservationLister{}, gateService)
+	if err != nil {
+		t.Fatalf("NewIssueDetailService returned error: %v", err)
+	}
+
+	detail, err := service.GetIssueDetail(context.Background(), "ISSUE-10")
+	if err != nil {
+		t.Fatalf("GetIssueDetail returned error: %v", err)
+	}
+	if len(gateService.calls) != 1 || gateService.calls[0] != issue.ID {
+		t.Fatalf("gate service calls = %#v, want one call with the resolved internal ID", gateService.calls)
+	}
+	if !reflect.DeepEqual(detail.Gates, gateService.summary) {
+		t.Fatalf("Gates = %#v, want the gate service's summary", detail.Gates)
+	}
+}
+
+// TestIssueDetailServiceFailsWhenGateSummaryFails: a gate read failure fails
+// the detail read like any other collaborator.
+func TestIssueDetailServiceFailsWhenGateSummaryFails(t *testing.T) {
+	issue := domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.StatusOpen}
+	gateService := &stubGateSummaryService{err: domain.NewError(domain.CodeStorageUnavailable, "gate read failed", false)}
+	service, err := NewIssueDetailService(&recordingIssueService{issue: issue}, &recordingGraphService{}, &recordingActivityService{}, &recordingReservationLister{}, gateService)
+	if err != nil {
+		t.Fatalf("NewIssueDetailService returned error: %v", err)
+	}
+	if _, err := service.GetIssueDetail(context.Background(), "ISSUE-10"); !errors.Is(err, &domain.Error{Code: domain.CodeStorageUnavailable}) {
+		t.Fatalf("GetIssueDetail error = %v, want the gate service failure", err)
+	}
 }

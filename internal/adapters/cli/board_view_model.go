@@ -75,6 +75,13 @@ type boardActiveAttemptViewModel struct {
 	LeaseExpiresAt  string
 	Reservations    []boardReservationRowViewModel
 	HasReservations bool
+	// GateProgress is the attempt's workflow-gate progress as text ("2/3
+	// satisfied", or "none apply" when no requirements match), with unmet
+	// requirement keys listed beneath it (ISSUE-175 AC2). Text, not a
+	// color-only indicator, so the state is perceivable without vision.
+	GateProgress string
+	GateUnmet    []string
+	HasGateUnmet bool
 }
 
 // boardReservationRowViewModel is one active reservation nested under its
@@ -127,8 +134,27 @@ type issueDetailPageViewModel struct {
 	Reservations        []issueDetailReservationViewModel
 	HasReservations     bool
 	HasMoreReservations bool
+	Gates               issueDetailGatesViewModel
 	Style               template.CSS
 	LiveRefreshScript   template.JS
+}
+
+// issueDetailGatesViewModel is the issue page's workflow-gate section
+// (ISSUE-175 AC2): a one-line summary of what was evaluated and how far
+// along it is, plus one row per unmet requirement with its reason and the
+// imperative next action that clears it.
+type issueDetailGatesViewModel struct {
+	StatusLine string
+	NoneApply  bool
+	Satisfied  bool
+	Unmet      []issueDetailGateUnmetViewModel
+	HasUnmet   bool
+}
+
+type issueDetailGateUnmetViewModel struct {
+	RequirementKey string
+	Reason         string
+	NextAction     string
 }
 
 // issueDetailReservationViewModel is one current or historical reservation
@@ -208,8 +234,10 @@ func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewM
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})
 	}
 	reservationsByAttempt := boardReservationsByAttempt(result.ActiveReservations)
+	gatesByAttempt := boardGatesByAttempt(result.AttemptGates)
 	for _, attempt := range result.ActiveAttempts {
 		reservations := reservationsByAttempt[attempt.AttemptID]
+		gates, hasGates := gatesByAttempt[attempt.AttemptID]
 		vm.ActiveAttempts = append(vm.ActiveAttempts, boardActiveAttemptViewModel{
 			AttemptID:       attempt.AttemptID,
 			IssueLabel:      issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
@@ -220,6 +248,9 @@ func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewM
 			LeaseExpiresAt:  attempt.LeaseExpiresAt.Format(time.RFC3339),
 			Reservations:    reservations,
 			HasReservations: len(reservations) > 0,
+			GateProgress:    boardGateProgressText(gates, hasGates),
+			GateUnmet:       boardGateUnmetLines(gates),
+			HasGateUnmet:    len(gates.Unmet) > 0,
 		})
 	}
 	for _, issue := range result.BlockedIssues {
@@ -270,8 +301,10 @@ func newBoardServedPageViewModel(result domain.BoardResult, state servedBoardSea
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})
 	}
 	reservationsByAttempt := boardReservationsByAttempt(result.ActiveReservations)
+	gatesByAttempt := boardGatesByAttempt(result.AttemptGates)
 	for _, attempt := range result.ActiveAttempts {
 		reservations := reservationsByAttempt[attempt.AttemptID]
+		gates, hasGates := gatesByAttempt[attempt.AttemptID]
 		vm.ActiveAttempts = append(vm.ActiveAttempts, boardActiveAttemptViewModel{
 			AttemptID:       attempt.AttemptID,
 			IssueLabel:      issueDisplayLabel(attempt.IssueID, attempt.IssueDisplayID, mapping),
@@ -284,6 +317,9 @@ func newBoardServedPageViewModel(result domain.BoardResult, state servedBoardSea
 			LeaseExpiresAt:  attempt.LeaseExpiresAt.Format(time.RFC3339),
 			Reservations:    reservations,
 			HasReservations: len(reservations) > 0,
+			GateProgress:    boardGateProgressText(gates, hasGates),
+			GateUnmet:       boardGateUnmetLines(gates),
+			HasGateUnmet:    len(gates.Unmet) > 0,
 		})
 	}
 	for _, issue := range result.BlockedIssues {
@@ -439,6 +475,68 @@ func newIssueDetailPageViewModel(detail domain.IssueDetail) issueDetailPageViewM
 	}
 	vm.HasReservations = len(vm.Reservations) > 0
 	vm.HasMoreReservations = detail.HasMoreReservations
+	vm.Gates = newIssueDetailGatesViewModel(detail.Gates)
+	return vm
+}
+
+// boardGatesByAttempt indexes attempt gate-progress rows by attempt ID for
+// joining against the already-rendered active attempts, the same join the
+// reservation rows use.
+func boardGatesByAttempt(rows []domain.AttemptGateProgress) map[string]domain.WorkContextGateSummary {
+	byAttempt := make(map[string]domain.WorkContextGateSummary, len(rows))
+	for _, row := range rows {
+		byAttempt[row.AttemptID] = row.Gates
+	}
+	return byAttempt
+}
+
+// boardGateProgressText renders gate progress as text rather than a
+// color-only indicator, so the state is perceivable without vision.
+func boardGateProgressText(summary domain.WorkContextGateSummary, hasSummary bool) string {
+	if !hasSummary {
+		return "—"
+	}
+	if summary.RequirementCount == 0 {
+		return "none apply"
+	}
+	return strconv.FormatInt(summary.SatisfiedCount, 10) + "/" + strconv.FormatInt(summary.RequirementCount, 10) + " satisfied"
+}
+
+func boardGateUnmetLines(summary domain.WorkContextGateSummary) []string {
+	lines := make([]string, 0, len(summary.Unmet))
+	for _, unmet := range summary.Unmet {
+		lines = append(lines, unmet.RequirementKey+": "+unmet.Reason)
+	}
+	return lines
+}
+
+func newIssueDetailGatesViewModel(summary domain.WorkContextGateSummary) issueDetailGatesViewModel {
+	vm := issueDetailGatesViewModel{}
+	if summary.RequirementCount == 0 {
+		vm.NoneApply = true
+		vm.StatusLine = "No workflow gate requirements apply to this issue."
+		return vm
+	}
+	source := "live policies"
+	if summary.SnapshotFingerprint != nil {
+		source = "the active attempt's frozen snapshot (fingerprint " + *summary.SnapshotFingerprint + ")"
+	}
+	vm.StatusLine = "Evaluated at " + string(summary.Point) + " against " + source + ": " +
+		strconv.FormatInt(summary.SatisfiedCount, 10) + " of " + strconv.FormatInt(summary.RequirementCount, 10) + " requirements satisfied."
+	vm.Satisfied = len(summary.Unmet) == 0
+	vm.Unmet = make([]issueDetailGateUnmetViewModel, 0, len(summary.Unmet))
+	for index, unmet := range summary.Unmet {
+		nextAction := ""
+		if index < len(summary.NextActions) {
+			nextAction = summary.NextActions[index]
+		}
+		vm.Unmet = append(vm.Unmet, issueDetailGateUnmetViewModel{
+			RequirementKey: unmet.RequirementKey,
+			Reason:         unmet.Reason,
+			NextAction:     nextAction,
+		})
+	}
+	vm.HasUnmet = len(vm.Unmet) > 0
 	return vm
 }
 

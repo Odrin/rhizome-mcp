@@ -236,16 +236,19 @@ func TestWorkflowPolicyServiceEvaluateGatesPerformsNoWrites(t *testing.T) {
 }
 
 type workflowPolicyRepositoryStub struct {
-	policy            domain.WorkflowPolicy
-	policyList        domain.WorkflowPolicyList
-	gateDiagnostic    ports.GateDiagnosticResult
-	createCommand     ports.CreateWorkflowPolicyCommand
-	updateCommand     ports.UpdateWorkflowPolicyCommand
-	archiveCommand    ports.ArchiveWorkflowPolicyCommand
-	listCommand       ports.ListWorkflowPoliciesCommand
-	diagnosticCommand ports.GateDiagnosticCommand
-	diagnosticCalls   int
-	err               error
+	policy             domain.WorkflowPolicy
+	policyList         domain.WorkflowPolicyList
+	gateDiagnostic     ports.GateDiagnosticResult
+	createCommand      ports.CreateWorkflowPolicyCommand
+	updateCommand      ports.UpdateWorkflowPolicyCommand
+	archiveCommand     ports.ArchiveWorkflowPolicyCommand
+	listCommand        ports.ListWorkflowPoliciesCommand
+	diagnosticCommand  ports.GateDiagnosticCommand
+	diagnosticCalls    int
+	gateSummary        domain.WorkContextGateSummary
+	gateSummaryCommand ports.IssueGateSummaryCommand
+	gateSummaryCalls   int
+	err                error
 }
 
 func (stub *workflowPolicyRepositoryStub) CreatePolicy(_ context.Context, command ports.CreateWorkflowPolicyCommand) (domain.WorkflowPolicy, error) {
@@ -299,6 +302,15 @@ func (stub *workflowPolicyRepositoryStub) GetReviewTargetGateSnapshot(_ context.
 		return domain.GateSnapshot{}, stub.err
 	}
 	return domain.GateSnapshot{}, nil
+}
+
+func (stub *workflowPolicyRepositoryStub) LoadIssueGateSummary(_ context.Context, command ports.IssueGateSummaryCommand) (domain.WorkContextGateSummary, error) {
+	stub.gateSummaryCommand = command
+	stub.gateSummaryCalls++
+	if stub.err != nil {
+		return domain.WorkContextGateSummary{}, stub.err
+	}
+	return stub.gateSummary, nil
 }
 
 func (stub *workflowPolicyRepositoryStub) LoadGateDiagnostic(_ context.Context, command ports.GateDiagnosticCommand) (ports.GateDiagnosticResult, error) {
