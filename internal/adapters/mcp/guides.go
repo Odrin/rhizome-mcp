@@ -51,6 +51,8 @@ Call ` + "`claim_issue`" + ` only for a claimable ` + "`ready`" + ` or ` + "`rev
 
 For long work, call ` + "`renew_attempt`" + ` before expiry. A lost or expired lease must not be treated as ownership.
 
+When other agents may work the same project concurrently, reserve the resources the attempt will edit: pass ` + "`resources`" + ` to ` + "`claim_issue`" + ` to acquire them atomically with the claim, or call ` + "`reserve_resources`" + ` later. Acquisition is all-or-nothing; a conflict fails the whole call with ` + "`RESOURCE_RESERVATION_CONFLICT`" + ` naming the reservation, its owning issue and attempt, and that lease's expiry. Diagnose a candidate set before claiming with ` + "`get_work_context`" + `'s ` + "`desired_resources`" + `. Reservations coordinate cooperating agents; they do not lock the filesystem against processes that bypass this server. They are released by ` + "`release_resources`" + `, by ` + "`finish_attempt`" + `, and by lease expiry, so a reserved resource is never permanently stuck.
+
 ## 5. Execute durably
 
 - Use ` + "`save_attempt_note`" + ` for restartable checkpoints, important findings, warnings, and concrete next steps.

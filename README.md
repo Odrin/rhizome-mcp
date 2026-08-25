@@ -221,6 +221,8 @@ The modular files under `docs/` are the canonical specification; [SPEC.md](SPEC.
 8. [Local HTTP transport contract](docs/08-local-http-transport.md)
 9. [Review workflow contract](docs/09-review-workflow.md)
 10. [VS Code extension](docs/10-vscode-extension.md)
+11. [Project routing contract](docs/11-project-routing.md)
+12. [Resource reservations](docs/12-resource-reservations.md)
 
 Guides for humans (quick start, workflow, CLI) live in [site/](site/) and are published via GitHub Pages. Release history is in the [CHANGELOG](CHANGELOG.md).
 

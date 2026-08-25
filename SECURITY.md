@@ -36,6 +36,13 @@ Only the latest minor release (1.0.x) receives security updates. Users are encou
 - Agents are identified by temporary session leases, not persistent credentials
 - This design prevents stale agent lockouts but requires secure session management by clients
 
+### Reservations are cooperative, not enforcement
+
+- Resource reservations coordinate agents that go through this server; they place no lock on the filesystem
+- Any process that does not use the reservation tools -- an editor, a script, another tool -- can still write a reserved file
+- Reservations are not an authorization boundary: any client that holds an attempt's lease token can reserve and release on that attempt
+- See [docs/12-resource-reservations.md](docs/12-resource-reservations.md) for the full guarantee and non-guarantee list
+
 ### No user authentication
 
 - Version 1.0.0 has no built-in authentication or authorization

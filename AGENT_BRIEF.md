@@ -19,6 +19,7 @@ Specification map:
 - `docs/04-storage-runtime.md`: SQLite, transactions, migrations, leases, and operations.
 - `docs/05-implementation-requirements.md`: architecture, algorithms, errors, and test coverage.
 - `docs/06-deferred-and-open.md`: deferred features and confirmed defaults.
+- `docs/12-resource-reservations.md`: reservation guarantees, lifecycle, and the two-agent workflow.
 - MCP decisions: accepted implementation and product choices.
 
 ## Non-negotiable requirements
