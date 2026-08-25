@@ -2,31 +2,32 @@
 
 ## Role resolution (harness-neutral)
 
-"Orchestrator" and "executor" are roles, not agent names. Notes may say "Sonnet", "Haiku", or
-"Rhizome Implementer" as shorthand; resolve them in whatever harness is running:
+"Orchestrator" and "executor" are capability profiles, not agent or model names. Resolve them in
+whatever harness is running:
 
-1. A subagent type named `Rhizome Implementer` exists (GitHub Copilot with this repo's
-   `.github/agents/`): delegate executor briefs to it.
-2. Otherwise, a generic subagent mechanism exists (e.g. Claude Code's Agent tool): spawn a
-   general-purpose subagent on the cheapest capable model (Haiku-class), give it the brief as its
-   entire task, and require the standard report (Summary / Files changed / Tests / Deviations).
+1. A dedicated implementation subagent exists and satisfies the executor profile: delegate the
+  executor brief to it.
+2. Otherwise, a generic subagent mechanism exists: use the least expensive available executor
+  that satisfies the brief's capability requirements, give it the brief as its entire task, and
+  require the standard report (Summary / Files changed / Tests / Deviations).
 3. Otherwise (no subagents at all): the orchestrator implements the brief itself, exactly as
    written, and records `Cost inefficiencies: no executor available` in the finish summary.
 
-The routing rules below are about *who decides*, not which product runs the code: H means "fully
-specified, needs no decisions", and stays H even when case 3 forces the orchestrator to type it in.
+The routing rules below are about *who decides*, not which product or model runs the code: E means
+"fully specified, needs no decisions", and stays E even when case 3 forces the orchestrator to
+type it in.
 
 ## Routes
 
 | Route | Meaning | Use when |
 |---|---|---|
-| **H** | Executor-only brief (Haiku-class) | Write scope is bounded, contracts are settled, success is judged by stated acceptance criteria and a focused test. Typical: wire an existing helper into N call sites, add a table test, rename/move code, docs edits, YAML. |
-| **S** | Orchestrator implements directly (Sonnet-class) | The edit needs an unresolved public-API, domain, storage, transaction, ordering, or security decision; or discovery and editing cannot be separated (migration over live data, choke-point refactor across many paths, race tests). Decision-only items (record_decision + doc wording) are also S. |
-| **S→H** | Orchestrator decides and designs, executor implements | Most refactors: the orchestrator writes the signatures, templates, SQL, or schema and records decisions; the executor fills in bodies, call sites, and tests. Say in the note exactly which slice is which. |
+| **E** | Executor-only brief | Write scope is bounded, contracts are settled, success is judged by stated acceptance criteria and a focused test. Typical: wire an existing helper into N call sites, add a table test, rename/move code, docs edits, YAML. |
+| **O** | Orchestrator implements directly | The edit needs an unresolved public-API, domain, storage, transaction, ordering, or security decision; or discovery and editing cannot be separated (migration over live data, choke-point refactor across many paths, race tests). Decision-only items (record_decision + doc wording) are also O. |
+| **O→E** | Orchestrator decides and designs, executor implements | Most refactors: the orchestrator writes the signatures, templates, SQL, or schema and records decisions; the executor fills in bodies, call sites, and tests. Say in the note exactly which slice is which. |
 | **M** | Maintainer action | Secrets, accounts, external publishing, sign-off on `review` items, committing work that already sits uncommitted in the tree. Items routed M get a short note saying exactly what the maintainer does and what it unblocks; they are listed in the map's Tail, never in a wave. |
 
-Classify as S only when a concrete unresolved decision exists. If none exists, delegate. A second
-failed executor brief on the same item escalates the remaining slice to S; do not write a third
+Classify as O only when a concrete unresolved decision exists. If none exists, delegate. A second
+failed executor brief on the same item escalates the remaining slice to O; do not write a third
 brief.
 
 ## What every note must pin down

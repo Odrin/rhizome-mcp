@@ -1,7 +1,7 @@
 ---
 name: rhizome-execution-plan
-description: "Generate or refresh a tracker-backed execution plan for a rhizome-mcp project: read live issue state, order the remaining work, route each item to an orchestrator model or a cheaper executor model, and encode that order into the tracker (execution-note comments, blocks relations, priorities, ready statuses) so an orchestrator never has to hold a plan in context. Use this whenever someone asks for an execution plan, roadmap, sequencing, wave plan, 'what should the agents do next', or to re-plan after issues were closed, even if they do not say 'plan' explicitly."
-argument-hint: "Optional: scope (epic IDs or 'all'), orchestrator/executor models, items to exclude or put on hold."
+description: "Generate or refresh a tracker-backed execution plan for a rhizome-mcp project: read live issue state, order the remaining work, route each item between decision-owning orchestration and bounded execution, and encode that order into the tracker (execution-note comments, blocks relations, priorities, ready statuses) so an orchestrator never has to hold a plan in context. Use this whenever someone asks for an execution plan, roadmap, sequencing, wave plan, 'what should the agents do next', or to re-plan after issues were closed, even if they do not say 'plan' explicitly."
+argument-hint: "Optional: scope (epic IDs or 'all'), available orchestration/execution capabilities, items to exclude or put on hold."
 ---
 
 # Rhizome execution plan
@@ -13,8 +13,8 @@ an orchestrator's context window.
 
 ## Why this shape
 
-An orchestrator (Sonnet-class) that carries a multi-issue plan re-reads it every turn and runs out
-of context mid-wave. rhizome-mcp already has the primitives to hold the plan instead: `blocks`
+An orchestrator that carries a multi-issue plan re-reads it every turn and can run out of context
+mid-wave. rhizome-mcp already has the primitives to hold the plan instead: `blocks`
 relations gate work, `priority` orders claimable work, `is_claimable` derives from both, and
 `get_work_context` returns an issue's comments. So the plan is encoded as data, and the
 orchestrator's whole instruction collapses to "take the highest-priority claimable issue and follow
@@ -39,7 +39,7 @@ its Execution notes comment".
    children, close or decompose the epic at the end. Items in `review` are maintainer sign-off
    (route M): the orchestrator's loop filters `status: ready`, so they never enter the pick order;
    give them a short M note and list them in the map's Tail section.
-3. **Classify each remaining item** using `references/routing.md`: route (H / S / S→H / M), the
+3. **Classify each remaining item** using `references/routing.md`: route (E / O / O→E / M), the
    pre-decisions the orchestrator must settle before briefing, exact write set, focused check
    command, and finish target (`done`, or `review` for migrations and public contract changes).
    Read the owning code only as far as needed to name symbols; the note must cite real files.
@@ -68,13 +68,13 @@ its Execution notes comment".
 ## Routing and cost rules (summary; details in `references/routing.md`)
 
 - "Orchestrator" and "executor" are roles, not agent names — notes must not assume a specific
-  harness. `references/routing.md` defines the resolution order (named `Rhizome Implementer`
-  subagent → any generic subagent on a Haiku-class model → orchestrator implements the brief
-  itself and records the deviation).
-- Executor (Haiku-class) gets fully specified briefs: exact files, symbols, acceptance criteria,
+   harness. `references/routing.md` defines the resolution order (dedicated executor → generic
+   executor with sufficient capability → orchestrator implements the brief and records the
+   deviation).
+- The executor gets fully specified briefs: exact files, symbols, acceptance criteria,
   commands. It never authors migrations, transaction boundaries, or public schema decisions.
-- Orchestrator (Sonnet-class) does the slice that requires a decision, then hands the mechanical
-  remainder down (S→H). Decision-only items (record a decision, amend a doc) are S.
+- The orchestrator does the slice that requires a decision, then hands the bounded implementation
+   remainder down (O→E). Decision-only items (record a decision, amend a doc) are O.
 - Pair items for parallel execution only when write sets are disjoint and checks are independent;
   say so explicitly in both notes.
 - Migrations are serialized through the orchestrator and numbered in plan order; every

@@ -10,10 +10,10 @@ fenced markdown block.
 # <project> execution plan v<N> — <YYYY-MM-DD>
 The tracker is the plan. This page is a map for the maintainer; the orchestrator never loads it.
 
-## How a session runs (<orchestrator model>)
+## How a session runs
 1. open_project → list_issues {status: ready, is_claimable: true} → take the highest priority (ties: lowest ISSUE number).
 2. get_work_context (compact + recent comments) → read the "Execution notes" comment → claim_issue.
-3. Follow the note's route (H = brief <executor model>; S = do it yourself; S→H = decide, record_decision, brief,
+3. Follow the note's route (E = brief an executor; O = do it yourself; O→E = decide, record_decision, brief,
    then delegate now or save the brief as a checkpoint note and finish interrupted/handoff for the next session).
 4. Review diff-stat + in-scope hunks, run the note's focused check, one scoped integration run, commit,
    finish_attempt (target per note). End the session.
