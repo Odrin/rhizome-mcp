@@ -16,7 +16,7 @@ const (
 )
 
 var (
-	codeConstantPattern = regexp.MustCompile(`(?m)^\tCode[A-Za-z]+\s*=\s*"([A-Z_]+)"$`)
+	codeConstantPattern = regexp.MustCompile(`(?m)^\tCode[A-Za-z]+\s*=\s*"([A-Z_]+)"\r?$`)
 	specDocPattern      = regexp.MustCompile(`^\d{2}-[a-z0-9-]+\.md$`)
 )
 

@@ -1,1 +1,12 @@
+# Normalize every text file to LF in the working tree, on every platform.
+# Several tests parse repo files with line-anchored regexes ($), which do not
+# match when Git checks the file out with CRLF endings on Windows.
+* text=auto eol=lf
+
+# PowerShell is happiest with CRLF; nothing parses this file in tests.
+*.ps1 text eol=crlf
+
+*.png binary
+*.ico binary
+
 internal/migrations/sql/*.sql text eol=lf

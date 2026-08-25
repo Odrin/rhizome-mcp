@@ -275,7 +275,7 @@ func TestGuidesDocumentedToolInventoryMatchesCatalog(t *testing.T) {
 	inventorySection := remaining[:nextSection]
 
 	// Parse lines matching ^(\d+)\. `([a-z_]+)`$
-	toolPattern := regexp.MustCompile("(?m)^(\\d+)\\.\\s+`([a-z_]+)`$")
+	toolPattern := regexp.MustCompile("(?m)^(\\d+)\\.\\s+`([a-z_]+)`\\r?$")
 	matches := toolPattern.FindAllStringSubmatch(inventorySection, -1)
 
 	if len(matches) == 0 {
