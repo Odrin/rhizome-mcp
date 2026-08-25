@@ -4,20 +4,21 @@ import "rhizome-mcp/internal/domain"
 
 // Bundle is the project-local service bundle shared by every adapter.
 type Bundle struct {
-	IssueService       *IssueService
-	ProjectService     *ProjectService
-	RelationService    *RelationService
-	GraphService       *GraphService
-	PlanningService    *PlanningService
-	CommentService     *CommentService
-	DecisionService    *DecisionService
-	ActivityService    *ActivityService
-	SearchService      *SearchService
-	ReviewService      *ReviewService
-	AttemptService     *AttemptService
-	ReservationService *ReservationService
-	SessionService     *AgentSessionService
-	WorkContextService *WorkContextService
+	IssueService          *IssueService
+	ProjectService        *ProjectService
+	RelationService       *RelationService
+	GraphService          *GraphService
+	PlanningService       *PlanningService
+	CommentService        *CommentService
+	DecisionService       *DecisionService
+	ActivityService       *ActivityService
+	SearchService         *SearchService
+	ReviewService         *ReviewService
+	AttemptService        *AttemptService
+	ReservationService    *ReservationService
+	SessionService        *AgentSessionService
+	WorkContextService    *WorkContextService
+	WorkflowPolicyService *WorkflowPolicyService
 
 	// CLI-only services; not required by the MCP request path.
 	MaintenanceService *MaintenanceService

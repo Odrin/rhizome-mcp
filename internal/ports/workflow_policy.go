@@ -67,6 +67,22 @@ type GetReviewTargetGateSnapshotCommand struct {
 	TargetID string
 }
 
+// GateDiagnosticCommand requests the read-only inputs of a gate decision.
+type GateDiagnosticCommand struct {
+	IssueID   string
+	Point     domain.EnforcementPoint
+	AttemptID *string // when set, use this attempt's frozen snapshot
+	TargetID  *string // when set, use this review target's frozen snapshot
+}
+
+// GateDiagnosticResult carries the assembled inputs of a gate decision.
+type GateDiagnosticResult struct {
+	Requirements   []domain.PolicyRequirement
+	SourcePolicies []domain.SourcePolicyRef
+	Evidence       domain.GateEvidence
+	SnapshotFound  bool // false when requirements came from live policies
+}
+
 // WorkflowPolicyRepository persists workflow policies, their audit trail, and
 // the immutable gate snapshots frozen at claim and review-request-creation
 // time (docs/02 §17.6). Snapshot rows are written inside the same
@@ -81,4 +97,5 @@ type WorkflowPolicyRepository interface {
 	ArchivePolicy(context.Context, ArchiveWorkflowPolicyCommand) (domain.WorkflowPolicy, error)
 	GetAttemptGateSnapshot(context.Context, GetAttemptGateSnapshotCommand) (domain.GateSnapshot, error)
 	GetReviewTargetGateSnapshot(context.Context, GetReviewTargetGateSnapshotCommand) (domain.GateSnapshot, error)
+	LoadGateDiagnostic(context.Context, GateDiagnosticCommand) (GateDiagnosticResult, error)
 }

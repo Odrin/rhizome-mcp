@@ -127,6 +127,10 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	if err != nil {
 		return nil, err
 	}
+	workflowPolicyRepository, err := sqlite.NewWorkflowPolicyRepository(project.Database)
+	if err != nil {
+		return nil, err
+	}
 	generator, err := ids.NewGenerator(source, rand.Reader)
 	if err != nil {
 		return nil, err
@@ -195,6 +199,10 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	if err != nil {
 		return nil, err
 	}
+	workflowPolicyService, err := application.NewWorkflowPolicyService(workflowPolicyRepository, source, generator)
+	if err != nil {
+		return nil, err
+	}
 	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
 	if err != nil {
 		return nil, err
@@ -207,23 +215,24 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	return &Services{
 		project: project,
 		bundle: application.Bundle{
-			IssueService:       issueService,
-			ProjectService:     projectService,
-			RelationService:    relationService,
-			GraphService:       graphService,
-			PlanningService:    planningService,
-			CommentService:     commentService,
-			DecisionService:    decisionService,
-			ActivityService:    activityService,
-			SearchService:      searchService,
-			ReviewService:      reviewService,
-			AttemptService:     attemptService,
-			ReservationService: reservationService,
-			SessionService:     sessionService,
-			WorkContextService: workContextService,
-			MaintenanceService: maintenanceService,
-			BoardService:       boardService,
-			IssueDetailService: issueDetailService,
+			IssueService:          issueService,
+			ProjectService:        projectService,
+			RelationService:       relationService,
+			GraphService:          graphService,
+			PlanningService:       planningService,
+			CommentService:        commentService,
+			DecisionService:       decisionService,
+			ActivityService:       activityService,
+			SearchService:         searchService,
+			ReviewService:         reviewService,
+			AttemptService:        attemptService,
+			ReservationService:    reservationService,
+			SessionService:        sessionService,
+			WorkContextService:    workContextService,
+			WorkflowPolicyService: workflowPolicyService,
+			MaintenanceService:    maintenanceService,
+			BoardService:          boardService,
+			IssueDetailService:    issueDetailService,
 		},
 	}, nil
 }
