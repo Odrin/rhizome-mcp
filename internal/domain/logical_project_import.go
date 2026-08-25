@@ -343,6 +343,9 @@ func logicalProjectDocumentKeysV2() (map[string]validatorFunc, []string) {
 	// validator keeps rejecting that key, so a v1 document cannot smuggle
 	// one in -- the per-version table is exactly the mechanism for this.
 	validators["events"] = validateLogicalEventArrayV2
+	// v2 issue records carry the source issue version (ISSUE-230). Same
+	// mechanism, same reason: v1's frozen validator keeps rejecting the key.
+	validators["issues"] = validateLogicalIssueArrayV2
 	validators["review_targets"] = validateLogicalReviewTargetArray
 	validators["review_requests"] = validateLogicalReviewRequestArray
 	validators["review_outcomes"] = validateLogicalReviewOutcomeArray
@@ -435,6 +438,27 @@ func validateLogicalIssueArray(decoder *json.Decoder, path string) error {
 			"created_at":            validateAnyJSONValue,
 			"updated_at":            validateAnyJSONValue,
 			"closed_at":             validateAnyJSONValue,
+		}, []string{"id", "type", "title", "description", "acceptance_criteria", "status", "priority", "parent_id", "blocked_reason", "created_by_session_id", "created_at", "updated_at", "closed_at"})
+	})
+}
+
+func validateLogicalIssueArrayV2(decoder *json.Decoder, path string) error {
+	return validateArray(decoder, path, func(decoder *json.Decoder, indexPath string) error {
+		return validateObject(decoder, indexPath, map[string]validatorFunc{
+			"id":                    validateAnyJSONValue,
+			"type":                  validateAnyJSONValue,
+			"title":                 validateAnyJSONValue,
+			"description":           validateAnyJSONValue,
+			"acceptance_criteria":   validateAnyJSONValue,
+			"status":                validateAnyJSONValue,
+			"priority":              validateAnyJSONValue,
+			"parent_id":             validateAnyJSONValue,
+			"blocked_reason":        validateAnyJSONValue,
+			"created_by_session_id": validateAnyJSONValue,
+			"created_at":            validateAnyJSONValue,
+			"updated_at":            validateAnyJSONValue,
+			"closed_at":             validateAnyJSONValue,
+			"version":               validateAnyJSONValue,
 		}, []string{"id", "type", "title", "description", "acceptance_criteria", "status", "priority", "parent_id", "blocked_reason", "created_by_session_id", "created_at", "updated_at", "closed_at"})
 	})
 }
@@ -842,6 +866,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 	seenIDs := make(map[string]string)
 	issueIDs := make(map[string]struct{})
 	issueTypes := make(map[string]string)
+	issueVersions := make(map[string]int64)
 	labelIDs := make(map[string]struct{})
 	relationIDs := make(map[string]struct{})
 	commentIDs := make(map[string]struct{})
@@ -909,6 +934,19 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			if err := validateNullableUTCTimestamp(path+".closed_at", *issue.ClosedAt); err != nil {
 				return err
 			}
+		}
+		if issue.Version != nil {
+			// Version 1 has no issue version and the structural pass already
+			// rejects the key there; this guards a document assembled
+			// in-process rather than parsed, exactly like the event source
+			// check below.
+			if document.Version < 2 {
+				return invalidArgumentPath(path+".version", "UNSUPPORTED_FIELD", "issue version requires version 2")
+			}
+			if *issue.Version < 1 {
+				return invalidArgumentPath(path+".version", "INVALID", "must be >= 1")
+			}
+			issueVersions[issue.ID] = *issue.Version
 		}
 	}
 
@@ -1149,6 +1187,9 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 				return err
 			}
 		}
+		if err := validateFrozenIssueVersion(path+".issue_version_at_start", attempt.IssueID, attempt.IssueVersionAtStart, issueVersions); err != nil {
+			return err
+		}
 	}
 
 	for index, note := range document.AttemptNotes {
@@ -1285,6 +1326,9 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			if target.IssueVersion < 1 {
 				return invalidArgumentPath(path+".issue_version", "INVALID", "must be >= 1")
 			}
+			if err := validateFrozenIssueVersion(path+".issue_version", target.IssueID, target.IssueVersion, issueVersions); err != nil {
+				return err
+			}
 			if target.LatestEventID < 0 {
 				return invalidArgumentPath(path+".latest_event_id", "INVALID", "must be >= 0")
 			}
@@ -1320,6 +1364,9 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			}
 			if request.TargetIssueVersion < 1 {
 				return invalidArgumentPath(path+".target_issue_version", "INVALID", "must be >= 1")
+			}
+			if err := validateFrozenIssueVersion(path+".target_issue_version", request.IssueID, request.TargetIssueVersion, issueVersions); err != nil {
+				return err
 			}
 			if request.TargetEventID < 0 {
 				return invalidArgumentPath(path+".target_event_id", "INVALID", "must be >= 0")
@@ -1424,7 +1471,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			return err
 		}
 
-		if err := validateLogicalGates(document, seenIDs, issueIDs, attemptIDs, attemptIssueIDs); err != nil {
+		if err := validateLogicalGates(document, seenIDs, issueIDs, issueVersions, attemptIDs, attemptIssueIDs); err != nil {
 			return err
 		}
 	}
@@ -1533,6 +1580,7 @@ func validateLogicalGates(
 	document *LogicalProjectDocument,
 	seenIDs map[string]string,
 	issueIDs map[string]struct{},
+	issueVersions map[string]int64,
 	attemptIDs map[string]struct{},
 	attemptIssueIDs map[string]string,
 ) error {
@@ -1635,6 +1683,9 @@ func validateLogicalGates(
 		if err := validateLogicalGateSnapshotBody(path, snapshot.RequirementsJSON, snapshot.SourcePoliciesJSON, snapshot.Fingerprint, snapshot.IssueVersion, snapshot.CreatedAt); err != nil {
 			return err
 		}
+		if err := validateFrozenIssueVersion(path+".issue_version", attemptIssueIDs[snapshot.AttemptID], snapshot.IssueVersion, issueVersions); err != nil {
+			return err
+		}
 	}
 
 	snapshotTargets := make(map[string]struct{}, len(gates.ReviewTargetSnapshots))
@@ -1648,6 +1699,9 @@ func validateLogicalGates(
 		}
 		snapshotTargets[snapshot.TargetID] = struct{}{}
 		if err := validateLogicalGateSnapshotBody(path, snapshot.RequirementsJSON, snapshot.SourcePoliciesJSON, snapshot.Fingerprint, snapshot.IssueVersion, snapshot.CreatedAt); err != nil {
+			return err
+		}
+		if err := validateFrozenIssueVersion(path+".issue_version", reviewTargetIssueIDs[snapshot.TargetID], snapshot.IssueVersion, issueVersions); err != nil {
 			return err
 		}
 	}
@@ -1779,6 +1833,9 @@ func validateLogicalGates(
 		if approval.TargetIssueVersion < 1 {
 			return invalidArgumentPath(path+".target_issue_version", "INVALID", "must be >= 1")
 		}
+		if err := validateFrozenIssueVersion(path+".target_issue_version", approval.IssueID, approval.TargetIssueVersion, issueVersions); err != nil {
+			return err
+		}
 		if approval.TargetEventID < 0 {
 			return invalidArgumentPath(path+".target_event_id", "INVALID", "must be >= 0")
 		}
@@ -1790,6 +1847,28 @@ func validateLogicalGates(
 		}
 	}
 	return nil
+}
+
+// validateFrozenIssueVersion checks one frozen issue-version cursor against
+// the version its issue will be restored at. Review targets, review requests,
+// attempts, gate snapshots, and review approvals each freeze the issue
+// version they observed, and a restored project has to be able to reach every
+// one of them: a cursor above the issue's own version names a position the
+// destination can never occupy, so a review target frozen there imports
+// permanently stale and unclaimable (ISSUE-230).
+//
+// An issue that carries no version is not checked. That is the documented
+// fallback of docs/07 §3: a version 1 document, or a version 2 document
+// written before issues carried their version, restores every issue at
+// DefaultLogicalIssueVersion while keeping its frozen cursors verbatim, and
+// enforcing the ceiling there would reject documents that have always
+// imported successfully.
+func validateFrozenIssueVersion(path, issueID string, frozen int64, issueVersions map[string]int64) error {
+	restored, carried := issueVersions[issueID]
+	if !carried || frozen <= restored {
+		return nil
+	}
+	return invalidArgumentPath(path, "INCONSISTENT_ISSUE_VERSION", "must not exceed the issue's own version")
 }
 
 // validateLogicalGateSnapshotBody validates the fields the two snapshot

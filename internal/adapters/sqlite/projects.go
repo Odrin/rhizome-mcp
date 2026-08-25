@@ -455,10 +455,11 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 					status, priority, parent_id, blocked_reason, version,
 					created_by_session_id, created_at, updated_at, closed_at,
 					archived_at, archived_by_session_id
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, NULL, NULL)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)
 			`, issueDestIDs[issue.ID], nextIssueNumber+int64(index), issue.Type, issue.Title,
 				nullableString(issue.Description), nullableString(issue.AcceptanceCriteria), issue.Status,
 				issue.Priority, nullableString(parentID), nullableString(issue.BlockedReason),
+				domain.LogicalIssueVersionForImport(issue.Version),
 				formatStorageTime(createdAt), formatStorageTime(updatedAt)); err != nil {
 				return err
 			}
@@ -1018,7 +1019,7 @@ func boolToInt(value bool) int {
 
 func readLogicalIssues(ctx context.Context, query Queryer) ([]domain.LogicalIssue, time.Time, error) {
 	rows, err := query.QueryContext(ctx, `
-		SELECT id, type, title, description, acceptance_criteria, status, priority, parent_id, blocked_reason, created_at, updated_at, closed_at
+		SELECT id, type, title, description, acceptance_criteria, status, priority, parent_id, blocked_reason, created_at, updated_at, closed_at, version
 		FROM issues
 		WHERE archived_at IS NULL
 		ORDER BY created_at ASC, id ASC`)
@@ -1033,8 +1034,9 @@ func readLogicalIssues(ctx context.Context, query Queryer) ([]domain.LogicalIssu
 		var (
 			description, acceptanceCriteria, parentID, blockedReason, closedAt   sql.NullString
 			id, issueType, title, status, priority, createdAtText, updatedAtText string
+			version                                                              int64
 		)
-		if err := rows.Scan(&id, &issueType, &title, &description, &acceptanceCriteria, &status, &priority, &parentID, &blockedReason, &createdAtText, &updatedAtText, &closedAt); err != nil {
+		if err := rows.Scan(&id, &issueType, &title, &description, &acceptanceCriteria, &status, &priority, &parentID, &blockedReason, &createdAtText, &updatedAtText, &closedAt, &version); err != nil {
 			return nil, time.Time{}, corruptLogicalProjectValue(err, "issues")
 		}
 		if _, err := ids.ParseStrict(id); err != nil {
@@ -1068,6 +1070,7 @@ func readLogicalIssues(ctx context.Context, query Queryer) ([]domain.LogicalIssu
 			CreatedAt:          formatLogicalProjectTimestamp(createdAt),
 			UpdatedAt:          formatLogicalProjectTimestamp(updatedAt),
 			ClosedAt:           nullableLogicalString(closedAt),
+			Version:            domain.LogicalIssueVersionForExport(version),
 		}
 		if parentID.Valid {
 			if _, err := ids.ParseStrict(parentID.String); err != nil {

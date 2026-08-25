@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
@@ -765,4 +767,119 @@ func canonicalizeLogicalProjectDocumentWithMappings(document domain.LogicalProje
 	}
 
 	return normalized
+}
+
+// TestIntegrationLogicalProjectRestoresIssueVersionForReviews is ISSUE-230's
+// integration regression: an issue at version 2+ with an open, claimable
+// review request must arrive in the destination project still claimable.
+// Before the fix every imported issue landed at version 1 while the request
+// kept its frozen target version, so the restored request was immediately
+// stale and no reviewer could ever claim it.
+func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
+	sourceEnv := newIntegrationEnvironment(t)
+	destEnv := newIntegrationEnvironment(t)
+	session := sourceEnv.connect(t)
+
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type":        "task",
+		"title":       "Versioned review target",
+		"description": "Exercise interchange of an issue whose version moved past 1.",
+		"status":      "review",
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+	for version := int64(1); version <= 2; version++ {
+		updated := callIntegrationTool(t, session, "update_issue", map[string]any{
+			"issue_id":         issue.DisplayID,
+			"expected_version": version,
+			"changes":          map[string]any{"description": fmt.Sprintf("Implementation revision %d.", version)},
+		})
+		if updated.IsError {
+			t.Fatalf("update_issue result = %#v", updated)
+		}
+	}
+
+	db, err := sqlite.Open(context.Background(), mustProjectDatabasePath(t, sourceEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open source project database: %v", err)
+	}
+	sourceVersion, sourceEventID := currentReviewTarget(t, db, issue.ID)
+	if sourceVersion < 3 {
+		t.Fatalf("source issue version = %d, want 3 after two updates", sourceVersion)
+	}
+	reviewRepository, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("new review repository: %v", err)
+	}
+	if _, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
+		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
+		Purposes:           []string{"implementation"},
+		IssueID:            issue.ID,
+		TargetIssueVersion: sourceVersion,
+		TargetEventID:      sourceEventID,
+		ArtifactIDs:        []string{},
+		OccurredAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create review request: %v", err)
+	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatalf("close source project database: %v", err)
+	}
+
+	document := mustExportLogicalProjectDocument(t, sourceEnv)
+	var exportedVersion *int64
+	for _, exported := range document.Issues {
+		if exported.Title == "Versioned review target" {
+			exportedVersion = exported.Version
+		}
+	}
+	if exportedVersion == nil || *exportedVersion != sourceVersion {
+		t.Fatalf("exported issue version = %v, want %d", exportedVersion, sourceVersion)
+	}
+	mustApplyLogicalProjectDocument(t, destEnv, document)
+
+	destDB, err := sqlite.Open(context.Background(), mustProjectDatabasePath(t, destEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open destination project database: %v", err)
+	}
+	var destIssueID, destRequestID string
+	var destVersion int64
+	if err := destDB.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT id, version FROM issues`).Scan(&destIssueID, &destVersion); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&destRequestID)
+	}); err != nil {
+		t.Fatalf("read imported rows: %v", err)
+	}
+	if err := destDB.Close(context.Background()); err != nil {
+		t.Fatalf("close destination project database: %v", err)
+	}
+	if destVersion != sourceVersion {
+		t.Fatalf("imported issue version = %d, want the source's %d", destVersion, sourceVersion)
+	}
+	if destIssueID == issue.ID {
+		t.Fatalf("imported issue kept the source ID %q; IDs must be remapped", destIssueID)
+	}
+
+	destSession := destEnv.connect(t)
+	got := callIntegrationTool(t, destSession, "get_review_request", map[string]any{"review_request_id": destRequestID})
+	var reviewOutput struct {
+		Status             string `json:"status"`
+		Claimable          bool   `json:"claimable"`
+		TargetIssueVersion int64  `json:"target_issue_version"`
+	}
+	decodeIntegrationResult(t, got, &reviewOutput)
+	if got.IsError || reviewOutput.Status != "open" || !reviewOutput.Claimable {
+		t.Fatalf("imported review request = %#v, decoded = %#v; want an open, claimable request", got, reviewOutput)
+	}
+	if reviewOutput.TargetIssueVersion != sourceVersion {
+		t.Fatalf("imported target_issue_version = %d, want %d", reviewOutput.TargetIssueVersion, sourceVersion)
+	}
 }

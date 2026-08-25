@@ -1484,3 +1484,160 @@ func assignImportDestinationIDs(t *testing.T, plan domain.LogicalProjectImportPl
 	plan.DestinationIDs = destinationIDs
 	return plan
 }
+
+// TestProjectRepositoryRestoresIssueVersionSoImportedReviewsStayFresh is
+// ISSUE-230's regression: every issue used to import at version 1 while its
+// review target and request kept the frozen source version, so a request
+// that was fresh and claimable at export arrived permanently stale. The v2
+// document now carries the issue's own version, and export-import-export
+// preserves it.
+func TestProjectRepositoryRestoresIssueVersionSoImportedReviewsStayFresh(t *testing.T) {
+	db, now := openProjectDatabase(t, "versioned source", "instructions")
+	ctx := context.Background()
+	generator, err := ids.NewGenerator(clock.NewFakeClock(now), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	issueID, err := generator.New()
+	if err != nil {
+		t.Fatalf("issue ID generation: %v", err)
+	}
+	var sourceEventID int64
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		// version 3: the issue was updated twice after creation, exactly the
+		// state a review request is normally created against.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'reviewed at version 3', 'review', 'high', 3, ?, ?)`,
+			issueID, sqlite.FormatStorageTime(now.Add(1*time.Second)), sqlite.FormatStorageTime(now.Add(2*time.Second))); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at, source) VALUES (?, 'issue_updated', '{"kind":"updated"}', ?, 'issue') RETURNING id`,
+			issueID, sqlite.FormatStorageTime(now.Add(3*time.Second))).Scan(&sourceEventID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FC2', ?, 3, ?, '[]', 1, ?)`,
+			issueID, sourceEventID, sqlite.FormatStorageTime(now.Add(4*time.Second))); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, version, created_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FC1', '01ARZ3NDEKTSV4RRFFQ69G5FC2', ?, 3, ?, '[]', 'open', 1, ?)`,
+			issueID, sourceEventID, sqlite.FormatStorageTime(now.Add(5*time.Second)))
+		return err
+	}); err != nil {
+		t.Fatalf("seed versioned review: %v", err)
+	}
+
+	sourceRepository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	sourceReviews, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("NewReviewRepository() error = %v", err)
+	}
+	sourceRequest, err := sourceReviews.GetReviewRequest(ctx, "01ARZ3NDEKTSV4RRFFQ69G5FC1")
+	if err != nil {
+		t.Fatalf("source GetReviewRequest() error = %v", err)
+	}
+	if sourceRequest.TargetStale {
+		t.Fatalf("source review request is stale before export; the fixture is wrong")
+	}
+
+	exported, err := sourceRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if len(exported.Issues) != 1 || exported.Issues[0].Version == nil || *exported.Issues[0].Version != 3 {
+		t.Fatalf("exported issues = %#v, want one issue carrying version 3", exported.Issues)
+	}
+
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	plan, err := domain.ParseLogicalProjectImportPlan(data)
+	if err != nil {
+		t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+	}
+	plan = assignImportDestinationIDs(t, plan)
+
+	destinationDB, _ := openProjectDatabase(t, "versioned destination", "instructions")
+	destinationRepository, err := sqlite.NewProjectRepository(destinationDB)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	if _, err := destinationRepository.ApplyLogicalProjectImport(ctx, plan); err != nil {
+		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+
+	var destinationVersion int64
+	var destinationRequestID string
+	if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT version FROM issues`).Scan(&destinationVersion); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&destinationRequestID)
+	}); err != nil {
+		t.Fatalf("read imported rows: %v", err)
+	}
+	if destinationVersion != 3 {
+		t.Fatalf("imported issues.version = %d, want the source's 3", destinationVersion)
+	}
+
+	destinationReviews, err := sqlite.NewReviewRepository(destinationDB)
+	if err != nil {
+		t.Fatalf("NewReviewRepository() error = %v", err)
+	}
+	destinationRequest, err := destinationReviews.GetReviewRequest(ctx, destinationRequestID)
+	if err != nil {
+		t.Fatalf("destination GetReviewRequest() error = %v", err)
+	}
+	// AC2: an open request that was fresh at export is still fresh, which
+	// also proves the event cursor landed below the destination's own log.
+	if destinationRequest.TargetStale {
+		t.Fatalf("imported review request is stale; it was fresh and claimable at export")
+	}
+	if destinationRequest.Request.Status != domain.ReviewRequestStatusOpen {
+		t.Fatalf("imported review request status = %q, want open", destinationRequest.Request.Status)
+	}
+
+	// AC5: the third leg of export-import-export carries the version too.
+	reExported, err := destinationRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("re-export ExportLogicalProject() error = %v", err)
+	}
+	if len(reExported.Issues) != 1 || reExported.Issues[0].Version == nil || *reExported.Issues[0].Version != 3 {
+		t.Fatalf("re-exported issues = %#v, want one issue carrying version 3", reExported.Issues)
+	}
+}
+
+// TestProjectRepositoryOmitsTheDefaultIssueVersionFromExports keeps the
+// ISSUE-230 addition invisible to a project that never updated an issue: the
+// exported document is byte-for-byte what it was before the field existed.
+func TestProjectRepositoryOmitsTheDefaultIssueVersionFromExports(t *testing.T) {
+	db, now := openProjectDatabase(t, "unversioned source", "instructions")
+	ctx := context.Background()
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FD1', 1, 'task', 'never updated', 'ready', 'medium', 1, ?, ?)`,
+			sqlite.FormatStorageTime(now.Add(1*time.Second)), sqlite.FormatStorageTime(now.Add(1*time.Second)))
+		return err
+	}); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatalf("NewProjectRepository() error = %v", err)
+	}
+	exported, err := repository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatalf("ExportLogicalProject() error = %v", err)
+	}
+	if len(exported.Issues) != 1 || exported.Issues[0].Version != nil {
+		t.Fatalf("exported issues = %#v, want the default version omitted", exported.Issues)
+	}
+	data, err := domain.MarshalLogicalProjectDocument(exported)
+	if err != nil {
+		t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+	}
+	if strings.Contains(string(data), `"version": 1`) {
+		t.Fatalf("exported document carries a default issue version: %s", data)
+	}
+}

@@ -48,6 +48,24 @@ type LogicalProjectProject struct {
 }
 
 // LogicalIssue is the exported issue record.
+//
+// Version is the source issue's optimistic-concurrency version, restored
+// verbatim on import. Version 2 only, and optional: it is omitted when it
+// equals DefaultLogicalIssueVersion, so a project whose issues were never
+// updated exports exactly the document it exported before, and a version 1
+// document (whose frozen record shape rejects the key) still imports every
+// issue at version 1.
+//
+// It is carried because the issue version is not private bookkeeping: review
+// targets, review requests, gate snapshots, review approvals, and attempts
+// all freeze an issue version, and review-target staleness is decided by
+// comparing the frozen number with the issue's current one. Importing every
+// issue at version 1 while preserving those frozen numbers made a review
+// that was fresh at export arrive permanently stale (ISSUE-230). Restoring
+// the version is the only fix that keeps the immutable snapshots honest;
+// rewriting them down to the destination's version would falsify an audit
+// record, and for a gate snapshot it would falsify the fingerprint computed
+// over it (docs/07 §4.1).
 type LogicalIssue struct {
 	ID                 string  `json:"id"`
 	Type               string  `json:"type"`
@@ -62,6 +80,33 @@ type LogicalIssue struct {
 	CreatedAt          string  `json:"created_at"`
 	UpdatedAt          string  `json:"updated_at"`
 	ClosedAt           *string `json:"closed_at"`
+	Version            *int64  `json:"version,omitempty"`
+}
+
+// DefaultLogicalIssueVersion is the issue version an interchange document
+// means when it carries no LogicalIssue.Version: the version every freshly
+// created issue holds, and the one every import wrote before ISSUE-230.
+const DefaultLogicalIssueVersion int64 = 1
+
+// LogicalIssueVersionForExport returns nil for the default version, so the
+// field is omitted rather than padding out every issue record with a
+// constant (the rule LogicalReviewTarget.Purposes already follows).
+func LogicalIssueVersionForExport(version int64) *int64 {
+	if version == DefaultLogicalIssueVersion {
+		return nil
+	}
+	return &version
+}
+
+// LogicalIssueVersionForImport resolves a record's carried version to the
+// version the destination row must be inserted with: the carried value, or
+// DefaultLogicalIssueVersion when the document does not express one (every
+// version 1 document, and any version 2 document written before ISSUE-230).
+func LogicalIssueVersionForImport(version *int64) int64 {
+	if version == nil {
+		return DefaultLogicalIssueVersion
+	}
+	return *version
 }
 
 // LogicalLabel is the exported label record.

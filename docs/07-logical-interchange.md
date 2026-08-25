@@ -114,8 +114,7 @@ import policy; version 1 creates an empty destination project from those
 values and rejects import into a nonempty project.
 
 Each `issues` record contains all durable issue fields except
-`sequence_no`, `display_id`, `version`, `archived_at`, and
-`archived_by_session_id`:
+`sequence_no`, `display_id`, `archived_at`, and `archived_by_session_id`:
 
 ```json
 {
@@ -131,14 +130,40 @@ Each `issues` record contains all durable issue fields except
   "created_by_session_id": null,
   "created_at": "2026-07-17T18:24:06Z",
   "updated_at": "2026-07-17T18:24:06Z",
-  "closed_at": null
+  "closed_at": null,
+  "version": 3
 }
 ```
 
 Archived issues are excluded entirely, including their issue-owned history.
 The importer applies existing enum, parent, and blocked-reason constraints.
-It assigns a fresh destination sequence number and version, maps every
-non-null `parent_id`, and imports `created_by_session_id` as `null`.
+It assigns a fresh destination sequence number, maps every non-null
+`parent_id`, and imports `created_by_session_id` as `null`.
+
+`version` is the issue's optimistic-concurrency version, restored verbatim.
+It is **version 2 only** and optional: it is omitted when it equals `1`, and
+a version 1 record shape rejects the key outright. An issue that carries no
+`version` is restored at version `1` — the behavior every import had before
+the field existed.
+
+The version is carried because it is not private bookkeeping. Review targets,
+review requests, gate snapshots, review approvals, and attempts each freeze
+the issue version they observed, and review-target staleness is decided by
+comparing a frozen version with the issue's current one (docs/09). Restoring
+every issue at version `1` while preserving those frozen numbers made a
+review request that was fresh and claimable at export arrive permanently
+stale (ISSUE-230). Rewriting the frozen numbers downward instead was
+rejected: they are immutable audit facts, and a gate snapshot's fingerprint
+is computed over a payload containing one (§4.1).
+
+Once a record states its issue's version, the importer enforces the ceiling
+that follows from it: no `review_targets[].issue_version`,
+`review_requests[].target_issue_version`, `attempts[].issue_version_at_start`,
+gate snapshot `issue_version`, or `review_approvals[].target_issue_version`
+for that issue may exceed it, because the destination could never reach that
+position. The check is skipped for an issue that states no version, so a
+version 1 document, or a version 2 document written before this field
+existed, keeps importing exactly as it always did.
 
 ## 4. Supporting entity records
 
@@ -298,7 +323,8 @@ The following are intentionally excluded:
   still active (version 2 only -- see docs/02 §18.7);
 - claimed review requests and their active review attempt binding (version
   2 only -- see §4);
-- generated issue display IDs, source row versions, and source event IDs;
+- generated issue display IDs and source event IDs, and every source row
+  version other than the issue version a version 2 document carries (§3);
 - binary artifact content, filesystem contents, absolute local paths, and
   machine-specific credentials;
 - SQLite internals, WAL files, query plans, and implementation indexes.
@@ -334,11 +360,12 @@ remain importable indefinitely.
 
 Version 2 is version 1 plus five additional, wholly optional top-level
 fields: `review_targets`, `review_requests`, `review_outcomes`,
-`review_events`, and `extensions` (§4), plus one optional field *within* an
-existing record: `events[].source` (§4). That second kind of addition is
-permitted only because version 1's own record shape is untouched — a
-version 1 document still rejects the key — which is what the per-version
-key table in `internal/domain/logical_project_import.go` exists to enforce.
+`review_events`, and `extensions` (§4), plus two optional fields *within*
+existing records: `events[].source` (§4) and `issues[].version` (§3). That
+second kind of addition is permitted only because version 1's own record
+shape is untouched — a version 1 document still rejects the key — which is
+what the per-version key table in
+`internal/domain/logical_project_import.go` exists to enforce.
 "Optional" here means precisely: the
 importer's required-field check for a version 2 document is the same set
 required for version 1 (§1); a version 2 document that omits any of the five

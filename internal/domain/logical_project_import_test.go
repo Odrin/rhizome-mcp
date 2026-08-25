@@ -488,3 +488,121 @@ func assertDomainErrorDetail(t *testing.T, err error, wantDomainCode, wantCode, 
 func assertDetail(t *testing.T, err error, wantCode, wantField string) {
 	assertDomainErrorDetail(t, err, domain.CodeInvalidArgument, wantCode, wantField)
 }
+
+// TestParseLogicalProjectImportPlanIssueVersionIsVersionGated covers
+// ISSUE-230 AC3/AC4: the issue version is a version 2 addition with the same
+// per-version key-table gate events[].source has, and an absent one keeps
+// version 1's meaning (every issue restores at version 1).
+func TestParseLogicalProjectImportPlanIssueVersionIsVersionGated(t *testing.T) {
+	withIssueVersion := func(documentVersion int, issueVersion any) []byte {
+		return buildLogicalProjectDocument(func(document map[string]any) {
+			document["version"] = documentVersion
+			if issueVersion != nil {
+				document["issues"].([]any)[0].(map[string]any)["version"] = issueVersion
+			}
+		})
+	}
+
+	t.Run("version 1 rejects the version key", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(withIssueVersion(1, 4))
+		assertDomainErrorDetail(t, err, domain.CodeUnsupportedField, domain.CodeUnsupportedField, "$.issues[0].version")
+	})
+
+	t.Run("version 2 carries the issue version", func(t *testing.T) {
+		plan, err := domain.ParseLogicalProjectImportPlan(withIssueVersion(2, 4))
+		if err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+		carried := plan.Document.Issues[0].Version
+		if carried == nil || *carried != 4 {
+			t.Fatalf("issue version = %v, want 4", carried)
+		}
+		if got := domain.LogicalIssueVersionForImport(carried); got != 4 {
+			t.Fatalf("LogicalIssueVersionForImport() = %d, want 4", got)
+		}
+	})
+
+	t.Run("an absent version restores at the default", func(t *testing.T) {
+		plan, err := domain.ParseLogicalProjectImportPlan(withIssueVersion(2, nil))
+		if err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+		if plan.Document.Issues[0].Version != nil {
+			t.Fatalf("issue version = %v, want absent", plan.Document.Issues[0].Version)
+		}
+		if got := domain.LogicalIssueVersionForImport(nil); got != domain.DefaultLogicalIssueVersion {
+			t.Fatalf("LogicalIssueVersionForImport(nil) = %d, want %d", got, domain.DefaultLogicalIssueVersion)
+		}
+	})
+
+	t.Run("version 2 rejects a version below one", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(withIssueVersion(2, 0))
+		assertDetail(t, err, "INVALID", "$.issues[0].version")
+	})
+}
+
+// TestParseLogicalProjectImportPlanRejectsCursorsAboveTheIssueVersion covers
+// ISSUE-230 AC1: once a document states an issue's version, no frozen
+// issue-version cursor may name a position the destination can never reach.
+func TestParseLogicalProjectImportPlanRejectsCursorsAboveTheIssueVersion(t *testing.T) {
+	reviewedDocument := func(issueVersion any, targetIssueVersion, requestIssueVersion, attemptIssueVersion int) []byte {
+		return buildLogicalProjectDocument(func(document map[string]any) {
+			document["version"] = 2
+			issue := document["issues"].([]any)[0].(map[string]any)
+			if issueVersion != nil {
+				issue["version"] = issueVersion
+			}
+			issueID := issue["id"]
+			attemptID := ulid.Make().String()
+			targetID := ulid.Make().String()
+			document["attempts"] = []any{map[string]any{
+				"id": attemptID, "issue_id": issueID, "session_id": nil, "agent_label": nil,
+				"kind": "review", "status": "completed",
+				"issue_version_at_start": attemptIssueVersion, "context_event_id_at_start": 0,
+				"lease_expires_at": "2026-07-17T18:24:07Z", "started_at": "2026-07-17T18:24:07Z",
+				"last_heartbeat_at": "2026-07-17T18:24:07Z", "finished_at": "2026-07-17T18:24:08Z",
+				"result_summary": nil, "next_steps": []any{}, "verification": []any{},
+				"failure_reason_code": nil, "interruption_reason_code": nil, "reason_details": nil,
+			}}
+			document["review_targets"] = []any{map[string]any{
+				"id": targetID, "issue_id": issueID, "issue_version": targetIssueVersion,
+				"latest_event_id": 0, "artifact_ids": []any{}, "created_at": "2026-07-17T18:24:07Z",
+			}}
+			document["review_requests"] = []any{map[string]any{
+				"id": ulid.Make().String(), "target_id": targetID, "issue_id": issueID,
+				"target_issue_version": requestIssueVersion, "target_event_id": 0,
+				"artifact_ids": []any{}, "status": "open", "supersedes_id": nil,
+				"created_at": "2026-07-17T18:24:08Z", "resolved_at": nil,
+			}}
+		})
+	}
+
+	t.Run("a consistent document is accepted", func(t *testing.T) {
+		if _, err := domain.ParseLogicalProjectImportPlan(reviewedDocument(3, 3, 3, 2)); err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+	})
+
+	t.Run("rejects a review target above the issue version", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(reviewedDocument(2, 3, 2, 2))
+		assertDetail(t, err, "INCONSISTENT_ISSUE_VERSION", "$.review_targets[0].issue_version")
+	})
+
+	t.Run("rejects a review request above the issue version", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(reviewedDocument(2, 2, 3, 2))
+		assertDetail(t, err, "INCONSISTENT_ISSUE_VERSION", "$.review_requests[0].target_issue_version")
+	})
+
+	t.Run("rejects an attempt above the issue version", func(t *testing.T) {
+		_, err := domain.ParseLogicalProjectImportPlan(reviewedDocument(2, 2, 2, 3))
+		assertDetail(t, err, "INCONSISTENT_ISSUE_VERSION", "$.attempts[0].issue_version_at_start")
+	})
+
+	t.Run("a document that states no issue version keeps its cursors", func(t *testing.T) {
+		// The documented fallback: a pre-ISSUE-230 document imported before
+		// and must keep importing, stale cursors and all.
+		if _, err := domain.ParseLogicalProjectImportPlan(reviewedDocument(nil, 3, 3, 3)); err != nil {
+			t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+		}
+	})
+}
