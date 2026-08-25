@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
-	"rhizome-mcp/internal/ports"
 )
 
 const (
@@ -51,7 +51,7 @@ type GraphService interface {
 
 // MaintenanceService exposes maintenance-only operations for CLI commands.
 type MaintenanceService interface {
-	ForceReleaseAttempt(context.Context, string) (ports.ForceReleaseAttemptResult, error)
+	ForceReleaseAttempt(context.Context, string) (application.ForceReleaseAttemptResult, error)
 	RebuildSearchIndex(context.Context) error
 }
 
@@ -849,7 +849,7 @@ func (c *CLI) runMaintenanceRebuildSearchIndex(ctx context.Context, args []strin
 	return err
 }
 
-func (c *CLI) writeMaintenanceReleaseAttemptTable(result ports.ForceReleaseAttemptResult) error {
+func (c *CLI) writeMaintenanceReleaseAttemptTable(result application.ForceReleaseAttemptResult) error {
 	var builder strings.Builder
 	builder.WriteString("attempt_id\tstatus\tinterruption_reason\tfinished_at\tlatest_event_id\n")
 	interruptionReason := ""
@@ -1139,7 +1139,7 @@ type MaintenanceReleaseAttemptResponse struct {
 	LatestEventID int64              `json:"latest_event_id"`
 }
 
-func maintenanceReleaseAttemptResponseFromDomain(result ports.ForceReleaseAttemptResult) MaintenanceReleaseAttemptResponse {
+func maintenanceReleaseAttemptResponseFromDomain(result application.ForceReleaseAttemptResult) MaintenanceReleaseAttemptResponse {
 	return MaintenanceReleaseAttemptResponse{Attempt: result.Attempt, LatestEventID: result.LatestEventID}
 }
 

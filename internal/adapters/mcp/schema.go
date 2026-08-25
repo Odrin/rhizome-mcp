@@ -226,7 +226,7 @@ func schemaSearch() *jsonschema.Schema {
 		"entity_types":     withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true}, "Optional result types; empty includes all."),
 		"issue_id":         withDescription(nullableIssueIdentifierSchema(), "Optional issue scope (ULID or ISSUE-N)."),
 		"epic_id":          withDescription(nullableIssueIdentifierSchema(), "Optional epic scope (ULID or ISSUE-N)."),
-		"statuses":         withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("open", "ready", "blocked", "review", "done", "cancelled"), MaxItems: intPointer(6), UniqueItems: true}, "Optional issue-status filter."),
+		"statuses":         withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(domain.StatusNames()...), MaxItems: intPointer(6), UniqueItems: true}, "Optional issue-status filter."),
 		"labels":           withDescription(boundedStringsSchema(domain.MaxLabelsPerIssue, domain.MaxLabelNameRunes), "Optional label filter."),
 		"include_archived": withDescription(booleanSchema(), "Include archived issue records."),
 		"limit":            withDescription(boundedIntegerSchema(0, domain.MaxSearchResults), "0 uses the default; 1-100 caps results."),
@@ -376,7 +376,7 @@ func schemaManageIssueRelation() *jsonschema.Schema {
 		"action":          enumSchema("add", "remove"),
 		"source_issue_id": issueIdentifierSchema(),
 		"target_issue_id": issueIdentifierSchema(),
-		"relation_type":   enumSchema("blocks", "related_to", "duplicates"),
+		"relation_type":   enumSchema(domain.RelationTypeNames()...),
 		"idempotency_key": nullableBoundedStringSchema(128),
 	}, "action", "source_issue_id", "target_issue_id", "relation_type"))
 }
@@ -386,7 +386,7 @@ func schemaGetIssueGraph() *jsonschema.Schema {
 		"root_issue_id":     withDescription(issueIdentifierSchema(), "Issue at the graph traversal root."),
 		"depth":             withDescription(boundedIntegerSchema(0, 5), "Relation hops from root; default 2."),
 		"direction":         withDescription(enumSchema("outgoing", "incoming", "both"), "Relation traversal direction."),
-		"relation_types":    withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("blocks", "related_to", "duplicates"), UniqueItems: true}, "Optional relation kinds; empty includes all."),
+		"relation_types":    withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(domain.RelationTypeNames()...), UniqueItems: true}, "Optional relation kinds; empty includes all."),
 		"include_hierarchy": withDescription(booleanSchema(), "Include derived epic hierarchy edges."),
 		"include_terminal":  withDescription(booleanSchema(), "Include terminal issue nodes."),
 		"max_nodes":         withDescription(boundedIntegerSchema(1, 500), "Maximum returned nodes; default 100."),
@@ -404,17 +404,17 @@ func schemaGetPlanningGraph() *jsonschema.Schema {
 
 func schemaPlanIssue() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
-		"ref": boundedStringSchema(64), "type": enumSchema("epic", "task", "bug"), "title": boundedStringSchema(300),
+		"ref": boundedStringSchema(64), "type": enumSchema(domain.IssueTypeNames()...), "title": boundedStringSchema(300),
 		"description": nullableBoundedStringSchema(100000), "acceptance_criteria": nullableBoundedStringSchema(50000),
-		"status":   enumSchema("open", "ready", "blocked", "review", "done", "cancelled"),
-		"priority": enumSchema("low", "medium", "high", "critical"), "parent_ref": nullableBoundedStringSchema(64),
+		"status":   enumSchema(domain.StatusNames()...),
+		"priority": enumSchema(domain.PriorityNames()...), "parent_ref": nullableBoundedStringSchema(64),
 		"blocked_reason": nullableBoundedStringSchema(100000), "labels": boundedStringsSchema(50, 64), "create_missing_labels": booleanSchema(),
 	}, "type", "title")
 }
 func schemaPlanRelation() *jsonschema.Schema {
 	return object(map[string]*jsonschema.Schema{
 		"source_ref": boundedStringSchema(64), "target_ref": boundedStringSchema(64),
-		"type": enumSchema("blocks", "related_to", "duplicates"),
+		"type": enumSchema(domain.RelationTypeNames()...),
 	}, "source_ref", "target_ref", "type")
 }
 func schemaPlanDecision() *jsonschema.Schema {

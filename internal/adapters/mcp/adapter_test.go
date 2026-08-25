@@ -4081,3 +4081,96 @@ func contains(values []string, wanted string) bool {
 	}
 	return false
 }
+
+// TestProjectOutputAdvertisedContractIsDerived verifies that the MCP server
+// advertises vocabularies and limits derived from domain slices, not copied.
+func TestProjectOutputAdvertisedContractIsDerived(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	// Call get_project to retrieve the advertised contract
+	result, err := client.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "get_project",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("get_project failed: %v", err)
+	}
+
+	var projectOutput struct {
+		SupportedIssueTypes    []string `json:"supported_issue_types"`
+		SupportedStatuses      []string `json:"supported_statuses"`
+		SupportedRelationTypes []string `json:"supported_relation_types"`
+		SupportedPriorities    []string `json:"supported_priorities"`
+		Limits                 struct {
+			DefaultIssueListLimit int `json:"default_issue_list_limit"`
+			DefaultLabelListLimit int `json:"default_label_list_limit"`
+			MaxCollectionLimit    int `json:"max_collection_limit"`
+		} `json:"limits"`
+	}
+
+	decodeStructured(t, result, &projectOutput)
+
+	// Verify supported_issue_types matches domain.IssueTypeNames()
+	expectedIssueTypes := domain.IssueTypeNames()
+	if !reflect.DeepEqual(projectOutput.SupportedIssueTypes, expectedIssueTypes) {
+		t.Errorf("supported_issue_types = %v, want %v (from domain.IssueTypeNames())", projectOutput.SupportedIssueTypes, expectedIssueTypes)
+	}
+
+	// Verify supported_statuses matches domain.StatusNames()
+	expectedStatuses := domain.StatusNames()
+	if !reflect.DeepEqual(projectOutput.SupportedStatuses, expectedStatuses) {
+		t.Errorf("supported_statuses = %v, want %v (from domain.StatusNames())", projectOutput.SupportedStatuses, expectedStatuses)
+	}
+
+	// Verify supported_relation_types matches domain.RelationTypeNames()
+	expectedRelationTypes := domain.RelationTypeNames()
+	if !reflect.DeepEqual(projectOutput.SupportedRelationTypes, expectedRelationTypes) {
+		t.Errorf("supported_relation_types = %v, want %v (from domain.RelationTypeNames())", projectOutput.SupportedRelationTypes, expectedRelationTypes)
+	}
+
+	// Verify supported_priorities matches domain.PriorityNames()
+	expectedPriorities := domain.PriorityNames()
+	if !reflect.DeepEqual(projectOutput.SupportedPriorities, expectedPriorities) {
+		t.Errorf("supported_priorities = %v, want %v (from domain.PriorityNames())", projectOutput.SupportedPriorities, expectedPriorities)
+	}
+
+	// Verify each supported value round-trips through the domain parse functions
+	for i, issueType := range projectOutput.SupportedIssueTypes {
+		if _, err := domain.ParseType(issueType); err != nil {
+			t.Errorf("supported_issue_types[%d] = %q does not round-trip through domain.ParseType: %v", i, issueType, err)
+		}
+	}
+
+	for i, status := range projectOutput.SupportedStatuses {
+		if _, err := domain.ParseStatus(status); err != nil {
+			t.Errorf("supported_statuses[%d] = %q does not round-trip through domain.ParseStatus: %v", i, status, err)
+		}
+	}
+
+	for i, relationType := range projectOutput.SupportedRelationTypes {
+		if _, err := domain.ParseRelationType(relationType); err != nil {
+			t.Errorf("supported_relation_types[%d] = %q does not round-trip through domain.ParseRelationType: %v", i, relationType, err)
+		}
+	}
+
+	for i, priority := range projectOutput.SupportedPriorities {
+		if _, err := domain.ParsePriority(priority); err != nil {
+			t.Errorf("supported_priorities[%d] = %q does not round-trip through domain.ParsePriority: %v", i, priority, err)
+		}
+	}
+
+	// Verify limits match domain constants
+	if projectOutput.Limits.DefaultIssueListLimit != domain.DefaultIssueListLimit {
+		t.Errorf("default_issue_list_limit = %d, want %d (from domain.DefaultIssueListLimit)", projectOutput.Limits.DefaultIssueListLimit, domain.DefaultIssueListLimit)
+	}
+	if projectOutput.Limits.DefaultLabelListLimit != domain.DefaultLabelListLimit {
+		t.Errorf("default_label_list_limit = %d, want %d (from domain.DefaultLabelListLimit)", projectOutput.Limits.DefaultLabelListLimit, domain.DefaultLabelListLimit)
+	}
+	if projectOutput.Limits.MaxCollectionLimit != domain.MaxCollectionLimit {
+		t.Errorf("max_collection_limit = %d, want %d (from domain.MaxCollectionLimit)", projectOutput.Limits.MaxCollectionLimit, domain.MaxCollectionLimit)
+	}
+}

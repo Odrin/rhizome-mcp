@@ -53,6 +53,23 @@ type ListReviewRequestsInput struct {
 	Cursor    *string
 }
 
+// Validate applies the shared collection page-size policy: a zero limit takes
+// the default and anything above the maximum is rejected rather than silently
+// clamped, so a caller asking for more than it can have is told so instead of
+// quietly receiving a short page.
+func (input ListReviewRequestsInput) Validate() (ListReviewRequestsInput, error) {
+	if input.Limit < 0 || input.Limit > domain.MaxCollectionLimit {
+		return ListReviewRequestsInput{}, domain.NewError(domain.CodeInvalidArgument,
+			"limit must be 0 (default) or between 1 and 100", false,
+			domain.Detail{Field: "limit", Code: "OUT_OF_RANGE", Message: "must be 0 (default) or between 1 and 100"})
+	}
+	limit := input.Limit
+	if limit == 0 {
+		limit = domain.DefaultIssueListLimit
+	}
+	return ListReviewRequestsInput{Status: input.Status, Claimable: input.Claimable, Limit: limit, Cursor: input.Cursor}, nil
+}
+
 // ReviewRequestListItem is one review request entry together with its derived claimability.
 type ReviewRequestListItem struct {
 	Request   domain.ReviewRequest
@@ -170,13 +187,12 @@ func (service *ReviewService) GetReviewRequest(ctx context.Context, requestID st
 
 // ListReviewRequests returns a deterministic page of review requests with claimability.
 func (service *ReviewService) ListReviewRequests(ctx context.Context, input ListReviewRequestsInput) (ListReviewRequestsResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return ListReviewRequestsResult{}, err
+	}
+	input = normalized
 	limit := input.Limit
-	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
 	offset := 0
 	if input.Cursor != nil {
 		cursorValue := strings.TrimSpace(*input.Cursor)

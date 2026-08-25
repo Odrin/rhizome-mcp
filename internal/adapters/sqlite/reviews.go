@@ -213,12 +213,6 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 	if repository == nil || repository.db == nil {
 		return ports.ListReviewRequestsResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
 	}
-	if query.Limit < 1 {
-		query.Limit = 20
-	}
-	if query.Limit > 100 {
-		query.Limit = 100
-	}
 	if query.Offset < 0 {
 		query.Offset = 0
 	}

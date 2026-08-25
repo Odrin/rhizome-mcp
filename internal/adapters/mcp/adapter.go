@@ -14,6 +14,22 @@ import (
 	"rhizome-mcp/internal/projectrouting"
 )
 
+// resolveView validates and defaults the view parameter. An empty input yields
+// the defaultView; a value in allowed is returned as-is; anything else returns
+// the unsupported field error.
+func resolveView(input string, defaultView string, allowed ...string) (string, error) {
+	view := input
+	if view == "" {
+		view = defaultView
+	}
+	for _, candidate := range allowed {
+		if view == candidate {
+			return view, nil
+		}
+	}
+	return "", unsupportedField("view")
+}
+
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
 	ProjectRouter   projectrouting.ProjectRouter
@@ -384,8 +400,9 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
 	result, err := adapter.services.AttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
@@ -394,10 +411,6 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 	})
 	if err != nil {
 		return adapter.failure(err)
-	}
-	view := input.View
-	if view == "" {
-		view = "compact"
 	}
 	if view == "full" {
 		attempt := attemptDTOFromDomain(result.Attempt)
@@ -464,8 +477,9 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
 	artifacts := make([]domain.ArtifactInput, len(input.Artifacts))
@@ -489,10 +503,6 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 	})
 	if err != nil {
 		return adapter.failure(err)
-	}
-	view := input.View
-	if view == "" {
-		view = "compact"
 	}
 	if view == "full" {
 		outputArtifacts := make([]artifactDTO, len(result.Artifacts))
@@ -638,7 +648,7 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	output := applyIssuePlanOutputFromPort(result)
+	output := applyIssuePlanOutputFromApplication(result)
 	output.NextActions = []string{"Use get_planning_graph to select executable work."}
 	return success(output, "issue plan applied")
 }
@@ -790,23 +800,16 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 	if err != nil {
 		return adapter.failure(err)
 	}
-	output := projectOutput{
-		ProjectRef:             ProjectRefFromContext(ctx),
-		Project:                projectDTOFromDomain(project, input.IncludeInstructions),
-		Session:                nil,
-		AppVersion:             adapter.appVersion,
-		SchemaVersion:          project.SchemaVersion,
-		ConfigVersion:          adapter.configVersion,
-		ToolProfile:            string(adapter.toolProfile),
-		Limits:                 limitsDTO{DefaultIssueListLimit: 20, DefaultLabelListLimit: 50, MaxCollectionLimit: 100},
-		SupportedIssueTypes:    []string{"epic", "task", "bug"},
-		SupportedStatuses:      []string{"open", "ready", "blocked", "review", "done", "cancelled"},
-		SupportedRelationTypes: []string{"blocks", "related_to", "duplicates"},
-		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
-		LatestEventID:          project.LatestEventID,
-		Guides:                 guideLinks(),
-		NextActions:            []string{"Retain project_ref and pass it to later project-scoped calls; read rhizome://guides/agent-workflow."},
-	}
+	output := projectOutputFor(
+		ProjectRefFromContext(ctx),
+		projectDTOFromDomain(project, input.IncludeInstructions),
+		nil,
+		adapter.appVersion,
+		project.SchemaVersion,
+		adapter.configVersion,
+		string(adapter.toolProfile),
+		project.LatestEventID,
+	)
 	return success(output, "project metadata returned")
 }
 
@@ -825,23 +828,16 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	output := projectOutput{
-		ProjectRef:             lease.ProjectRef(),
-		Project:                projectDTOFromDomain(project, false),
-		Session:                nil,
-		AppVersion:             adapter.appVersion,
-		SchemaVersion:          project.SchemaVersion,
-		ConfigVersion:          adapter.configVersion,
-		ToolProfile:            string(adapter.toolProfile),
-		Limits:                 limitsDTO{DefaultIssueListLimit: 20, DefaultLabelListLimit: 50, MaxCollectionLimit: 100},
-		SupportedIssueTypes:    []string{"epic", "task", "bug"},
-		SupportedStatuses:      []string{"open", "ready", "blocked", "review", "done", "cancelled"},
-		SupportedRelationTypes: []string{"blocks", "related_to", "duplicates"},
-		SupportedPriorities:    []string{"low", "medium", "high", "critical"},
-		LatestEventID:          project.LatestEventID,
-		Guides:                 guideLinks(),
-		NextActions:            []string{"Retain project_ref and pass it to later project-scoped calls; read rhizome://guides/agent-workflow."},
-	}
+	output := projectOutputFor(
+		lease.ProjectRef(),
+		projectDTOFromDomain(project, false),
+		nil,
+		adapter.appVersion,
+		project.SchemaVersion,
+		adapter.configVersion,
+		string(adapter.toolProfile),
+		project.LatestEventID,
+	)
 	return success(output, "project opened")
 }
 
@@ -892,8 +888,9 @@ func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	result, err := adapter.services.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
 		Type:                domain.Type(input.Type),
@@ -911,10 +908,6 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	view := input.View
-	if view == "" {
-		view = "compact"
-	}
 	if view == "full" {
 		return success(issueDTOFromDomain(result.Issue), "issue created")
 	}
@@ -922,8 +915,9 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	result, err := adapter.services.IssueService.UpdateIssue(ctx, domain.UpdateIssueInput{
 		IssueID:             input.IssueID,
@@ -935,10 +929,6 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	view := input.View
-	if view == "" {
-		view = "compact"
-	}
 	if view == "full" {
 		return success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, "issue updated")
 	}
@@ -946,8 +936,9 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "standard" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "standard", "compact", "standard", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	if len(input.Include) != 0 {
 		return adapter.failure(unsupportedField("include"))
@@ -958,10 +949,6 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 	issue, err := adapter.services.IssueService.GetIssue(ctx, input.IssueID)
 	if err != nil {
 		return adapter.failure(err)
-	}
-	view := input.View
-	if view == "" {
-		view = "standard"
 	}
 	switch view {
 	case "compact":
@@ -976,12 +963,9 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 }
 
 func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallToolRequest, input listIssuesInput) (*sdkmcp.CallToolResult, any, error) {
-	view := input.View
-	if view == "" {
-		view = "compact"
-	}
-	if view != "compact" && view != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	result, err := adapter.services.IssueService.ListIssues(ctx, domain.ListIssuesInput{
 		Types:             stringsToTypes(input.Types),
@@ -1029,8 +1013,9 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
-	if input.View != "" && input.View != "compact" && input.View != "full" {
-		return adapter.failure(unsupportedField("view"))
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
 	}
 	result, err := adapter.services.IssueService.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
@@ -1039,10 +1024,6 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	})
 	if err != nil {
 		return adapter.failure(err)
-	}
-	view := input.View
-	if view == "" {
-		view = "compact"
 	}
 	if view == "full" {
 		return success(issueDTOFromDomain(result.Issue), "issue archived")

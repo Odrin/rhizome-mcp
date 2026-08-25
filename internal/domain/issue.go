@@ -29,12 +29,7 @@ func ParseType(value string) (Type, error) {
 
 // Valid reports whether t is a supported issue type.
 func (t Type) Valid() bool {
-	switch t {
-	case TypeEpic, TypeTask, TypeBug:
-		return true
-	default:
-		return false
-	}
+	return enumValid(t, AllIssueTypes)
 }
 
 // Status is an issue status persisted in storage.
@@ -66,12 +61,7 @@ func ParseStatus(value string) (Status, error) {
 
 // Valid reports whether s is a supported stored status.
 func (s Status) Valid() bool {
-	switch s {
-	case StatusOpen, StatusReady, StatusBlocked, StatusReview, StatusDone, StatusCancelled:
-		return true
-	default:
-		return false
-	}
+	return enumValid(s, AllStatuses)
 }
 
 // Terminal reports whether s ends ordinary issue execution.
@@ -156,12 +146,7 @@ func ParsePriority(value string) (Priority, error) {
 
 // Valid reports whether p is a supported priority.
 func (p Priority) Valid() bool {
-	switch p {
-	case PriorityLow, PriorityMedium, PriorityHigh, PriorityCritical:
-		return true
-	default:
-		return false
-	}
+	return enumValid(p, AllPriorities)
 }
 
 // CanTransition reports whether the stored status transition is allowed.

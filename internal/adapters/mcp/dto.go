@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
-	"rhizome-mcp/internal/ports"
 )
 
 type exportProjectInput struct {
@@ -1433,7 +1433,7 @@ func issuePlanInputFromDomain(value domain.IssuePlan) issuePlanInput {
 	}
 	return result
 }
-func applyIssuePlanOutputFromPort(value ports.ApplyIssuePlanResult) applyIssuePlanOutput {
+func applyIssuePlanOutputFromApplication(value application.ApplyIssuePlanResult) applyIssuePlanOutput {
 	result := applyIssuePlanOutput{CreatedIssues: make([]createdPlanIssueDTO, len(value.CreatedIssues)), CreatedRelations: make([]relationDTO, len(value.CreatedRelations)), CreatedDecisions: make([]decisionDTO, len(value.CreatedDecisions)), LatestEventID: value.LatestEventID}
 	for i, issue := range value.CreatedIssues {
 		result.CreatedIssues[i] = createdPlanIssueDTO{Ref: issue.Ref, Issue: issueDTOFromDomain(issue.Issue)}
@@ -1445,6 +1445,26 @@ func applyIssuePlanOutputFromPort(value ports.ApplyIssuePlanResult) applyIssuePl
 		result.CreatedDecisions[i] = decisionDTO{ID: decision.ID, IssueID: decision.IssueID, Title: decision.Title, Summary: decision.Summary, Content: decision.Content, Status: decision.Status, CreatedAt: decision.CreatedAt}
 	}
 	return result
+}
+
+func projectOutputFor(projectRef string, project projectDTO, session *sessionDTO, appVersion string, schemaVersion int, configVersion int, toolProfile string, latestEventID int64) projectOutput {
+	return projectOutput{
+		ProjectRef:             projectRef,
+		Project:                project,
+		Session:                session,
+		AppVersion:             appVersion,
+		SchemaVersion:          schemaVersion,
+		ConfigVersion:          configVersion,
+		ToolProfile:            toolProfile,
+		Limits:                 limitsDTO{DefaultIssueListLimit: domain.DefaultIssueListLimit, DefaultLabelListLimit: domain.DefaultLabelListLimit, MaxCollectionLimit: domain.MaxCollectionLimit},
+		SupportedIssueTypes:    domain.IssueTypeNames(),
+		SupportedStatuses:      domain.StatusNames(),
+		SupportedRelationTypes: domain.RelationTypeNames(),
+		SupportedPriorities:    domain.PriorityNames(),
+		LatestEventID:          latestEventID,
+		Guides:                 guideLinks(),
+		NextActions:            []string{"Retain project_ref and pass it to later project-scoped calls; read rhizome://guides/agent-workflow."},
+	}
 }
 
 func projectDTOFromDomain(project domain.Project, includeInstructions bool) projectDTO {

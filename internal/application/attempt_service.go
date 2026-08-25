@@ -28,6 +28,24 @@ type ClaimIssueResult struct {
 	LeaseToken   string
 }
 
+type RenewAttemptResult struct {
+	LeaseExpiresAt time.Time
+	ServerTime     time.Time
+}
+
+type SaveAttemptNoteResult struct {
+	Note      domain.AttemptNote
+	Artifacts []domain.Artifact
+}
+
+type FinishAttemptResult struct {
+	Attempt       domain.WorkAttempt
+	Issue         domain.Issue
+	Warnings      []string
+	LatestEventID int64
+	Artifacts     []domain.Artifact
+}
+
 func NewAttemptService(repository ports.AttemptRepository, source clock.Clock, generator IDGenerator) (*AttemptService, error) {
 	if repository == nil || source == nil || generator == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "attempt dependencies are required", false)
@@ -117,17 +135,24 @@ func (service *AttemptService) newReservationResourceInputs(resources []domain.R
 	return inputs, nil
 }
 
-func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.RenewAttemptInput) (ports.RenewAttemptResult, error) {
+func (service *AttemptService) RenewAttempt(ctx context.Context, input domain.RenewAttemptInput) (RenewAttemptResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
-		return ports.RenewAttemptResult{}, err
+		return RenewAttemptResult{}, err
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
 	now := service.clock.Now().UTC()
-	return service.repository.RenewAttempt(ctx, ports.RenewAttemptCommand{
+	result, err := service.repository.RenewAttempt(ctx, ports.RenewAttemptCommand{
 		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:],
 		LeaseDuration: time.Duration(*normalized.LeaseSeconds) * time.Second, OccurredAt: now,
 	})
+	if err != nil {
+		return RenewAttemptResult{}, err
+	}
+	return RenewAttemptResult{
+		LeaseExpiresAt: result.LeaseExpiresAt,
+		ServerTime:     result.ServerTime,
+	}, nil
 }
 
 func (service *AttemptService) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
@@ -143,10 +168,10 @@ func (service *AttemptService) ListActiveAttempts(ctx context.Context, limit int
 	return service.repository.ListActiveAttempts(ctx, ports.ListActiveAttemptsCommand{Limit: limit, Now: now})
 }
 
-func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (ports.SaveAttemptNoteResult, error) {
+func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain.SaveAttemptNoteInput) (SaveAttemptNoteResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
-		return ports.SaveAttemptNoteResult{}, err
+		return SaveAttemptNoteResult{}, err
 	}
 
 	var idempotencyKey string
@@ -154,37 +179,37 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 	if normalized.IdempotencyKey != nil {
 		canonical, err := domain.CanonicalSaveAttemptNoteRequest(normalized)
 		if err != nil {
-			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode save attempt note request", false)
+			return SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode save attempt note request", false)
 		}
 		hash := sha256.Sum256(canonical)
 		requestHash = append([]byte(nil), hash[:]...)
 		idempotencyKey = *normalized.IdempotencyKey
 		result, found, err := service.repository.LookupSaveAttemptNote(ctx, idempotencyKey, requestHash)
 		if err != nil {
-			return ports.SaveAttemptNoteResult{}, err
+			return SaveAttemptNoteResult{}, err
 		}
 		if found {
-			return result, nil
+			return SaveAttemptNoteResult{Note: result.Note, Artifacts: result.Artifacts}, nil
 		}
 	}
 
 	id, err := service.ids.New()
 	if err != nil {
-		return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+		return SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
 	}
 	if _, err := ids.ParseStrict(id); err != nil {
-		return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
+		return SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate attempt note identifier", false)
 	}
 	now := service.clock.Now().UTC()
 	artifacts := make([]domain.Artifact, len(normalized.Artifacts))
 	for index, inputArtifact := range normalized.Artifacts {
 		artifactID, err := service.ids.New()
 		if err != nil {
-			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+			return SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
 				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "ID_GENERATION_FAILED"})
 		}
 		if _, err := ids.ParseStrict(artifactID); err != nil {
-			return ports.SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+			return SaveAttemptNoteResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
 				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "INVALID_ULID"})
 		}
 		artifacts[index] = domain.Artifact{
@@ -200,9 +225,9 @@ func (service *AttemptService) SaveAttemptNote(ctx context.Context, input domain
 		Artifacts: artifacts, OccurredAt: now, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
 	})
 	if err != nil {
-		return ports.SaveAttemptNoteResult{}, err
+		return SaveAttemptNoteResult{}, err
 	}
-	return result, nil
+	return SaveAttemptNoteResult{Note: result.Note, Artifacts: result.Artifacts}, nil
 }
 
 // SubmitGateEvidence validates and idempotently upserts one lease-authenticated
@@ -327,27 +352,33 @@ func (service *AttemptService) ReleaseResources(ctx context.Context, input domai
 	})
 }
 
-func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.FinishAttemptInput) (ports.FinishAttemptResult, error) {
+func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.FinishAttemptInput) (FinishAttemptResult, error) {
 	normalized, err := input.Validate()
 	if err != nil {
-		return ports.FinishAttemptResult{}, err
+		return FinishAttemptResult{}, err
 	}
 	var idempotencyKey string
 	var requestHash []byte
 	if normalized.IdempotencyKey != nil {
 		canonical, err := domain.CanonicalFinishAttemptRequest(normalized)
 		if err != nil {
-			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode finish request", false)
+			return FinishAttemptResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode finish request", false)
 		}
 		hash := sha256.Sum256(canonical)
 		requestHash = append([]byte(nil), hash[:]...)
 		idempotencyKey = *normalized.IdempotencyKey
 		result, found, err := service.repository.LookupFinishedAttempt(ctx, idempotencyKey, requestHash)
 		if err != nil {
-			return ports.FinishAttemptResult{}, err
+			return FinishAttemptResult{}, err
 		}
 		if found {
-			return result, nil
+			return FinishAttemptResult{
+				Attempt:       result.Attempt,
+				Issue:         result.Issue,
+				Warnings:      result.Warnings,
+				LatestEventID: result.LatestEventID,
+				Artifacts:     result.Artifacts,
+			}, nil
 		}
 	}
 	now := service.clock.Now().UTC()
@@ -355,11 +386,11 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 	for index, inputArtifact := range normalized.Artifacts {
 		artifactID, err := service.ids.New()
 		if err != nil {
-			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+			return FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
 				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "ID_GENERATION_FAILED"})
 		}
 		if _, err := ids.ParseStrict(artifactID); err != nil {
-			return ports.FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
+			return FinishAttemptResult{}, domain.WrapError(err, domain.CodeIDGeneration, "cannot generate artifact identifier", false,
 				domain.Detail{Field: "artifacts[" + strconv.Itoa(index) + "].id", Code: "INVALID_ULID"})
 		}
 		var title *string
@@ -373,8 +404,18 @@ func (service *AttemptService) FinishAttempt(ctx context.Context, input domain.F
 		}
 	}
 	hash := sha256.Sum256([]byte(normalized.LeaseToken))
-	return service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
+	result, err := service.repository.FinishAttempt(ctx, ports.FinishAttemptCommand{
 		AttemptID: normalized.AttemptID, SessionID: normalized.SessionID, TokenHash: hash[:], Input: normalized,
 		Artifacts: artifacts, IdempotencyKey: idempotencyKey, RequestHash: requestHash, OccurredAt: now,
 	})
+	if err != nil {
+		return FinishAttemptResult{}, err
+	}
+	return FinishAttemptResult{
+		Attempt:       result.Attempt,
+		Issue:         result.Issue,
+		Warnings:      result.Warnings,
+		LatestEventID: result.LatestEventID,
+		Artifacts:     result.Artifacts,
+	}, nil
 }

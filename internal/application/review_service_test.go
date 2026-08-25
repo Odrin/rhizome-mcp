@@ -150,6 +150,67 @@ func TestReviewServiceListFiltersByStatusAndClaimability(t *testing.T) {
 	}
 }
 
+// TestReviewServiceListAppliesCollectionLimitPolicy pins the ISSUE-203 AC6
+// policy. The limit rule used to be duplicated as a silent clamp in both the
+// service and the SQLite repository, so asking for 101 quietly returned 100
+// instead of saying no. The rule now lives once, in Validate, and matches
+// ListIssuesInput: zero means the default, above the maximum is an error.
+func TestReviewServiceListAppliesCollectionLimitPolicy(t *testing.T) {
+	newService := func(t *testing.T) (*ReviewService, *reviewRepositoryStub) {
+		t.Helper()
+		fakeClock := clock.NewFakeClock(time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC))
+		generator, _ := ids.NewGenerator(fakeClock, rand.Reader)
+		repository := &reviewRepositoryStub{request: domain.ReviewRequest{ID: "req-1", Status: domain.ReviewRequestStatusOpen}}
+		service, err := NewReviewService(repository, &issueRepositoryStub{}, fakeClock, generator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return service, repository
+	}
+
+	t.Run("zero limit takes the default", func(t *testing.T) {
+		service, repository := newService(t)
+		if _, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Limit: 0}); err != nil {
+			t.Fatalf("ListReviewRequests(limit 0) error = %v", err)
+		}
+		if repository.listQuery.Limit != domain.DefaultIssueListLimit {
+			t.Fatalf("repository limit = %d, want the default %d", repository.listQuery.Limit, domain.DefaultIssueListLimit)
+		}
+	})
+
+	t.Run("maximum limit is accepted unchanged", func(t *testing.T) {
+		service, repository := newService(t)
+		if _, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Limit: domain.MaxCollectionLimit}); err != nil {
+			t.Fatalf("ListReviewRequests(limit %d) error = %v", domain.MaxCollectionLimit, err)
+		}
+		if repository.listQuery.Limit != domain.MaxCollectionLimit {
+			t.Fatalf("repository limit = %d, want %d", repository.listQuery.Limit, domain.MaxCollectionLimit)
+		}
+	})
+
+	t.Run("above the maximum is rejected, not clamped", func(t *testing.T) {
+		service, repository := newService(t)
+		_, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Limit: domain.MaxCollectionLimit + 1})
+		if err == nil {
+			t.Fatal("ListReviewRequests(limit 101) succeeded, want an out-of-range error")
+		}
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument {
+			t.Fatalf("error = %v, want a domain INVALID_ARGUMENT", err)
+		}
+		if repository.listQuery.Limit != 0 {
+			t.Fatalf("repository was queried with limit %d; a rejected request must not reach storage", repository.listQuery.Limit)
+		}
+	})
+
+	t.Run("negative limit is rejected", func(t *testing.T) {
+		service, _ := newService(t)
+		if _, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Limit: -1}); err == nil {
+			t.Fatal("ListReviewRequests(limit -1) succeeded, want an out-of-range error")
+		}
+	})
+}
+
 type issueRepositoryStub struct {
 	issue domain.Issue
 }
@@ -199,6 +260,7 @@ func (stub *issueRepositoryStub) CountIssuesByEffectiveStatus(context.Context, p
 }
 
 type reviewRepositoryStub struct {
+	listQuery      ports.ListReviewRequestsQuery
 	createCommand  ports.CreateReviewRequestCommand
 	request        domain.ReviewRequest
 	replaceCommand ports.ReplaceReviewRequestCommand
@@ -218,6 +280,7 @@ func (stub *reviewRepositoryStub) GetReviewRequest(_ context.Context, requestID 
 }
 
 func (stub *reviewRepositoryStub) ListReviewRequests(_ context.Context, query ports.ListReviewRequestsQuery) (ports.ListReviewRequestsResult, error) {
+	stub.listQuery = query
 	return ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{stub.request}, HasMore: false, NextOffset: 0}, nil
 }
 

@@ -277,7 +277,7 @@ func TestFinishAttemptConcurrentSameKeyReplay(t *testing.T) {
 
 	start := make(chan struct{})
 	results := make(chan struct {
-		result ports.FinishAttemptResult
+		result application.FinishAttemptResult
 		err    error
 	}, 2)
 	var group sync.WaitGroup
@@ -288,7 +288,7 @@ func TestFinishAttemptConcurrentSameKeyReplay(t *testing.T) {
 			<-start
 			result, err := fixture.attempts.FinishAttempt(context.Background(), input)
 			results <- struct {
-				result ports.FinishAttemptResult
+				result application.FinishAttemptResult
 				err    error
 			}{result: result, err: err}
 		}()
@@ -297,7 +297,7 @@ func TestFinishAttemptConcurrentSameKeyReplay(t *testing.T) {
 	group.Wait()
 	close(results)
 
-	var first ports.FinishAttemptResult
+	var first application.FinishAttemptResult
 	for index := 0; index < 2; index++ {
 		outcome := <-results
 		if outcome.err != nil {

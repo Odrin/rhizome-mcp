@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
-	"rhizome-mcp/internal/ports"
 )
 
 type stubProjectService struct {
@@ -114,7 +114,7 @@ func (s *stubGraphService) GetIssueGraph(ctx context.Context, input domain.GetIs
 }
 
 type stubMaintenanceService struct {
-	releaseResult ports.ForceReleaseAttemptResult
+	releaseResult application.ForceReleaseAttemptResult
 	releaseErr    error
 	rebuildErr    error
 	calledRelease bool
@@ -145,7 +145,7 @@ func (s *stubBoardService) Search(context.Context, domain.SearchInput) (domain.S
 	return s.searchPage, s.searchErr
 }
 
-func (s *stubMaintenanceService) ForceReleaseAttempt(ctx context.Context, attemptID string) (ports.ForceReleaseAttemptResult, error) {
+func (s *stubMaintenanceService) ForceReleaseAttempt(ctx context.Context, attemptID string) (application.ForceReleaseAttemptResult, error) {
 	s.calledRelease = true
 	s.releaseID = attemptID
 	return s.releaseResult, s.releaseErr
@@ -700,7 +700,7 @@ func TestRunMaintenanceCommands(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		finishedAt := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 		interruptionReason := domain.InterruptionReasonUserRequest
-		maintenanceService := &stubMaintenanceService{releaseResult: ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.AttemptStatusInterrupted, InterruptionReasonCode: &interruptionReason, FinishedAt: &finishedAt}, LatestEventID: 7}}
+		maintenanceService := &stubMaintenanceService{releaseResult: application.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: domain.AttemptStatusInterrupted, InterruptionReasonCode: &interruptionReason, FinishedAt: &finishedAt}, LatestEventID: 7}}
 		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
 		if err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "01ARZ3NDEKTSV4RRFFQ69G5FAV"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -718,7 +718,7 @@ func TestRunMaintenanceCommands(t *testing.T) {
 
 	t.Run("release attempt json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		maintenanceService := &stubMaintenanceService{releaseResult: ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, LatestEventID: 7}}
+		maintenanceService := &stubMaintenanceService{releaseResult: application.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, LatestEventID: 7}}
 		cli := New(Services{MaintenanceService: maintenanceService}, &stdout, &stderr, nil, nil)
 		if err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--format", "json"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)

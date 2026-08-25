@@ -92,12 +92,12 @@ type ListLabelsInput struct {
 
 // Validate validates list bounds and normalizes the optional query prefix.
 func (input ListLabelsInput) Validate() (ListLabelsInput, error) {
-	if input.Limit < 0 || input.Limit > 100 {
+	if input.Limit < 0 || input.Limit > MaxCollectionLimit {
 		return ListLabelsInput{}, validationError("limit", "OUT_OF_RANGE", "must be 0 (default) or between 1 and 100")
 	}
 	limit := input.Limit
 	if limit == 0 {
-		limit = 50
+		limit = DefaultLabelListLimit
 	}
 	if err := ValidateText("query", input.Query, MaxLabelNameRunes); err != nil {
 		return ListLabelsInput{}, err

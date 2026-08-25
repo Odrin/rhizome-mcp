@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
-	"rhizome-mcp/internal/ports"
 )
 
 func TestWriteTableWriters(t *testing.T) {
@@ -117,7 +117,7 @@ func TestWriteTableWriters(t *testing.T) {
 		cli := New(Services{}, &stdout, nil, nil, nil)
 		finishedAt := time.Date(2026, 8, 7, 12, 45, 0, 0, time.UTC)
 		interruption := domain.InterruptionReasonHandoff
-		result := ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "att-2", Status: domain.AttemptStatusInterrupted, InterruptionReasonCode: &interruption, FinishedAt: &finishedAt}, LatestEventID: 18}
+		result := application.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "att-2", Status: domain.AttemptStatusInterrupted, InterruptionReasonCode: &interruption, FinishedAt: &finishedAt}, LatestEventID: 18}
 		if err := cli.writeMaintenanceReleaseAttemptTable(result); err != nil {
 			t.Fatalf("writeMaintenanceReleaseAttemptTable: %v", err)
 		}
@@ -285,7 +285,7 @@ func TestRunCommandFlowsAndParsing(t *testing.T) {
 
 	t.Run("maintenance release attempt and rebuild", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		stub := &stubMaintenanceService{releaseResult: ports.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "att-9"}, LatestEventID: 12}}
+		stub := &stubMaintenanceService{releaseResult: application.ForceReleaseAttemptResult{Attempt: domain.WorkAttempt{ID: "att-9"}, LatestEventID: 12}}
 		cli := New(Services{MaintenanceService: stub}, &stdout, &stderr, nil, nil)
 		if err := cli.Run(context.Background(), []string{"maintenance", "release-attempt", "ATT-9", "--format", "json"}); err != nil {
 			t.Fatalf("unexpected error: %v", err)

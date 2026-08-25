@@ -40,7 +40,7 @@ type IssueList struct {
 // Validate validates and defensively copies all list input. A zero limit
 // defaults to 20 and the maximum page size is 100.
 func (input ListIssuesInput) Validate() (ListIssuesInput, error) {
-	if input.Limit < 0 || input.Limit > 100 {
+	if input.Limit < 0 || input.Limit > MaxCollectionLimit {
 		return ListIssuesInput{}, validationError("limit", "OUT_OF_RANGE", "must be 0 (default) or between 1 and 100")
 	}
 	types, err := copyIssueListEnums("types", input.Types, func(value Type) bool { return value.Valid() })
@@ -74,7 +74,7 @@ func (input ListIssuesInput) Validate() (ListIssuesInput, error) {
 	}
 	limit := input.Limit
 	if limit == 0 {
-		limit = 20
+		limit = DefaultIssueListLimit
 	}
 	return ListIssuesInput{
 		Types:             types,
