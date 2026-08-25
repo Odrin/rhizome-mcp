@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"rhizome-mcp/internal/domain"
@@ -277,29 +278,7 @@ func (repository *ProjectRepository) ExportLogicalProject(ctx context.Context) (
 func (repository *ProjectRepository) HasLogicalProjectImportDestinationContent(ctx context.Context) (bool, error) {
 	var hasContent bool
 	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
-		row := query.QueryRowContext(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM issues
-				UNION ALL
-				SELECT 1 FROM labels
-				UNION ALL
-				SELECT 1 FROM issue_labels
-				UNION ALL
-				SELECT 1 FROM issue_relations
-				UNION ALL
-				SELECT 1 FROM comments
-				UNION ALL
-				SELECT 1 FROM decisions
-				UNION ALL
-				SELECT 1 FROM work_attempts
-				UNION ALL
-				SELECT 1 FROM attempt_notes
-				UNION ALL
-				SELECT 1 FROM artifacts
-				UNION ALL
-				SELECT 1 FROM issue_events
-			)`)
-		return row.Scan(&hasContent)
+		return query.QueryRowContext(ctx, logicalProjectImportDestinationContentQuery).Scan(&hasContent)
 	})
 	if err != nil {
 		return false, err
@@ -1000,32 +979,66 @@ func logicalImportRelationWriteError(err error, index int) error {
 
 func hasLogicalProjectImportDestinationContentInTransaction(ctx context.Context, tx Executor) (bool, error) {
 	var hasContent bool
-	row := tx.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM issues
-			UNION ALL
-			SELECT 1 FROM labels
-			UNION ALL
-			SELECT 1 FROM issue_labels
-			UNION ALL
-			SELECT 1 FROM issue_relations
-			UNION ALL
-			SELECT 1 FROM comments
-			UNION ALL
-			SELECT 1 FROM decisions
-			UNION ALL
-			SELECT 1 FROM work_attempts
-			UNION ALL
-			SELECT 1 FROM attempt_notes
-			UNION ALL
-			SELECT 1 FROM artifacts
-			UNION ALL
-			SELECT 1 FROM issue_events
-		)`)
-	if err := row.Scan(&hasContent); err != nil {
+	if err := tx.QueryRowContext(ctx, logicalProjectImportDestinationContentQuery).Scan(&hasContent); err != nil {
 		return false, err
 	}
 	return hasContent, nil
+}
+
+// logicalProjectImportDestinationContentTables is the authoritative
+// definition of "this destination already holds durable project content",
+// shared by the preflight check and the in-transaction race-closing check
+// above so the two can never disagree about what empty means. Both used to
+// carry their own copy of the list, and both copies stopped at the tables
+// that existed when logical interchange was first written: a project holding
+// only workflow policies looked empty to each of them, so an import merged
+// into it despite the format's no-merge contract (ISSUE-233).
+//
+// Every table an import writes into belongs here, plus every other table that
+// holds durable project content -- membership does not depend on whether the
+// interchange format happens to carry the table today (review_follow_ups does
+// not cross the boundary, but a destination holding one is still not empty).
+//
+// Deliberately absent, and asserted as such by
+// TestLogicalProjectImportDestinationContentCoversEveryDurableTable:
+// the projects row itself (the destination project always exists),
+// agent_sessions (a connected client would make every project look occupied,
+// and sessions are excluded from interchange entirely -- docs/07 §5),
+// idempotency_records, schema_migrations, and the derived search_index FTS
+// tables.
+var logicalProjectImportDestinationContentTables = []string{
+	"issues",
+	"labels",
+	"issue_labels",
+	"issue_relations",
+	"comments",
+	"decisions",
+	"work_attempts",
+	"attempt_notes",
+	"artifacts",
+	"issue_events",
+	"review_targets",
+	"review_requests",
+	"review_outcomes",
+	"review_follow_ups",
+	"review_approvals",
+	"resource_reservations",
+	"workflow_policies",
+	"workflow_policy_events",
+	"attempt_gate_snapshots",
+	"review_target_gate_snapshots",
+	"gate_evidence",
+	"gate_evidence_events",
+}
+
+var logicalProjectImportDestinationContentQuery = buildLogicalProjectImportDestinationContentQuery()
+
+func buildLogicalProjectImportDestinationContentQuery() string {
+	branches := make([]string, 0, len(logicalProjectImportDestinationContentTables))
+	for _, table := range logicalProjectImportDestinationContentTables {
+		branches = append(branches, "SELECT 1 FROM "+table)
+	}
+	return "SELECT EXISTS (" + strings.Join(branches, " UNION ALL ") + ")"
 }
 
 func latestIssueEventIDInTransaction(ctx context.Context, tx Executor) (int64, error) {

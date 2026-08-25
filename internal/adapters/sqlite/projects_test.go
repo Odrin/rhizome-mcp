@@ -1785,3 +1785,124 @@ func TestProjectRepositoryRemapsReviewEventPayloadsSoReExportParses(t *testing.T
 		t.Fatalf("imported payload outcome = %q, want it preserved", approved["outcome"])
 	}
 }
+
+// TestProjectRepositoryRejectsExtensionOnlyDestinations is ISSUE-233's
+// regression. Both empty-destination guards listed only the tables that
+// existed when logical interchange was written, so a project holding nothing
+// but workflow-gate state looked empty to both: preflight reported no
+// content, and the in-transaction race-closing check let the import merge
+// into it despite the format's no-merge contract.
+func TestProjectRepositoryRejectsExtensionOnlyDestinations(t *testing.T) {
+	const policyID = "01ARZ3NDEKTSV4RRFFQ69G5KA1"
+	for _, testCase := range []struct {
+		name  string
+		seed  func(ctx context.Context, tx sqlite.Executor, now time.Time) error
+		table string
+	}{
+		{
+			name:  "workflow policies only",
+			table: "workflow_policies",
+			seed: func(ctx context.Context, tx sqlite.Executor, now time.Time) error {
+				_, err := tx.ExecContext(ctx, `INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at) VALUES (?, '{"issue_types":["task"]}', '[{"key":"impl","kind":"attempt_evidence","evidence_key":"impl"}]', 'active', 1, ?, ?)`,
+					policyID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+				return err
+			},
+		},
+		{
+			name:  "policy audit trail only",
+			table: "workflow_policy_events",
+			seed: func(ctx context.Context, tx sqlite.Executor, now time.Time) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at) VALUES (?, '{"issue_types":["task"]}', '[]', 'archived', 1, ?, ?)`,
+					policyID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now)); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO workflow_policy_events(policy_id, event_type, session_id, prior_version, new_version, payload, created_at) VALUES (?, 'policy_created', NULL, NULL, 1, '{}', ?)`,
+					policyID, sqlite.FormatStorageTime(now))
+				return err
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			db, now := openProjectDatabase(t, "extension destination", "instructions")
+			ctx := context.Background()
+			if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+				return testCase.seed(ctx, tx, now)
+			}); err != nil {
+				t.Fatalf("seed %s: %v", testCase.table, err)
+			}
+
+			repository, err := sqlite.NewProjectRepository(db)
+			if err != nil {
+				t.Fatalf("NewProjectRepository() error = %v", err)
+			}
+			// AC1, preflight half.
+			hasContent, err := repository.HasLogicalProjectImportDestinationContent(ctx)
+			if err != nil {
+				t.Fatalf("HasLogicalProjectImportDestinationContent() error = %v", err)
+			}
+			if !hasContent {
+				t.Fatalf("a destination holding %s rows reported itself empty", testCase.table)
+			}
+
+			// AC1, in-transaction half: the race-closing check has to reach
+			// the same verdict, since it is the one that actually guards the
+			// write.
+			document := domain.LogicalProjectDocument{
+				Format:     "rhizome-logical-project",
+				Version:    2,
+				ExportedAt: "2026-07-17T18:24:20Z",
+				Project: domain.LogicalProjectProject{
+					ID: sqliteTestProjectID, CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+				},
+				Issues: []domain.LogicalIssue{{
+					ID: "01ARZ3NDEKTSV4RRFFQ69G5KA2", Type: "task", Title: "Imported task", Status: "ready", Priority: "medium",
+					CreatedAt: "2026-07-17T18:24:06Z", UpdatedAt: "2026-07-17T18:24:06Z",
+				}},
+			}
+			data, err := domain.MarshalLogicalProjectDocument(document)
+			if err != nil {
+				t.Fatalf("MarshalLogicalProjectDocument() error = %v", err)
+			}
+			plan, err := domain.ParseLogicalProjectImportPlan(data)
+			if err != nil {
+				t.Fatalf("ParseLogicalProjectImportPlan() error = %v", err)
+			}
+			plan = assignImportDestinationIDs(t, plan)
+			result, err := repository.ApplyLogicalProjectImport(ctx, plan)
+			if err != nil {
+				t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+			}
+			// AC3: the documented destination-not-empty conflict.
+			if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "empty_destination_required" {
+				t.Fatalf("apply result conflicts = %#v, want one empty_destination_required", result.Conflicts)
+			}
+
+			// AC3: and nothing was written or disturbed.
+			var importedIssues, policies, policyEvents int
+			var policyStatus string
+			if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+				if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issues`).Scan(&importedIssues); err != nil {
+					return err
+				}
+				if err := query.QueryRowContext(ctx, `SELECT count(*) FROM workflow_policies`).Scan(&policies); err != nil {
+					return err
+				}
+				if err := query.QueryRowContext(ctx, `SELECT count(*) FROM workflow_policy_events`).Scan(&policyEvents); err != nil {
+					return err
+				}
+				return query.QueryRowContext(ctx, `SELECT status FROM workflow_policies WHERE id = ?`, policyID).Scan(&policyStatus)
+			}); err != nil {
+				t.Fatalf("read destination after the rejected import: %v", err)
+			}
+			if importedIssues != 0 {
+				t.Fatalf("issues after a rejected import = %d, want 0", importedIssues)
+			}
+			if policies != 1 || policyStatus == "" {
+				t.Fatalf("workflow policies after a rejected import = %d (status %q), want the destination's own left untouched", policies, policyStatus)
+			}
+			if testCase.table == "workflow_policy_events" && policyEvents != 1 {
+				t.Fatalf("policy events after a rejected import = %d, want the destination's own left untouched", policyEvents)
+			}
+		})
+	}
+}

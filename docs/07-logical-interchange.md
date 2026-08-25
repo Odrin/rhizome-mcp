@@ -402,6 +402,17 @@ Any storage, mapping, constraint, or search-index failure rolls back the
 entire import. An apply requires an empty destination project to avoid
 unspecified merge behavior, regardless of the document's version.
 
+*Empty* means holding no durable project content of any kind — not merely no
+issues. Workflow policies and their audit trail, review targets, requests,
+outcomes and follow-ups, gate snapshots, evidence and approvals, and released
+reservations all count, whether or not the interchange format carries that
+table. The preflight check and the in-transaction race-closing check read one
+shared definition of that set, so they cannot disagree about it, and a project
+holding only extension-owned state (workflow policies, say) is correctly
+refused rather than merged into (ISSUE-233). The destination project row
+itself, sessions, idempotency records, migration state, and the derived search
+index are excluded, matching §5.
+
 References must target records of the correct included type. The importer
 rejects dangling references, invalid ULIDs, duplicate logical IDs,
 noncanonical enum values, malformed timestamps, invalid artifact metadata,
