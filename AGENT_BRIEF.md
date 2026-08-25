@@ -20,6 +20,7 @@ Specification map:
 - `docs/05-implementation-requirements.md`: architecture, algorithms, errors, and test coverage.
 - `docs/06-deferred-and-open.md`: deferred features and confirmed defaults.
 - `docs/12-resource-reservations.md`: reservation guarantees, lifecycle, and the two-agent workflow.
+- `docs/13-status-board.md`: loopback-only read-only status board routes, data, and UI contract.
 - MCP decisions: accepted implementation and product choices.
 
 ## Non-negotiable requirements

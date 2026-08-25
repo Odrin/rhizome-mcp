@@ -14,6 +14,7 @@ The canonical specification is split into focused documents so agents can load o
 10. [VS Code extension](docs/10-vscode-extension.md)
 11. [Project routing contract](docs/11-project-routing.md)
 12. [Resource reservations](docs/12-resource-reservations.md)
+13. [Status board](docs/13-status-board.md)
 
 Use the configured `rhizome-mcp` project for current status, dependency order, implementation history, and accepted decisions.
 

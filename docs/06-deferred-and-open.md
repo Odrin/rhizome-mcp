@@ -6,10 +6,10 @@ Do not include these in the first version unless required to satisfy a core inva
 
 ### User experience
 
-- web UI;
+- hosted or authenticated web UI; multi-user web UI; browser write operations (loopback-only read-only local status board is shipped; see docs/13);
 - desktop UI;
 - terminal UI;
-- visual dashboard;
+- hosted or interactive visual dashboard; multi-user analytics dashboard;
 - interactive graph editor.
 
 ### Identity and access

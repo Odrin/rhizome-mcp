@@ -183,7 +183,7 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 
 **Design principle:** an issue must never remain permanently stuck in `in_progress`. Effective status is computed from stored status plus the presence of an active leased attempt; if the agent disappears and the lease expires, the attempt becomes `expired` and the issue is available again when its stored state permits it.
 
-**Core constraints (by design):** Go, SQLite (`modernc.org/sqlite`, pure Go, CGO-free), stdio as the primary transport, one database per project, no web UI, no authentication, minimal CLI. Deferred features are listed in [docs/06](docs/06-deferred-and-open.md).
+**Core constraints (by design):** Go, SQLite (`modernc.org/sqlite`, pure Go, CGO-free), stdio as the primary transport, one database per project, no hosted or authenticated web UI (a loopback-only local status board is included), no authentication, minimal CLI. Deferred features are listed in [docs/06](docs/06-deferred-and-open.md).
 
 ## CLI reference
 

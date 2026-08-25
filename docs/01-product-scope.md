@@ -162,7 +162,8 @@ The MCP contract must follow these rules:
 
 The first version does not include:
 
-- web UI or desktop UI;
+- hosted, remote, or multi-user web UI; any browser write operations; or authenticated/permission-gated UI (a loopback-only read-only local status board is in scope; see docs/13);
+- desktop UI;
 - authentication or user accounts;
 - multi-user permissions;
 - permanent agent identities;
