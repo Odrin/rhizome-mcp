@@ -75,8 +75,8 @@ func (service *GraphService) GetPlanningGraph(ctx context.Context, input domain.
 	return domain.BuildGraph(snapshot, domain.GraphTraversal{
 		RootIssueIDs: roots, ExplicitRootID: dereference(snapshot.RootIssueID),
 		Depth: *normalized.Depth, MaxNodes: *normalized.MaxNodes, Direction: domain.GraphDirectionBoth,
-		RelationTypes: relationTypes, IncludeHierarchy: true, IncludeTerminal: true,
-		ExcludeReview: !*normalized.IncludeReview,
+		RelationTypes: relationTypes, IncludeHierarchy: true, IncludeTerminal: *normalized.IncludeTerminal,
+		ExcludeReview: !*normalized.IncludeReview, PreferNonTerminal: true,
 	}), nil
 }
 

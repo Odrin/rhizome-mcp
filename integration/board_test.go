@@ -999,6 +999,88 @@ func mustCreateBoardIssue(t *testing.T, session *mcp.ClientSession, arguments ma
 	return mustCreateBoardIssueWithTimeout(t, session, arguments, integrationTimeout)
 }
 
+// TestIntegrationBoardTruncationReportsTrueEntryPoints verifies that when
+// the planning graph is truncated, the board reports entry_points computed
+// over the whole snapshot (not just retained nodes) and marks the graph as
+// truncated. With include_terminal=false, the board excludes done/cancelled
+// issues from the node budget, so we create enough non-terminal issues to
+// exceed the 100-node budget.
+func TestIntegrationBoardTruncationReportsTrueEntryPoints(t *testing.T) {
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	// Create 110 ready issues to exceed the 100-node budget (they all count
+	// against the budget since include_terminal=false excludes only done/cancelled)
+	readyIssues := make([]boardIssueRef, 0)
+	for i := 0; i < 110; i++ {
+		issue := mustCreateBoardIssue(t, session, map[string]any{
+			"type": "task", "title": fmt.Sprintf("Ready task %d", i), "status": "ready",
+		})
+		readyIssues = append(readyIssues, issue)
+	}
+
+	// Also create some done issues that should not consume the budget
+	for i := 0; i < 50; i++ {
+		mustCreateBoardIssue(t, session, map[string]any{
+			"type": "task", "title": fmt.Sprintf("Done task %d", i), "status": "done",
+		})
+	}
+
+	// Run the board command with JSON output
+	jsonOutput := runIntegrationCommand(t, env, "--data-root", env.dataRoot, "board", "--format", "json")
+	var board struct {
+		PlanningGraph struct {
+			Truncated         bool     `json:"truncated"`
+			RetainedNodeCount int      `json:"retained_node_count"`
+			EntryPoints       []string `json:"entry_points"`
+			Summary           struct {
+				EntryPointCount int `json:"entry_point_count"`
+			} `json:"summary"`
+		} `json:"planning_graph"`
+	}
+	if err := json.Unmarshal(jsonOutput, &board); err != nil {
+		t.Fatalf("decode board --format json output: %v\noutput:\n%s", err, jsonOutput)
+	}
+
+	// Verify truncation is reported
+	if !board.PlanningGraph.Truncated {
+		t.Fatal("expected planning_graph.truncated = true when graph exceeds 100-node budget")
+	}
+
+	// Verify retained node count is reported
+	if board.PlanningGraph.RetainedNodeCount == 0 {
+		t.Fatal("expected planning_graph.retained_node_count > 0")
+	}
+	if board.PlanningGraph.RetainedNodeCount > 100 {
+		t.Fatalf("retained_node_count = %d, want at most 100 (the node budget)", board.PlanningGraph.RetainedNodeCount)
+	}
+
+	// Verify entry points includes all ready issues (computed over full snapshot,
+	// not just retained nodes). Even though the graph is truncated at 100 nodes,
+	// all 110 ready issues should appear in entry_points since they are all claimable.
+	if board.PlanningGraph.Summary.EntryPointCount != 110 {
+		t.Fatalf("summary.entry_point_count = %d, want 110 (all ready issues, computed over full snapshot)", board.PlanningGraph.Summary.EntryPointCount)
+	}
+	if len(board.PlanningGraph.EntryPoints) != 110 {
+		t.Fatalf("len(entry_points) = %d, want 110", len(board.PlanningGraph.EntryPoints))
+	}
+	if len(board.PlanningGraph.EntryPoints) != 110 {
+		t.Fatalf("len(entry_points) = %d, want 110", len(board.PlanningGraph.EntryPoints))
+	}
+	for _, readyIssue := range readyIssues {
+		found := false
+		for _, entryPoint := range board.PlanningGraph.EntryPoints {
+			if entryPoint == readyIssue.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("entry_points missing ready issue %s (%s)", readyIssue.DisplayID, readyIssue.ID)
+		}
+	}
+}
+
 func mustCreateBoardIssueWithTimeout(t *testing.T, session *mcp.ClientSession, arguments map[string]any, timeout time.Duration) boardIssueRef {
 	t.Helper()
 	created := callIntegrationToolWithTimeout(t, session, "create_issue", arguments, timeout)

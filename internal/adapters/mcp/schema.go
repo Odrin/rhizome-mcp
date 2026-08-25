@@ -398,6 +398,7 @@ func schemaGetPlanningGraph() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"root_issue_id": nullableIssueIdentifierSchema(), "depth": boundedIntegerSchema(0, 5), "max_nodes": boundedIntegerSchema(1, 500),
 		"include_review": booleanSchema(), "include_related": booleanSchema(),
+		"include_terminal": booleanSchema(),
 	}))
 }
 

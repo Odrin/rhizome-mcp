@@ -709,6 +709,7 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 	graph, err := adapter.services.GraphService.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
 		RootIssueID: input.RootIssueID, Depth: input.Depth, MaxNodes: input.MaxNodes,
 		IncludeReview: input.IncludeReview, IncludeRelated: input.IncludeRelated,
+		IncludeTerminal: input.IncludeTerminal,
 	})
 	if err != nil {
 		return adapter.failure(err)

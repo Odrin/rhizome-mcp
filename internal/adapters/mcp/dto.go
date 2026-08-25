@@ -338,6 +338,10 @@ type getPlanningGraphInput struct {
 	MaxNodes       *int    `json:"max_nodes,omitempty"`
 	IncludeReview  *bool   `json:"include_review,omitempty"`
 	IncludeRelated *bool   `json:"include_related,omitempty"`
+	// include_terminal defaults to true, preserving the response shape callers
+	// already depend on; the board opts out so finished work cannot crowd
+	// claimable work out of the node budget.
+	IncludeTerminal *bool `json:"include_terminal,omitempty"`
 }
 
 type issuePlanInput struct {

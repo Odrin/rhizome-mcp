@@ -1026,6 +1026,9 @@ func (c *CLI) writeBoardTable(result domain.BoardResult) error {
 	builder.WriteString(fmt.Sprintf("edges\t%d\n", result.PlanningGraph.Summary.EdgeCount))
 	builder.WriteString(fmt.Sprintf("entry_points\t%d\n", result.PlanningGraph.Summary.EntryPointCount))
 	builder.WriteString(fmt.Sprintf("blocking_nodes\t%d\n", result.PlanningGraph.Summary.BlockingNodeCount))
+	if result.PlanningGraph.Truncated {
+		builder.WriteString(fmt.Sprintf("truncated\ttrue\t(%d retained)\n", len(result.PlanningGraph.Nodes)))
+	}
 
 	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
 	return err
@@ -1372,12 +1375,13 @@ type BoardReviewRequest struct {
 
 // BoardGraph is a stable CLI projection of the board's planning graph.
 type BoardGraph struct {
-	Nodes         []IssueSummary      `json:"nodes"`
-	Edges         []domain.GraphEdge  `json:"edges"`
-	EntryPoints   []string            `json:"entry_points"`
-	BlockingNodes []string            `json:"blocking_nodes"`
-	Summary       domain.GraphSummary `json:"summary"`
-	Truncated     bool                `json:"truncated"`
+	Nodes             []IssueSummary      `json:"nodes"`
+	Edges             []domain.GraphEdge  `json:"edges"`
+	EntryPoints       []string            `json:"entry_points"`
+	BlockingNodes     []string            `json:"blocking_nodes"`
+	Summary           domain.GraphSummary `json:"summary"`
+	Truncated         bool                `json:"truncated"`
+	RetainedNodeCount int                 `json:"retained_node_count"`
 }
 
 func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
@@ -1429,6 +1433,7 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 		PlanningGraph: BoardGraph{
 			Nodes: nodes, Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints,
 			BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated,
+			RetainedNodeCount: len(result.PlanningGraph.Nodes),
 		},
 	}
 }

@@ -81,7 +81,12 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 		reviewRequests[index] = item.Request
 	}
 
-	planningGraph, err := service.graphService.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{})
+	// The board answers "what can I work on", so finished work (done/cancelled)
+	// must not consume the node budget. Request the graph without terminal nodes.
+	includeTerminal := false
+	planningGraph, err := service.graphService.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
+		IncludeTerminal: &includeTerminal,
+	})
 	if err != nil {
 		return domain.BoardResult{}, err
 	}

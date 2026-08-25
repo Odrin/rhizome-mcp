@@ -152,6 +152,8 @@ rhizome-mcp graph ISSUE-42 --format mermaid
 rhizome-mcp doctor --full
 ```
 
+The status board reports live lease counts, blocked issues and their reasons, open review requests, and the project-wide planning graph. The planning graph excludes finished work (done, cancelled) from the node budget, so the entry-point count always reflects claimable work. When the graph is truncated due to the 100-node budget, the board marks it as truncated and reports the retained node count in both table and JSON formats.
+
 ### Optional: local HTTP transport
 
 ```bash

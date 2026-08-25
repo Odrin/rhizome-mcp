@@ -36,11 +36,12 @@ type GetIssueGraphInput struct {
 
 // GetPlanningGraphInput requests the planning projection of the shared graph.
 type GetPlanningGraphInput struct {
-	RootIssueID    *string
-	Depth          *int
-	MaxNodes       *int
-	IncludeReview  *bool
-	IncludeRelated *bool
+	RootIssueID     *string
+	Depth           *int
+	MaxNodes        *int
+	IncludeReview   *bool
+	IncludeRelated  *bool
+	IncludeTerminal *bool
 }
 
 // Validate validates graph-local limits and returns defaults as explicit values.
@@ -92,6 +93,7 @@ func (input GetPlanningGraphInput) Validate() (GetPlanningGraphInput, error) {
 	return GetPlanningGraphInput{
 		RootIssueID: root, Depth: &depth, MaxNodes: &nodes,
 		IncludeReview: graphBool(input.IncludeReview, true), IncludeRelated: graphBool(input.IncludeRelated, false),
+		IncludeTerminal: graphBool(input.IncludeTerminal, true),
 	}, nil
 }
 
@@ -199,6 +201,13 @@ type GraphTraversal struct {
 	IncludeHierarchy bool
 	IncludeTerminal  bool
 	ExcludeReview    bool
+	// PreferNonTerminal spends the MaxNodes budget on non-terminal nodes
+	// first, admitting done/cancelled nodes only afterwards and only as
+	// relation endpoints of retained nodes, and computes EntryPoints over the
+	// whole snapshot rather than the retained set. The planning graph sets it;
+	// the rooted issue graph does not, because there order of discovery from
+	// the requested root is the meaningful answer.
+	PreferNonTerminal bool
 }
 
 // BuildGraph performs deterministic bounded breadth-first traversal over a
@@ -252,18 +261,43 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 		}
 		return traversal.ExcludeReview && node.Status == StatusReview
 	}
+	// deferred preserves snapshot order so the second pass stays deterministic.
+	deferred := make([]string, 0)
+	isDeferrable := func(id string) bool {
+		if !traversal.PreferNonTerminal || id == traversal.ExplicitRootID {
+			return false
+		}
+		node, found := nodesByID[id]
+		return found && (node.Status == StatusDone || node.Status == StatusCancelled)
+	}
 	allowedNode := func(id string, root bool) bool {
 		if _, found := nodesByID[id]; !found {
 			return false
 		}
 		return (root && id == traversal.ExplicitRootID) || !nodeExcluded(id)
 	}
+	deferredSeen := make(map[string]bool)
+	// budgetExhausted separates "this node was deferred to the second pass"
+	// from "there was no room left", because the root loop must keep going in
+	// the first case and stop in the second.
+	budgetExhausted := false
 	addNode := func(id string, depth int, root bool) bool {
 		if visited[id] || !allowedNode(id, root) {
 			return visited[id]
 		}
+		if isDeferrable(id) {
+			// Terminal work never competes with open work for the budget; it
+			// gets a second chance below only if an edge to a retained node
+			// makes it worth showing.
+			if !deferredSeen[id] {
+				deferredSeen[id] = true
+				deferred = append(deferred, id)
+			}
+			return false
+		}
 		if len(result.Nodes) >= traversal.MaxNodes {
 			truncated = true
+			budgetExhausted = true
 			return false
 		}
 		visited[id] = true
@@ -277,7 +311,11 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 			continue
 		}
 		if !addNode(root, 0, root == traversal.ExplicitRootID) {
-			break
+			if budgetExhausted {
+				break
+			}
+			// Deferred to the second pass; other roots may still fit.
+			continue
 		}
 		for len(queue) > 0 {
 			current := queue[0]
@@ -302,10 +340,56 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 		}
 	}
 
+	// Second pass: whatever budget survived pass 1 goes to deferred terminal
+	// nodes, and only to those an allowed edge attaches to a retained node.
+	for _, id := range deferred {
+		if len(result.Nodes) >= traversal.MaxNodes {
+			truncated = true
+			break
+		}
+		attached := false
+		for _, edge := range adjacency[id] {
+			other := edge.SourceIssueID
+			if other == id {
+				other = edge.TargetIssueID
+			}
+			if other != id && visited[other] {
+				attached = true
+				break
+			}
+		}
+		if !attached {
+			truncated = true
+			continue
+		}
+		visited[id] = true
+		result.Nodes = append(result.Nodes, nodesByID[id])
+		for _, edge := range adjacency[id] {
+			other := edge.SourceIssueID
+			if other == id {
+				other = edge.TargetIssueID
+			}
+			if visited[other] {
+				result.Edges = appendGraphEdge(result.Edges, edge)
+			}
+		}
+	}
+
 	result.Edges = uniqueSortedGraphEdges(result.Edges, nodesByID)
-	for _, node := range result.Nodes {
-		if node.IsClaimable && node.Status != StatusDone && node.Status != StatusCancelled {
-			result.EntryPoints = append(result.EntryPoints, node.ID)
+	if traversal.PreferNonTerminal {
+		// Entry points answer "what can I claim", so truncation must not shrink
+		// them: they are computed over the whole snapshot, which means a
+		// truncated graph can report an entry point that is not in Nodes.
+		for _, node := range snapshot.Nodes {
+			if node.IsClaimable && node.Status != StatusDone && node.Status != StatusCancelled {
+				result.EntryPoints = append(result.EntryPoints, node.ID)
+			}
+		}
+	} else {
+		for _, node := range result.Nodes {
+			if node.IsClaimable && node.Status != StatusDone && node.Status != StatusCancelled {
+				result.EntryPoints = append(result.EntryPoints, node.ID)
+			}
 		}
 	}
 	blocking := make(map[string]bool)

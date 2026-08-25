@@ -80,6 +80,18 @@ board can show what an attempt held and why it lost it.
 Reservations are held by **work** attempts only. A review attempt's lease
 token is rejected ([docs/02 §18](02-domain-model.md)).
 
+### 12.3.1. Board reporting
+
+The `rhizome-mcp board` command reports active reservations grouped under
+their owning attempts. The planning graph excludes finished work (done,
+cancelled) from the node budget via `include_terminal=false`, ensuring the
+entry-point count reflects claimable work only. When the 100-node graph
+budget is exhausted, the board marks the graph as truncated and reports the
+retained node count in both table and JSON formats. Truncation never shrinks
+the entry-point set: truncated graphs still report all claimable issues as
+entry points, even when those issues are not retained in `nodes` due to the
+node budget limit.
+
 ## 12.4. Choosing a resource set
 
 - Reserve the narrowest resource that covers the write set. A directory or
