@@ -42,12 +42,23 @@ func NewReviewRepository(db *DB) (*ReviewRepository, error) {
 // the issue as it is right now. Two independent questions, both of which
 // docs/09 "Staleness and concurrency" treats as staleness:
 //
-//   - the issue record itself moved on (its version no longer matches the
-//     version the target froze), and
 //   - the reviewed work changed after the target's event position, judged by
 //     reviewedWorkChangedSince (attempts.go) so the answer is issue-scoped
 //     and position-based, never an equality test against a recomputed
-//     maximum event id (ISSUE-189).
+//     maximum event id (ISSUE-189), and
+//   - the issue record itself moved on, in a way that work check cannot
+//     already account for.
+//
+// The second question used to be a plain version equality test, which
+// contradicted the same section's promise that a priority-only change does
+// not invalidate a target: every update increments issues.version, so
+// re-prioritising a queue silently superseded every review in it
+// (ISSUE-229). A version gap is now accepted exactly when priority-only
+// updates account for all of it, one version step each. Anything else that
+// moved the version -- an edit, a status change, a relabelling, a new
+// implementation attempt's own completion -- leaves the arithmetic short and
+// the target stale, so this stays a conservative test rather than a
+// heuristic: the version must be explained, not merely be plausible.
 //
 // Both are asked inside the caller's own write transaction, so a request can
 // neither be born stale (create/replace) nor be handed to a reviewer after it
@@ -60,10 +71,21 @@ func reviewTargetStale(ctx context.Context, queryer Queryer, issueID string, tar
 		}
 		return false, err
 	}
-	if currentVersion != targetIssueVersion {
+	changed, err := reviewedWorkChangedSince(ctx, queryer, issueID, targetEventID)
+	if err != nil {
+		return false, err
+	}
+	if changed {
 		return true, nil
 	}
-	return reviewedWorkChangedSince(ctx, queryer, issueID, targetEventID)
+	if currentVersion == targetIssueVersion {
+		return false, nil
+	}
+	priorityOnlyUpdates, err := priorityOnlyIssueUpdatesSince(ctx, queryer, issueID, targetEventID)
+	if err != nil {
+		return false, err
+	}
+	return currentVersion != targetIssueVersion+priorityOnlyUpdates, nil
 }
 
 func staleReviewTargetError() *domain.Error {

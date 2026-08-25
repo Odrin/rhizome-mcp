@@ -1277,11 +1277,16 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 				return err
 			}
 			if reviewRequest != nil && reviewRequest.Status == domain.ReviewRequestStatusClaimed && reviewRequest.ActiveAttemptID != nil && *reviewRequest.ActiveAttemptID == command.AttemptID {
-				workChanged, err := reviewedWorkChangedSince(ctx, tx, issue.ID, reviewRequest.TargetEventID)
+				// The same predicate get/list, claim, and release apply, in
+				// this transaction: completion asked the question with its
+				// own inlined copy, so the two answers could differ -- and
+				// did, once a priority-only update stopped counting as
+				// staleness everywhere except here (ISSUE-229).
+				stale, err := reviewTargetStale(ctx, tx, issue.ID, reviewRequest.TargetIssueVersion, reviewRequest.TargetEventID)
 				if err != nil {
 					return err
 				}
-				if reviewRequest.TargetIssueVersion != issue.Version || workChanged {
+				if stale {
 					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now); err != nil {
 						return err
 					}
@@ -1674,14 +1679,53 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 func reviewedWorkChangedSince(ctx context.Context, tx Queryer, issueID string, afterEventID int64) (bool, error) {
 	var changed bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issue_events AS event
-		WHERE event.issue_id = ? AND event.id > ? AND event.source != 'review'
-		AND event.event_type NOT IN ('attempt_started', 'reservation_reserved', 'reservation_released')
-		AND NOT EXISTS (SELECT 1 FROM work_attempts AS attempt
-			WHERE attempt.id = event.attempt_id AND attempt.kind = 'review'))`,
+		WHERE event.issue_id = ? AND event.id > ? AND `+reviewedWorkEventScopeSQL+`
+		AND NOT (`+priorityOnlyIssueUpdateSQL+`))`,
 		issueID, afterEventID).Scan(&changed); err != nil {
 		return false, err
 	}
 	return changed, nil
+}
+
+// reviewedWorkEventScopeSQL is the event set reviewedWorkChangedSince and
+// priorityOnlyIssueUpdatesSince both range over, factored out so the two
+// partition exactly the same rows: the count the second returns is only a
+// valid explanation of a version gap if it covers the events the first
+// deliberately ignored, and nothing else.
+const reviewedWorkEventScopeSQL = `event.source != 'review'
+		AND event.event_type NOT IN ('attempt_started', 'reservation_reserved', 'reservation_released')
+		AND NOT EXISTS (SELECT 1 FROM work_attempts AS attempt
+			WHERE attempt.id = event.attempt_id AND attempt.kind = 'review')`
+
+// priorityOnlyIssueUpdateSQL matches an update that changed the issue's
+// priority and nothing else: exactly the change docs/09 promises does not
+// invalidate a review target. update_issue writes one event per update with
+// the changed field names in its payload, and downgrades the type from
+// issue_updated to status_changed or labels_changed whenever status or
+// labels were part of the same call -- so an issue_updated whose
+// changed_fields holds nothing but "priority" is the whole of the exemption.
+// An update that changed nothing is not exempt (it should not exist, and
+// treating an empty field list as "only priority" would be a silent
+// widening).
+const priorityOnlyIssueUpdateSQL = `event.event_type = 'issue_updated'
+		AND EXISTS (SELECT 1 FROM json_each(event.payload, '$.changed_fields'))
+		AND NOT EXISTS (SELECT 1 FROM json_each(event.payload, '$.changed_fields') AS changed
+			WHERE changed.value <> 'priority')`
+
+// priorityOnlyIssueUpdatesSince counts the priority-only updates issueID took
+// after event position afterEventID. Each one incremented issues.version
+// without changing the reviewed work, so it is exactly the amount by which a
+// still-valid target's frozen version may legitimately lag the issue's
+// current one (ISSUE-229).
+func priorityOnlyIssueUpdatesSince(ctx context.Context, tx Queryer, issueID string, afterEventID int64) (int64, error) {
+	var count int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_events AS event
+		WHERE event.issue_id = ? AND event.id > ? AND `+reviewedWorkEventScopeSQL+`
+		AND `+priorityOnlyIssueUpdateSQL,
+		issueID, afterEventID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptID string) (*domain.ReviewRequest, error) {

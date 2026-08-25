@@ -124,6 +124,21 @@ attempt makes the request stale. Priority-only changes do not. A stale request
 cannot approve, request changes, or block; it transitions to `superseded` and
 returns `STALE_REVIEW_TARGET`.
 
+The priority exemption is a real exemption, not a gap the version check
+happens to leave: every `update_issue` increments `issues.version`, so a plain
+version equality test would supersede a review the moment someone re-ordered
+the queue it was waiting in (ISSUE-229). The version is instead required to be
+*accounted for*. A gap between the target's frozen version and the issue's
+current one is accepted only when priority-only updates explain all of it, one
+version step each; anything else that moved the version leaves the arithmetic
+short and the target stale. An update is priority-only when it changed the
+priority and nothing else — a priority changed alongside a description, or in
+the same call as a status or label change, is an ordinary change.
+
+Every enforcement point in the table above asks this one question through the
+same predicate, completion included, so a request can never be fresh to
+`get_review_request` and stale to `finish_attempt`.
+
 The event-position check asks a single question: **did the reviewed issue's own
 work change after `target_event_id`?** Three properties follow from that
 wording, and each one matters:

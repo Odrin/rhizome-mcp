@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
 )
@@ -339,5 +340,211 @@ func assertReviewRequestCount(t *testing.T, ctx context.Context, db *sqlite.DB, 
 	}
 	if got != want {
 		t.Fatalf("review request rows for issue %s = %d, want %d", issueID, got, want)
+	}
+}
+
+// ISSUE-229: docs/09 promises that a priority-only change does not invalidate
+// a review target, but staleness treated every version mismatch as stale --
+// and every update, priority included, increments issues.version. Re-ordering
+// a queue therefore superseded every review in flight. These tests pin the
+// exemption at each lifecycle point that asks the question, with the
+// disqualifying control the exemption must not swallow.
+
+// reprioritizeReviewedIssue applies a real priority-only update through the
+// issue service, so the event payload's changed_fields is whatever production
+// actually writes rather than a hand-built fixture.
+func reprioritizeReviewedIssue(t *testing.T, fixture *attemptTestFixture, issueID string, version int64, priority domain.Priority) int64 {
+	t.Helper()
+	updated, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: issueID, ExpectedVersion: version,
+		Changes: domain.IssuePatch{Priority: domain.OptionalValue[domain.Priority]{Set: true, Value: priority}},
+	})
+	if err != nil {
+		t.Fatalf("priority-only update: %v", err)
+	}
+	if updated.Issue.Version != version+1 {
+		t.Fatalf("priority-only update left version %d, want %d; the fixture must exercise a real version bump", updated.Issue.Version, version+1)
+	}
+	return updated.Issue.Version
+}
+
+func openReviewRequestFor(t *testing.T, fixture *attemptTestFixture, issue application.CreateIssueResult) (*sqlite.ReviewRepository, string) {
+	t.Helper()
+	reviewRepository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes:  []string{"implementation"},
+		RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRequest() error = %v", err)
+	}
+	return reviewRepository, created.Request.ID
+}
+
+func TestPriorityOnlyUpdateKeepsReviewTargetFreshAtGetAndList(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "priority-projection")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "priority projection", domain.StatusReview)
+	reviewRepository, requestID := openReviewRequestFor(t, fixture, issue)
+	reprioritizeReviewedIssue(t, fixture, issue.ID, issue.Issue.Version, domain.PriorityCritical)
+
+	got, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() error = %v", err)
+	}
+	if got.TargetStale {
+		t.Fatalf("request went stale after a priority-only update: %+v", got.Request)
+	}
+	listed, err := reviewRepository.ListReviewRequests(fixture.ctx, ports.ListReviewRequestsQuery{Limit: 20})
+	if err != nil {
+		t.Fatalf("ListReviewRequests() error = %v", err)
+	}
+	if listed.StaleTargets[requestID] {
+		t.Fatalf("request listed as stale after a priority-only update: %+v", listed.StaleTargets)
+	}
+
+	// Repeated re-prioritisation stays fresh: the version gap is explained
+	// one step per update, not tolerated as a fixed slack of one.
+	version := issue.Issue.Version + 1
+	for _, priority := range []domain.Priority{domain.PriorityLow, domain.PriorityHigh, domain.PriorityMedium} {
+		version = reprioritizeReviewedIssue(t, fixture, issue.ID, version, priority)
+	}
+	afterMany, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() error = %v", err)
+	}
+	if afterMany.TargetStale {
+		t.Fatalf("request went stale after four priority-only updates: %+v", afterMany.Request)
+	}
+}
+
+func TestPriorityOnlyUpdateKeepsReviewTargetFreshAtClaimReleaseAndCompletion(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "priority-lifecycle")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "priority lifecycle", domain.StatusReview)
+	reviewRepository, requestID := openReviewRequestFor(t, fixture, issue)
+	reprioritizeReviewedIssue(t, fixture, issue.ID, issue.Issue.Version, domain.PriorityCritical)
+
+	// Claim: an explicit claim of a stale request supersedes it and fails.
+	reviewAttempt, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("claim a review attempt: %v", err)
+	}
+	current, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// claim_issue's own binding already ran the same check; a stale request
+	// would have been left open and unbound instead.
+	if current.Request.Status != domain.ReviewRequestStatusClaimed {
+		t.Fatalf("claim_issue did not bind the request after a priority-only update: %+v", current.Request)
+	}
+
+	// Release: an interrupted review attempt returns the request to open
+	// rather than superseding it.
+	input := finishInput(reviewAttempt, domain.AttemptOutcomeInterrupted)
+	input.InterruptionReasonCode = interruptionPointer(domain.InterruptionReasonHandoff)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("interrupt the review attempt: %v", err)
+	}
+	released, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.Request.Status != domain.ReviewRequestStatusOpen || released.TargetStale {
+		t.Fatalf("released request = %+v (stale %v), want open and fresh", released.Request, released.TargetStale)
+	}
+
+	// Completion: one more priority-only update, then approve.
+	issueVersion := issue.Issue.Version + 1
+	reprioritizeReviewedIssue(t, fixture, issue.ID, issueVersion, domain.PriorityLow)
+	reclaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("re-claim a review attempt: %v", err)
+	}
+	approve := finishInput(reclaim, domain.AttemptOutcomeCompleted)
+	approve.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, approve); err != nil {
+		t.Fatalf("approve after priority-only updates: %v", err)
+	}
+	approved, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Request.Status != domain.ReviewRequestStatusApproved {
+		t.Fatalf("request after approval = %+v, want approved", approved.Request)
+	}
+}
+
+// The control the exemption must not swallow: a title-only update is in the
+// same warning class as priority (docs/02 §16) and still bumps the version by
+// one, so nothing but the changed field itself distinguishes it.
+func TestNonPriorityUpdateStillStalesReviewTarget(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "priority-control")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "priority control", domain.StatusReview)
+	reviewRepository, requestID := openReviewRequestFor(t, fixture, issue)
+	if _, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: issue.Issue.Version,
+		Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "priority control, retitled"}},
+	}); err != nil {
+		t.Fatalf("title-only update: %v", err)
+	}
+
+	got, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() error = %v", err)
+	}
+	if !got.TargetStale {
+		t.Fatalf("request survived a title change: %+v", got.Request)
+	}
+
+	// And at completion: claim_issue leaves a stale request unbound, so the
+	// approval is refused rather than silently resolving it.
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatalf("claim a review attempt: %v", err)
+	}
+	approve := finishInput(claim, domain.AttemptOutcomeCompleted)
+	approve.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, approve); err == nil {
+		t.Fatal("approving against a title-changed target succeeded")
+	}
+}
+
+// A priority change bundled with anything else is not a priority-only change:
+// update_issue reports both fields, and the exemption must read the whole
+// list rather than merely noticing that priority is in it.
+func TestPriorityBundledWithAnotherChangeStillStalesReviewTarget(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "priority-bundled")
+	defer fixture.close()
+
+	issue := createAttemptIssue(t, fixture, "priority bundled", domain.StatusReview)
+	reviewRepository, requestID := openReviewRequestFor(t, fixture, issue)
+	if _, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: issue.Issue.Version,
+		Changes: domain.IssuePatch{
+			Priority:    domain.OptionalValue[domain.Priority]{Set: true, Value: domain.PriorityCritical},
+			Description: domain.OptionalString{Set: true, Value: pointer("re-scoped while re-prioritised")},
+		},
+	}); err != nil {
+		t.Fatalf("priority and description update: %v", err)
+	}
+
+	got, err := reviewRepository.GetReviewRequest(fixture.ctx, requestID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest() error = %v", err)
+	}
+	if !got.TargetStale {
+		t.Fatalf("request survived a description change bundled with the priority change: %+v", got.Request)
 	}
 }
