@@ -223,7 +223,7 @@ func schemaGetIssueActivity() *jsonschema.Schema {
 func schemaSearch() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"query":            withDescription(boundedStringSchema(domain.MaxSearchQueryRunes), "Required full-text terms."),
-		"entity_types":     withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note"), MaxItems: intPointer(5), UniqueItems: true}, "Optional result types; empty includes all."),
+		"entity_types":     withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema("issue", "comment", "decision", "review", "attempt_note", "workflow_policy", "gate_evidence"), MaxItems: intPointer(7), UniqueItems: true}, "Optional result types; empty includes all."),
 		"issue_id":         withDescription(nullableIssueIdentifierSchema(), "Optional issue scope (ULID or ISSUE-N)."),
 		"epic_id":          withDescription(nullableIssueIdentifierSchema(), "Optional epic scope (ULID or ISSUE-N)."),
 		"statuses":         withDescription(&jsonschema.Schema{Type: "array", Items: enumSchema(domain.StatusNames()...), MaxItems: intPointer(6), UniqueItems: true}, "Optional issue-status filter."),

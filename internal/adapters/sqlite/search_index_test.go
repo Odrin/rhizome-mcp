@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"rhizome-mcp/internal/adapters/sqlite"
@@ -368,7 +369,9 @@ func searchIndexRows(t *testing.T, db *sqlite.DB) []searchIndexRow {
 	t.Helper()
 	var result []searchIndexRow
 	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
-		rows, err := query.QueryContext(ctx, `SELECT entity_type, entity_id, issue_id, title, content
+		// COALESCE: workflow policies are project-scoped and carry a NULL
+		// issue_id (migration 014).
+		rows, err := query.QueryContext(ctx, `SELECT entity_type, entity_id, COALESCE(issue_id, ''), title, content
 			FROM search_index`)
 		if err != nil {
 			return err
@@ -392,4 +395,133 @@ func searchIndexRows(t *testing.T, db *sqlite.DB) []searchIndexRow {
 		return result[i].EntityID < result[j].EntityID
 	})
 	return result
+}
+
+// TestSearchIndexTracksGateEntitiesAndRebuildAgrees covers ISSUE-175 AC4: a
+// workflow policy is indexed by its declared requirement keys, evidence
+// keys, purposes, and selector (the locked schema has no free-text name),
+// gate evidence is indexed by key, summary, and details, updates re-index
+// both, a wrong-shaped requirements blob degrades to empty index text
+// instead of failing the write, and a full Rebuild reproduces exactly what
+// the live triggers wrote.
+func TestSearchIndexTracksGateEntitiesAndRebuildAgrees(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "gated search issue", Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	const (
+		attemptID  = "01ARZ3NDEKTSV4RRFFQ69G5FJA"
+		policyID   = "01ARZ3NDEKTSV4RRFFQ69G5FJB"
+		evidenceID = "01ARZ3NDEKTSV4RRFFQ69G5FJC"
+	)
+	timestamp := sqlite.FormatStorageTime(now)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, X'06', ?, ?, ?)`,
+			attemptID, issue.ID, timestamp, timestamp, timestamp); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at)
+			VALUES (?, '{"issue_types":["task"]}', '[{"key":"zqxpolicykey","kind":"review_approval","purpose":"zqxsecuritypurpose"}]', 'active', 1, ?, ?)`,
+			policyID, timestamp, timestamp); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, details, artifact_ids_json, version, created_at, updated_at)
+			VALUES (?, ?, ?, 'zqxevidencekey', 'satisfied', 'zqxevidencesummary text', 'zqxevidencedetails text', '[]', 1, ?, ?)`,
+			evidenceID, attemptID, issue.ID, timestamp, timestamp)
+		return err
+	}); err != nil {
+		t.Fatalf("insert gate fixtures: %v", err)
+	}
+
+	rows := searchIndexRows(t, db)
+	policyRow := findSearchIndexRow(rows, "workflow_policy", policyID)
+	if policyRow == nil {
+		t.Fatalf("workflow policy not indexed: %#v", rows)
+	}
+	if policyRow.Title != "zqxpolicykey" {
+		t.Fatalf("policy title = %q, want the requirement key", policyRow.Title)
+	}
+	if !strings.Contains(policyRow.Content, "zqxsecuritypurpose") || !strings.Contains(policyRow.Content, "task") {
+		t.Fatalf("policy content = %q, want the purpose and selector text", policyRow.Content)
+	}
+	evidenceRow := findSearchIndexRow(rows, "gate_evidence", evidenceID)
+	if evidenceRow == nil {
+		t.Fatalf("gate evidence not indexed: %#v", rows)
+	}
+	if evidenceRow.Title != "zqxevidencekey" || !strings.Contains(evidenceRow.Content, "zqxevidencesummary") || !strings.Contains(evidenceRow.Content, "zqxevidencedetails") {
+		t.Fatalf("evidence row = %#v, want key title with summary and details content", evidenceRow)
+	}
+
+	searchRepository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchRepository() error = %v", err)
+	}
+	byPurpose, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{Query: "zqxsecuritypurpose", Limit: 20}})
+	if err != nil {
+		t.Fatalf("search by purpose: %v", err)
+	}
+	if len(byPurpose.Results) != 1 || byPurpose.Results[0].EntityType != domain.SearchEntityTypeWorkflowPolicy {
+		t.Fatalf("search by purpose = %#v, want the policy", byPurpose.Results)
+	}
+	if byPurpose.Results[0].IssueID != nil {
+		t.Fatalf("policy result issue id = %#v, want nil for a project-scoped entity", byPurpose.Results[0].IssueID)
+	}
+	bySummary, err := searchRepository.Search(ctx, ports.SearchCommand{Input: domain.SearchInput{
+		Query: "zqxevidencesummary", Limit: 20, EntityTypes: []domain.SearchEntityType{domain.SearchEntityTypeGateEvidence},
+	}})
+	if err != nil {
+		t.Fatalf("search by evidence summary: %v", err)
+	}
+	if len(bySummary.Results) != 1 || bySummary.Results[0].EntityID != evidenceID {
+		t.Fatalf("search by evidence summary = %#v, want the evidence row", bySummary.Results)
+	}
+
+	// The evidence upsert path updates summary/details/result/version; the
+	// index must follow.
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE gate_evidence SET summary = 'zqxreplacedsummary', version = 2, updated_at = ? WHERE id = ?`, timestamp, evidenceID)
+		return err
+	}); err != nil {
+		t.Fatalf("update evidence: %v", err)
+	}
+	updatedRows := searchIndexRows(t, db)
+	updatedEvidence := findSearchIndexRow(updatedRows, "gate_evidence", evidenceID)
+	if updatedEvidence == nil || !strings.Contains(updatedEvidence.Content, "zqxreplacedsummary") {
+		t.Fatalf("evidence row after update = %#v, want the replaced summary indexed", updatedEvidence)
+	}
+
+	// A wrong-shaped requirements blob (valid JSON, wrong type) must not
+	// fail the write; the index degrades to empty text and GetPolicy is
+	// what reports the corruption.
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE workflow_policies SET requirements_json = '"not-an-array"' WHERE id = ?`, policyID)
+		return err
+	}); err != nil {
+		t.Fatalf("wrong-shaped requirements update failed, want tolerant indexing: %v", err)
+	}
+	degradedRows := searchIndexRows(t, db)
+	degradedPolicy := findSearchIndexRow(degradedRows, "workflow_policy", policyID)
+	if degradedPolicy == nil || degradedPolicy.Title != "" {
+		t.Fatalf("policy row after shape corruption = %#v, want an empty title", degradedPolicy)
+	}
+
+	indexRepository, err := sqlite.NewSearchIndexRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchIndexRepository() error = %v", err)
+	}
+	if err := indexRepository.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild() error = %v", err)
+	}
+	rebuilt := searchIndexRows(t, db)
+	if !reflect.DeepEqual(rebuilt, degradedRows) {
+		t.Fatalf("rebuilt search index rows = %#v, want %#v (trigger and Rebuild must agree)", rebuilt, degradedRows)
+	}
 }

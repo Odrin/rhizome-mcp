@@ -24,6 +24,9 @@ const (
 	checkOrphanedReservations    = "active_reservations_without_live_attempt"
 	checkReservationReleaseState = "reservation_release_state_consistency"
 	checkHTTPAddress             = "http_address"
+	checkPolicyPayloadShape      = "workflow_policy_payload_shape"
+	checkTargetGateSnapshots     = "review_targets_without_gate_snapshot"
+	checkGateEvidenceConsistency = "gate_evidence_attempt_issue_consistency"
 	checkIntegrity               = "integrity_check"
 )
 
@@ -159,6 +162,15 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 			_ = ctx
 			_ = query
 			return checkHTTPAddressConfiguration(httpAddress)
+		}},
+		{checkPolicyPayloadShape, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			return checkWorkflowPolicyPayloadShapeQuery(ctx, query)
+		}},
+		{checkTargetGateSnapshots, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			return checkReviewTargetGateSnapshotsQuery(ctx, query)
+		}},
+		{checkGateEvidenceConsistency, func(ctx context.Context, query sqlite.Queryer) (string, error) {
+			return checkGateEvidenceConsistencyQuery(ctx, query)
 		}},
 	}
 	if report.Full {
@@ -305,6 +317,60 @@ func checkReservationReleaseStateQuery(ctx context.Context, query sqlite.Queryer
 	}
 	if count != 0 {
 		return "", fmt.Errorf("reservations with inconsistent release state=%d", count)
+	}
+	return fmt.Sprintf("count=%d", count), nil
+}
+
+// checkWorkflowPolicyPayloadShapeQuery flags policy rows whose selector or
+// requirements blob has the wrong JSON shape. The storage CHECK only
+// enforces json_valid, so a row written around the domain (a hand-edited
+// database, a partial restore) could hold a shape the gate evaluator cannot
+// decode; surfacing it here turns a confusing evaluation failure into a
+// located diagnostic (ISSUE-175 AC4).
+func checkWorkflowPolicyPayloadShapeQuery(ctx context.Context, query sqlite.Queryer) (string, error) {
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM workflow_policies
+		WHERE json_type(selector_json) <> 'object' OR json_type(requirements_json) <> 'array'`).Scan(&count); err != nil {
+		return "", err
+	}
+	if count != 0 {
+		return "", fmt.Errorf("policies with malformed payload shape=%d", count)
+	}
+	return fmt.Sprintf("count=%d", count), nil
+}
+
+// checkReviewTargetGateSnapshotsQuery flags review targets without a frozen
+// gate snapshot. Migration 012 backfilled one for every pre-existing target,
+// ensureTarget freezes one for every new target, and logical import
+// backfills one for every imported target, so a missing row means one of
+// those writers was bypassed (docs/02 §17.6).
+func checkReviewTargetGateSnapshotsQuery(ctx context.Context, query sqlite.Queryer) (string, error) {
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM review_targets
+		WHERE NOT EXISTS (SELECT 1 FROM review_target_gate_snapshots WHERE target_id = review_targets.id)`).Scan(&count); err != nil {
+		return "", err
+	}
+	if count != 0 {
+		return "", fmt.Errorf("review targets without a gate snapshot=%d", count)
+	}
+	return fmt.Sprintf("count=%d", count), nil
+}
+
+// checkGateEvidenceConsistencyQuery flags evidence rows naming a different
+// issue than their owning attempt does. submit_gate_evidence derives the
+// issue from the lease-authenticated attempt, so a divergent row cannot come
+// from the sanctioned path -- and gate evaluation keys evidence by attempt
+// while activity and search key it by issue, so a divergent row would be
+// visible in one projection and invisible to enforcement.
+func checkGateEvidenceConsistencyQuery(ctx context.Context, query sqlite.Queryer) (string, error) {
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT count(*) FROM gate_evidence e
+		JOIN work_attempts a ON a.id = e.attempt_id
+		WHERE a.issue_id <> e.issue_id`).Scan(&count); err != nil {
+		return "", err
+	}
+	if count != 0 {
+		return "", fmt.Errorf("gate evidence rows inconsistent with their attempt=%d", count)
 	}
 	return fmt.Sprintf("count=%d", count), nil
 }

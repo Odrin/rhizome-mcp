@@ -30,7 +30,7 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 	if !report.Healthy() {
 		t.Fatalf("Doctor() unhealthy report = %+v", report)
 	}
-	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts", "active_reservations_without_live_attempt", "reservation_release_state_consistency", "http_address"}
+	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts", "active_reservations_without_live_attempt", "reservation_release_state_consistency", "http_address", "workflow_policy_payload_shape", "review_targets_without_gate_snapshot", "gate_evidence_attempt_issue_consistency"}
 	if len(report.Checks) != len(wantChecks) {
 		t.Fatalf("doctor checks = %+v", report.Checks)
 	}
@@ -376,5 +376,83 @@ func TestProjectDoctorReportsReservationReleaseStateInconsistency(t *testing.T) 
 	}
 	if !found {
 		t.Fatalf("doctor report missing reservation_release_state_consistency check: %+v", report.Checks)
+	}
+}
+
+// TestProjectDoctorReportsGateInvariantViolations covers the three
+// workflow-gate invariants (ISSUE-175 AC4): a policy blob with the wrong
+// JSON shape, a review target without its frozen gate snapshot, and an
+// evidence row naming a different issue than its owning attempt. Each is a
+// state no sanctioned write path produces, seeded directly to simulate the
+// corrupted or half-restored databases doctor exists to detect.
+func TestProjectDoctorReportsGateInvariantViolations(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	fakeClock := clock.NewFakeClock(testTime)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        fakeClock,
+	})
+	if err != nil {
+		t.Fatalf("OpenProject() error = %v", err)
+	}
+	defer func() { _ = project.Close(context.Background()) }()
+
+	issueID := "01F2H8V5M9Q1J7K3N6P4R0T5G1"
+	otherIssueID := "01F2H8V5M9Q1J7K3N6P4R0T5G2"
+	attemptID := "01G2H8V5M9Q1J7K3N6P4R0T5G3"
+	policyID := "01G2H8V5M9Q1J7K3N6P4R0T5G4"
+	targetID := "01G2H8V5M9Q1J7K3N6P4R0T5G5"
+	evidenceID := "01G2H8V5M9Q1J7K3N6P4R0T5G6"
+	now := fakeClock.Now().UTC().Format(time.RFC3339Nano)
+	if err := project.Database.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		statements := []struct {
+			query string
+			args  []any
+		}{
+			{`INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 1, 'task', 'gate doctor issue', 'ready', 'medium', 1, ?, ?)`, []any{issueID, now, now}},
+			{`INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at) VALUES (?, 2, 'task', 'other issue', 'ready', 'medium', 1, ?, ?)`, []any{otherIssueID, now, now}},
+			{`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary) VALUES (?, ?, 'work', 'completed', 1, 0, X'01', ?, ?, ?, ?, 'done')`, []any{attemptID, issueID, now, now, now, now}},
+			// A policy whose requirements blob is valid JSON of the wrong
+			// shape -- json_valid passes, json_type does not.
+			{`INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at) VALUES (?, '{"issue_types":["task"]}', '"not-an-array"', 'active', 1, ?, ?)`, []any{policyID, now, now}},
+			// A review target with no snapshot row at all.
+			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, version, created_at) VALUES (?, ?, 1, 0, '[]', 1, ?)`, []any{targetID, issueID, now}},
+			// Evidence naming a different issue than its attempt's.
+			{`INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, artifact_ids_json, version, created_at, updated_at) VALUES (?, ?, ?, 'impl', 'satisfied', 'divergent', '[]', 1, ?, ?)`, []any{evidenceID, attemptID, otherIssueID, now, now}},
+		}
+		for _, statement := range statements {
+			if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("insert test fixtures: %v", err)
+	}
+
+	report, err := project.Doctor(context.Background(), projectruntime.DoctorOptions{Full: false})
+	if err == nil {
+		t.Fatalf("Doctor() unexpectedly succeeded: %+v", report)
+	}
+	assertDomainCode(t, err, projectruntime.CodeHealthCheck)
+	if report.Healthy() {
+		t.Fatalf("Doctor() healthy report = %+v", report)
+	}
+
+	unhealthy := map[string]bool{}
+	for _, check := range report.Checks {
+		if !check.Healthy {
+			unhealthy[check.Name] = true
+		}
+	}
+	for _, want := range []string{
+		"workflow_policy_payload_shape",
+		"review_targets_without_gate_snapshot",
+		"gate_evidence_attempt_issue_consistency",
+	} {
+		if !unhealthy[want] {
+			t.Fatalf("doctor report missing unhealthy %s check: %+v", want, report.Checks)
+		}
 	}
 }

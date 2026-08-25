@@ -406,7 +406,13 @@ Also verify:
 - oversized WAL;
 - expired attempts;
 - migration consistency;
-- one-active-attempt invariant.
+- one-active-attempt invariant;
+- active reservations without a live attempt, and reservation
+  release-state consistency (docs/02 §18);
+- workflow-gate invariants (docs/02 §17, ISSUE-175): policy selector and
+  requirement blobs have the JSON shape the evaluator expects, every
+  review target has its frozen gate snapshot, and every gate evidence row
+  names the same issue as its owning attempt.
 
 Deep mode:
 

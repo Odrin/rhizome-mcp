@@ -2270,8 +2270,14 @@ Input:
 }
 ```
 
-Supported entity types are `issue`, `comment`, `decision`, `review`, and
-`attempt_note`.
+Supported entity types are `issue`, `comment`, `decision`, `review`,
+`attempt_note`, `workflow_policy`, and `gate_evidence`. A `workflow_policy`
+row indexes the policy's declared requirement keys, evidence keys, purposes,
+fields, and selector (the locked schema gives policies no free-text name);
+it is project-scoped, so its results carry no `issue_id`. A `gate_evidence`
+row indexes the evidence key, summary, and details. Reservation rows are
+also indexed (docs/02 §18.4) and appear in unfiltered results, but
+`reservation` is not accepted as an explicit `entity_types` filter value.
 
 FTS5 syntax supports raw phrases, boolean operators, prefixes, and column
 filters. Punctuation-bearing literal terms, including hyphenated terms such as

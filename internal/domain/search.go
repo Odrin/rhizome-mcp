@@ -17,11 +17,19 @@ const (
 	SearchEntityTypeReview      SearchEntityType = "review"
 	SearchEntityTypeAttemptNote SearchEntityType = "attempt_note"
 	SearchEntityTypeReservation SearchEntityType = "reservation"
+	// SearchEntityTypeWorkflowPolicy indexes a policy's requirement keys,
+	// evidence keys, purposes, fields, and selector (docs/02 §17.2 policies
+	// carry no free-text name, so the declared identifiers are the
+	// searchable text). Project-scoped: its rows have no issue_id.
+	SearchEntityTypeWorkflowPolicy SearchEntityType = "workflow_policy"
+	// SearchEntityTypeGateEvidence indexes evidence keys, summaries, and
+	// details (ISSUE-175 AC4).
+	SearchEntityTypeGateEvidence SearchEntityType = "gate_evidence"
 )
 
 func (value SearchEntityType) Valid() bool {
 	switch value {
-	case SearchEntityTypeIssue, SearchEntityTypeComment, SearchEntityTypeDecision, SearchEntityTypeReview, SearchEntityTypeAttemptNote, SearchEntityTypeReservation:
+	case SearchEntityTypeIssue, SearchEntityTypeComment, SearchEntityTypeDecision, SearchEntityTypeReview, SearchEntityTypeAttemptNote, SearchEntityTypeReservation, SearchEntityTypeWorkflowPolicy, SearchEntityTypeGateEvidence:
 		return true
 	default:
 		return false

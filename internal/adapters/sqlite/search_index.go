@@ -51,6 +51,28 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
 				SELECT 'reservation', id, issue_id, display_value, kind || char(10) || COALESCE(release_reason, '')
 				FROM resource_reservations`,
+			// These two must stay byte-identical in effect to migration
+			// 014's triggers, the same rule the reservation statement
+			// follows for migration 013.
+			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
+				SELECT 'workflow_policy', id, NULL,
+					CASE WHEN json_type(requirements_json) = 'array'
+						THEN COALESCE((SELECT group_concat(json_extract(value, '$.key'), ' ')
+							FROM json_each(requirements_json) WHERE type = 'object'), '')
+						ELSE '' END,
+					CASE WHEN json_type(requirements_json) = 'array'
+						THEN COALESCE((SELECT group_concat(
+							COALESCE(json_extract(value, '$.evidence_key'), '') || ' ' ||
+							COALESCE(json_extract(value, '$.purpose'), '') || ' ' ||
+							COALESCE(json_extract(value, '$.field'), ''), char(10))
+							FROM json_each(requirements_json) WHERE type = 'object'), '')
+						ELSE '' END
+					|| char(10) || selector_json || char(10) || status
+				FROM workflow_policies`,
+			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
+				SELECT 'gate_evidence', id, issue_id, key,
+					summary || char(10) || COALESCE(details, '') || char(10) || result
+				FROM gate_evidence`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return err
