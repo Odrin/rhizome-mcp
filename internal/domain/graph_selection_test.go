@@ -91,11 +91,78 @@ func TestBuildGraphPlanningPrefersNonTerminalNodes(t *testing.T) {
 	if len(result.Nodes) > 100 {
 		t.Fatalf("node count = %d, want at most the 100-node cap", len(result.Nodes))
 	}
+	// ISSUE-225 Q1: the 150 finished issues are dropped by the endpoints-only
+	// policy, not by the budget -- only 10 of the 100 nodes were ever spent,
+	// so no larger max_nodes would retain them. That is not truncation.
+	if result.Truncated || result.TruncationReason != nil {
+		t.Fatalf("truncated = %v, reason = %v; a policy drop with 90 nodes of budget left is not truncation",
+			result.Truncated, result.TruncationReason)
+	}
+}
+
+// TestBuildGraphPlanningNodeBudgetStillReportsTruncation is the other half of
+// ISSUE-225 Q1: narrowing what truncated means must not stop it firing when a
+// budget really did drop something a larger budget would have kept.
+func TestBuildGraphPlanningNodeBudgetStillReportsTruncation(t *testing.T) {
+	var nodes []domain.IssueProjection
+	for index := 0; index < 12; index++ {
+		nodes = append(nodes, planningNode(fmt.Sprintf("ready-%03d", index), domain.StatusReady, true))
+	}
+	snapshot := domain.GraphSnapshot{Nodes: nodes}
+
+	result := domain.BuildGraph(snapshot, planningTraversal(snapshot, 5, false))
+
+	if len(result.Nodes) != 5 {
+		t.Fatalf("nodes = %d, want the 5-node budget spent in full", len(result.Nodes))
+	}
 	if !result.Truncated {
-		t.Fatal("truncated = false, want true: 160 candidates do not fit a 100-node cap")
+		t.Fatal("truncated = false, want true: 12 claimable issues do not fit a 5-node budget")
 	}
 	if result.TruncationReason == nil || *result.TruncationReason != "node_limit" {
 		t.Fatalf("truncation_reason = %v, want node_limit", result.TruncationReason)
+	}
+}
+
+// TestBuildGraphPlanningCapsEntryPointsButKeepsFullCount pins ISSUE-225 Q2:
+// entry points are still counted over the whole snapshot, so truncation never
+// shrinks the reported amount of claimable work, but the serialized list is
+// bounded by the same budget that bounds nodes and the gap is explicit.
+//
+// node_limit shadows entry_point_limit here, and in practice always will:
+// every entry point is a claimable non-terminal node and therefore a
+// traversal root, so a snapshot with more entry points than the budget also
+// exhausts the node budget. The entry_point_limit branch exists as a
+// correctness guard for a future selection that breaks that coupling.
+func TestBuildGraphPlanningCapsEntryPointsButKeepsFullCount(t *testing.T) {
+	var nodes []domain.IssueProjection
+	for index := 0; index < 12; index++ {
+		nodes = append(nodes, planningNode(fmt.Sprintf("ready-%03d", index), domain.StatusReady, true))
+	}
+	snapshot := domain.GraphSnapshot{Nodes: nodes}
+
+	result := domain.BuildGraph(snapshot, planningTraversal(snapshot, 5, false))
+
+	if result.Summary.EntryPointCount != 12 {
+		t.Fatalf("summary.entry_point_count = %d, want all 12 claimable issues", result.Summary.EntryPointCount)
+	}
+	if len(result.EntryPoints) != 5 {
+		t.Fatalf("entry_points = %d, want the list capped at the 5-node budget", len(result.EntryPoints))
+	}
+	if result.Summary.EntryPointCount <= len(result.EntryPoints) {
+		t.Fatal("entry_point_count must exceed the emitted list, so the shrink is never silent")
+	}
+	// The kept prefix is the deterministic snapshot order, so a client polling
+	// the board sees a stable list rather than a shuffling window.
+	for index := 0; index < 5; index++ {
+		want := fmt.Sprintf("ready-%03d", index)
+		if result.EntryPoints[index] != want {
+			t.Fatalf("entry_points[%d] = %q, want %q: the kept prefix must follow snapshot order",
+				index, result.EntryPoints[index], want)
+		}
+	}
+	if !result.Truncated || result.TruncationReason == nil {
+		t.Fatalf("truncated = %v, reason = %v; a capped list is a budget truncation",
+			result.Truncated, result.TruncationReason)
 	}
 }
 
@@ -126,8 +193,14 @@ func TestBuildGraphPlanningKeepsTerminalNodesOnlyAsEndpoints(t *testing.T) {
 	if containsID(retained, "done-isolated") {
 		t.Fatalf("nodes = %v, want done-isolated dropped: no edge attaches it to retained work", retained)
 	}
-	if !result.Truncated {
-		t.Fatal("truncated = false, want true: an allowed node was dropped")
+	// done-isolated is dropped by the endpoints-only policy with 97 nodes of
+	// budget to spare, so it is a selection outcome, not truncation
+	// (ISSUE-225 Q1) -- the same reading
+	// TestBuildGraphPlanningExcludeTerminalDropsEveryTerminalNode already
+	// pinned for include_terminal=false exclusions.
+	if result.Truncated || result.TruncationReason != nil {
+		t.Fatalf("truncated = %v, reason = %v; an endpoints-only policy drop is not truncation",
+			result.Truncated, result.TruncationReason)
 	}
 }
 
@@ -315,8 +388,9 @@ func TestBuildGraphPlanningSecondPassIsOrderIndependent(t *testing.T) {
 		if containsID(retained, "done-epic") {
 			t.Fatalf("%s: nodes = %v, want done-epic dropped: it only attaches to another terminal node", name, retained)
 		}
-		if !result.Truncated {
-			t.Fatalf("%s: truncated = false, want true: an includable node was dropped", name)
+		if result.Truncated || result.TruncationReason != nil {
+			t.Fatalf("%s: truncated = %v, reason = %v; dropping done-epic is the endpoints-only policy, not a budget (ISSUE-225 Q1)",
+				name, result.Truncated, result.TruncationReason)
 		}
 	}
 }

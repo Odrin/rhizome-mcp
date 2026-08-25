@@ -1019,11 +1019,18 @@ func mustCreateBoardIssue(t *testing.T, session *mcp.ClientSession, arguments ma
 }
 
 // TestIntegrationBoardTruncationReportsTrueEntryPoints verifies that when
-// the planning graph is truncated, the board reports entry_points computed
-// over the whole snapshot (not just retained nodes) and marks the graph as
-// truncated. With include_terminal=false, the board excludes done/cancelled
-// issues from the node budget, so we create enough non-terminal issues to
-// exceed the 100-node budget.
+// the planning graph is truncated, the board still reports an entry-point
+// *count* computed over the whole snapshot rather than over retained nodes,
+// and marks the graph truncated. With include_terminal=false the board
+// excludes done/cancelled issues from the node budget, so enough non-terminal
+// issues are created to exceed the 100-node budget.
+//
+// ISSUE-225 Q2 bounded the serialized list: the count still covers every
+// claimable issue, so truncation never shrinks how much claimable work the
+// client is told about, but the emitted list is capped at the same node
+// budget so a project with thousands of claimable issues does not ship
+// thousands of ULIDs on every board poll. count > len(list) plus the
+// truncation reason is what makes the shrink explicit instead of silent.
 func TestIntegrationBoardTruncationReportsTrueEntryPoints(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
@@ -1074,18 +1081,28 @@ func TestIntegrationBoardTruncationReportsTrueEntryPoints(t *testing.T) {
 		t.Fatalf("retained_node_count = %d, want at most 100 (the node budget)", board.PlanningGraph.RetainedNodeCount)
 	}
 
-	// Verify entry points includes all ready issues (computed over full snapshot,
-	// not just retained nodes). Even though the graph is truncated at 100 nodes,
-	// all 110 ready issues should appear in entry_points since they are all claimable.
+	// The count still covers every claimable issue -- this is the ISSUE-219
+	// guarantee, and it is what a client reads to learn how much work exists.
 	if board.PlanningGraph.Summary.EntryPointCount != 110 {
-		t.Fatalf("summary.entry_point_count = %d, want 110 (all ready issues, computed over full snapshot)", board.PlanningGraph.Summary.EntryPointCount)
+		t.Fatalf("summary.entry_point_count = %d, want 110 (all ready issues, computed over the full snapshot)", board.PlanningGraph.Summary.EntryPointCount)
 	}
-	if len(board.PlanningGraph.EntryPoints) != 110 {
-		t.Fatalf("len(entry_points) = %d, want 110", len(board.PlanningGraph.EntryPoints))
+	// The serialized list is bounded by the same 100-node budget, and the gap
+	// between count and list is the explicit signal that it was bounded.
+	if len(board.PlanningGraph.EntryPoints) != 100 {
+		t.Fatalf("len(entry_points) = %d, want 100 (capped at the node budget)", len(board.PlanningGraph.EntryPoints))
 	}
+	if board.PlanningGraph.Summary.EntryPointCount <= len(board.PlanningGraph.EntryPoints) {
+		t.Fatal("entry_point_count must exceed the emitted list so the cap is never silent")
+	}
+	// Every emitted entry point is still a real claimable issue, and the
+	// emitted set is a subset of the ready issues rather than an arbitrary mix.
+	readyByID := make(map[string]bool, len(readyIssues))
 	for _, readyIssue := range readyIssues {
-		if !containsString(board.PlanningGraph.EntryPoints, readyIssue.ID) {
-			t.Fatalf("entry_points missing ready issue %s (%s)", readyIssue.DisplayID, readyIssue.ID)
+		readyByID[readyIssue.ID] = true
+	}
+	for _, entryPoint := range board.PlanningGraph.EntryPoints {
+		if !readyByID[entryPoint] {
+			t.Fatalf("entry_points contains %s, which is not one of the ready issues", entryPoint)
 		}
 	}
 }

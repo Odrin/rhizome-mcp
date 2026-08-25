@@ -101,8 +101,15 @@ Orphaned reservation rows awaiting expiry sweep can also push a live reservation
 out of the visible window.
 
 The planning graph is bounded separately, by a node budget (default 100 nodes,
-maximum 500), and it *does* report its cut: the response carries `truncated` and
-`truncation_reason` (`"node_limit"`) whenever a node was dropped.
+maximum 500), and it *does* report its cut: the response carries `truncated`
+and a single-valued `truncation_reason` whenever a *budget* dropped something a
+larger budget would have kept — `"node_limit"` for the node budget,
+`"entry_point_limit"` for the entry-point cap, with `node_limit` taking
+precedence when both apply (which in practice it always does, since every entry
+point is also a traversal root). Deterministic selection outcomes are not
+truncation and set neither field: a terminal issue dropped because no relation
+edge attaches it to retained work, or excluded outright by
+`include_terminal: false`.
 
 Two properties of the graph's node selection matter to a board consumer:
 
@@ -111,11 +118,17 @@ Two properties of the graph's node selection matter to a board consumer:
   edge attaches it to a retained node. The board additionally requests the graph
   with terminal issues excluded outright, so finished work cannot consume the
   budget at all.
-- `entry_points` is computed over every claimable issue in the snapshot, not
-  over the returned `nodes`. This is deliberate, so that truncation can never
-  shrink the set of claimable work a client is shown. The consequence is that
+- `summary.entry_point_count` is computed over every claimable issue in the
+  snapshot, not over the returned `nodes`, so truncation can never shrink how
+  much claimable work a client is told exists. The consequence is that
   `entry_points` may name an issue that does not appear in `nodes` — under the
   node budget, and equally when an issue lies outside the traversal depth.
+- The serialized `entry_points` list is capped at the same node budget, keeping
+  the board's JSON, table and ETag payloads bounded on a project with thousands
+  of claimable issues. `entry_point_count` greater than `len(entry_points)`,
+  together with the truncation reason, is how a consumer sees that the list was
+  capped; the kept prefix follows the deterministic snapshot order, so a live
+  board poll does not see the window shuffle.
 
 ## 7. Workflow gate visibility
 

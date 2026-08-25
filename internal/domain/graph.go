@@ -383,7 +383,13 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 			}
 		}
 		if !attached {
-			truncated = true
+			// ISSUE-225 Q1: a policy drop is not truncation. This node is
+			// includable but the endpoints-only rule attaches it to nothing
+			// pass 1 retained, which is a deterministic selection outcome no
+			// MaxNodes value changes. Flagging it sent clients into an
+			// unwinnable raise-and-retry loop and gave every project holding
+			// one relation-free finished issue a permanent truncated=true.
+			// include_terminal=false exclusions already read this way.
 			continue
 		}
 		visited[id] = true
@@ -418,6 +424,23 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 			}
 		}
 	}
+	// ISSUE-225 Q2: entry points are still computed over the whole snapshot,
+	// so the count never shrinks with the budget, but the serialized list is
+	// bounded by the same MaxNodes that bounds Nodes -- otherwise a project
+	// with thousands of claimable issues ships thousands of ULIDs on every
+	// call and board poll, and the documented response budget is false
+	// exactly where it matters. The kept prefix is the existing deterministic
+	// snapshot order, so it is stable across calls and ETag-friendly, and
+	// EntryPointCount > len(EntryPoints) plus the reason below tells a client
+	// exactly what happened. The rooted graph derives entry points from
+	// Nodes, which is already within budget, so the cap is a no-op there.
+	entryPointCount := len(result.EntryPoints)
+	entryPointsCapped := false
+	if traversal.MaxNodes > 0 && len(result.EntryPoints) > traversal.MaxNodes {
+		result.EntryPoints = result.EntryPoints[:traversal.MaxNodes]
+		entryPointsCapped = true
+	}
+
 	blocking := make(map[string]bool)
 	for _, edge := range result.Edges {
 		if edge.Type == string(RelationTypeBlocks) {
@@ -432,10 +455,18 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 		}
 	}
 	result.Summary = GraphSummary{NodeCount: len(result.Nodes), EdgeCount: len(result.Edges),
-		EntryPointCount: len(result.EntryPoints), BlockingNodeCount: len(result.BlockingNodes)}
-	result.Truncated = truncated
-	if truncated {
+		EntryPointCount: entryPointCount, BlockingNodeCount: len(result.BlockingNodes)}
+	// truncated now means exactly "a budget dropped something a larger budget
+	// would have kept", which is true of both the node budget and the entry
+	// point cap. The reason is single-valued, so node_limit wins when both
+	// happened: it is the one that also cost the caller nodes and edges.
+	result.Truncated = truncated || entryPointsCapped
+	switch {
+	case truncated:
 		reason := "node_limit"
+		result.TruncationReason = &reason
+	case entryPointsCapped:
+		reason := "entry_point_limit"
 		result.TruncationReason = &reason
 	}
 	return result
