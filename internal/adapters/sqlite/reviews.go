@@ -1045,29 +1045,73 @@ func insertReviewApprovals(ctx context.Context, tx Executor, request domain.Revi
 	return nil
 }
 
-// loadIssueReviewApprovalPurposes returns the distinct set of purposes
-// issueID holds at least one review_approval record for, regardless of
-// which target or issue version granted it (docs/02 §17.5 states plain
-// existence, with no staleness qualifier -- unlike approve_review, which
-// checks its own review target's frozen snapshot, complete_work_to_done has
-// no review target of its own to freeze against). Used to populate
-// GateEvidence.ReviewApprovalPurposes at complete_work_to_done.
+// loadIssueReviewApprovalPurposes returns the set of purposes issueID holds
+// at least one *still-fresh* approval for. An approval contributes its
+// purpose only while nothing disqualifying has happened to the issue after
+// the target_event_id it was granted against -- the same
+// reviewedWorkChangedSince predicate approve_review applies to its own
+// frozen target (docs/02 §17.5). Used to populate
+// GateEvidence.ReviewApprovalPurposes at complete_work_to_done, and by the
+// work-context summary and the evaluate_gates diagnostic, so all three
+// report the same freshness.
+//
+// ISSUE-223: the lookup used to be plain existence. That made the
+// reviewer-free path laxer than the reviewer-involving one, which is
+// backwards for a gate whose whole point is that a human looked: an issue
+// approved for `security`, reopened (done -> ready is an ordinary
+// transition), then modified and completed straight to done with no new
+// review, satisfied the gate with an approval granted for code nobody had
+// reviewed. "Ever signed off" is a legitimately weaker check, but it must
+// not be the invisible default meaning of review_approval.
+//
+// Freshness is monotone in target_event_id: if nothing disqualifying
+// happened after position E, nothing happened after any later position
+// either. So the distinct positions are probed in ascending order and the
+// first fresh one makes every later position fresh too, bounding the probes
+// to the number of distinct approval positions -- in practice one.
 func loadIssueReviewApprovalPurposes(ctx context.Context, tx Executor, issueID string) (map[string]bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT purpose FROM review_approvals WHERE issue_id = ?`, issueID)
+	rows, err := tx.QueryContext(ctx, `SELECT target_event_id, purpose FROM review_approvals
+		WHERE issue_id = ? ORDER BY target_event_id ASC`, issueID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	purposes := make(map[string]bool)
+	var positions []int64
+	purposesAt := make(map[int64][]string)
 	for rows.Next() {
+		var targetEventID int64
 		var purpose string
-		if err := rows.Scan(&purpose); err != nil {
+		if err := rows.Scan(&targetEventID, &purpose); err != nil {
 			return nil, err
 		}
-		purposes[purpose] = true
+		if _, seen := purposesAt[targetEventID]; !seen {
+			positions = append(positions, targetEventID)
+		}
+		purposesAt[targetEventID] = append(purposesAt[targetEventID], purpose)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	purposes := make(map[string]bool)
+	fresh := false
+	for _, position := range positions {
+		if !fresh {
+			changed, err := reviewedWorkChangedSince(ctx, tx, issueID, position)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				continue
+			}
+			fresh = true
+		}
+		for _, purpose := range purposesAt[position] {
+			purposes[purpose] = true
+		}
 	}
 	return purposes, nil
 }

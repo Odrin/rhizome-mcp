@@ -57,7 +57,15 @@ func TestCreateReviewRequestRejectsMissingRequiredPurpose(t *testing.T) {
 // review_approval requirement at complete_work_to_done for a completely
 // different, later work attempt on the same issue -- proving the live,
 // issue-scoped lookup (not a snapshot) is what complete_work_to_done reads.
-func TestApproveReviewGrantsApprovalUsableLaterAtCompleteWorkToDone(t *testing.T) {
+// TestApproveReviewGrantsApprovalReusableOnlyWhileReviewedWorkIsUnchanged
+// pins the ISSUE-223 semantics: approving a request grants one immutable
+// approval row per covered purpose, and that approval keeps satisfying
+// complete_work_to_done's review_approval requirement only while nothing
+// disqualifying has happened to the issue since the position it was granted
+// against. Reopening the issue and doing more work invalidates it, so the
+// reviewer-free completion path can no longer ship unreviewed changes
+// through a green security gate.
+func TestApproveReviewGrantsApprovalReusableOnlyWhileReviewedWorkIsUnchanged(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "review-purpose-approve-grants")
 	defer fixture.close()
 	createWorkflowPolicy(t, fixture, allTasksSelector(), []domain.PolicyRequirementInput{
@@ -134,32 +142,64 @@ func TestApproveReviewGrantsApprovalUsableLaterAtCompleteWorkToDone(t *testing.T
 		t.Fatal("UPDATE review_approvals succeeded; the immutability trigger did not fire")
 	}
 
-	// Reopen and complete a brand-new, unrelated work attempt straight to
-	// done -- no review request this time -- proving complete_work_to_done
-	// reads the live, issue-scoped approval, not any snapshot.
-	reopened, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
-		IssueID: issue.ID, ExpectedVersion: approvedResult.Issue.Version,
-		Changes: domain.IssuePatch{Status: domain.OptionalValue[domain.Status]{Set: true, Value: domain.StatusReady}},
+	// The positive half of the freshness rule, read straight off the
+	// evidence the enforcement path uses: nothing disqualifying has happened
+	// since the approval was granted -- the approving review attempt's own
+	// events are excluded by reviewedWorkChangedSince -- so the purpose still
+	// counts. Without this assertion the negative half below would pass even
+	// if the qualifier rejected every approval unconditionally.
+	policyRepository, err := sqlite.NewWorkflowPolicyRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identifier, err := domain.ParseIssueIdentifier(issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshDiagnostic, err := policyRepository.LoadGateDiagnostic(fixture.ctx, ports.GateDiagnosticCommand{
+		Identifier: identifier, Point: domain.EnforcementPointCompleteWorkToDone,
 	})
 	if err != nil {
+		t.Fatalf("LoadGateDiagnostic before reopen: %v", err)
+	}
+	if !freshDiagnostic.Evidence.ReviewApprovalPurposes["security"] {
+		t.Fatalf("security approval = %#v immediately after approval, want it to still count",
+			freshDiagnostic.Evidence.ReviewApprovalPurposes)
+	}
+
+	// Reopen and run a brand-new work attempt straight to done with no review
+	// request. This is the ISSUE-223 exploit path: before the staleness
+	// qualifier the stale approval satisfied the gate and shipped code no
+	// reviewer had seen. Reopening is itself a disqualifying issue event, so
+	// the approval must no longer count.
+	if _, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: approvedResult.Issue.Version,
+		Changes: domain.IssuePatch{Status: domain.OptionalValue[domain.Status]{Set: true, Value: domain.StatusReady}},
+	}); err != nil {
 		t.Fatalf("reopen to ready: %v", err)
 	}
+	staleDiagnostic, err := policyRepository.LoadGateDiagnostic(fixture.ctx, ports.GateDiagnosticCommand{
+		Identifier: identifier, Point: domain.EnforcementPointCompleteWorkToDone,
+	})
+	if err != nil {
+		t.Fatalf("LoadGateDiagnostic after reopen: %v", err)
+	}
+	if staleDiagnostic.Evidence.ReviewApprovalPurposes["security"] {
+		t.Fatalf("security approval = %#v after the issue was reopened, want it to have gone stale",
+			staleDiagnostic.Evidence.ReviewApprovalPurposes)
+	}
+
 	secondClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondFinish := finishInput(secondClaim, domain.AttemptOutcomeCompleted)
 	secondFinish.TargetIssueStatus = statusPointer(domain.StatusDone)
-	secondResult, err := fixture.attempts.FinishAttempt(fixture.ctx, secondFinish)
-	if err != nil {
-		t.Fatalf("complete_work_to_done must be satisfied by the earlier granted approval: %v", err)
-	}
-	if secondResult.Issue.Status != domain.StatusDone {
-		t.Fatalf("second issue status = %q, want done", secondResult.Issue.Status)
-	}
-	_ = reopened
+	_, err = fixture.attempts.FinishAttempt(fixture.ctx, secondFinish)
+	assertWorkflowGateUnsatisfied(t, err)
 
-	// complete_work_to_done only reads approvals, it never grants them.
+	// A rejected completion reads approvals; it never grants, consumes or
+	// deletes one.
 	var countAfter int
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
 		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_approvals WHERE issue_id = ?`, issue.ID).Scan(&countAfter)
@@ -167,7 +207,7 @@ func TestApproveReviewGrantsApprovalUsableLaterAtCompleteWorkToDone(t *testing.T
 		t.Fatal(err)
 	}
 	if countAfter != 1 {
-		t.Fatalf("review_approvals rows after complete_work_to_done = %d, want still 1", countAfter)
+		t.Fatalf("review_approvals rows after the rejected completion = %d, want still 1", countAfter)
 	}
 }
 

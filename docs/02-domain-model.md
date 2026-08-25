@@ -831,10 +831,29 @@ applicable at that point.
   satisfied by construction, since creation already required full coverage
   of that same frozen snapshot. `complete_work_to_done` has no review target
   of its own to check against, so it instead checks a live, issue-scoped
-  lookup of every purpose the issue holds at least one approval for,
-  regardless of which request or target granted it, with no staleness
-  qualifier -- unlike a review request's own staleness (docs/09), an
-  existing approval never expires on its own.
+  lookup of every purpose the issue holds at least one *still-fresh*
+  approval for, regardless of which request or target granted it. An
+  approval is fresh while nothing disqualifying has happened to the issue
+  after the `target_event_id` it was granted against -- the same predicate
+  `approve_review` applies to its own frozen target, so both evaluation
+  paths now share one freshness rule (ISSUE-223).
+
+  Plain existence was the original rule and was a hole: `done -> ready` is
+  an ordinary transition (§5), so an issue approved for `security` could be
+  reopened, modified, and completed straight back to `done` with no new
+  review, satisfied by an approval granted for code no reviewer had seen.
+  Having the reviewer-free path be laxer than the reviewer-involving one is
+  backwards for a gate whose point is that a human looked. "Was this issue
+  ever signed off" is a legitimately weaker check, but it must not be the
+  invisible default meaning of `review_approval`; if it is wanted it belongs
+  in an explicit, separately named requirement kind.
+
+  A consequence worth stating plainly: reopening an issue is itself a
+  disqualifying event, so once a `review_approval` requirement is in force,
+  a reopened issue reaches `done` through `approve_review` -- a fresh
+  request and a real reviewer -- rather than through `complete_work_to_done`
+  on a stale approval. The approval rows themselves are still immutable and
+  append-only; freshness is evaluated at read time and is never written back.
 
 ### 17.6. Snapshot timing
 

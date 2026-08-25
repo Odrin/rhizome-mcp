@@ -1929,7 +1929,10 @@ Completion checks:
   (and validated, at creation) to cover. `complete_work_to_done` also checks
   `review_approval` requirements, but against a live, issue-scoped lookup of
   granted approvals rather than any snapshot, since a plain work attempt
-  completing directly to `done` has no review target of its own. An unmet
+  completing directly to `done` has no review target of its own. That lookup
+  counts an approval only while nothing disqualifying has happened to the
+  issue since the event position it was granted against, so both evaluation
+  paths apply the same freshness rule (docs/02 §17.5). An unmet
   requirement fails the call with `WORKFLOW_GATE_UNSATISFIED` and leaves the
   attempt active.
 
