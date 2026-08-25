@@ -10,42 +10,50 @@ import (
 )
 
 type boardStaticPageViewModel struct {
-	Title                  string
-	GeneratedAt            string
-	Style                  template.CSS
-	StatusCounts           []boardStatusCountViewModel
-	ActiveAttempts         []boardActiveAttemptViewModel
-	ActiveReservationCount int
-	BlockedIssues          []boardIssueRowViewModel
-	ReviewRequests         []boardReviewRequestViewModel
-	PlanningGraphSVG       template.HTML
-	PlanningGraphSummary   string
-	PlanningGraphMermaid   string
+	Title                       string
+	GeneratedAt                 string
+	Style                       template.CSS
+	StatusCounts                []boardStatusCountViewModel
+	ActiveAttempts              []boardActiveAttemptViewModel
+	ActiveReservationCount      int
+	BlockedIssues               []boardIssueRowViewModel
+	ReviewRequests              []boardReviewRequestViewModel
+	PlanningGraphSVG            template.HTML
+	PlanningGraphSummary        string
+	PlanningGraphMermaid        string
+	ActiveAttemptsTruncated     bool
+	ActiveReservationsTruncated bool
+	BlockedIssuesTruncated      bool
+	ReviewRequestsTruncated     bool
 }
 
 type boardServedPageViewModel struct {
-	Title                  string
-	GeneratedAt            string
-	Style                  template.CSS
-	LiveRefreshScript      template.JS
-	SearchScript           template.JS
-	SearchQuery            string
-	SelectedEntityType     string
-	SearchStatusMessage    string
-	SearchResults          []boardSearchResultViewModel
-	SearchHasResults       bool
-	SearchHasMore          bool
-	SearchInvalid          bool
-	SearchError            bool
-	SearchIsInitial        bool
-	StatusCounts           []boardStatusCountViewModel
-	ActiveAttempts         []boardActiveAttemptViewModel
-	ActiveReservationCount int
-	BlockedIssues          []boardIssueRowViewModel
-	ReviewRequests         []boardReviewRequestViewModel
-	PlanningGraphSVG       template.HTML
-	PlanningGraphSummary   string
-	PlanningGraphMermaid   string
+	Title                       string
+	GeneratedAt                 string
+	Style                       template.CSS
+	LiveRefreshScript           template.JS
+	SearchScript                template.JS
+	SearchQuery                 string
+	SelectedEntityType          string
+	SearchStatusMessage         string
+	SearchResults               []boardSearchResultViewModel
+	SearchHasResults            bool
+	SearchHasMore               bool
+	SearchInvalid               bool
+	SearchError                 bool
+	SearchIsInitial             bool
+	StatusCounts                []boardStatusCountViewModel
+	ActiveAttempts              []boardActiveAttemptViewModel
+	ActiveReservationCount      int
+	BlockedIssues               []boardIssueRowViewModel
+	ReviewRequests              []boardReviewRequestViewModel
+	PlanningGraphSVG            template.HTML
+	PlanningGraphSummary        string
+	PlanningGraphMermaid        string
+	ActiveAttemptsTruncated     bool
+	ActiveReservationsTruncated bool
+	BlockedIssuesTruncated      bool
+	ReviewRequestsTruncated     bool
 }
 
 type boardSearchResultViewModel struct {
@@ -218,17 +226,21 @@ type issueDetailActivityItemViewModel struct {
 func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewModel {
 	mapping := issueDisplayIDMap(result.PlanningGraph.Nodes)
 	vm := boardStaticPageViewModel{
-		Title:                  "Rhizome status board",
-		GeneratedAt:            result.GeneratedAt.Format(time.RFC3339),
-		Style:                  template.CSS(boardHTMLStyle),
-		StatusCounts:           make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
-		ActiveAttempts:         make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
-		ActiveReservationCount: len(result.ActiveReservations),
-		BlockedIssues:          make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
-		ReviewRequests:         make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
-		PlanningGraphSVG:       template.HTML(renderBoardGraphSVG(result.PlanningGraph)),
-		PlanningGraphSummary:   buildPlanningGraphSummary(result.PlanningGraph),
-		PlanningGraphMermaid:   renderMermaid(result.PlanningGraph),
+		Title:                       "Rhizome status board",
+		GeneratedAt:                 result.GeneratedAt.Format(time.RFC3339),
+		Style:                       template.CSS(boardHTMLStyle),
+		StatusCounts:                make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
+		ActiveAttempts:              make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
+		ActiveReservationCount:      len(result.ActiveReservations),
+		BlockedIssues:               make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
+		ReviewRequests:              make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
+		PlanningGraphSVG:            template.HTML(renderBoardGraphSVG(result.PlanningGraph)),
+		PlanningGraphSummary:        buildPlanningGraphSummary(result.PlanningGraph),
+		PlanningGraphMermaid:        renderMermaid(result.PlanningGraph),
+		ActiveAttemptsTruncated:     result.Truncation.ActiveAttempts,
+		ActiveReservationsTruncated: result.Truncation.ActiveReservations,
+		BlockedIssuesTruncated:      result.Truncation.BlockedIssues,
+		ReviewRequestsTruncated:     result.Truncation.ReviewRequests,
 	}
 	for _, count := range result.StatusCounts {
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})
@@ -275,27 +287,31 @@ func newBoardStaticPageViewModel(result domain.BoardResult) boardStaticPageViewM
 func newBoardServedPageViewModel(result domain.BoardResult, state servedBoardSearchState) boardServedPageViewModel {
 	mapping := issueDisplayIDMap(result.PlanningGraph.Nodes)
 	vm := boardServedPageViewModel{
-		Title:                  "Rhizome status board",
-		GeneratedAt:            result.GeneratedAt.Format(time.RFC3339),
-		Style:                  template.CSS(boardHTMLStyle),
-		LiveRefreshScript:      template.JS(boardLiveRefreshScript),
-		SearchScript:           template.JS(boardSearchScript),
-		SearchQuery:            state.Query,
-		SelectedEntityType:     state.EntityType,
-		SearchStatusMessage:    state.StatusMessage,
-		SearchHasResults:       len(state.Results) > 0,
-		SearchHasMore:          state.HasMore,
-		SearchInvalid:          state.Invalid,
-		SearchError:            state.Error,
-		SearchIsInitial:        state.Query == "",
-		StatusCounts:           make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
-		ActiveAttempts:         make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
-		ActiveReservationCount: len(result.ActiveReservations),
-		BlockedIssues:          make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
-		ReviewRequests:         make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
-		PlanningGraphSVG:       template.HTML(renderServedBoardGraphSVG(result.PlanningGraph)),
-		PlanningGraphSummary:   buildPlanningGraphSummary(result.PlanningGraph),
-		PlanningGraphMermaid:   renderMermaid(result.PlanningGraph),
+		Title:                       "Rhizome status board",
+		GeneratedAt:                 result.GeneratedAt.Format(time.RFC3339),
+		Style:                       template.CSS(boardHTMLStyle),
+		LiveRefreshScript:           template.JS(boardLiveRefreshScript),
+		SearchScript:                template.JS(boardSearchScript),
+		SearchQuery:                 state.Query,
+		SelectedEntityType:          state.EntityType,
+		SearchStatusMessage:         state.StatusMessage,
+		SearchHasResults:            len(state.Results) > 0,
+		SearchHasMore:               state.HasMore,
+		SearchInvalid:               state.Invalid,
+		SearchError:                 state.Error,
+		SearchIsInitial:             state.Query == "",
+		StatusCounts:                make([]boardStatusCountViewModel, 0, len(result.StatusCounts)),
+		ActiveAttempts:              make([]boardActiveAttemptViewModel, 0, len(result.ActiveAttempts)),
+		ActiveReservationCount:      len(result.ActiveReservations),
+		BlockedIssues:               make([]boardIssueRowViewModel, 0, len(result.BlockedIssues)),
+		ReviewRequests:              make([]boardReviewRequestViewModel, 0, len(result.ReviewRequests)),
+		PlanningGraphSVG:            template.HTML(renderServedBoardGraphSVG(result.PlanningGraph)),
+		PlanningGraphSummary:        buildPlanningGraphSummary(result.PlanningGraph),
+		PlanningGraphMermaid:        renderMermaid(result.PlanningGraph),
+		ActiveAttemptsTruncated:     result.Truncation.ActiveAttempts,
+		ActiveReservationsTruncated: result.Truncation.ActiveReservations,
+		BlockedIssuesTruncated:      result.Truncation.BlockedIssues,
+		ReviewRequestsTruncated:     result.Truncation.ReviewRequests,
 	}
 	for _, count := range result.StatusCounts {
 		vm.StatusCounts = append(vm.StatusCounts, boardStatusCountViewModel{Status: string(count.EffectiveStatus), Count: int(count.Count)})

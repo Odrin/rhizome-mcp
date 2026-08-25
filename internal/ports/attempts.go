@@ -127,7 +127,7 @@ type AttemptRepository interface {
 	FinishAttempt(context.Context, FinishAttemptCommand) (FinishAttemptResult, error)
 	ForceReleaseAttempt(context.Context, ForceReleaseAttemptCommand) (ForceReleaseAttemptResult, error)
 	ExpireAttempts(context.Context, ExpireAttemptsCommand) (ExpireAttemptsResult, error)
-	ListActiveAttempts(context.Context, ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error)
+	ListActiveAttempts(context.Context, ListActiveAttemptsCommand) (domain.ActiveAttemptList, error)
 	// SubmitGateEvidence is a lease-authenticated, idempotent upsert (ISSUE-171):
 	// see SubmitGateEvidenceCommand for the frozen-snapshot and same-attempt
 	// artifact validation it performs inside the write transaction.

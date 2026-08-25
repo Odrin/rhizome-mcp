@@ -35,6 +35,8 @@
 </table></div>
 {{else}}<p class="empty">No active attempts.</p>
 {{end}}
+{{if .ActiveAttemptsTruncated}}<p class="empty">Showing the first 100 active attempts; more exist.</p>{{end}}
+{{if .ActiveReservationsTruncated}}<p class="empty">Showing the first 100 resource reservations; more exist.</p>{{end}}
 </section>
 <section>
 <h2>Blocked issues</h2>
@@ -47,6 +49,7 @@
 </table></div>
 {{else}}<p class="empty">No blocked issues.</p>
 {{end}}
+{{if .BlockedIssuesTruncated}}<p class="empty">Showing the first 100 blocked issues; more exist.</p>{{end}}
 </section>
 <section>
 <h2>Open review requests</h2>
@@ -59,6 +62,7 @@
 </table></div>
 {{else}}<p class="empty">No open review requests.</p>
 {{end}}
+{{if .ReviewRequestsTruncated}}<p class="empty">Showing the first 100 open review requests; more exist.</p>{{end}}
 </section>
 <section>
 <h2>Planning graph</h2>

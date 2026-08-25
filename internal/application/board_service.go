@@ -61,10 +61,11 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 		return domain.BoardResult{}, err
 	}
 
-	activeAttempts, err := service.attemptService.ListActiveAttempts(ctx, domain.MaxBoardCollectionLimit)
+	activeAttemptList, err := service.attemptService.ListActiveAttempts(ctx, domain.MaxBoardCollectionLimit)
 	if err != nil {
 		return domain.BoardResult{}, err
 	}
+	activeAttempts := activeAttemptList.Items
 
 	active := true
 	reservationPage, err := service.reservationService.ListReservations(ctx, domain.ListResourceReservationsInput{
@@ -74,6 +75,11 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 	if err != nil {
 		return domain.BoardResult{}, err
 	}
+	// Truncation.ActiveReservations is set from the pre-filter page's HasMore;
+	// this is deliberate (per D2) to detect truncation before the filter runs.
+	// A truncated reservation list may show fewer than 100 entries after
+	// filtering, and orphaned rows awaiting sweep can push a live reservation
+	// out of the window.
 	activeReservations := filterReservationsByActiveAttempts(reservationPage.Items, activeAttempts)
 
 	// One gate-progress row per active attempt (ISSUE-175 AC2): the gate the
@@ -126,6 +132,12 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 		BlockedIssues:      blockedPage.Items,
 		ReviewRequests:     reviewRequests,
 		PlanningGraph:      planningGraph,
+		Truncation: domain.BoardTruncation{
+			BlockedIssues:      blockedPage.HasMore,
+			ActiveAttempts:     activeAttemptList.HasMore,
+			ActiveReservations: reservationPage.HasMore,
+			ReviewRequests:     reviewPage.HasMore,
+		},
 	}, nil
 }
 

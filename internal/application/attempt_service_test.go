@@ -357,8 +357,8 @@ func (repository *recordingAttemptRepository) ForceReleaseAttempt(context.Contex
 	return ports.ForceReleaseAttemptResult{}, nil
 }
 
-func (repository *recordingAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
-	return nil, nil
+func (repository *recordingAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) (domain.ActiveAttemptList, error) {
+	return domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{}, HasMore: false}, nil
 }
 
 func (repository *recordingAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {

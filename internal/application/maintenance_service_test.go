@@ -103,8 +103,8 @@ func (repository *recordingMaintenanceAttemptRepository) ExpireAttempts(context.
 	return ports.ExpireAttemptsResult{}, nil
 }
 
-func (repository *recordingMaintenanceAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
-	return nil, nil
+func (repository *recordingMaintenanceAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) (domain.ActiveAttemptList, error) {
+	return domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{}, HasMore: false}, nil
 }
 
 func (repository *recordingMaintenanceAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {

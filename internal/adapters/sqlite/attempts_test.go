@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1704,17 +1705,17 @@ func TestAttemptRepositoryListActiveAttemptsReturnsOnlyUnexpiredOrderedByLease(t
 	if err != nil {
 		t.Fatalf("ListActiveAttempts() error = %v", err)
 	}
-	if len(results) != 1 {
+	if len(results.Items) != 1 {
 		t.Fatalf("results = %#v, want exactly the one attempt still within its lease (laterExpiry)", results)
 	}
-	if results[0].AttemptID != laterExpiry.Attempt.ID {
-		t.Fatalf("result attempt id = %q, want %q", results[0].AttemptID, laterExpiry.Attempt.ID)
+	if results.Items[0].AttemptID != laterExpiry.Attempt.ID {
+		t.Fatalf("result attempt id = %q, want %q", results.Items[0].AttemptID, laterExpiry.Attempt.ID)
 	}
-	if results[0].IssueID != laterExpiryIssue.ID || results[0].IssueDisplayID != laterExpiryIssue.DisplayID {
-		t.Fatalf("result issue linkage = %#v, want issue %s (%s)", results[0], laterExpiryIssue.ID, laterExpiryIssue.DisplayID)
+	if results.Items[0].IssueID != laterExpiryIssue.ID || results.Items[0].IssueDisplayID != laterExpiryIssue.DisplayID {
+		t.Fatalf("result issue linkage = %#v, want issue %s (%s)", results.Items[0], laterExpiryIssue.ID, laterExpiryIssue.DisplayID)
 	}
-	if results[0].Kind != domain.AttemptKindWork {
-		t.Fatalf("result kind = %q, want work", results[0].Kind)
+	if results.Items[0].Kind != domain.AttemptKindWork {
+		t.Fatalf("result kind = %q, want work", results.Items[0].Kind)
 	}
 	_ = soonToExpire
 	_ = expiredClaim
@@ -1731,7 +1732,7 @@ func TestAttemptRepositoryListActiveAttemptsReturnsOnlyUnexpiredOrderedByLease(t
 	if err != nil {
 		t.Fatalf("ListActiveAttempts() error = %v", err)
 	}
-	if len(results) != 2 || results[0].AttemptID != soonest.Attempt.ID || results[1].AttemptID != laterExpiry.Attempt.ID {
+	if len(results.Items) != 2 || results.Items[0].AttemptID != soonest.Attempt.ID || results.Items[1].AttemptID != laterExpiry.Attempt.ID {
 		t.Fatalf("results = %#v, want [soonest, laterExpiry] ordered by lease_expires_at ascending", results)
 	}
 
@@ -1739,8 +1740,73 @@ func TestAttemptRepositoryListActiveAttemptsReturnsOnlyUnexpiredOrderedByLease(t
 	if err != nil {
 		t.Fatalf("ListActiveAttempts(limit=1) error = %v", err)
 	}
-	if len(limited) != 1 || limited[0].AttemptID != soonest.Attempt.ID {
+	if len(limited.Items) != 1 || limited.Items[0].AttemptID != soonest.Attempt.ID {
 		t.Fatalf("limited results = %#v, want just the soonest-to-expire attempt", limited)
+	}
+}
+
+// TestAttemptRepositoryListActiveAttemptsReportsHasMoreAtTheLimit verifies
+// that HasMore is set correctly at the repository level when the query
+// encounters more results than the limit.
+func TestAttemptRepositoryListActiveAttemptsReportsHasMoreAtTheLimit(t *testing.T) {
+	tests := []struct {
+		name          string
+		claimCount    int
+		limit         int
+		wantItemCount int
+		wantHasMore   bool
+	}{
+		{
+			name:          "exactly at limit, no more",
+			claimCount:    3,
+			limit:         3,
+			wantItemCount: 3,
+			wantHasMore:   false,
+		},
+		{
+			name:          "one more than limit",
+			claimCount:    4,
+			limit:         3,
+			wantItemCount: 3,
+			wantHasMore:   true,
+		},
+		{
+			name:          "limit zero uses default",
+			claimCount:    2,
+			limit:         0,
+			wantItemCount: 2,
+			wantHasMore:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a new fixture for each test case to avoid contamination
+			fixture := newAttemptTestFixture(t, "list-active-attempts-hasmore-"+tt.name)
+			defer fixture.close()
+
+			// Create and claim the requested number of issues
+			for i := 0; i < tt.claimCount; i++ {
+				issue := createAttemptIssue(t, fixture, fmt.Sprintf("issue %d", i), domain.StatusReady)
+				_, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+				if err != nil {
+					t.Fatalf("claim issue %d: %v", i, err)
+				}
+			}
+
+			// Query with the specified limit
+			results, err := fixture.attempts.ListActiveAttempts(fixture.ctx, tt.limit)
+			if err != nil {
+				t.Fatalf("ListActiveAttempts() error = %v", err)
+			}
+
+			if len(results.Items) != tt.wantItemCount {
+				t.Fatalf("len(Items) = %d, want %d", len(results.Items), tt.wantItemCount)
+			}
+			if results.HasMore != tt.wantHasMore {
+				t.Fatalf("HasMore = %v, want %v", results.HasMore, tt.wantHasMore)
+			}
+		})
 	}
 }
 

@@ -214,8 +214,8 @@ func (repo *countingAttemptRepository) ForceReleaseAttempt(context.Context, port
 	return ports.ForceReleaseAttemptResult{}, nil
 }
 
-func (repo *countingAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
-	return nil, nil
+func (repo *countingAttemptRepository) ListActiveAttempts(context.Context, ports.ListActiveAttemptsCommand) (domain.ActiveAttemptList, error) {
+	return domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{}, HasMore: false}, nil
 }
 
 func (repo *countingAttemptRepository) SubmitGateEvidence(context.Context, ports.SubmitGateEvidenceCommand) (ports.SubmitGateEvidenceResult, error) {

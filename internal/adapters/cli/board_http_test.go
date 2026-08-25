@@ -586,6 +586,144 @@ func TestBoardHTTPHandlerPassesRequestContextToBoardService(t *testing.T) {
 	}
 }
 
+// TestBoardResponseFromDomainCopiesTruncationFlags verifies that
+// boardResponseFromDomain correctly copies all four truncation flags from
+// the domain BoardResult to the CLI BoardResponse projection.
+func TestBoardResponseFromDomainCopiesTruncationFlags(t *testing.T) {
+	result := domain.BoardResult{
+		GeneratedAt:  time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC),
+		StatusCounts: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 1}},
+		Truncation: domain.BoardTruncation{
+			BlockedIssues:      true,
+			ActiveAttempts:     false,
+			ActiveReservations: true,
+			ReviewRequests:     false,
+		},
+	}
+
+	response := boardResponseFromDomain(result)
+
+	if !response.Truncation.BlockedIssues {
+		t.Fatalf("Truncation.BlockedIssues = false, want true")
+	}
+	if response.Truncation.ActiveAttempts {
+		t.Fatalf("Truncation.ActiveAttempts = true, want false")
+	}
+	if !response.Truncation.ActiveReservations {
+		t.Fatalf("Truncation.ActiveReservations = false, want true")
+	}
+	if response.Truncation.ReviewRequests {
+		t.Fatalf("Truncation.ReviewRequests = true, want false")
+	}
+}
+
+// TestBoardResponseFromDomainMarshalsTruncationJSON verifies that the
+// BoardResponse's Truncation field marshals to JSON with the expected
+// structure and keys.
+func TestBoardResponseFromDomainMarshalsTruncationJSON(t *testing.T) {
+	result := domain.BoardResult{
+		GeneratedAt:  time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC),
+		StatusCounts: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 1}},
+		Truncation: domain.BoardTruncation{
+			BlockedIssues:      true,
+			ActiveAttempts:     false,
+			ActiveReservations: true,
+			ReviewRequests:     false,
+		},
+	}
+
+	response := boardResponseFromDomain(result)
+	jsonBytes, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	jsonStr := string(jsonBytes)
+	if !strings.Contains(jsonStr, `"truncation"`) {
+		t.Fatalf("JSON missing truncation field: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"blocked_issues":true`) {
+		t.Fatalf("JSON missing or wrong blocked_issues: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"active_attempts":false`) {
+		t.Fatalf("JSON missing or wrong active_attempts: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"active_reservations":true`) {
+		t.Fatalf("JSON missing or wrong active_reservations: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"review_requests":false`) {
+		t.Fatalf("JSON missing or wrong review_requests: %s", jsonStr)
+	}
+}
+
+// TestSemanticBoardETagReflectsTruncationChanges verifies that the semantic
+// ETag changes when any truncation flag changes, mirroring the pattern for
+// gate changes.
+func TestSemanticBoardETagReflectsTruncationChanges(t *testing.T) {
+	baseBoard := domain.BoardResult{
+		GeneratedAt:  time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC),
+		StatusCounts: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 1}},
+		Truncation: domain.BoardTruncation{
+			BlockedIssues:      false,
+			ActiveAttempts:     false,
+			ActiveReservations: false,
+			ReviewRequests:     false,
+		},
+	}
+
+	tests := []struct {
+		name       string
+		modifyFn   func(*domain.BoardResult)
+		expectDiff bool
+	}{
+		{
+			name: "blocked_issues flag change",
+			modifyFn: func(b *domain.BoardResult) {
+				b.Truncation.BlockedIssues = true
+			},
+			expectDiff: true,
+		},
+		{
+			name: "active_attempts flag change",
+			modifyFn: func(b *domain.BoardResult) {
+				b.Truncation.ActiveAttempts = true
+			},
+			expectDiff: true,
+		},
+		{
+			name: "active_reservations flag change",
+			modifyFn: func(b *domain.BoardResult) {
+				b.Truncation.ActiveReservations = true
+			},
+			expectDiff: true,
+		},
+		{
+			name: "review_requests flag change",
+			modifyFn: func(b *domain.BoardResult) {
+				b.Truncation.ReviewRequests = true
+			},
+			expectDiff: true,
+		},
+	}
+
+	baseETag := semanticBoardETag(baseBoard)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modified := baseBoard
+			tt.modifyFn(&modified)
+			modifiedETag := semanticBoardETag(modified)
+
+			if tt.expectDiff && modifiedETag == baseETag {
+				t.Fatalf("ETag unchanged after modifying truncation: %q", baseETag)
+			}
+			if !tt.expectDiff && modifiedETag != baseETag {
+				t.Fatalf("ETag changed unexpectedly: %q -> %q", baseETag, modifiedETag)
+			}
+		})
+	}
+}
+
 func boardResultFixture() domain.BoardResult {
 	return domain.BoardResult{GeneratedAt: time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC), StatusCounts: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 1}}}
 }

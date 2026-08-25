@@ -51,7 +51,7 @@ func TestBoardServiceGetBoardAggregatesBoundedCollectionsAndGraph(t *testing.T) 
 		countResult: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 2}, {EffectiveStatus: domain.EffectiveStatusInProgress, Count: 1}},
 		listResult:  domain.IssueList{Items: []domain.IssueProjection{{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1"}, EffectiveStatus: domain.EffectiveStatusBlocked, IsBlocked: true}}},
 	}
-	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", IssueTitle: "Work", Kind: domain.AttemptKindWork}}}
+	attemptRepo := &boardRecordingAttemptRepository{listResult: domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", IssueTitle: "Work", Kind: domain.AttemptKindWork}}, HasMore: false}}
 	reservationRepo := &boardRecordingReservationRepository{listResult: domain.ReservationList{Items: []domain.Reservation{{ID: "reservation-1", IssueID: "issue-1", AttemptID: "attempt-1", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive}}}}
 	reviewRepo := &boardRecordingReviewRepository{listResult: ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{{ID: "review-1", IssueID: "issue-1", Status: domain.ReviewRequestStatusOpen}}}}
 	graphRepo := &boardRecordingGraphRepository{snapshot: domain.GraphSnapshot{RootIssueID: boardStringPointer("issue-1"), Nodes: []domain.IssueProjection{{Issue: domain.Issue{ID: "issue-1", DisplayID: "ISSUE-1"}}}}}
@@ -319,7 +319,7 @@ func (repository *boardRecordingIssueRepository) CountIssuesByEffectiveStatus(_ 
 
 type boardRecordingAttemptRepository struct {
 	listCommand ports.ListActiveAttemptsCommand
-	listResult  []domain.ActiveAttemptSummary
+	listResult  domain.ActiveAttemptList
 	listErr     error
 	listCalled  bool
 }
@@ -356,7 +356,7 @@ func (repository *boardRecordingAttemptRepository) ExpireAttempts(context.Contex
 	return ports.ExpireAttemptsResult{}, nil
 }
 
-func (repository *boardRecordingAttemptRepository) ListActiveAttempts(_ context.Context, command ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
+func (repository *boardRecordingAttemptRepository) ListActiveAttempts(_ context.Context, command ports.ListActiveAttemptsCommand) (domain.ActiveAttemptList, error) {
 	repository.listCalled = true
 	repository.listCommand = command
 	return repository.listResult, repository.listErr
@@ -491,10 +491,10 @@ func boardStringPointer(value string) *string {
 // summary the gate service reports for that attempt's issue.
 func TestBoardServiceBuildsAttemptGateProgress(t *testing.T) {
 	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
-	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{
+	attemptRepo := &boardRecordingAttemptRepository{listResult: domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{
 		{AttemptID: "attempt-1", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", Kind: domain.AttemptKindWork},
 		{AttemptID: "attempt-2", IssueID: "issue-2", IssueDisplayID: "ISSUE-2", Kind: domain.AttemptKindWork},
-	}}
+	}, HasMore: false}}
 	gateService := &stubGateSummaryService{summary: domain.WorkContextGateSummary{
 		Point:            domain.EnforcementPointCompleteWorkToDone,
 		RequirementCount: 2,
@@ -531,7 +531,7 @@ func TestBoardServiceBuildsAttemptGateProgress(t *testing.T) {
 // aggregate; a gate read failure fails the board like any other collaborator.
 func TestBoardServiceFailsWhenGateSummaryFails(t *testing.T) {
 	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
-	attemptRepo := &boardRecordingAttemptRepository{listResult: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", Kind: domain.AttemptKindWork}}}
+	attemptRepo := &boardRecordingAttemptRepository{listResult: domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{{AttemptID: "attempt-1", IssueID: "issue-1", Kind: domain.AttemptKindWork}}, HasMore: false}}
 	gateService := &stubGateSummaryService{err: domain.NewError(domain.CodeStorageUnavailable, "gate read failed", false)}
 
 	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, &boardRecordingIssueRepository{}, attemptRepo, &boardRecordingReservationRepository{}, &boardRecordingReviewRepository{}, &boardRecordingGraphRepository{}, now)
@@ -543,4 +543,203 @@ func TestBoardServiceFailsWhenGateSummaryFails(t *testing.T) {
 	if _, err := service.GetBoard(context.Background()); !errors.Is(err, &domain.Error{Code: domain.CodeStorageUnavailable}) {
 		t.Fatalf("GetBoard() error = %v, want the gate service failure", err)
 	}
+}
+
+// TestBoardServiceGetBoardReportsPerCollectionTruncation verifies that
+// GetBoard correctly reports truncation for each bounded board collection.
+// This tests that HasMore flags from repositories propagate to the result's
+// Truncation field, covering the four collections independently and in
+// combination.
+func TestBoardServiceGetBoardReportsPerCollectionTruncation(t *testing.T) {
+	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name                   string
+		blockedHasMore         bool
+		attemptsHasMore        bool
+		reservationsHasMore    bool
+		reviewsHasMore         bool
+		wantBlockedIssues      bool
+		wantActiveAttempts     bool
+		wantActiveReservations bool
+		wantReviewRequests     bool
+		wantTruncationAny      bool
+	}{
+		{
+			name:                   "no truncation",
+			blockedHasMore:         false,
+			attemptsHasMore:        false,
+			reservationsHasMore:    false,
+			reviewsHasMore:         false,
+			wantBlockedIssues:      false,
+			wantActiveAttempts:     false,
+			wantActiveReservations: false,
+			wantReviewRequests:     false,
+			wantTruncationAny:      false,
+		},
+		{
+			name:                   "blocked issues truncated",
+			blockedHasMore:         true,
+			attemptsHasMore:        false,
+			reservationsHasMore:    false,
+			reviewsHasMore:         false,
+			wantBlockedIssues:      true,
+			wantActiveAttempts:     false,
+			wantActiveReservations: false,
+			wantReviewRequests:     false,
+			wantTruncationAny:      true,
+		},
+		{
+			name:                   "active attempts truncated",
+			blockedHasMore:         false,
+			attemptsHasMore:        true,
+			reservationsHasMore:    false,
+			reviewsHasMore:         false,
+			wantBlockedIssues:      false,
+			wantActiveAttempts:     true,
+			wantActiveReservations: false,
+			wantReviewRequests:     false,
+			wantTruncationAny:      true,
+		},
+		{
+			name:                   "active reservations truncated",
+			blockedHasMore:         false,
+			attemptsHasMore:        false,
+			reservationsHasMore:    true,
+			reviewsHasMore:         false,
+			wantBlockedIssues:      false,
+			wantActiveAttempts:     false,
+			wantActiveReservations: true,
+			wantReviewRequests:     false,
+			wantTruncationAny:      true,
+		},
+		{
+			name:                   "review requests truncated",
+			blockedHasMore:         false,
+			attemptsHasMore:        false,
+			reservationsHasMore:    false,
+			reviewsHasMore:         true,
+			wantBlockedIssues:      false,
+			wantActiveAttempts:     false,
+			wantActiveReservations: false,
+			wantReviewRequests:     true,
+			wantTruncationAny:      true,
+		},
+		{
+			name:                   "all truncated",
+			blockedHasMore:         true,
+			attemptsHasMore:        true,
+			reservationsHasMore:    true,
+			reviewsHasMore:         true,
+			wantBlockedIssues:      true,
+			wantActiveAttempts:     true,
+			wantActiveReservations: true,
+			wantReviewRequests:     true,
+			wantTruncationAny:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueRepo := &boardRecordingIssueRepository{
+				listResult: domain.IssueList{Items: []domain.IssueProjection{}, HasMore: tt.blockedHasMore},
+			}
+			attemptRepo := &boardRecordingAttemptRepository{
+				listResult: domain.ActiveAttemptList{Items: []domain.ActiveAttemptSummary{}, HasMore: tt.attemptsHasMore},
+			}
+			reservationRepo := &boardRecordingReservationRepository{
+				listResult: domain.ReservationList{Items: []domain.Reservation{}, HasMore: tt.reservationsHasMore},
+			}
+			reviewRepo := &boardRecordingReviewRepository{
+				listResult: ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{}, HasMore: tt.reviewsHasMore},
+			}
+			graphRepo := &boardRecordingGraphRepository{}
+
+			issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
+			service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, &stubGateSummaryService{}, source)
+			if err != nil {
+				t.Fatalf("NewBoardService() error = %v", err)
+			}
+
+			result, err := service.GetBoard(context.Background())
+			if err != nil {
+				t.Fatalf("GetBoard() error = %v", err)
+			}
+
+			if result.Truncation.BlockedIssues != tt.wantBlockedIssues {
+				t.Fatalf("Truncation.BlockedIssues = %v, want %v", result.Truncation.BlockedIssues, tt.wantBlockedIssues)
+			}
+			if result.Truncation.ActiveAttempts != tt.wantActiveAttempts {
+				t.Fatalf("Truncation.ActiveAttempts = %v, want %v", result.Truncation.ActiveAttempts, tt.wantActiveAttempts)
+			}
+			if result.Truncation.ActiveReservations != tt.wantActiveReservations {
+				t.Fatalf("Truncation.ActiveReservations = %v, want %v", result.Truncation.ActiveReservations, tt.wantActiveReservations)
+			}
+			if result.Truncation.ReviewRequests != tt.wantReviewRequests {
+				t.Fatalf("Truncation.ReviewRequests = %v, want %v", result.Truncation.ReviewRequests, tt.wantReviewRequests)
+			}
+			if result.Truncation.Any() != tt.wantTruncationAny {
+				t.Fatalf("Truncation.Any() = %v, want %v", result.Truncation.Any(), tt.wantTruncationAny)
+			}
+		})
+	}
+}
+
+// TestBoardServiceReservationTruncationIsPreFilter verifies that the
+// ActiveReservations truncation flag (D2 guarantee) comes from the
+// pre-filter page's HasMore, not the post-filter reservation count.
+// This proves that truncation detection happens before the attempt-filter,
+// so a reader can trust "more exist" even when the filter removes rows.
+func TestBoardServiceReservationTruncationIsPreFilter(t *testing.T) {
+	now := time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC)
+
+	// Create two reservations: one owned by an active attempt, one orphaned.
+	issueRepo := &boardRecordingIssueRepository{}
+	attemptRepo := &boardRecordingAttemptRepository{
+		listResult: domain.ActiveAttemptList{
+			Items: []domain.ActiveAttemptSummary{
+				{AttemptID: "active-attempt", IssueID: "issue-1", IssueDisplayID: "ISSUE-1", Kind: domain.AttemptKindWork},
+			},
+			HasMore: false,
+		},
+	}
+	reservationRepo := &boardRecordingReservationRepository{
+		listResult: domain.ReservationList{
+			Items: []domain.Reservation{
+				{ID: "reservation-1", IssueID: "issue-1", AttemptID: "active-attempt", Kind: domain.ResourceKindFile, DisplayValue: "a.go", Status: domain.ReservationStatusActive},
+				{ID: "reservation-2", IssueID: "issue-2", AttemptID: "orphaned-attempt", Kind: domain.ResourceKindFile, DisplayValue: "b.go", Status: domain.ReservationStatusActive},
+			},
+			HasMore: true, // Pre-filter page has more (indicates truncation)
+		},
+	}
+	reviewRepo := &boardRecordingReviewRepository{
+		listResult: ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{}, HasMore: false},
+	}
+	graphRepo := &boardRecordingGraphRepository{}
+
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, &stubGateSummaryService{}, source)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+
+	result, err := service.GetBoard(context.Background())
+	if err != nil {
+		t.Fatalf("GetBoard() error = %v", err)
+	}
+
+	// The truncation flag must be true because the pre-filter page had HasMore=true
+	if !result.Truncation.ActiveReservations {
+		t.Fatalf("Truncation.ActiveReservations = %v, want true (from pre-filter HasMore)", result.Truncation.ActiveReservations)
+	}
+
+	// After filtering, only one reservation should remain (the one owned by the active attempt)
+	if len(result.ActiveReservations) != 1 {
+		t.Fatalf("len(ActiveReservations) = %d, want 1 (post-filter)", len(result.ActiveReservations))
+	}
+	if result.ActiveReservations[0].ID != "reservation-1" {
+		t.Fatalf("ActiveReservations[0].ID = %q, want reservation-1", result.ActiveReservations[0].ID)
+	}
+
+	// D2 guarantee verified: truncation flag survives the filter and doesn't depend on post-filter length
 }

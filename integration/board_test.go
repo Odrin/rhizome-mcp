@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -136,6 +137,12 @@ func TestIntegrationBoardCommand(t *testing.T) {
 				DisplayID string `json:"display_id"`
 			} `json:"nodes"`
 		} `json:"planning_graph"`
+		Truncation struct {
+			BlockedIssues      bool `json:"blocked_issues"`
+			ActiveAttempts     bool `json:"active_attempts"`
+			ActiveReservations bool `json:"active_reservations"`
+			ReviewRequests     bool `json:"review_requests"`
+		} `json:"truncation"`
 	}
 	if err := json.Unmarshal(jsonOutput, &board); err != nil {
 		t.Fatalf("decode board --format json output: %v\noutput:\n%s", err, jsonOutput)
@@ -192,6 +199,18 @@ func TestIntegrationBoardCommand(t *testing.T) {
 	}
 	if !graphHasReadyIssue {
 		t.Fatalf("board planning_graph nodes missing %s: %#v", readyIssue.DisplayID, board.PlanningGraph.Nodes)
+	}
+
+	// The truncation object must actually be in the payload -- decoding into a
+	// struct alone would leave every flag false if the key were missing -- and
+	// every flag must be false on a fixture project well under every bound.
+	for _, key := range []string{"truncation", "blocked_issues", "active_attempts", "active_reservations", "review_requests"} {
+		if !bytes.Contains(jsonOutput, []byte("\""+key+"\"")) {
+			t.Fatalf("board JSON is missing %q:\n%s", key, jsonOutput)
+		}
+	}
+	if board.Truncation.BlockedIssues || board.Truncation.ActiveAttempts || board.Truncation.ActiveReservations || board.Truncation.ReviewRequests {
+		t.Fatalf("truncation flags should all be false on small fixture project: %#v", board.Truncation)
 	}
 
 	// --output writes a fully self-contained HTML board.

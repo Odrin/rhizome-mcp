@@ -1061,6 +1061,9 @@ func (c *CLI) writeBoardTable(result domain.BoardResult) error {
 		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n",
 			attempt.AttemptID, attempt.IssueDisplayID, attempt.Kind, escapeTableValue(label), attempt.LeaseExpiresAt.Format(time.RFC3339Nano)))
 	}
+	if result.Truncation.ActiveAttempts {
+		builder.WriteString(fmt.Sprintf("truncated\ttrue\t(first %d shown)\n", domain.MaxBoardCollectionLimit))
+	}
 
 	reservationIssueDisplayIDByAttempt := make(map[string]string, len(result.ActiveAttempts))
 	for _, attempt := range result.ActiveAttempts {
@@ -1072,6 +1075,9 @@ func (c *CLI) writeBoardTable(result domain.BoardResult) error {
 		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n",
 			reservation.ID, reservationIssueDisplayIDByAttempt[reservation.AttemptID], reservation.AttemptID, reservation.Kind, escapeTableValue(reservation.DisplayValue)))
 	}
+	if result.Truncation.ActiveReservations {
+		builder.WriteString(fmt.Sprintf("truncated\ttrue\t(first %d shown)\n", domain.MaxBoardCollectionLimit))
+	}
 
 	builder.WriteString("\nblocked_issues\n")
 	builder.WriteString("display_id\ttitle\tblocked_reason\n")
@@ -1082,11 +1088,17 @@ func (c *CLI) writeBoardTable(result domain.BoardResult) error {
 		}
 		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\n", issue.DisplayID, escapeTableValue(issue.Title), escapeTableValue(reason)))
 	}
+	if result.Truncation.BlockedIssues {
+		builder.WriteString(fmt.Sprintf("truncated\ttrue\t(first %d shown)\n", domain.MaxBoardCollectionLimit))
+	}
 
 	builder.WriteString("\nreview_requests\n")
 	builder.WriteString("id\tissue_id\tstatus\tcreated_at\n")
 	for _, request := range result.ReviewRequests {
 		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\n", request.ID, request.IssueID, request.Status, request.CreatedAt.Format(time.RFC3339Nano)))
+	}
+	if result.Truncation.ReviewRequests {
+		builder.WriteString(fmt.Sprintf("truncated\ttrue\t(first %d shown)\n", domain.MaxBoardCollectionLimit))
 	}
 
 	builder.WriteString("\nplanning_graph\n")
@@ -1398,6 +1410,18 @@ type BoardResponse struct {
 	BlockedIssues      []IssueSummary       `json:"blocked_issues"`
 	ReviewRequests     []BoardReviewRequest `json:"review_requests"`
 	PlanningGraph      BoardGraph           `json:"planning_graph"`
+	Truncation         BoardTruncation      `json:"truncation"`
+}
+
+// BoardTruncation reports, per bounded board collection, whether that
+// collection was cut at the limit (domain.MaxBoardCollectionLimit). Each flag
+// set to true means "first MaxBoardCollectionLimit shown; more exist", not a
+// total count.
+type BoardTruncation struct {
+	BlockedIssues      bool `json:"blocked_issues"`
+	ActiveAttempts     bool `json:"active_attempts"`
+	ActiveReservations bool `json:"active_reservations"`
+	ReviewRequests     bool `json:"review_requests"`
 }
 
 // BoardStatusCount is one bounded aggregate count of issues in a single
@@ -1535,6 +1559,12 @@ func boardResponseFromDomain(result domain.BoardResult) BoardResponse {
 			Nodes: nodes, Edges: result.PlanningGraph.Edges, EntryPoints: result.PlanningGraph.EntryPoints,
 			BlockingNodes: result.PlanningGraph.BlockingNodes, Summary: result.PlanningGraph.Summary, Truncated: result.PlanningGraph.Truncated,
 			RetainedNodeCount: len(result.PlanningGraph.Nodes),
+		},
+		Truncation: BoardTruncation{
+			BlockedIssues:      result.Truncation.BlockedIssues,
+			ActiveAttempts:     result.Truncation.ActiveAttempts,
+			ActiveReservations: result.Truncation.ActiveReservations,
+			ReviewRequests:     result.Truncation.ReviewRequests,
 		},
 	}
 }

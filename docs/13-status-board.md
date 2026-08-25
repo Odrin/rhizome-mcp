@@ -76,18 +76,29 @@ Every response also sets:
 
 ## 6. Bounded collections and truncation reporting
 
-The board bounds three collections so responses stay predictable in size:
+The board bounds four collections so responses stay predictable in size:
 
 - **Blocked issues** — at most 100 entries.
+- **Active attempts** — at most 100 entries.
 - **Active reservations** — at most 100 entries.
 - **Review requests** — at most 100 entries.
 
-These three are capped by the query that loads them and carry no truncation
-marker of their own: `BoardResult` exposes no `truncated` field for them, so a
-project with more than 100 blocked issues shows the first 100 with nothing in
-the response saying so. This is a known gap against the "no silent truncation"
-rule in [docs/06](docs/06-deferred-and-open.md) section 7 and should be closed by
-giving these collections the same reporting the planning graph already has.
+Each carries a boolean flag in the response's `truncation` object, surfaced in
+the JSON response, the CLI table (as a `truncated` marker row), both HTML views
+(as a text note below the table), and the semantic ETag. Each flag means "first
+`MaxBoardCollectionLimit` shown; more exist", not a total. The flag is set when
+the query that loaded the collection returned more results than the limit.
+
+`attempt_gates` is one row per active attempt, so it shares `active_attempts`'s
+flag.
+
+**Active reservations pre-filter semantics:** the `truncation.active_reservations`
+flag is set from the reservation page's result *before* `filterReservationsByActiveAttempts`
+runs. This is deliberate, to detect when the raw query was truncated. Consequently,
+a truncated pre-filter reservation list may show fewer than 100 entries after
+filtering if some reservations belong to attempts that are not currently active.
+Orphaned reservation rows awaiting expiry sweep can also push a live reservation
+out of the visible window.
 
 The planning graph is bounded separately, by a node budget (default 100 nodes,
 maximum 500), and it *does* report its cut: the response carries `truncated` and

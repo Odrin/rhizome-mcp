@@ -520,14 +520,15 @@ func (repository *AttemptRepository) ExpireAttempts(ctx context.Context, command
 // ListActiveAttempts returns a bounded, project-wide projection of currently
 // active (leased, unexpired) attempts joined with their issue and, when
 // present, the claiming session's label. The result is capped at command.Limit
-// regardless of how many issues or attempts exist.
-func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, command ports.ListActiveAttemptsCommand) ([]domain.ActiveAttemptSummary, error) {
-	limit := command.Limit
-	if limit <= 0 || limit > domain.MaxBoardCollectionLimit {
-		limit = domain.MaxBoardCollectionLimit
+// regardless of how many issues or attempts exist. HasMore is set when more
+// results were available than the limit, mirroring domain.IssueList.
+func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, command ports.ListActiveAttemptsCommand) (domain.ActiveAttemptList, error) {
+	effectiveLimit := command.Limit
+	if effectiveLimit <= 0 || effectiveLimit > domain.MaxBoardCollectionLimit {
+		effectiveLimit = domain.MaxBoardCollectionLimit
 	}
 	now := command.Now.UTC()
-	var result []domain.ActiveAttemptSummary
+	var items []domain.ActiveAttemptSummary
 	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
 		rows, err := query.QueryContext(ctx, `SELECT wa.id, wa.issue_id, i.sequence_no, i.title, wa.kind,
 				wa.session_id, s.agent_label, wa.started_at, wa.lease_expires_at
@@ -536,7 +537,7 @@ func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, com
 			LEFT JOIN agent_sessions AS s ON s.id = wa.session_id
 			WHERE wa.status = 'active' AND wa.lease_expires_at > ?
 			ORDER BY wa.lease_expires_at ASC, wa.id ASC
-			LIMIT ?`, formatStorageTime(now), limit)
+			LIMIT ?`, formatStorageTime(now), effectiveLimit+1)
 		if err != nil {
 			return err
 		}
@@ -558,7 +559,7 @@ func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, com
 			if err != nil {
 				return err
 			}
-			result = append(result, domain.ActiveAttemptSummary{
+			items = append(items, domain.ActiveAttemptSummary{
 				AttemptID:      id,
 				IssueID:        issueID,
 				IssueDisplayID: fmt.Sprintf("ISSUE-%d", sequenceNo),
@@ -573,10 +574,16 @@ func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, com
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, err
+		return domain.ActiveAttemptList{}, err
 	}
-	if result == nil {
-		result = []domain.ActiveAttemptSummary{}
+
+	result := domain.ActiveAttemptList{Items: items}
+	if len(items) > effectiveLimit {
+		result.HasMore = true
+		result.Items = items[:effectiveLimit]
+	}
+	if result.Items == nil {
+		result.Items = []domain.ActiveAttemptSummary{}
 	}
 	return result, nil
 }
