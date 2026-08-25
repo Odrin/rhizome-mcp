@@ -1,4 +1,4 @@
-package main
+package compose
 
 import (
 	"context"
@@ -8,33 +8,33 @@ import (
 	"sync"
 	"time"
 
-	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
-	projectruntime "rhizome-mcp/internal/runtime"
+	"rhizome-mcp/internal/projectrouting"
+	"rhizome-mcp/internal/runtime"
 )
 
-var projectRouterMaxEntries = 16
+var RouterMaxEntries = 16
 
-var errProjectRouterClosed = errors.New("project router is closed")
+var ErrRouterClosed = errors.New("project router is closed")
 
-type projectRouter struct {
+type Router struct {
 	dataRoot      string
 	clock         clock.Clock
 	sqliteOptions sqlite.Options
-	composeFn     func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error)
+	composeFn     func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error)
 
-	defaultBundle *composedServices
+	defaultBundle *Services
 	defaultRef    string
 	defaultRoot   string
 
 	mu                  sync.Mutex
 	cond                *sync.Cond
-	entries             map[string]*projectRouterEntry
+	entries             map[string]*routerEntry
 	closed              bool
 	closing             bool
 	closingErr          error
@@ -48,33 +48,33 @@ type projectRouter struct {
 	useCounter   int64
 }
 
-type projectRouterEntry struct {
+type routerEntry struct {
 	ref      string
 	pinned   bool
 	state    string
-	bundle   *composedServices
+	bundle   *Services
 	active   int
 	lastUsed int64
 	done     chan struct{}
-	result   projectRouterResult
+	result   routerResult
 	removed  bool
 }
 
-type projectRouterResult struct {
-	bundle *composedServices
+type routerResult struct {
+	bundle *Services
 	err    error
 }
 
-func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.Options, defaultBundle *composedServices) *projectRouter {
+func NewRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.Options, defaultBundle *Services) *Router {
 	if source == nil {
 		source = clock.RealClock{}
 	}
-	router := &projectRouter{
+	router := &Router{
 		dataRoot:      dataRoot,
 		clock:         source,
 		sqliteOptions: sqliteOptions,
-		entries:       make(map[string]*projectRouterEntry),
-		composeFn:     composeServicesFromExistingProject,
+		entries:       make(map[string]*routerEntry),
+		composeFn:     OpenExisting,
 		closeStarted:  make(chan struct{}),
 	}
 	router.cond = sync.NewCond(&router.mu)
@@ -85,7 +85,7 @@ func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.
 			router.defaultRoot = defaultBundle.project.Root
 		}
 		router.useCounter = 1
-		router.entries[router.defaultRef] = &projectRouterEntry{
+		router.entries[router.defaultRef] = &routerEntry{
 			ref:      router.defaultRef,
 			pinned:   true,
 			state:    "ready",
@@ -96,11 +96,18 @@ func newProjectRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.
 	return router
 }
 
-func (router *projectRouter) DataRoot() string {
+func (router *Router) DataRoot() string {
 	return router.dataRoot
 }
 
-func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (mcpadapter.ProjectLease, error) {
+func (router *Router) DefaultProjectRef() string {
+	if router == nil {
+		return ""
+	}
+	return router.defaultRef
+}
+
+func (router *Router) Acquire(ctx context.Context, explicitRef *string) (projectrouting.ProjectLease, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -112,7 +119,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	router.mu.Lock()
 	if router.closed {
 		router.mu.Unlock()
-		return nil, errProjectRouterClosed
+		return nil, ErrRouterClosed
 	}
 
 	ref, err := router.resolveRef(explicitRef)
@@ -122,7 +129,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	}
 	if ref == "" {
 		router.mu.Unlock()
-		return nil, mcpadapter.NewProjectRequiredError()
+		return nil, projectrouting.NewProjectRequiredError()
 	}
 
 	if entry, ok := router.entries[ref]; ok {
@@ -147,7 +154,7 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 			}
 			if entry.result.bundle == nil {
 				router.releaseEntryLocked(entry)
-				return nil, errProjectRouterClosed
+				return nil, ErrRouterClosed
 			}
 			return router.wrapLease(entry), nil
 		}
@@ -160,15 +167,15 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 		}
 	}
 
-	var evicted *projectRouterEntry
-	if len(router.entries) >= projectRouterMaxEntries {
+	var evicted *routerEntry
+	if len(router.entries) >= RouterMaxEntries {
 		if evicted = router.evictIdleEntryLocked(); evicted == nil {
 			router.mu.Unlock()
-			return nil, mcpadapter.NewProjectCapacityExceededError()
+			return nil, projectrouting.NewProjectCapacityExceededError()
 		}
 	}
 
-	entry := &projectRouterEntry{ref: ref, state: "opening", done: make(chan struct{}), lastUsed: router.nextUseLocked()}
+	entry := &routerEntry{ref: ref, state: "opening", done: make(chan struct{}), lastUsed: router.nextUseLocked()}
 	router.entries[ref] = entry
 	router.openingCount++
 	entry.active++
@@ -220,12 +227,12 @@ func (router *projectRouter) Acquire(ctx context.Context, explicitRef *string) (
 	}
 	if entry.result.bundle == nil {
 		router.releaseEntryLocked(entry)
-		return nil, errProjectRouterClosed
+		return nil, ErrRouterClosed
 	}
 	return router.wrapLease(entry), nil
 }
 
-func (router *projectRouter) OpenProject(ctx context.Context, absoluteRoot string) (mcpadapter.ProjectLease, error) {
+func (router *Router) OpenProject(ctx context.Context, absoluteRoot string) (projectrouting.ProjectLease, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -240,9 +247,9 @@ func (router *projectRouter) OpenProject(ctx context.Context, absoluteRoot strin
 	return router.Acquire(ctx, &projectRef)
 }
 
-func (router *projectRouter) resolveRef(explicitRef *string) (string, error) {
+func (router *Router) resolveRef(explicitRef *string) (string, error) {
 	if explicitRef != nil {
-		if err := mcpadapter.ValidateProjectRef(*explicitRef); err != nil {
+		if err := projectrouting.ValidateProjectRef(*explicitRef); err != nil {
 			return "", err
 		}
 		return *explicitRef, nil
@@ -250,45 +257,45 @@ func (router *projectRouter) resolveRef(explicitRef *string) (string, error) {
 	if router.defaultRef != "" {
 		return router.defaultRef, nil
 	}
-	return "", mcpadapter.NewProjectRequiredError()
+	return "", projectrouting.NewProjectRequiredError()
 }
 
-func (router *projectRouter) openEntry(ctx context.Context, entry *projectRouterEntry) projectRouterResult {
+func (router *Router) openEntry(ctx context.Context, entry *routerEntry) routerResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if entry == nil {
-		return projectRouterResult{err: fmt.Errorf("project router entry is nil")}
+		return routerResult{err: fmt.Errorf("project router entry is nil")}
 	}
 	if router.composeFn == nil {
-		return projectRouterResult{err: fmt.Errorf("project router composition function is nil")}
+		return routerResult{err: fmt.Errorf("project router composition function is nil")}
 	}
 	bundle, project, err := router.composeFn(ctx, entry.ref, router.dataRoot, router.clock, router.sqliteOptions)
 	if err != nil {
-		return projectRouterResult{err: err}
+		return routerResult{err: err}
 	}
 	if bundle == nil || project == nil {
-		return projectRouterResult{err: fmt.Errorf("project bundle for %q was nil", entry.ref)}
+		return routerResult{err: fmt.Errorf("project bundle for %q was nil", entry.ref)}
 	}
 	entry.bundle = bundle
-	return projectRouterResult{bundle: bundle}
+	return routerResult{bundle: bundle}
 }
 
-func (router *projectRouter) wrapLease(entry *projectRouterEntry) mcpadapter.ProjectLease {
+func (router *Router) wrapLease(entry *routerEntry) projectrouting.ProjectLease {
 	if entry == nil || entry.bundle == nil {
 		return nil
 	}
-	baseLease := mcpadapter.NewStaticLease(entry.ref, entry.bundle.ProjectServices())
-	return &projectRouterLease{baseLease: baseLease, router: router, entry: entry}
+	baseLease := projectrouting.NewStaticLease(entry.ref, entry.bundle.Bundle())
+	return &routerLease{baseLease: baseLease, router: router, entry: entry}
 }
 
-func (router *projectRouter) nextUseLocked() int64 {
+func (router *Router) nextUseLocked() int64 {
 	router.useCounter++
 	return router.useCounter
 }
 
-func (router *projectRouter) evictIdleEntryLocked() *projectRouterEntry {
-	var victim *projectRouterEntry
+func (router *Router) evictIdleEntryLocked() *routerEntry {
+	var victim *routerEntry
 	var victimKey string
 	for key, entry := range router.entries {
 		if entry == nil || entry.pinned || entry.state != "ready" || entry.removed || entry.active != 0 {
@@ -307,7 +314,7 @@ func (router *projectRouter) evictIdleEntryLocked() *projectRouterEntry {
 	return victim
 }
 
-func (router *projectRouter) Close(ctx context.Context) error {
+func (router *Router) Close(ctx context.Context) error {
 	waitCtx := ctx
 	if waitCtx == nil {
 		waitCtx = context.Background()
@@ -365,19 +372,19 @@ func (router *projectRouter) Close(ctx context.Context) error {
 	}
 }
 
-func (router *projectRouter) runCleanup(ctx context.Context) error {
+func (router *Router) runCleanup(ctx context.Context) error {
 	router.mu.Lock()
 	if router.openingCount != 0 || router.activeCount != 0 {
 		router.mu.Unlock()
 		return context.DeadlineExceeded
 	}
-	remaining := make([]*projectRouterEntry, 0, len(router.entries))
+	remaining := make([]*routerEntry, 0, len(router.entries))
 	for _, entry := range router.entries {
 		if entry != nil {
 			remaining = append(remaining, entry)
 		}
 	}
-	router.entries = make(map[string]*projectRouterEntry)
+	router.entries = make(map[string]*routerEntry)
 	router.mu.Unlock()
 
 	var errs []error
@@ -408,7 +415,7 @@ func (router *projectRouter) runCleanup(ctx context.Context) error {
 // longer names a ready, non-removed entry by the time this reaches it
 // (evicted or closed between the snapshot above and this loop) is skipped
 // instead of being reopened.
-func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
+func (router *Router) ExpireAttempts(ctx context.Context) (ports.ExpireAttemptsResult, error) {
 	if router == nil {
 		return ports.ExpireAttemptsResult{}, nil
 	}
@@ -428,7 +435,7 @@ func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAt
 		if lease == nil {
 			continue
 		}
-		projectResult, projectErr := lease.AttemptService().ExpireAttempts(ctx)
+		projectResult, projectErr := lease.Services().AttemptService.ExpireAttempts(ctx)
 		releaseErr := lease.Release()
 		result.ExpiredAttemptCount += projectResult.ExpiredAttemptCount
 		if projectErr != nil {
@@ -447,7 +454,7 @@ func (router *projectRouter) ExpireAttempts(ctx context.Context) (ports.ExpireAt
 // so the caller's use doesn't count as client activity for LRU purposes.
 // Returns nil if ref no longer names such an entry (never Acquire's
 // reopen-from-disk fallback). The caller must Release the returned lease.
-func (router *projectRouter) pinReadyEntry(ref string) mcpadapter.ProjectLease {
+func (router *Router) pinReadyEntry(ref string) projectrouting.ProjectLease {
 	router.mu.Lock()
 	defer router.mu.Unlock()
 	entry, ok := router.entries[ref]
@@ -459,120 +466,29 @@ func (router *projectRouter) pinReadyEntry(ref string) mcpadapter.ProjectLease {
 	return router.wrapLease(entry)
 }
 
-type projectRouterLease struct {
-	baseLease   mcpadapter.ProjectLease
-	router      *projectRouter
-	entry       *projectRouterEntry
+type routerLease struct {
+	baseLease   projectrouting.ProjectLease
+	router      *Router
+	entry       *routerEntry
 	releaseOnce sync.Once
 	releaseErr  error
 }
 
-func (lease *projectRouterLease) ProjectRef() string {
+func (lease *routerLease) ProjectRef() string {
 	if lease == nil || lease.baseLease == nil {
 		return ""
 	}
 	return lease.baseLease.ProjectRef()
 }
 
-func (lease *projectRouterLease) IssueService() *application.IssueService {
+func (lease *routerLease) Services() application.Bundle {
 	if lease == nil || lease.baseLease == nil {
-		return nil
+		return application.Bundle{}
 	}
-	return lease.baseLease.IssueService()
+	return lease.baseLease.Services()
 }
 
-func (lease *projectRouterLease) ProjectService() *application.ProjectService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.ProjectService()
-}
-
-func (lease *projectRouterLease) RelationService() *application.RelationService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.RelationService()
-}
-
-func (lease *projectRouterLease) GraphService() *application.GraphService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.GraphService()
-}
-
-func (lease *projectRouterLease) PlanningService() *application.PlanningService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.PlanningService()
-}
-
-func (lease *projectRouterLease) CommentService() *application.CommentService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.CommentService()
-}
-
-func (lease *projectRouterLease) DecisionService() *application.DecisionService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.DecisionService()
-}
-
-func (lease *projectRouterLease) ActivityService() *application.ActivityService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.ActivityService()
-}
-
-func (lease *projectRouterLease) SearchService() *application.SearchService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.SearchService()
-}
-
-func (lease *projectRouterLease) ReviewService() *application.ReviewService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.ReviewService()
-}
-
-func (lease *projectRouterLease) AttemptService() *application.AttemptService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.AttemptService()
-}
-
-func (lease *projectRouterLease) ReservationService() *application.ReservationService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.ReservationService()
-}
-
-func (lease *projectRouterLease) SessionService() *application.AgentSessionService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.SessionService()
-}
-
-func (lease *projectRouterLease) WorkContextService() *application.WorkContextService {
-	if lease == nil || lease.baseLease == nil {
-		return nil
-	}
-	return lease.baseLease.WorkContextService()
-}
-
-func (lease *projectRouterLease) Release() error {
+func (lease *routerLease) Release() error {
 	if lease == nil {
 		return nil
 	}
@@ -589,7 +505,7 @@ func (lease *projectRouterLease) Release() error {
 	return lease.releaseErr
 }
 
-func (router *projectRouter) releaseEntryLocked(entry *projectRouterEntry) {
+func (router *Router) releaseEntryLocked(entry *routerEntry) {
 	if entry != nil && entry.active > 0 {
 		entry.active--
 	}

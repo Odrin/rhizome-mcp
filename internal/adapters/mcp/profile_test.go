@@ -10,6 +10,7 @@ import (
 
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/projectrouting"
 )
 
 // toolNamesFor returns the sorted (lexical, per the SDK's own tools/list
@@ -66,7 +67,7 @@ func TestToolSessionResolutionUsesRoutedBundle(t *testing.T) {
 	}
 
 	releaseCount := 0
-	lease := &trackingLease{ProjectLease: mcpadapter.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
+	lease := &trackingLease{ProjectLease: projectrouting.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
 	router := &trackingRouter{lease: lease}
 	options := composeServices(t, db, source)
 	options.ProjectRouter = router

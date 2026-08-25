@@ -17,7 +17,6 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -28,11 +27,13 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
+	"rhizome-mcp/internal/projectrouting"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
@@ -153,72 +154,6 @@ func formatVersionOutput(version, commit, date string) string {
 	return fmt.Sprintf("rhizome-mcp %s (commit %s, built %s)", version, commit, date)
 }
 
-type composedServices struct {
-	project *projectruntime.Project
-
-	projectService     *application.ProjectService
-	issueService       *application.IssueService
-	relationService    *application.RelationService
-	graphService       *application.GraphService
-	planningService    *application.PlanningService
-	commentService     *application.CommentService
-	decisionService    *application.DecisionService
-	activityService    *application.ActivityService
-	searchService      *application.SearchService
-	reviewService      *application.ReviewService
-	attemptService     *application.AttemptService
-	reservationService *application.ReservationService
-	maintenanceService *application.MaintenanceService
-	workContextService *application.WorkContextService
-	sessionService     *application.AgentSessionService
-	boardService       *application.BoardService
-	issueDetailService *application.IssueDetailService
-
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func (bundle *composedServices) ProjectRef() string {
-	if bundle == nil || bundle.project == nil {
-		return ""
-	}
-	return bundle.project.ProjectID
-}
-
-func (bundle *composedServices) ProjectServices() mcpadapter.ProjectServices {
-	if bundle == nil {
-		return mcpadapter.ProjectServices{}
-	}
-	return mcpadapter.ProjectServices{
-		IssueService:       bundle.issueService,
-		ProjectService:     bundle.projectService,
-		RelationService:    bundle.relationService,
-		GraphService:       bundle.graphService,
-		PlanningService:    bundle.planningService,
-		CommentService:     bundle.commentService,
-		DecisionService:    bundle.decisionService,
-		ActivityService:    bundle.activityService,
-		SearchService:      bundle.searchService,
-		ReviewService:      bundle.reviewService,
-		AttemptService:     bundle.attemptService,
-		ReservationService: bundle.reservationService,
-		SessionService:     bundle.sessionService,
-		WorkContextService: bundle.workContextService,
-	}
-}
-
-func (bundle *composedServices) Close(ctx context.Context) error {
-	if bundle == nil || bundle.project == nil {
-		return nil
-	}
-	bundle.closeOnce.Do(func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		bundle.closeErr = bundle.project.Close(closeCtx)
-	})
-	return bundle.closeErr
-}
-
 func main() {
 	resolvedVersion, resolvedCommit, resolvedDate := resolveVersion()
 	cfg, warnings := config.Load(os.Getenv)
@@ -278,9 +213,9 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return err
 	}
 
-	var bundle *composedServices
+	var bundle *compose.Services
 	var project *projectruntime.Project
-	var router mcpadapter.ProjectRouter
+	var router projectrouting.ProjectRouter
 	var serveProjectRoot string
 	var serveShared bool
 
@@ -321,17 +256,17 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 				return dataRootErr
 			}
 			if serveShared {
-				router = newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, nil)
+				router = compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, nil)
 			} else {
 				composeRoot := startingPath
 				if serveProjectRoot != "" {
 					composeRoot = serveProjectRoot
 				}
-				bundle, project, err = composeServices(ctx, composeRoot, pathInputs, dataRootOverride)
+				bundle, project, err = compose.Open(ctx, composeRoot, pathInputs, dataRootOverride)
 				if err != nil {
 					return err
 				}
-				router = newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
+				router = compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 			}
 		}
 		defer func() {
@@ -349,15 +284,16 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		cfg.HTTPAddress = httpAddress
 		if bundle == nil {
-			bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
+			bundle, project, err = compose.Open(ctx, startingPath, pathInputs, dataRootOverride)
 			if err != nil {
 				return err
 			}
 		}
-		if bundle == nil || bundle.boardService == nil || bundle.issueDetailService == nil {
+		b := bundle.Bundle()
+		if bundle == nil || b.BoardService == nil || b.IssueDetailService == nil {
 			return errors.New("board service is not configured")
 		}
-		return runBoardServe(ctx, cfg, stdoutWriter, boardServeService{boardService: bundle.boardService, issueDetailService: bundle.issueDetailService, searchService: bundle.searchService})
+		return runBoardServe(ctx, cfg, stdoutWriter, boardServeService{boardService: b.BoardService, issueDetailService: b.IssueDetailService, searchService: b.SearchService})
 	}
 	backupHandler := func(ctx context.Context, output string) (cliadapter.BackupReport, error) {
 		if project == nil {
@@ -390,7 +326,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	}
 
 	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && args[0] != "serve" && (args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
-		bundle, project, err = composeServices(ctx, startingPath, pathInputs, dataRootOverride)
+		bundle, project, err = compose.Open(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
 		}
@@ -407,13 +343,14 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 
 	var services cliadapter.Services
 	if bundle != nil {
+		b := bundle.Bundle()
 		services = cliadapter.Services{
-			ProjectService:     bundle.projectService,
-			IssueService:       bundle.issueService,
-			SearchService:      bundle.searchService,
-			GraphService:       bundle.graphService,
-			MaintenanceService: bundle.maintenanceService,
-			BoardService:       bundle.boardService,
+			ProjectService:     b.ProjectService,
+			IssueService:       b.IssueService,
+			SearchService:      b.SearchService,
+			GraphService:       b.GraphService,
+			MaintenanceService: b.MaintenanceService,
+			BoardService:       b.BoardService,
 		}
 	}
 
@@ -568,7 +505,7 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 	return writeJSON(stdout, response)
 }
 
-func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) (err error) {
+func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, router projectrouting.ProjectRouter) (err error) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -592,7 +529,7 @@ func runServe(ctx context.Context, cfg *config.Config, stderr io.Writer, router 
 	return serveStdio(ctx, cfg, stderr, router)
 }
 
-func newMCPServer(cfg *config.Config, router mcpadapter.ProjectRouter) (*mcpadapter.Server, error) {
+func newMCPServer(cfg *config.Config, router projectrouting.ProjectRouter) (*mcpadapter.Server, error) {
 	if router == nil {
 		return nil, errors.New("project router is required")
 	}
@@ -610,7 +547,7 @@ func newMCPServer(cfg *config.Config, router mcpadapter.ProjectRouter) (*mcpadap
 	})
 }
 
-func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, router projectrouting.ProjectRouter) error {
 	server, err := newMCPServer(cfg, router)
 	if err != nil {
 		return err
@@ -618,7 +555,7 @@ func runServeStdio(ctx context.Context, cfg *config.Config, stderr io.Writer, ro
 	return server.Run(ctx, &sdkmcp.StdioTransport{})
 }
 
-func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+func runServeHTTP(ctx context.Context, cfg *config.Config, stderr io.Writer, router projectrouting.ProjectRouter) error {
 	handler, err := newHTTPHandler(cfg, router)
 	if err != nil {
 		return err
@@ -688,7 +625,7 @@ func boardServeURL(listener net.Listener) string {
 	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
-func newHTTPHandler(cfg *config.Config, router mcpadapter.ProjectRouter) (http.Handler, error) {
+func newHTTPHandler(cfg *config.Config, router projectrouting.ProjectRouter) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -928,237 +865,6 @@ func writeJSONToWriter(w io.Writer, value interface{}) error {
 	}
 	_, err = fmt.Fprintln(w, string(data))
 	return err
-}
-
-func newComposedServices(project *projectruntime.Project, source clock.Clock) (*composedServices, error) {
-	if project == nil {
-		return nil, errors.New("project is nil")
-	}
-
-	if source == nil {
-		source = clock.RealClock{}
-	}
-	issueRepository, err := sqlite.NewIssueRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	projectRepository, err := sqlite.NewProjectRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	relationRepository, err := sqlite.NewRelationRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	graphRepository, err := sqlite.NewGraphRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	planningRepository, err := sqlite.NewPlanningRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	commentRepository, err := sqlite.NewCommentRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	decisionRepository, err := sqlite.NewDecisionRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	activityRepository, err := sqlite.NewActivityRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	searchRepository, err := sqlite.NewSearchRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	reviewRepository, err := sqlite.NewReviewRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	searchIndexRepository, err := sqlite.NewSearchIndexRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	attemptRepository, err := sqlite.NewAttemptRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	reservationRepository, err := sqlite.NewReservationRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	workContextRepository, err := sqlite.NewWorkContextRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	generator, err := ids.NewGenerator(source, rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	issueService, err := application.NewIssueService(issueRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	projectService, err := application.NewProjectService(projectRepository, generator)
-	if err != nil {
-		return nil, err
-	}
-	relationService, err := application.NewRelationService(relationRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	graphService, err := application.NewGraphService(graphRepository, source)
-	if err != nil {
-		return nil, err
-	}
-	planningService, err := application.NewPlanningService(planningRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	commentService, err := application.NewCommentService(commentRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	decisionService, err := application.NewDecisionService(decisionRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	activityService, err := application.NewActivityService(activityRepository)
-	if err != nil {
-		return nil, err
-	}
-	searchService, err := application.NewSearchService(searchRepository)
-	if err != nil {
-		return nil, err
-	}
-	reviewService, err := application.NewReviewService(reviewRepository, issueRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	attemptService, err := application.NewAttemptService(attemptRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	reservationService, err := application.NewReservationService(reservationRepository)
-	if err != nil {
-		return nil, err
-	}
-	maintenanceService, err := application.NewMaintenanceService(attemptRepository, searchIndexRepository, source)
-	if err != nil {
-		return nil, err
-	}
-	workContextService, err := application.NewWorkContextService(workContextRepository, source)
-	if err != nil {
-		return nil, err
-	}
-	sessionRepository, err := sqlite.NewAgentSessionRepository(project.Database)
-	if err != nil {
-		return nil, err
-	}
-	sessionService, err := application.NewAgentSessionService(sessionRepository, source, generator)
-	if err != nil {
-		return nil, err
-	}
-	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, source)
-	if err != nil {
-		return nil, err
-	}
-	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService)
-	if err != nil {
-		return nil, err
-	}
-
-	return &composedServices{
-		project:            project,
-		projectService:     projectService,
-		issueService:       issueService,
-		relationService:    relationService,
-		graphService:       graphService,
-		planningService:    planningService,
-		commentService:     commentService,
-		decisionService:    decisionService,
-		activityService:    activityService,
-		searchService:      searchService,
-		reviewService:      reviewService,
-		attemptService:     attemptService,
-		reservationService: reservationService,
-		maintenanceService: maintenanceService,
-		workContextService: workContextService,
-		sessionService:     sessionService,
-		boardService:       boardService,
-		issueDetailService: issueDetailService,
-	}, nil
-}
-
-func composeServices(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (bundle *composedServices, project *projectruntime.Project, err error) {
-	project, err = openProject(ctx, startingPath, pathInputs, dataRootOverride)
-	if err != nil {
-		return nil, nil, err
-	}
-	openedProject := project
-	keepProject := false
-	defer func() {
-		if keepProject {
-			return
-		}
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if closeErr := openedProject.Close(closeCtx); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	bundle, err = newComposedServices(project, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	keepProject = true
-	return bundle, project, nil
-}
-
-func composeServicesFromExistingProject(ctx context.Context, projectID, dataRoot string, source clock.Clock, sqliteOptions sqlite.Options) (bundle *composedServices, project *projectruntime.Project, err error) {
-	if source == nil {
-		source = clock.RealClock{}
-	}
-	project, err = projectruntime.OpenExistingProject(ctx, projectID, dataRoot, source, sqliteOptions)
-	if err != nil {
-		return nil, nil, err
-	}
-	openedProject := project
-	keepProject := false
-	defer func() {
-		if keepProject {
-			return
-		}
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if closeErr := openedProject.Close(closeCtx); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	bundle, err = newComposedServices(project, source)
-	if err != nil {
-		return nil, nil, err
-	}
-	keepProject = true
-	return bundle, project, nil
-}
-
-func openProject(ctx context.Context, startingPath string, pathInputs projectconfig.PathInputs, dataRootOverride string) (*projectruntime.Project, error) {
-	options := projectruntime.Options{
-		StartingPath: startingPath,
-		PathInputs:   pathInputs,
-		Clock:        clock.RealClock{},
-		SQLite:       sqlite.Options{},
-	}
-	if dataRootOverride != "" {
-		options.DataRoot = dataRootOverride
-	}
-	return projectruntime.OpenProject(ctx, options)
 }
 
 func resolveDataRoot(pathInputs projectconfig.PathInputs, dataRootOverride string) (string, error) {

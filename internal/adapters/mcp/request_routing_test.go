@@ -9,10 +9,11 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/projectrouting"
 )
 
 func TestRouteProjectRequestRejectsWrongProjectRefTypeBeforeAcquire(t *testing.T) {
-	router := &requestRouter{lease: NewStaticLease(projectID, completeProjectServices())}
+	router := &requestRouter{lease: projectrouting.NewStaticLease(projectID, completeProjectServices())}
 	target := &adapter{router: router}
 	request := requestWithArguments(t, map[string]any{"project_ref": 7})
 	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
@@ -31,7 +32,7 @@ func TestRouteProjectRequestRejectsWrongProjectRefTypeBeforeAcquire(t *testing.T
 }
 
 func TestRouteProjectRequestPropagatesSharedProjectRequired(t *testing.T) {
-	router := &requestRouter{err: NewProjectRequiredError()}
+	router := &requestRouter{err: projectrouting.NewProjectRequiredError()}
 	target := &adapter{router: router}
 	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
 		t.Fatal("handler ran")
@@ -49,7 +50,7 @@ func TestRouteProjectRequestPropagatesSharedProjectRequired(t *testing.T) {
 }
 
 func TestRouteProjectRequestPropagatesProjectNotFound(t *testing.T) {
-	router := &requestRouter{err: NewProjectNotFoundError("01ARZ3NDEKTSV4RRFFQ69G5FAV")}
+	router := &requestRouter{err: projectrouting.NewProjectNotFoundError("01ARZ3NDEKTSV4RRFFQ69G5FAV")}
 	target := &adapter{router: router}
 	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
 		t.Fatal("handler ran")
@@ -68,7 +69,7 @@ func TestRouteProjectRequestPropagatesProjectNotFound(t *testing.T) {
 }
 
 func TestRouteProjectRequestPropagatesProjectCapacityExceededAsRetryable(t *testing.T) {
-	router := &requestRouter{err: NewProjectCapacityExceededError()}
+	router := &requestRouter{err: projectrouting.NewProjectCapacityExceededError()}
 	target := &adapter{router: router}
 	handler := routeProjectRequest[struct{}, any](target, nil, func(*adapter, context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, any, error) {
 		t.Fatal("handler ran")
@@ -87,7 +88,7 @@ func TestRouteProjectRequestPropagatesProjectCapacityExceededAsRetryable(t *test
 
 func TestRouteProjectRequestReleasesLeaseAfterHandlerFailure(t *testing.T) {
 	releases := 0
-	lease := &staticLease{projectRef: projectID, services: completeProjectServices(), releaseFn: func() error {
+	lease := &testLease{projectRef: projectID, services: completeProjectServices(), releaseFn: func() error {
 		releases++
 		return nil
 	}}
@@ -138,17 +139,17 @@ func TestTouchSessionForMutatingToolRejectsNonStringHandle(t *testing.T) {
 }
 
 type requestRouter struct {
-	lease    ProjectLease
+	lease    projectrouting.ProjectLease
 	err      error
 	acquires int
 }
 
-func (router *requestRouter) Acquire(context.Context, *string) (ProjectLease, error) {
+func (router *requestRouter) Acquire(context.Context, *string) (projectrouting.ProjectLease, error) {
 	router.acquires++
 	return router.lease, router.err
 }
 
-func (router *requestRouter) OpenProject(context.Context, string) (ProjectLease, error) {
+func (router *requestRouter) OpenProject(context.Context, string) (projectrouting.ProjectLease, error) {
 	return router.lease, router.err
 }
 

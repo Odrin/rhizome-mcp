@@ -17,6 +17,7 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/projectconfig"
@@ -121,7 +122,7 @@ func TestNewHTTPHandlerRejectsNilRouterAndRoutesMCPPaths(t *testing.T) {
 		t.Fatalf("newHTTPHandler(nil router) error = %v, want required-router error", err)
 	}
 
-	router := newProjectRouter(filepath.Join(t.TempDir(), "data"), clock.RealClock{}, sqlite.Options{}, nil)
+	router := compose.NewRouter(filepath.Join(t.TempDir(), "data"), clock.RealClock{}, sqlite.Options{}, nil)
 	handler, err := newHTTPHandler(&config.Config{ServerName: "test", Version: "v1"}, router)
 	if err != nil {
 		t.Fatalf("newHTTPHandler(router) error = %v", err)
@@ -446,19 +447,19 @@ func TestMergeAndWriteJSONConfigReportsParseAndWriteErrors(t *testing.T) {
 }
 
 func TestComposedServicesNilSafeAccessorsAndClose(t *testing.T) {
-	var bundle *composedServices
+	var bundle *compose.Services
 	if got := bundle.ProjectRef(); got != "" {
 		t.Fatalf("nil ProjectRef() = %q, want empty", got)
 	}
-	services := bundle.ProjectServices()
+	services := bundle.Bundle()
 	if services.IssueService != nil || services.ProjectService != nil || services.RelationService != nil || services.GraphService != nil || services.PlanningService != nil || services.CommentService != nil || services.DecisionService != nil || services.ActivityService != nil || services.SearchService != nil || services.ReviewService != nil || services.AttemptService != nil || services.SessionService != nil || services.WorkContextService != nil {
-		t.Fatalf("nil ProjectServices() returned non-zero services: %#v", services)
+		t.Fatalf("nil Bundle() returned non-zero services: %#v", services)
 	}
 	if err := bundle.Close(context.Background()); err != nil {
 		t.Fatalf("nil Close() error = %v, want nil", err)
 	}
 
-	bundle = &composedServices{}
+	bundle = &compose.Services{}
 	if got := bundle.ProjectRef(); got != "" {
 		t.Fatalf("empty ProjectRef() = %q, want empty", got)
 	}

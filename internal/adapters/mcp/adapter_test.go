@@ -25,6 +25,7 @@ import (
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
+	"rhizome-mcp/internal/projectrouting"
 )
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -121,7 +122,7 @@ func TestToolRequestsRouteThroughLeaseServicesAndReleaseLease(t *testing.T) {
 	}
 
 	releaseCount := 0
-	lease := &trackingLease{ProjectLease: mcpadapter.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
+	lease := &trackingLease{ProjectLease: projectrouting.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
 	router := &trackingRouter{lease: lease}
 	options := composeServices(t, db, source)
 	options.ProjectRouter = router
@@ -1993,7 +1994,7 @@ func TestNewServerRejectsNilRouter(t *testing.T) {
 }
 
 func TestNewServerAcceptsZeroProjectRouter(t *testing.T) {
-	router := mcpadapter.NewStaticProjectRouter("", "", mcpadapter.ProjectServices{})
+	router := projectrouting.NewStaticProjectRouter("", "", application.Bundle{})
 	_, err := mcpadapter.NewServer(mcpadapter.Options{ProjectRouter: router, ServerName: "test-server", ServerVersion: "test-version", ConfigVersion: 1})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v, want nil for zero-project router", err)
@@ -2011,7 +2012,7 @@ func TestNewServerRequiresActivityService(t *testing.T) {
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	services.ActivityService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if err == nil {
 		t.Fatal("NewServer() succeeded without activity service")
@@ -2036,7 +2037,7 @@ func TestNewServerRequiresRelationService(t *testing.T) {
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	services.RelationService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing relation service error", err)
@@ -2053,7 +2054,7 @@ func TestNewServerRequiresSessionService(t *testing.T) {
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	services.SessionService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing session service error", err)
@@ -2070,7 +2071,7 @@ func TestNewServerRequiresDecisionService(t *testing.T) {
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	services.DecisionService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	_, err := mcpadapter.NewServer(options)
 	if !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
 		t.Fatalf("NewServer() error = %v, want missing decision service error", err)
@@ -2340,7 +2341,7 @@ func TestAgentSessionStdioShutdownEndsOnce(t *testing.T) {
 	}
 	services := servicesFromOptions(t, options)
 	services.SessionService = sessions
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	client, stop := newClient(t, options)
 	if client == nil {
 		t.Fatal("newClient() returned nil client")
@@ -2568,7 +2569,7 @@ func TestAgentSessionCreationFailureDoesNotChangeToolLifecycle(t *testing.T) {
 	}
 	services := servicesFromOptions(t, options)
 	services.SessionService = sessions
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	client, stop := newClient(t, options)
 	result := call(t, client, "get_project", map[string]any{})
 	if result.IsError {
@@ -3434,14 +3435,14 @@ func TestGetWorkContextLifecycleAndContracts(t *testing.T) {
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	services.WorkContextService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil work context service")
 	}
 	options = composeServices(t, db, source)
 	services = servicesFromOptions(t, options)
 	services.SearchService = nil
-	options.ProjectRouter = mcpadapter.NewStaticProjectRouter(projectID, "", services)
+	options.ProjectRouter = projectrouting.NewStaticProjectRouter(projectID, "", services)
 	if _, err := mcpadapter.NewServer(options); err == nil {
 		t.Fatal("NewServer() accepted nil search service")
 	}
@@ -3558,7 +3559,7 @@ func TestGetWorkContextReservationSections(t *testing.T) {
 }
 
 type trackingLease struct {
-	mcpadapter.ProjectLease
+	projectrouting.ProjectLease
 	releaseCount *int
 }
 
@@ -3570,17 +3571,17 @@ func (lease *trackingLease) Release() error {
 }
 
 type trackingRouter struct {
-	lease        mcpadapter.ProjectLease
+	lease        projectrouting.ProjectLease
 	err          error
 	acquireCount int
 }
 
-func (router *trackingRouter) Acquire(context.Context, *string) (mcpadapter.ProjectLease, error) {
+func (router *trackingRouter) Acquire(context.Context, *string) (projectrouting.ProjectLease, error) {
 	router.acquireCount++
 	return router.lease, router.err
 }
 
-func (router *trackingRouter) OpenProject(context.Context, string) (mcpadapter.ProjectLease, error) {
+func (router *trackingRouter) OpenProject(context.Context, string) (projectrouting.ProjectLease, error) {
 	return router.lease, router.err
 }
 
@@ -3653,28 +3654,13 @@ func reopenDatabase(t *testing.T, path string, source *clock.FakeClock) (*sqlite
 	return db, source
 }
 
-func servicesFromOptions(t *testing.T, options mcpadapter.Options) mcpadapter.ProjectServices {
+func servicesFromOptions(t *testing.T, options mcpadapter.Options) application.Bundle {
 	t.Helper()
 	lease, err := options.ProjectRouter.Acquire(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("acquire project lease: %v", err)
 	}
-	services := mcpadapter.ProjectServices{
-		IssueService:       lease.IssueService(),
-		ProjectService:     lease.ProjectService(),
-		RelationService:    lease.RelationService(),
-		GraphService:       lease.GraphService(),
-		PlanningService:    lease.PlanningService(),
-		CommentService:     lease.CommentService(),
-		DecisionService:    lease.DecisionService(),
-		ActivityService:    lease.ActivityService(),
-		SearchService:      lease.SearchService(),
-		ReviewService:      lease.ReviewService(),
-		AttemptService:     lease.AttemptService(),
-		ReservationService: lease.ReservationService(),
-		SessionService:     lease.SessionService(),
-		WorkContextService: lease.WorkContextService(),
-	}
+	services := lease.Services()
 	if err := lease.Release(); err != nil {
 		t.Fatalf("release project lease: %v", err)
 	}
@@ -3799,7 +3785,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 	if err != nil {
 		t.Fatal(err)
 	}
-	services := mcpadapter.ProjectServices{
+	services := application.Bundle{
 		IssueService:       issues,
 		ProjectService:     projects,
 		RelationService:    relations,
@@ -3816,7 +3802,7 @@ func composeServices(t *testing.T, db *sqlite.DB, source *clock.FakeClock) mcpad
 		WorkContextService: workContexts,
 	}
 	return mcpadapter.Options{
-		ProjectRouter:   mcpadapter.NewStaticProjectRouter(projectID, "", services),
+		ProjectRouter:   projectrouting.NewStaticProjectRouter(projectID, "", services),
 		ServerName:      "test-server",
 		ServerVersion:   "test-version",
 		ConfigVersion:   1,

@@ -38,6 +38,7 @@ internal/
     errors.go
 
   application/
+    bundle.go
     project_service.go
     issue_service.go
     relation_service.go
@@ -47,6 +48,13 @@ internal/
     context_service.go
     search_service.go
     change_service.go
+
+  projectrouting/
+    routing.go
+
+  compose/
+    router.go
+    compose.go
 
   adapters/
     mcp/

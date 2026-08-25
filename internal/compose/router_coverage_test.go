@@ -1,4 +1,4 @@
-package main
+package compose
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
-	projectruntime "rhizome-mcp/internal/runtime"
+	"rhizome-mcp/internal/runtime"
 )
 
 func TestProjectRouterOpenProjectLoadsConfiguredProjectRoot(t *testing.T) {
@@ -29,11 +29,11 @@ func TestProjectRouterOpenProjectLoadsConfiguredProjectRoot(t *testing.T) {
 		t.Fatalf("Write identity: %v", err)
 	}
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
 	calls := 0
-	router.composeFn = func(_ context.Context, ref string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router.composeFn = func(_ context.Context, ref string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		calls++
-		return newTestBundle(ref), &projectruntime.Project{ProjectID: ref}, nil
+		return newTestServices(ref), &runtime.Project{ProjectID: ref}, nil
 	}
 
 	lease, err := router.OpenProject(context.Background(), root)
@@ -49,9 +49,9 @@ func TestProjectRouterOpenProjectLoadsConfiguredProjectRoot(t *testing.T) {
 }
 
 func TestProjectRouterOpenProjectRejectsInvalidRootsBeforeCompose(t *testing.T) {
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
 	calls := 0
-	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error) {
 		calls++
 		return nil, nil, errors.New("unexpected compose")
 	}
@@ -77,8 +77,8 @@ func TestProjectRouterOpenProjectRejectsInvalidRootsBeforeCompose(t *testing.T) 
 }
 
 func TestProjectRouterOpenProjectRejectsNilComposeResult(t *testing.T) {
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error) {
 		return nil, nil, nil
 	}
 
@@ -104,20 +104,20 @@ func TestProjectRouterExpireAttemptsProcessesReadyEntriesAndAggregatesErrors(t *
 	defaultRef := "01ARZ3NDEKTSV4RRFFQ69G5FC2"
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FC3"
 
-	defaultBundle := newTestBundle(defaultRef)
-	defaultBundle.project = &projectruntime.Project{ProjectID: defaultRef}
+	defaultBundle := newTestServices(defaultRef)
+	defaultBundle.project = &runtime.Project{ProjectID: defaultRef}
 	defaultRepo := &countingAttemptRepository{results: []ports.ExpireAttemptsResult{{ExpiredAttemptCount: 1}}, errs: []error{errors.New("first expiry failed")}}
-	defaultBundle.attemptService = mustNewAttemptService(t, defaultRepo)
+	defaultBundle.bundle.AttemptService = mustNewAttemptService(t, defaultRepo)
 
-	explicitBundle := newTestBundle(ref)
-	explicitBundle.project = &projectruntime.Project{ProjectID: ref}
+	explicitBundle := newTestServices(ref)
+	explicitBundle.project = &runtime.Project{ProjectID: ref}
 	explicitRepo := &countingAttemptRepository{results: []ports.ExpireAttemptsResult{{ExpiredAttemptCount: 1}}}
-	explicitBundle.attemptService = mustNewAttemptService(t, explicitRepo)
+	explicitBundle.bundle.AttemptService = mustNewAttemptService(t, explicitRepo)
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.entries[defaultRef] = &projectRouterEntry{ref: defaultRef, pinned: true, state: "ready", bundle: defaultBundle, lastUsed: 1}
-	router.entries[ref] = &projectRouterEntry{ref: ref, state: "ready", bundle: explicitBundle, lastUsed: 2}
-	router.entries["skipped-ref"] = &projectRouterEntry{ref: "skipped-ref", state: "opening", done: make(chan struct{})}
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.entries[defaultRef] = &routerEntry{ref: defaultRef, pinned: true, state: "ready", bundle: defaultBundle, lastUsed: 1}
+	router.entries[ref] = &routerEntry{ref: ref, state: "ready", bundle: explicitBundle, lastUsed: 2}
+	router.entries["skipped-ref"] = &routerEntry{ref: "skipped-ref", state: "opening", done: make(chan struct{})}
 
 	result, err := router.ExpireAttempts(context.Background())
 	if err == nil {
@@ -136,11 +136,11 @@ func TestProjectRouterExpireAttemptsProcessesReadyEntriesAndAggregatesErrors(t *
 
 func TestProjectRouterCloseReturnsCancellationErrorAndReleaseAfterCloseIsSafe(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FC4"
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		bundle := newTestBundle(projectID)
-		bundle.project = &projectruntime.Project{ProjectID: projectID}
-		return bundle, &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		bundle := newTestServices(projectID)
+		bundle.project = &runtime.Project{ProjectID: projectID}
+		return bundle, &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	lease, err := router.Acquire(context.Background(), &ref)
@@ -259,4 +259,26 @@ type fakeIDGenerator struct{}
 
 func (fakeIDGenerator) New() (string, error) {
 	return "01ARZ3NDEKTSV4RRFFQ69G5FC5", nil
+}
+
+func newTestServices(projectID string) *Services {
+	return &Services{
+		project: &runtime.Project{ProjectID: projectID},
+		bundle: application.Bundle{
+			IssueService:       &application.IssueService{},
+			ProjectService:     &application.ProjectService{},
+			RelationService:    &application.RelationService{},
+			GraphService:       &application.GraphService{},
+			PlanningService:    &application.PlanningService{},
+			CommentService:     &application.CommentService{},
+			DecisionService:    &application.DecisionService{},
+			ActivityService:    &application.ActivityService{},
+			SearchService:      &application.SearchService{},
+			ReviewService:      &application.ReviewService{},
+			AttemptService:     &application.AttemptService{},
+			ReservationService: &application.ReservationService{},
+			SessionService:     &application.AgentSessionService{},
+			WorkContextService: &application.WorkContextService{},
+		},
+	}
 }

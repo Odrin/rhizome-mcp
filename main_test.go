@@ -20,15 +20,16 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
+	"rhizome-mcp/internal/projectrouting"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
@@ -282,7 +283,7 @@ func TestBackupCommandCreatesValidatedBackup(t *testing.T) {
 func TestServeWithoutHTTPAddressUsesStdioTransport(t *testing.T) {
 	originalServeStdio := serveStdio
 	called := false
-	serveStdio = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error {
+	serveStdio = func(context.Context, *config.Config, io.Writer, projectrouting.ProjectRouter) error {
 		called = true
 		return nil
 	}
@@ -347,9 +348,9 @@ func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
 		{name: "shared fallback", args: []string{"serve"}, startingDir: sharedRoot, wantShared: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var captured mcpadapter.ProjectRouter
+			var captured projectrouting.ProjectRouter
 			originalServeRunner := serveRunner
-			serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+			serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router projectrouting.ProjectRouter) error {
 				captured = router
 				return nil
 			}
@@ -365,21 +366,21 @@ func TestServeProjectRootPrecedenceUsesFlagEnvCwdAndShared(t *testing.T) {
 			if captured == nil {
 				t.Fatal("expected serve runner to receive a router")
 			}
-			projectRouter, ok := captured.(*projectRouter)
+			router, ok := captured.(*compose.Router)
 			if !ok {
-				t.Fatalf("router type = %T, want *projectRouter", captured)
+				t.Fatalf("router type = %T, want *compose.Router", captured)
 			}
 			if tc.wantShared {
-				if projectRouter.defaultBundle != nil {
+				if router.DefaultProjectRef() != "" {
 					t.Fatal("expected shared router to use a nil default bundle")
 				}
 				return
 			}
-			if projectRouter.defaultBundle == nil {
+			if router.DefaultProjectRef() == "" {
 				t.Fatal("expected router to carry a default bundle")
 			}
-			if projectRouter.defaultBundle.ProjectRef() != tc.wantProject {
-				t.Fatalf("router default ref = %q, want %q", projectRouter.defaultBundle.ProjectRef(), tc.wantProject)
+			if router.DefaultProjectRef() != tc.wantProject {
+				t.Fatalf("router default ref = %q, want %q", router.DefaultProjectRef(), tc.wantProject)
 			}
 		})
 	}
@@ -401,7 +402,7 @@ func TestServeProjectRootExplicitInvalidRootFailsWithoutFallback(t *testing.T) {
 	t.Setenv("RHIZOME_PROJECT_ROOT", filepath.Join(tempDir, "env-root"))
 
 	originalServeRunner := serveRunner
-	serveRunner = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error { return nil }
+	serveRunner = func(context.Context, *config.Config, io.Writer, projectrouting.ProjectRouter) error { return nil }
 	defer func() { serveRunner = originalServeRunner }()
 
 	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"serve", "--project-root", filepath.Join(tempDir, "missing")}, projectRoot, pathInputs); err == nil {
@@ -410,7 +411,7 @@ func TestServeProjectRootExplicitInvalidRootFailsWithoutFallback(t *testing.T) {
 }
 
 func TestNewMCPServerWithSharedRouterHasNilDefault(t *testing.T) {
-	router := newProjectRouter(filepath.Join(t.TempDir(), "data"), clock.RealClock{}, sqlite.Options{}, nil)
+	router := compose.NewRouter(filepath.Join(t.TempDir(), "data"), clock.RealClock{}, sqlite.Options{}, nil)
 	server, err := newMCPServer(&config.Config{ServerName: "test", Version: "v1", ToolProfile: "full"}, router)
 	if err != nil {
 		t.Fatalf("newMCPServer(shared) error = %v", err)
@@ -441,11 +442,11 @@ func TestNewMCPServerWithDefaultRouterStillSupportsOmittedRef(t *testing.T) {
 		defer cancel()
 		_ = project.Close(closeCtx)
 	}()
-	bundle, err := newComposedServices(project, project.Clock())
+	bundle, err := compose.NewServices(project, project.Clock())
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
-	router := newProjectRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
+	router := compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 	server, err := newMCPServer(&config.Config{ServerName: "test", Version: "v1", ToolProfile: "full"}, router)
 	if err != nil {
 		t.Fatalf("newMCPServer(default) error = %v", err)
@@ -457,7 +458,7 @@ func TestNewMCPServerWithDefaultRouterStillSupportsOmittedRef(t *testing.T) {
 
 // TestRouterComposedServicesUseInjectedClockNotWallClock is ISSUE-196's
 // router-level regression test: it opens a project through the same
-// composeFn (composeServicesFromExistingProject -> newComposedServices) the
+// composeFn (composeServicesFromExistingProject -> compose.NewServices) the
 // router uses in production, with a fake clock fixed far from wall-clock
 // time, and asserts both a lease's expiry and a freshly-minted ULID's
 // embedded timestamp are computed from that fake clock -- not RealClock --
@@ -494,7 +495,7 @@ func TestRouterComposedServicesUseInjectedClockNotWallClock(t *testing.T) {
 		t.Fatalf("close project: %v", err)
 	}
 
-	router := newProjectRouter(dataRoot, fakeClock, sqlite.Options{}, nil)
+	router := compose.NewRouter(dataRoot, fakeClock, sqlite.Options{}, nil)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -510,13 +511,13 @@ func TestRouterComposedServicesUseInjectedClockNotWallClock(t *testing.T) {
 		}
 	}()
 
-	issue, err := lease.IssueService().CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "clock threading", Status: domain.StatusReady})
+	issue, err := lease.Services().IssueService.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "clock threading", Status: domain.StatusReady})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
 
 	leaseSeconds := 900
-	claim, err := lease.AttemptService().ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID, LeaseSeconds: &leaseSeconds})
+	claim, err := lease.Services().AttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issue.ID, LeaseSeconds: &leaseSeconds})
 	if err != nil {
 		t.Fatalf("ClaimIssue() error = %v", err)
 	}
@@ -554,9 +555,9 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	}
 
 	called := false
-	var capturedRouter mcpadapter.ProjectRouter
+	var capturedRouter projectrouting.ProjectRouter
 	originalServeRunner := serveRunner
-	serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router mcpadapter.ProjectRouter) error {
+	serveRunner = func(ctx context.Context, cfg *config.Config, stderr io.Writer, router projectrouting.ProjectRouter) error {
 		called = true
 		capturedRouter = router
 		return nil
@@ -569,8 +570,8 @@ func TestServeCommandUsesExplicitHandler(t *testing.T) {
 	if !called {
 		t.Fatal("expected serve handler to be invoked")
 	}
-	if _, err := capturedRouter.Acquire(ctx, nil); !errors.Is(err, errProjectRouterClosed) {
-		t.Fatalf("router Acquire() after serve = %v, want %v", err, errProjectRouterClosed)
+	if _, err := capturedRouter.Acquire(ctx, nil); !errors.Is(err, compose.ErrRouterClosed) {
+		t.Fatalf("router Acquire() after serve = %v, want %v", err, compose.ErrRouterClosed)
 	}
 }
 
@@ -1163,7 +1164,7 @@ func TestServeWarnsWhenTransportOrProfileSelectedFromEnvironment(t *testing.T) {
 	}
 
 	originalServeRunner := serveRunner
-	serveRunner = func(context.Context, *config.Config, io.Writer, mcpadapter.ProjectRouter) error { return nil }
+	serveRunner = func(context.Context, *config.Config, io.Writer, projectrouting.ProjectRouter) error { return nil }
 	defer func() { serveRunner = originalServeRunner }()
 
 	stderr.Reset()

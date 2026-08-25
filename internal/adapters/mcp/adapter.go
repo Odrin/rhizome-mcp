@@ -11,11 +11,12 @@ import (
 
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/projectrouting"
 )
 
 // Options supplies the explicit composition dependencies for the MCP adapter.
 type Options struct {
-	ProjectRouter   ProjectRouter
+	ProjectRouter   projectrouting.ProjectRouter
 	ServerName      string
 	ServerVersion   string
 	ConfigVersion   int
@@ -26,21 +27,8 @@ type Options struct {
 }
 
 type adapter struct {
-	router        ProjectRouter
-	issues        *application.IssueService
-	projects      *application.ProjectService
-	relations     *application.RelationService
-	graphs        *application.GraphService
-	plans         *application.PlanningService
-	comments      *application.CommentService
-	decisions     *application.DecisionService
-	activities    *application.ActivityService
-	searches      *application.SearchService
-	reviews       *application.ReviewService
-	attempts      *application.AttemptService
-	reservations  *application.ReservationService
-	sessions      *application.AgentSessionService
-	workContexts  *application.WorkContextService
+	router        projectrouting.ProjectRouter
+	services      application.Bundle
 	appVersion    string
 	configVersion int
 	toolProfile   domain.ToolProfile
@@ -72,7 +60,7 @@ func NewServer(options Options) (*Server, error) {
 	if err != nil {
 		return nil, domain.WrapError(err, domain.CodeStorageConfiguration, "managed export artifacts could not be initialized", false)
 	}
-	services := ProjectServices{}
+	var services application.Bundle
 	if lease, err := options.ProjectRouter.Acquire(context.Background(), nil); err != nil {
 		var domainErr *domain.Error
 		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectRequired {
@@ -81,45 +69,17 @@ func NewServer(options Options) (*Server, error) {
 	} else if lease == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "project router returned a nil lease", false)
 	} else {
-		services = ProjectServices{
-			IssueService:       lease.IssueService(),
-			ProjectService:     lease.ProjectService(),
-			RelationService:    lease.RelationService(),
-			GraphService:       lease.GraphService(),
-			PlanningService:    lease.PlanningService(),
-			CommentService:     lease.CommentService(),
-			DecisionService:    lease.DecisionService(),
-			ActivityService:    lease.ActivityService(),
-			SearchService:      lease.SearchService(),
-			ReviewService:      lease.ReviewService(),
-			AttemptService:     lease.AttemptService(),
-			ReservationService: lease.ReservationService(),
-			SessionService:     lease.SessionService(),
-			WorkContextService: lease.WorkContextService(),
-		}
+		services = lease.Services()
 		if err := lease.Release(); err != nil {
 			return nil, err
 		}
-		if err := validateProjectServices(services); err != nil {
+		if err := services.Validate(); err != nil {
 			return nil, err
 		}
 	}
 	adapter := &adapter{
 		router:        options.ProjectRouter,
-		issues:        services.IssueService,
-		projects:      services.ProjectService,
-		relations:     services.RelationService,
-		graphs:        services.GraphService,
-		plans:         services.PlanningService,
-		comments:      services.CommentService,
-		decisions:     services.DecisionService,
-		activities:    services.ActivityService,
-		searches:      services.SearchService,
-		reviews:       services.ReviewService,
-		attempts:      services.AttemptService,
-		reservations:  services.ReservationService,
-		sessions:      services.SessionService,
-		workContexts:  services.WorkContextService,
+		services:      services,
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 		toolProfile:   toolProfile,
@@ -333,7 +293,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 }
 
 func (adapter *adapter) createAgentSession(ctx context.Context, request *sdkmcp.CallToolRequest, input createAgentSessionInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.sessions.CreateWithHandle(ctx, domain.CreateAgentSessionInput{
+	result, err := adapter.services.SessionService.CreateWithHandle(ctx, domain.CreateAgentSessionInput{
 		ClientName: input.ClientName, ClientVersion: input.ClientVersion, AgentLabel: input.AgentLabel,
 		Model: input.Model, InstanceKey: input.InstanceKey,
 	})
@@ -344,7 +304,7 @@ func (adapter *adapter) createAgentSession(ctx context.Context, request *sdkmcp.
 }
 
 func (adapter *adapter) endAgentSession(ctx context.Context, request *sdkmcp.CallToolRequest, input endAgentSessionInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.sessions.EndWithHandle(ctx, input.AgentSessionHandle)
+	result, err := adapter.services.SessionService.EndWithHandle(ctx, input.AgentSessionHandle)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -356,7 +316,7 @@ func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequ
 	for index, value := range input.EntityTypes {
 		entityTypes[index] = domain.SearchEntityType(value)
 	}
-	result, err := adapter.searches.Search(ctx, domain.SearchInput{
+	result, err := adapter.services.SearchService.Search(ctx, domain.SearchInput{
 		Query: input.Query, EntityTypes: entityTypes, IssueID: input.IssueID, EpicID: input.EpicID,
 		Statuses: stringsToStatuses(input.Statuses), Labels: input.Labels, IncludeArchived: input.IncludeArchived,
 		Limit: input.Limit, Cursor: stringValue(input.Cursor), SnippetLength: input.SnippetLength,
@@ -368,7 +328,7 @@ func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequ
 }
 
 func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallToolRequest, input getChangesInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.searches.GetChanges(ctx, domain.GetChangesInput{
+	result, err := adapter.services.SearchService.GetChanges(ctx, domain.GetChangesInput{
 		SinceEventID: input.SinceEventID, IssueID: input.IssueID, EventTypes: input.EventTypes, Limit: input.Limit,
 	})
 	if err != nil {
@@ -412,7 +372,7 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 			limits[domain.WorkContextIncludeReservationConflicts] = *input.Limits.ReservationConflicts
 		}
 	}
-	result, err := adapter.workContexts.GetWorkContext(ctx, domain.GetWorkContextInput{
+	result, err := adapter.services.WorkContextService.GetWorkContext(ctx, domain.GetWorkContextInput{
 		IssueID: input.IssueID, Include: include, Limits: limits, DesiredResources: resourcesFromInput(input.DesiredResources),
 	})
 	if err != nil {
@@ -428,7 +388,7 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 		return adapter.failure(unsupportedField("view"))
 	}
 	sessionID := adapter.sessionIDForRequest(ctx, request)
-	result, err := adapter.attempts.ClaimIssue(ctx, domain.ClaimIssueInput{
+	result, err := adapter.services.AttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
 		IssueID: input.IssueID, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID,
 		Resources: resourcesFromInput(input.Resources), IdempotencyKey: input.IdempotencyKey,
 	})
@@ -464,7 +424,7 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 
 func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
 	sessionID := adapter.sessionIDForRequest(ctx, request)
-	result, err := adapter.attempts.RenewAttempt(ctx, domain.RenewAttemptInput{
+	result, err := adapter.services.AttemptService.RenewAttempt(ctx, domain.RenewAttemptInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, LeaseSeconds: input.LeaseSeconds, SessionID: sessionID,
 	})
 	if err != nil {
@@ -485,7 +445,7 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 			Title: copyString(artifact.Title), Metadata: append([]byte(nil), artifact.Metadata...),
 		}
 	}
-	result, err := adapter.attempts.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
+	result, err := adapter.services.AttemptService.SaveAttemptNote(ctx, domain.SaveAttemptNoteInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Kind: domain.AttemptNoteKind(input.Kind),
 		SessionID: sessionID, Content: input.Content, NextSteps: input.NextSteps, Important: input.Important, Artifacts: artifacts,
 		IdempotencyKey: input.IdempotencyKey,
@@ -519,7 +479,7 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 	if input.AcknowledgedChanges != nil {
 		acknowledgement = &domain.AttemptAcknowledgement{IssueVersion: input.AcknowledgedChanges.IssueVersion, LatestEventID: input.AcknowledgedChanges.LatestEventID}
 	}
-	result, err := adapter.attempts.FinishAttempt(ctx, domain.FinishAttemptInput{
+	result, err := adapter.services.AttemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, Outcome: domain.AttemptOutcome(input.Outcome),
 		SessionID: sessionID, ResultSummary: input.ResultSummary, NextSteps: input.NextSteps, Verification: input.Verification,
 		TargetIssueStatus: statusPointer(input.TargetIssueStatus), BlockedReason: input.BlockedReason,
@@ -548,7 +508,7 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 
 func (adapter *adapter) reserveResources(ctx context.Context, request *sdkmcp.CallToolRequest, input reserveResourcesInput) (*sdkmcp.CallToolResult, any, error) {
 	sessionID := adapter.sessionIDForRequest(ctx, request)
-	result, err := adapter.attempts.ReserveResources(ctx, domain.ReserveResourcesInput{
+	result, err := adapter.services.AttemptService.ReserveResources(ctx, domain.ReserveResourcesInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
 		Resources: resourcesFromInput(input.Resources), IdempotencyKey: input.IdempotencyKey,
 	})
@@ -563,7 +523,7 @@ func (adapter *adapter) reserveResources(ctx context.Context, request *sdkmcp.Ca
 
 func (adapter *adapter) releaseResources(ctx context.Context, request *sdkmcp.CallToolRequest, input releaseResourcesInput) (*sdkmcp.CallToolResult, any, error) {
 	sessionID := adapter.sessionIDForRequest(ctx, request)
-	result, err := adapter.attempts.ReleaseResources(ctx, domain.ReleaseResourcesInput{
+	result, err := adapter.services.AttemptService.ReleaseResources(ctx, domain.ReleaseResourcesInput{
 		AttemptID: input.AttemptID, LeaseToken: input.LeaseToken, SessionID: sessionID,
 		ReservationIDs: input.ReservationIDs, IdempotencyKey: input.IdempotencyKey,
 	})
@@ -586,7 +546,7 @@ func (adapter *adapter) listResourceReservations(ctx context.Context, request *s
 	if input.Cursor != nil {
 		cursor = *input.Cursor
 	}
-	result, err := adapter.reservations.ListReservations(ctx, domain.ListResourceReservationsInput{
+	result, err := adapter.services.ReservationService.ListReservations(ctx, domain.ListResourceReservationsInput{
 		IssueID: input.IssueID, AttemptID: input.AttemptID, Kind: kind, Active: input.Active,
 		Limit: input.Limit, Cursor: cursor,
 	})
@@ -603,7 +563,7 @@ func (adapter *adapter) getResourceReservation(ctx context.Context, request *sdk
 	if input.View != "" && input.View != "compact" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
-	reservation, err := adapter.reservations.GetReservation(ctx, input.ReservationID)
+	reservation, err := adapter.services.ReservationService.GetReservation(ctx, input.ReservationID)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -657,7 +617,7 @@ func interruptionPointer(value *string) *domain.InterruptionReasonCode {
 
 func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input issuePlanInput) (*sdkmcp.CallToolResult, any, error) {
 	plan := input.domainPlan()
-	validation, err := adapter.plans.ValidateIssuePlan(ctx, plan)
+	validation, err := adapter.services.PlanningService.ValidateIssuePlan(ctx, plan)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -674,7 +634,7 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.C
 }
 
 func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.plans.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
+	result, err := adapter.services.PlanningService.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -684,7 +644,7 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
-	comment, err := adapter.comments.AddComment(ctx, domain.AddCommentInput{
+	comment, err := adapter.services.CommentService.AddComment(ctx, domain.AddCommentInput{
 		IssueID: input.IssueID, Content: input.Content, SessionID: adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey: input.IdempotencyKey,
 	})
@@ -695,7 +655,7 @@ func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.CallToolRequest, input recordDecisionInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.decisions.RecordDecision(ctx, domain.RecordDecisionInput{
+	result, err := adapter.services.DecisionService.RecordDecision(ctx, domain.RecordDecisionInput{
 		IssueID: input.IssueID, Title: input.Title, Summary: input.Summary, Content: input.Content,
 		Status: domain.DecisionStatus(input.Status), SupersedesID: input.SupersedesID,
 		SessionID: adapter.sessionIDForRequest(ctx, request),
@@ -710,7 +670,7 @@ func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.Call
 }
 
 func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallToolRequest, input listDecisionsInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.decisions.ListDecisions(ctx, domain.ListDecisionsInput{
+	result, err := adapter.services.DecisionService.ListDecisions(ctx, domain.ListDecisionsInput{
 		IssueID: input.IssueID, Limit: input.Limit, Cursor: stringValue(input.Cursor),
 	})
 	if err != nil {
@@ -720,7 +680,7 @@ func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallT
 }
 
 func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueActivityInput) (*sdkmcp.CallToolResult, any, error) {
-	activity, err := adapter.activities.GetIssueActivity(ctx, getIssueActivityInputToDomain(input))
+	activity, err := adapter.services.ActivityService.GetIssueActivity(ctx, getIssueActivityInputToDomain(input))
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -732,7 +692,7 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallT
 	for index, relationType := range input.RelationTypes {
 		relationTypes[index] = domain.RelationType(relationType)
 	}
-	graph, err := adapter.graphs.GetIssueGraph(ctx, domain.GetIssueGraphInput{
+	graph, err := adapter.services.GraphService.GetIssueGraph(ctx, domain.GetIssueGraphInput{
 		RootIssueID: input.RootIssueID, Depth: input.Depth, Direction: domain.GraphDirection(input.Direction),
 		RelationTypes: relationTypes, IncludeHierarchy: input.IncludeHierarchy, IncludeTerminal: input.IncludeTerminal,
 		MaxNodes: input.MaxNodes, View: input.View,
@@ -746,7 +706,7 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallT
 }
 
 func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
-	graph, err := adapter.graphs.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
+	graph, err := adapter.services.GraphService.GetPlanningGraph(ctx, domain.GetPlanningGraphInput{
 		RootIssueID: input.RootIssueID, Depth: input.Depth, MaxNodes: input.MaxNodes,
 		IncludeReview: input.IncludeReview, IncludeRelated: input.IncludeRelated,
 	})
@@ -762,7 +722,7 @@ func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallT
 	if input.Delivery != "" && input.Delivery != "artifact" && input.Delivery != "inline" {
 		return adapter.failure(domain.NewError(domain.CodeInvalidArgument, "delivery must be artifact or inline", false, domain.Detail{Field: "delivery", Code: "INVALID_ENUM"}))
 	}
-	data, err := adapter.projects.ExportLogicalProject(ctx)
+	data, err := adapter.services.ProjectService.ExportLogicalProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -793,7 +753,7 @@ func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	dryRun, err := adapter.projects.ValidateLogicalProjectImport(ctx, document)
+	dryRun, err := adapter.services.ProjectService.ValidateLogicalProjectImport(ctx, document)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -805,7 +765,7 @@ func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	result, err := adapter.projects.ApplyLogicalProjectImport(ctx, document)
+	result, err := adapter.services.ProjectService.ApplyLogicalProjectImport(ctx, document)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -825,7 +785,7 @@ func (adapter *adapter) importDocument(document *string, sourceURI *string) ([]b
 }
 
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
-	project, err := adapter.projects.GetProject(ctx)
+	project, err := adapter.services.ProjectService.GetProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -860,7 +820,7 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 	defer func() {
 		_ = lease.Release()
 	}()
-	project, err := lease.ProjectService().GetProject(ctx)
+	project, err := lease.Services().ProjectService.GetProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -885,7 +845,7 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 }
 
 func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.relations.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
+	result, err := adapter.services.RelationService.ManageIssueRelation(ctx, domain.ManageIssueRelationInput{
 		Action:         domain.RelationAction(input.Action),
 		SourceIssueID:  input.SourceIssueID,
 		TargetIssueID:  input.TargetIssueID,
@@ -915,7 +875,7 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp
 }
 
 func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallToolRequest, input listLabelsInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.issues.ListLabels(ctx, domain.ListLabelsInput{
+	result, err := adapter.services.IssueService.ListLabels(ctx, domain.ListLabelsInput{
 		Query:  stringValue(input.Query),
 		Limit:  input.Limit,
 		Cursor: stringValue(input.Cursor),
@@ -934,7 +894,7 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 	if input.View != "" && input.View != "compact" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
-	result, err := adapter.issues.CreateIssue(ctx, domain.CreateIssueInput{
+	result, err := adapter.services.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
 		Type:                domain.Type(input.Type),
 		Title:               input.Title,
 		Description:         input.Description,
@@ -964,7 +924,7 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 	if input.View != "" && input.View != "compact" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
-	result, err := adapter.issues.UpdateIssue(ctx, domain.UpdateIssueInput{
+	result, err := adapter.services.IssueService.UpdateIssue(ctx, domain.UpdateIssueInput{
 		IssueID:             input.IssueID,
 		ExpectedVersion:     input.ExpectedVersion,
 		Changes:             input.Changes.domainPatch(),
@@ -994,7 +954,7 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 	if len(input.Limits) != 0 {
 		return adapter.failure(unsupportedField("limits"))
 	}
-	issue, err := adapter.issues.GetIssue(ctx, input.IssueID)
+	issue, err := adapter.services.IssueService.GetIssue(ctx, input.IssueID)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -1022,7 +982,7 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 	if view != "compact" && view != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
-	result, err := adapter.issues.ListIssues(ctx, domain.ListIssuesInput{
+	result, err := adapter.services.IssueService.ListIssues(ctx, domain.ListIssuesInput{
 		Types:             stringsToTypes(input.Types),
 		Statuses:          stringsToStatuses(input.Statuses),
 		EffectiveStatuses: stringsToEffectiveStatuses(input.EffectiveStatuses),
@@ -1071,7 +1031,7 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	if input.View != "" && input.View != "compact" && input.View != "full" {
 		return adapter.failure(unsupportedField("view"))
 	}
-	result, err := adapter.issues.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+	result, err := adapter.services.IssueService.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
 		IdempotencyKey:  input.IdempotencyKey,
@@ -1090,7 +1050,7 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 }
 
 func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.GetReviewRequest(ctx, input.ReviewRequestID)
+	result, err := adapter.services.ReviewService.GetReviewRequest(ctx, input.ReviewRequestID)
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -1098,7 +1058,7 @@ func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.Ca
 }
 
 func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.CallToolRequest, input listReviewRequestsInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.ListReviewRequests(ctx, application.ListReviewRequestsInput{
+	result, err := adapter.services.ReviewService.ListReviewRequests(ctx, application.ListReviewRequestsInput{
 		Status:    input.Status,
 		Claimable: input.Claimable,
 		Limit:     input.Limit,
@@ -1119,7 +1079,7 @@ func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.
 }
 
 func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	result, err := adapter.services.ReviewService.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -1127,7 +1087,7 @@ func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp
 }
 
 func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input replaceReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.reviews.ReplaceReviewRequest(ctx, application.ReplaceReviewRequestInput{
+	result, err := adapter.services.ReviewService.ReplaceReviewRequest(ctx, application.ReplaceReviewRequestInput{
 		PredecessorRequestID:       input.PredecessorRequestID,
 		PredecessorExpectedVersion: input.PredecessorExpectedVersion,
 		TargetIssueVersion:         input.TargetIssueVersion,
@@ -1170,52 +1130,6 @@ func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) 
 		StructuredContent: output,
 		IsError:           true,
 	}, nil, nil
-}
-
-func validateProjectServices(services ProjectServices) error {
-	if services.IssueService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "issue service is required", false)
-	}
-	if services.ProjectService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "project service is required", false)
-	}
-	if services.RelationService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "relation service is required", false)
-	}
-	if services.GraphService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "graph service is required", false)
-	}
-	if services.PlanningService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "planning service is required", false)
-	}
-	if services.CommentService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "comment service is required", false)
-	}
-	if services.DecisionService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "decision service is required", false)
-	}
-	if services.ActivityService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "activity service is required", false)
-	}
-	if services.SearchService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "search service is required", false)
-	}
-	if services.ReviewService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "review service is required", false)
-	}
-	if services.AttemptService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "attempt service is required", false)
-	}
-	if services.ReservationService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "reservation service is required", false)
-	}
-	if services.SessionService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "session service is required", false)
-	}
-	if services.WorkContextService == nil {
-		return domain.NewError(domain.CodeInvalidArgument, "work context service is required", false)
-	}
-	return nil
 }
 
 func unsupportedField(field string) *domain.Error {

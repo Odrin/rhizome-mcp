@@ -2,7 +2,7 @@
 
 // This file holds the one integration test that cannot move into the
 // dedicated integration/ package: TestIntegrationHTTPTransportIsolatesSessions
-// calls composeServices and newHTTPHandler directly (unexported package-main
+// calls compose.Open and newHTTPHandler directly (unexported package-main
 // internals) to build an in-process httptest server, and Go does not allow
 // splitting one package across directories. Every other integration test
 // lives in integration/ and only shells out to the compiled binary or talks
@@ -31,6 +31,7 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/projectconfig"
 )
@@ -110,11 +111,11 @@ func TestIntegrationHTTPMCPConformanceMatrix(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	ctx := context.Background()
 	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}
-	bundle, _, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
+	bundle, _, err := compose.Open(ctx, env.repository, pathInputs, env.dataRoot)
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
-	router := newProjectRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
+	router := compose.NewRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 		defer cancel()
@@ -269,11 +270,11 @@ func TestIntegrationHTTPTransportIsolatesSessions(t *testing.T) {
 	env := newIntegrationEnvironment(t)
 	ctx := context.Background()
 	pathInputs := projectconfig.PathInputs{GOOS: runtime.GOOS, HomeDir: t.TempDir(), XDGDataHome: t.TempDir()}
-	bundle, _, err := composeServices(ctx, env.repository, pathInputs, env.dataRoot)
+	bundle, _, err := compose.Open(ctx, env.repository, pathInputs, env.dataRoot)
 	if err != nil {
 		t.Fatalf("compose services: %v", err)
 	}
-	router := newProjectRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
+	router := compose.NewRouter(env.dataRoot, clock.RealClock{}, sqlite.Options{}, bundle)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 		defer cancel()

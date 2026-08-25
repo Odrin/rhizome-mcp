@@ -1,4 +1,4 @@
-package main
+package compose
 
 import (
 	"context"
@@ -7,16 +7,16 @@ import (
 	"testing"
 	"time"
 
-	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
-	projectruntime "rhizome-mcp/internal/runtime"
+	"rhizome-mcp/internal/projectrouting"
+	"rhizome-mcp/internal/runtime"
 )
 
 func TestProjectRouterUsesDefaultBundleAndSharedModeSelection(t *testing.T) {
-	defaultBundle := newTestBundle("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, defaultBundle)
+	defaultBundle := newTestServices("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, defaultBundle)
 	lease, err := router.Acquire(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Acquire(nil) error = %v", err)
@@ -28,7 +28,7 @@ func TestProjectRouterUsesDefaultBundleAndSharedModeSelection(t *testing.T) {
 		t.Fatalf("Release() error = %v", err)
 	}
 
-	shared := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	shared := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
 	_, err = shared.Acquire(context.Background(), nil)
 	var domainErr *domain.Error
 	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeProjectRequired {
@@ -38,8 +38,8 @@ func TestProjectRouterUsesDefaultBundleAndSharedModeSelection(t *testing.T) {
 
 func TestProjectRouterRejectsMalformedRefsBeforeLookup(t *testing.T) {
 	calls := 0
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error) {
 		calls++
 		return nil, nil, errors.New("unexpected load")
 	}
@@ -68,18 +68,18 @@ func TestProjectRouterCoalescesConcurrentOpens(t *testing.T) {
 	calls := 0
 	var mu sync.Mutex
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
 		started <- struct{}{}
 		<-release
-		return newTestBundle(ref), &projectruntime.Project{ProjectID: ref}, nil
+		return newTestServices(ref), &runtime.Project{ProjectID: ref}, nil
 	}
 
 	ctx := context.Background()
-	leases := make(chan mcpadapter.ProjectLease, 4)
+	leases := make(chan projectrouting.ProjectLease, 4)
 	errCh := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		go func() {
@@ -116,13 +116,13 @@ func TestProjectRouterCoalescesConcurrentOpens(t *testing.T) {
 }
 
 func TestProjectRouterEvictsLeastRecentlyUsedReadyEntries(t *testing.T) {
-	oldMax := projectRouterMaxEntries
-	projectRouterMaxEntries = 2
-	defer func() { projectRouterMaxEntries = oldMax }()
+	oldMax := RouterMaxEntries
+	RouterMaxEntries = 2
+	defer func() { RouterMaxEntries = oldMax }()
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	first := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -173,15 +173,15 @@ func TestProjectRouterEvictsLeastRecentlyUsedReadyEntries(t *testing.T) {
 // stamps lastUsed, so every sweep flattened client-driven recency and made
 // the true LRU victim unevictable. ExpireAttempts must leave lastUsed alone.
 func TestProjectRouterExpireAttemptsDoesNotRefreshLRURecency(t *testing.T) {
-	oldMax := projectRouterMaxEntries
-	projectRouterMaxEntries = 2
-	defer func() { projectRouterMaxEntries = oldMax }()
+	oldMax := RouterMaxEntries
+	RouterMaxEntries = 2
+	defer func() { RouterMaxEntries = oldMax }()
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		bundle := newTestBundle(projectID)
-		bundle.attemptService = mustNewAttemptService(t, &countingAttemptRepository{})
-		return bundle, &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		bundle := newTestServices(projectID)
+		bundle.bundle.AttemptService = mustNewAttemptService(t, &countingAttemptRepository{})
+		return bundle, &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	first := "01ARZ3NDEKTSV4RRFFQ69G5FD1"
@@ -237,8 +237,8 @@ func TestProjectRouterExpireAttemptsDoesNotRefreshLRURecency(t *testing.T) {
 // which would resurrect a project nobody asked for. composeFn failing the
 // test if invoked is the proof: pinReadyEntry must never reach it.
 func TestProjectRouterPinReadyEntryNeverReopensAMissingEntry(t *testing.T) {
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(context.Context, string, string, clock.Clock, sqlite.Options) (*Services, *runtime.Project, error) {
 		t.Fatal("composeFn should not be called: pinReadyEntry must never reopen a project")
 		return nil, nil, nil
 	}
@@ -248,26 +248,26 @@ func TestProjectRouterPinReadyEntryNeverReopensAMissingEntry(t *testing.T) {
 	}
 
 	removedRef := "01ARZ3NDEKTSV4RRFFQ69G5FD5"
-	router.entries[removedRef] = &projectRouterEntry{ref: removedRef, state: "ready", removed: true}
+	router.entries[removedRef] = &routerEntry{ref: removedRef, state: "ready", removed: true}
 	if lease := router.pinReadyEntry(removedRef); lease != nil {
 		t.Fatalf("pinReadyEntry() for a removed (evicted) entry = %v, want nil", lease)
 	}
 
 	openingRef := "01ARZ3NDEKTSV4RRFFQ69G5FD6"
-	router.entries[openingRef] = &projectRouterEntry{ref: openingRef, state: "opening", done: make(chan struct{})}
+	router.entries[openingRef] = &routerEntry{ref: openingRef, state: "opening", done: make(chan struct{})}
 	if lease := router.pinReadyEntry(openingRef); lease != nil {
 		t.Fatalf("pinReadyEntry() for a not-yet-ready entry = %v, want nil", lease)
 	}
 }
 
 func TestProjectRouterDoesNotEvictActiveEntry(t *testing.T) {
-	oldMax := projectRouterMaxEntries
-	projectRouterMaxEntries = 1
-	defer func() { projectRouterMaxEntries = oldMax }()
+	oldMax := RouterMaxEntries
+	RouterMaxEntries = 1
+	defer func() { RouterMaxEntries = oldMax }()
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	first := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -295,13 +295,13 @@ func TestProjectRouterDoesNotEvictActiveEntry(t *testing.T) {
 
 func TestProjectRouterRetriesAfterFailedOpen(t *testing.T) {
 	calls := 0
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		calls++
 		if calls == 1 {
 			return nil, nil, errors.New("open failed")
 		}
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FAY"
@@ -321,8 +321,8 @@ func TestProjectRouterRetriesAfterFailedOpen(t *testing.T) {
 }
 
 func TestProjectRouterReleaseIsIdempotentAndCloseDrains(t *testing.T) {
-	defaultBundle := newTestBundle("01ARZ3NDEKTSV4RRFFQ69G5FAZ")
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, defaultBundle)
+	defaultBundle := newTestServices("01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, defaultBundle)
 	lease, err := router.Acquire(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Acquire(nil) error = %v", err)
@@ -337,12 +337,12 @@ func TestProjectRouterReleaseIsIdempotentAndCloseDrains(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 	openStarted := make(chan struct{})
 	allowOpen := make(chan struct{})
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		close(openStarted)
 		<-allowOpen
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
-	started := make(chan mcpadapter.ProjectLease, 1)
+	started := make(chan projectrouting.ProjectLease, 1)
 	acquireErr := make(chan error, 1)
 	go func() {
 		lease, err := router.Acquire(context.Background(), &ref)
@@ -363,7 +363,7 @@ func TestProjectRouterReleaseIsIdempotentAndCloseDrains(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(allowOpen)
-	var openedLease mcpadapter.ProjectLease
+	var openedLease projectrouting.ProjectLease
 	select {
 	case err := <-acquireErr:
 		t.Fatalf("Acquire() error after open = %v", err)
@@ -383,11 +383,11 @@ func TestProjectRouterCancelingInitiatingWaiterReleasesReservation(t *testing.T)
 	allowOpen := make(chan struct{})
 	acquireErr := make(chan error, 1)
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		close(openStarted)
 		<-allowOpen
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -438,15 +438,15 @@ func TestProjectRouterCancelingCoalescedWaiterLeavesHealthyWaiterWorking(t *test
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB2"
 	openStarted := make(chan struct{})
 	allowOpen := make(chan struct{})
-	healthyLeaseCh := make(chan mcpadapter.ProjectLease, 1)
+	healthyLeaseCh := make(chan projectrouting.ProjectLease, 1)
 	healthyErrCh := make(chan error, 1)
 	coalescedErrCh := make(chan error, 1)
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		close(openStarted)
 		<-allowOpen
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	healthyCtx := context.Background()
@@ -524,15 +524,15 @@ func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB1"
 	openStarted := make(chan struct{})
 	allowOpen := make(chan struct{})
-	leaseDelivered := make(chan mcpadapter.ProjectLease, 1)
+	leaseDelivered := make(chan projectrouting.ProjectLease, 1)
 	acquireErr := make(chan error, 1)
 	closeDone := make(chan error, 1)
 
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
 		close(openStarted)
 		<-allowOpen
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	go func() {
@@ -557,7 +557,7 @@ func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
 
 	close(allowOpen)
 
-	var lease mcpadapter.ProjectLease
+	var lease projectrouting.ProjectLease
 	select {
 	case err := <-acquireErr:
 		t.Fatalf("Acquire() error after open = %v", err)
@@ -607,9 +607,9 @@ func TestProjectRouterCloseWaitsForInitiatingLeaseRelease(t *testing.T) {
 
 func TestProjectRouterCloseTimeoutDoesNotConsumeCleanupCapability(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB3"
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	lease, err := router.Acquire(context.Background(), &ref)
@@ -665,16 +665,16 @@ func TestProjectRouterCloseTimeoutDoesNotConsumeCleanupCapability(t *testing.T) 
 	if !closeComplete {
 		t.Fatal("expected cleanup to complete on retry Close")
 	}
-	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, errProjectRouterClosed) {
-		t.Fatalf("Acquire() after timed-out Close error = %v, want %v", err, errProjectRouterClosed)
+	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, ErrRouterClosed) {
+		t.Fatalf("Acquire() after timed-out Close error = %v, want %v", err, ErrRouterClosed)
 	}
 }
 
 func TestProjectRouterCloseWithCanceledContextClosesAdmissionImmediately(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB5"
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	lease, err := router.Acquire(context.Background(), &ref)
@@ -702,8 +702,8 @@ func TestProjectRouterCloseWithCanceledContextClosesAdmissionImmediately(t *test
 	if !closeStarted {
 		t.Fatal("expected closeStarted to be signaled for canceled Close")
 	}
-	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, errProjectRouterClosed) {
-		t.Fatalf("Acquire() after canceled Close error = %v, want %v", err, errProjectRouterClosed)
+	if _, err := router.Acquire(context.Background(), &ref); !errors.Is(err, ErrRouterClosed) {
+		t.Fatalf("Acquire() after canceled Close error = %v, want %v", err, ErrRouterClosed)
 	}
 	if err := router.Close(context.Background()); err != nil {
 		t.Fatalf("retry Close() error = %v", err)
@@ -712,9 +712,9 @@ func TestProjectRouterCloseWithCanceledContextClosesAdmissionImmediately(t *test
 
 func TestProjectRouterConcurrentCloseCallsShareCleanup(t *testing.T) {
 	ref := "01ARZ3NDEKTSV4RRFFQ69G5FB4"
-	router := newProjectRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
-	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*composedServices, *projectruntime.Project, error) {
-		return newTestBundle(projectID), &projectruntime.Project{ProjectID: projectID}, nil
+	router := NewRouter("/tmp/data", clock.RealClock{}, sqlite.Options{}, nil)
+	router.composeFn = func(_ context.Context, projectID string, _ string, _ clock.Clock, _ sqlite.Options) (*Services, *runtime.Project, error) {
+		return newTestServices(projectID), &runtime.Project{ProjectID: projectID}, nil
 	}
 
 	lease, err := router.Acquire(context.Background(), &ref)
@@ -767,8 +767,4 @@ func TestProjectRouterConcurrentCloseCallsShareCleanup(t *testing.T) {
 	if ok {
 		t.Fatal("expected router entry to be removed after concurrent Close")
 	}
-}
-
-func newTestBundle(projectID string) *composedServices {
-	return &composedServices{project: &projectruntime.Project{ProjectID: projectID}}
 }

@@ -119,9 +119,9 @@ func touchSessionForMutatingTool[In, Out any](adapter *adapter, toolDef *sdkmcp.
 			var sessionID string
 			var err error
 			if toolDef != nil && toolDef.Annotations != nil && toolDef.Annotations.ReadOnlyHint {
-				sessionID, err = adapter.sessions.ResolveHandle(ctx, handle)
+				sessionID, err = adapter.services.SessionService.ResolveHandle(ctx, handle)
 			} else {
-				sessionID, err = adapter.sessions.ResolveAndTouch(ctx, handle)
+				sessionID, err = adapter.services.SessionService.ResolveAndTouch(ctx, handle)
 			}
 			if err != nil {
 				result, _, ferr := adapter.failure(err)
