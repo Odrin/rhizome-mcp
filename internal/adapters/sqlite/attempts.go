@@ -191,8 +191,20 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 		return nil
 	}
 	timestamp := formatStorageTime(now)
-	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = NULL, version = version + 1
-		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusOpen, request.ID, attemptID)
+	// docs/09: releasing a claimed request returns it to open *unless it has
+	// become stale*. A stale one is resolved as superseded instead, so the
+	// next reviewer is never handed a request that can only fail at finish
+	// (ISSUE-188).
+	stale, err := reviewTargetStale(ctx, tx, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
+	if err != nil {
+		return err
+	}
+	status, eventType, resolvedAt := domain.ReviewRequestStatusOpen, "review_requested", any(nil)
+	if stale {
+		status, eventType, resolvedAt = domain.ReviewRequestStatusSuperseded, "review_superseded", any(timestamp)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
+		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, status, resolvedAt, request.ID, attemptID)
 	if err != nil {
 		return err
 	}
@@ -203,7 +215,7 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 	if affected != 1 {
 		return nil
 	}
-	return appendReviewEvent(ctx, tx, request.IssueID, "review_requested", &attemptID,
+	return appendReviewEvent(ctx, tx, request.IssueID, eventType, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), timestamp)
 }
 
@@ -1576,15 +1588,27 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 // nil) when no open request exists for the issue.
 func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, attemptID string, now time.Time) error {
 	var requestID, targetID string
-	var version int64
-	err := tx.QueryRowContext(ctx, `SELECT id, target_id, version FROM review_requests
+	var version, targetIssueVersion, targetEventID int64
+	err := tx.QueryRowContext(ctx, `SELECT id, target_id, version, target_issue_version, target_event_id FROM review_requests
 		WHERE issue_id = ? AND status = 'open' ORDER BY created_at DESC, id DESC LIMIT 1`, issueID).
-		Scan(&requestID, &targetID, &version)
+		Scan(&requestID, &targetID, &version, &targetIssueVersion, &targetEventID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	// A stale request is not claimable (docs/09), so the attempt starts
+	// unbound and the request is left open for an explicit replace. Binding
+	// it anyway would spend a reviewer on work that can only fail at finish,
+	// and superseding it here would let the unbound attempt approve the issue
+	// with no request at all (ISSUE-188).
+	stale, err := reviewTargetStale(ctx, tx, issueID, targetIssueVersion, targetEventID)
+	if err != nil {
+		return err
+	}
+	if stale {
+		return nil
 	}
 	claimedAt := formatStorageTime(now)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = 'claimed', active_attempt_id = ?, resolved_at = NULL, version = version + 1
@@ -1616,18 +1640,22 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 // review stale as soon as any agent touched any issue -- unusable once
 // claim-time binding became routine.
 //
-// Excludes source='review' rows, attempt_started rows, and the two
-// reservation event types. The review's own lifecycle (its request, its
-// claim) and an attempt's own start are the workflow progressing, not the
-// reviewed work changing -- and so is a reservation acquired or released
-// against the reviewed issue (ISSUE-179/ISSUE-178 review): reservations
-// track resource ownership among concurrent attempts, not the issue's
-// content, so counting them here would make claim-time acquisition
-// (ISSUE-180) invalidate a reviewer's own in-flight review the moment they
-// claimed it. The exclusion is by event_type, not by widening
-// issue_events.source (docs/04 §7.1 documents source as a closed two-value
-// legacy-provenance enum; excluding two more event types is the smaller
-// change).
+// Excludes source='review' rows, attempt_started rows, the two reservation
+// event types, and every event emitted by a review attempt. The review's own
+// lifecycle (its request, its claim) and an attempt's own start are the
+// workflow progressing, not the reviewed work changing -- and so is a review
+// attempt failing, being interrupted, force-released, or expiring
+// (ISSUE-188: counting those made a request permanently stale after its first
+// abandoned review, invisible while only completion enforced staleness and
+// unrecoverable once claim and release enforce it too) -- and so is a
+// reservation acquired or released against the reviewed issue
+// (ISSUE-179/ISSUE-178 review): reservations track resource ownership among
+// concurrent attempts, not the issue's content, so counting them here would
+// make claim-time acquisition (ISSUE-180) invalidate a reviewer's own
+// in-flight review the moment they claimed it. The exclusions are by
+// event_type and owning attempt kind, not by widening issue_events.source
+// (docs/04 §7.1 documents source as a closed two-value legacy-provenance
+// enum).
 //
 // Asks "did anything disqualifying happen after this position" rather than
 // comparing afterEventID against a recomputed maximum. target_event_id is a
@@ -1638,9 +1666,11 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 // excluded kinds (every claim_issue on any issue emits an attempt_started).
 func reviewedWorkChangedSince(ctx context.Context, tx Queryer, issueID string, afterEventID int64) (bool, error) {
 	var changed bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issue_events
-		WHERE issue_id = ? AND id > ? AND source != 'review'
-		AND event_type NOT IN ('attempt_started', 'reservation_reserved', 'reservation_released'))`,
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM issue_events AS event
+		WHERE event.issue_id = ? AND event.id > ? AND event.source != 'review'
+		AND event.event_type NOT IN ('attempt_started', 'reservation_reserved', 'reservation_released')
+		AND NOT EXISTS (SELECT 1 FROM work_attempts AS attempt
+			WHERE attempt.id = event.attempt_id AND attempt.kind = 'review'))`,
 		issueID, afterEventID).Scan(&changed); err != nil {
 		return false, err
 	}

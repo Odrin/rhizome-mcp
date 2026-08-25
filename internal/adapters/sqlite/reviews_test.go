@@ -133,6 +133,7 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 		t.Fatal(err)
 	}
 
+	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
 	reviewed, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
@@ -346,6 +347,7 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 
 	issueID := fixture.insertIssue(t, "version conflict")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
+	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
 
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
@@ -404,6 +406,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 		t.Fatal(err)
 	}
 
+	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
 	replaced, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
@@ -642,6 +645,7 @@ func TestReviewRepositoryConcurrentReplaceHaveOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -710,6 +714,7 @@ func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -758,6 +763,59 @@ func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *t
 	if successorCount != 1 {
 		t.Fatalf("successor count = %d, want exactly 1 active successor", successorCount)
 	}
+}
+
+// setReviewedIssueVersion moves an issue row to the version a later review
+// target claims to freeze. Review targets are now checked against the issue's
+// real version when a request is created or replaced (ISSUE-188), so a test
+// that reviews "version 2" has to put the issue at version 2 first.
+func setReviewedIssueVersion(t *testing.T, ctx context.Context, db *sqlite.DB, issueID string, version int64) {
+	t.Helper()
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET version = ? WHERE id = ?`, version, issueID)
+		return err
+	}); err != nil {
+		t.Fatalf("set reviewed issue version: %v", err)
+	}
+}
+
+// advanceReviewedIssue applies the state change a real implementation edit
+// produces -- a version bump plus one ordinary issue event -- and returns the
+// issue's new version and the client-visible event position a caller would
+// freeze into the next review target.
+func advanceReviewedIssue(t *testing.T, ctx context.Context, db *sqlite.DB, issueID string, now time.Time) (int64, int64) {
+	t.Helper()
+	var version, latestEventID int64
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET version = version + 1, updated_at = ? WHERE id = ?`,
+			sqlite.FormatStorageTime(now), issueID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, issueID, sqlite.FormatStorageTime(now)); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatalf("advance reviewed issue: %v", err)
+	}
+	return version, latestEventID
+}
+
+// currentEventPosition returns the unfiltered MAX(id) a client would read as
+// latest_event_id and freeze into a review target.
+func currentEventPosition(t *testing.T, ctx context.Context, db *sqlite.DB) int64 {
+	t.Helper()
+	var latestEventID int64
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatalf("read latest event position: %v", err)
+	}
+	return latestEventID
 }
 
 func reviewStringPtr(value string) *string {

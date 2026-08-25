@@ -224,11 +224,16 @@ func TestReplaceReviewRequestPurposeInheritanceAndCoverage(t *testing.T) {
 		t.Fatalf("CreateReviewRequest: %v", err)
 	}
 
+	// The implementation changed, so the successor freezes the issue's new
+	// version and event position -- a replace onto a target that no longer
+	// matches the issue is rejected as stale (ISSUE-188).
+	successorVersion, successorEventID := advanceReviewedIssue(t, fixture.ctx, fixture.db, issue.ID, fixture.clock.Now())
+
 	// Omitting purposes on replace inherits the predecessor's.
 	inherited, err := reviewRepository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
 		PredecessorRequestID: predecessor.Request.ID, PredecessorExpectedVersion: predecessor.Request.Version,
 		SuccessorID: fixture.newID(t), SuccessorTargetID: fixture.newID(t),
-		TargetIssueVersion: finished.Issue.Version + 1, TargetEventID: finished.LatestEventID + 1,
+		TargetIssueVersion: successorVersion, TargetEventID: successorEventID,
 		OccurredAt: fixture.clock.Now(), IdempotencyKey: "replace-inherit", RequestHash: []byte("hash-inherit"),
 	})
 	if err != nil {
@@ -238,11 +243,13 @@ func TestReplaceReviewRequestPurposeInheritanceAndCoverage(t *testing.T) {
 		t.Fatalf("inherited successor purposes = %v, want [implementation security]", got)
 	}
 
+	secondSuccessorVersion, secondSuccessorEventID := advanceReviewedIssue(t, fixture.ctx, fixture.db, issue.ID, fixture.clock.Now())
+
 	// An explicit successor purposes list that drops the required purpose fails.
 	_, err = reviewRepository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
 		PredecessorRequestID: inherited.Successor.ID, PredecessorExpectedVersion: inherited.Successor.Version,
 		SuccessorID: fixture.newID(t), SuccessorTargetID: fixture.newID(t),
-		TargetIssueVersion: finished.Issue.Version + 2, TargetEventID: finished.LatestEventID + 2,
+		TargetIssueVersion: secondSuccessorVersion, TargetEventID: secondSuccessorEventID,
 		Purposes:       []string{"implementation"},
 		OccurredAt:     fixture.clock.Now(),
 		IdempotencyKey: "replace-drop-required",

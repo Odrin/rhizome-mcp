@@ -57,15 +57,18 @@ when its request content is identical; otherwise it fails with
 | claimed | block | blocked | reviewed issue becomes `blocked` with reason |
 | open, claimed | cancel | cancelled | no issue status change |
 | open, claimed | target becomes stale | superseded | request is no longer claimable |
+| open | claim with a stale target | superseded | claim fails with `STALE_REVIEW_TARGET`; no review attempt is bound |
 | approved, changes_requested, blocked, cancelled, superseded | request re-review | open | creates a new request with a new exact target |
 
 `claimed` is derived from its active review attempt and is not a persisted
 general workflow status. Any path that ends the claiming review attempt
 without it completing — lease expiry, `finish_attempt` with outcome `failed`
 or `interrupted`, or an administrative force-release — returns the request
-to `open`, unless it has become stale. Only a completed attempt (`approved`,
-`changes_requested`, or `blocked`) resolves the request instead. No table
-stores `in_progress`.
+to `open`; if the target went stale while the attempt held it, the request is
+resolved as `superseded` instead, so the next reviewer is never handed work
+that can only end in `STALE_REVIEW_TARGET`. Only a completed attempt
+(`approved`, `changes_requested`, or `blocked`) resolves the request
+otherwise. No table stores `in_progress`.
 
 ## Operational guide: request, discover, claim, complete, follow-up, and re-request
 
@@ -83,10 +86,23 @@ Recovery examples:
 - If the review attempt is finished with outcome `failed` or `interrupted` (e.g. a handoff or context limit) instead of a review outcome, the request returns to `open` the same way — the caller does not need to wait for the lease to expire. Re-discover and re-claim.
 - If the attempt is administratively force-released (a stuck or abandoned session, released via the CLI), the request likewise returns to `open` immediately rather than staying `claimed` against a session that will never return.
 - If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Create a new review request against the new target instead of reusing the stale one.
+- If the implementation changed before anyone claimed the request, the request stops being reported as `claimable`; claiming it explicitly supersedes it and returns `STALE_REVIEW_TARGET`, and a `claim_issue` review attempt simply starts unbound. Replace the request with one that freezes the new target.
 - If two agents race to claim the same request, one wins and the other gets `VERSION_CONFLICT` or `ACTIVE_ATTEMPT_EXISTS`. Re-discover the request and retry the claim with the new state.
 - If a review request is created after an unbound attempt has already claimed the issue, `finish_attempt` with `review_outcome=approved` returns `REVIEW_REQUEST_REQUIRED` and does not mutate state. This ensures the new request is not silently orphaned; the caller must resolve or discover the request through the normal review flow (which most often means re-attempting the review with a fresh claim against the newly-bound request).
 
 ## Staleness and concurrency
+
+Staleness is enforced at every point that could otherwise hand out or keep
+alive a doomed request, not only at completion:
+
+| Point | Behavior |
+| --- | --- |
+| create / replace | The target is compared with the issue inside the same write transaction. A request whose target already fails the comparison is rejected with `STALE_REVIEW_TARGET` and nothing is written — a request can never be born stale. |
+| get / list / planning projections | `claimable` is `status == open` **and** the target still matches. A stale request is reported as not claimable while remaining `open`. |
+| claim (`claim_review_request`) | A stale request is resolved as `superseded` and the call returns `STALE_REVIEW_TARGET`. The supersede is durable even though the call reports an error. |
+| claim-time binding (`claim_issue` on a review issue) | A stale open request is not bound: the review attempt starts unbound and the request is left `open` for an explicit `replace_review_request`. Approving an unbound attempt while an unresolved request exists still fails with `REVIEW_REQUEST_REQUIRED`. |
+| release (lease expiry, `failed`/`interrupted` finish, force release) | A claimed request whose target went stale is resolved as `superseded` rather than returned to `open`. |
+| completion (`finish_attempt` with a review outcome) | Unchanged: the request is superseded and the call returns `STALE_REVIEW_TARGET`. |
 
 Before review completion, the service checks the target issue version and
 event position against current state. Any change that affects implementation
@@ -105,13 +121,17 @@ wording, and each one matters:
   A project-global comparison would make every in-flight review stale as soon
   as anyone touched anything, which is unusable once claim-time binding is
   routine.
-- **Excludes review-sourced events, `attempt_started`, and reservation
-  events.** The review's own lifecycle (its request, and the claim that
+- **Excludes review-sourced events, `attempt_started`, reservation events,
+  and every event emitted by a review attempt.** The review's own lifecycle (its request, and the claim that
   `claim_issue` auto-binds to its `attempt_started` row) is the workflow
   progressing, not the reviewed work changing -- and so is a reservation
   acquired or released against the reviewed issue, since reservations track
   resource ownership among concurrent attempts, not the issue's content.
-  Without this, claim-time reservation acquisition would invalidate a
+  A review attempt's own finish, interruption, force-release, or expiry is
+  likewise the review workflow's footprint, not a change to the work under
+  review; counting it made a request permanently stale after its first
+  abandoned review, which stayed invisible while only completion enforced
+  staleness. Without this, claim-time reservation acquisition would invalidate a
   reviewer's own review request the moment they claimed it.
 - **Asks "anything since?", not "does this still equal the maximum?"**
   `target_event_id` is a client-supplied position taken from `latest_event_id`,

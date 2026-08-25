@@ -38,6 +38,38 @@ func NewReviewRepository(db *DB) (*ReviewRepository, error) {
 }
 
 // CreateReviewRequest inserts a new review request and its target snapshot.
+// reviewTargetStale reports whether a frozen review target still describes
+// the issue as it is right now. Two independent questions, both of which
+// docs/09 "Staleness and concurrency" treats as staleness:
+//
+//   - the issue record itself moved on (its version no longer matches the
+//     version the target froze), and
+//   - the reviewed work changed after the target's event position, judged by
+//     reviewedWorkChangedSince (attempts.go) so the answer is issue-scoped
+//     and position-based, never an equality test against a recomputed
+//     maximum event id (ISSUE-189).
+//
+// Both are asked inside the caller's own write transaction, so a request can
+// neither be born stale (create/replace) nor be handed to a reviewer after it
+// went stale (claim).
+func reviewTargetStale(ctx context.Context, queryer Queryer, issueID string, targetIssueVersion, targetEventID int64) (bool, error) {
+	var currentVersion int64
+	if err := queryer.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&currentVersion); err != nil {
+		if isNoRowsError(err) {
+			return false, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+		}
+		return false, err
+	}
+	if currentVersion != targetIssueVersion {
+		return true, nil
+	}
+	return reviewedWorkChangedSince(ctx, queryer, issueID, targetEventID)
+}
+
+func staleReviewTargetError() *domain.Error {
+	return domain.NewError(domain.CodeReviewTargetStale, "review target is stale", false)
+}
+
 func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, command ports.CreateReviewRequestCommand) (ports.CreateReviewRequestResult, error) {
 	if repository == nil || repository.db == nil {
 		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
@@ -85,6 +117,16 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 				return nil
 			}
 			return domain.NewError(domain.CodeReviewAlreadyExists, "review request already exists for target", false)
+		}
+		// A request whose target no longer matches the issue must never be
+		// born: it would be advertised as claimable, consume a reviewer's
+		// attempt, and only fail at finish (ISSUE-188).
+		stale, err := reviewTargetStale(ctx, tx, command.IssueID, command.TargetIssueVersion, command.TargetEventID)
+		if err != nil {
+			return err
+		}
+		if stale {
+			return staleReviewTargetError()
 		}
 		if err := requireReviewPurposeCoverage(ctx, tx, target.ID, command.Purposes); err != nil {
 			return err
@@ -150,15 +192,20 @@ func (repository *ReviewRepository) GetReviewRequest(ctx context.Context, reques
 	}
 	var request domain.ReviewRequest
 	var target domain.ReviewTarget
+	var stale bool
 	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
 		var err error
 		request, target, err = repository.loadRequestForMutation(ctx, queryer, requestID)
+		if err != nil {
+			return err
+		}
+		stale, err = reviewTargetStale(ctx, queryer, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
 		return err
 	})
 	if err != nil {
 		return ports.GetReviewRequestResult{}, err
 	}
-	return ports.GetReviewRequestResult{Request: request, Target: target}, nil
+	return ports.GetReviewRequestResult{Request: request, Target: target, TargetStale: stale}, nil
 }
 
 // ListReviewRequests loads review requests with optional status filtering and offset pagination.
@@ -182,6 +229,7 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 		args = append(args, string(*query.Status))
 	}
 	var items []domain.ReviewRequest
+	staleTargets := map[string]bool{}
 	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
 		rows, err := queryer.QueryContext(ctx, `SELECT `+reviewRequestColumnsQualified+`
             FROM review_requests
@@ -198,7 +246,25 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 			}
 			items = append(items, request)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// The cursor is closed before the per-request staleness queries run:
+		// they reuse this same connection, and issuing them while the page's
+		// own rows are still open would contend with it.
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, request := range items {
+			stale, err := reviewTargetStale(ctx, queryer, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
+			if err != nil {
+				return err
+			}
+			if stale {
+				staleTargets[request.ID] = true
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return ports.ListReviewRequestsResult{}, err
@@ -207,7 +273,7 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 	if hasMore {
 		items = items[:query.Limit]
 	}
-	return ports.ListReviewRequestsResult{Items: items, HasMore: hasMore, NextOffset: query.Offset + len(items)}, nil
+	return ports.ListReviewRequestsResult{Items: items, HasMore: hasMore, NextOffset: query.Offset + len(items), StaleTargets: staleTargets}, nil
 }
 
 // CancelReviewRequest transitions an open or claimed request to cancelled.
@@ -336,6 +402,17 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			return domain.NewError(domain.CodeReviewRequestNotReplaceable, "review request cannot be replaced", false)
 		}
 
+		// The successor freezes a new target, so it is held to the same rule
+		// as a fresh create: replacing a stale request with another stale
+		// one just moves the eventual finish-time failure (ISSUE-188).
+		stale, err := reviewTargetStale(ctx, tx, predecessor.IssueID, command.TargetIssueVersion, command.TargetEventID)
+		if err != nil {
+			return err
+		}
+		if stale {
+			return staleReviewTargetError()
+		}
+
 		// A caller that names no purposes inherits the predecessor's --
 		// there is nothing else to inherit from at this layer (domain
 		// validation has no predecessor to read), and re-review typically
@@ -462,7 +539,13 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 		return ports.ReviewMutationResult{}, domain.NewError(domain.CodeInvalidArgument, "active_attempt_id is required", false)
 	}
 	var result ports.ReviewMutationResult
+	// staleReviewTargetErr is reported to the caller after the transaction
+	// commits, not returned from inside it: the supersede this path performs
+	// is the point of the call and must survive, exactly as FinishAttempt's
+	// own stale-target handling does (attempts.go).
+	var staleReviewTargetErr error
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		staleReviewTargetErr = nil
 		request, target, err := repository.loadRequestForMutation(ctx, tx, command.RequestID)
 		if err != nil {
 			return err
@@ -472,6 +555,20 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 		}
 		if request.Status != domain.ReviewRequestStatusOpen {
 			return domain.NewError(domain.CodeInvalidArgument, "review request cannot be claimed", false)
+		}
+		// A stale request is not claimable (docs/09): supersede it here
+		// rather than letting a reviewer spend an attempt discovering the
+		// staleness at finish.
+		stale, err := reviewTargetStale(ctx, tx, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
+		if err != nil {
+			return err
+		}
+		if stale {
+			if err := supersedeOpenReviewRequest(ctx, tx, request, command.OccurredAt); err != nil {
+				return err
+			}
+			staleReviewTargetErr = staleReviewTargetError()
+			return nil
 		}
 		var attemptIssueID, attemptKind, attemptStatus, leaseExpiresAtText string
 		if err := tx.QueryRowContext(ctx, `SELECT issue_id, kind, status, lease_expires_at FROM work_attempts WHERE id = ?`, *command.ActiveAttemptID).Scan(&attemptIssueID, &attemptKind, &attemptStatus, &leaseExpiresAtText); err != nil {
@@ -523,7 +620,31 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 	if err != nil {
 		return ports.ReviewMutationResult{}, err
 	}
+	if staleReviewTargetErr != nil {
+		return ports.ReviewMutationResult{}, staleReviewTargetErr
+	}
 	return result, nil
+}
+
+// supersedeOpenReviewRequest resolves an open request as superseded and
+// records the matching review event. Used wherever an open request is found
+// to have gone stale (claim time, and the claim-time binding in attempts.go).
+func supersedeOpenReviewRequest(ctx context.Context, tx Executor, request domain.ReviewRequest, occurredAt time.Time) error {
+	resolvedAt := formatStorageTime(occurredAt)
+	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
+		WHERE id = ? AND status = 'open'`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return nil
+	}
+	return appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil,
+		payloadForReviewEvent(request.ID, request.TargetID, nil, nil, nil), resolvedAt)
 }
 
 // ResolveReviewRequest transitions a claimed request to an outcome state.

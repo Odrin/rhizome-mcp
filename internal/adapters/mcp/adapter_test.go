@@ -1489,13 +1489,14 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	targetVersion, targetEventID := currentReviewTargetPosition(t, db, issue.ID)
 	createdReview, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FA1",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:            issue.ID,
-		TargetIssueVersion: 2,
-		TargetEventID:      7,
+		TargetIssueVersion: targetVersion,
+		TargetEventID:      targetEventID,
 		ArtifactIDs:        []string{"artifact-1", "artifact-2"},
 		OccurredAt:         time.Now().UTC(),
 	})
@@ -1544,13 +1545,14 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	}
 
 	// Create a third review request using direct repository access to test replace_review_request.
+	thirdVersion, thirdEventID := advanceReviewedIssueForTest(t, db, issue.ID, source.Now().UTC())
 	thirdCreated, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FA3",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FA4",
 		IssueID:            issue.ID,
-		TargetIssueVersion: 3,
-		TargetEventID:      9,
+		TargetIssueVersion: thirdVersion,
+		TargetEventID:      thirdEventID,
 		ArtifactIDs:        []string{"artifact-9"},
 		OccurredAt:         source.Now().UTC(),
 	})
@@ -1559,11 +1561,12 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 	}
 
 	// Test replace_review_request: atomically supersede third and create fourth.
+	successorVersion, successorEventID := advanceReviewedIssueForTest(t, db, issue.ID, source.Now().UTC())
 	replaced := call(t, client, "replace_review_request", map[string]any{
 		"predecessor_request_id":       thirdCreated.Request.ID,
 		"predecessor_expected_version": 1,
-		"target_issue_version":         4,
-		"target_event_id":              11,
+		"target_issue_version":         successorVersion,
+		"target_event_id":              successorEventID,
 		"artifact_ids":                 []string{"artifact-new"},
 		"idempotency_key":              "replace-key-1",
 	})
@@ -3579,6 +3582,43 @@ func (router *trackingRouter) Acquire(context.Context, *string) (mcpadapter.Proj
 
 func (router *trackingRouter) OpenProject(context.Context, string) (mcpadapter.ProjectLease, error) {
 	return router.lease, router.err
+}
+
+// advanceReviewedIssueForTest applies the state change a real implementation
+// edit produces -- a version bump plus one ordinary issue event -- so a later
+// review request freezes a genuinely new target instead of inventing one.
+func advanceReviewedIssueForTest(t *testing.T, db *sqlite.DB, issueID string, now time.Time) (int64, int64) {
+	t.Helper()
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET version = version + 1, updated_at = ? WHERE id = ?`,
+			sqlite.FormatStorageTime(now), issueID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, issueID, sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatalf("advance reviewed issue: %v", err)
+	}
+	return currentReviewTargetPosition(t, db, issueID)
+}
+
+// currentReviewTargetPosition reads the issue's version and the unfiltered
+// MAX(id) event position a client would freeze into a review target. Review
+// targets are validated against the issue's real state when a request is
+// created (ISSUE-188), so tests can no longer invent target coordinates.
+func currentReviewTargetPosition(t *testing.T, db *sqlite.DB, issueID string) (int64, int64) {
+	t.Helper()
+	var version, latestEventID int64
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatalf("read review target position: %v", err)
+	}
+	return version, latestEventID
 }
 
 func openDatabase(t *testing.T, path string) (*sqlite.DB, *clock.FakeClock) {

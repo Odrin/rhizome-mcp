@@ -76,12 +76,13 @@ func TestIntegrationBoardCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	targetVersion, targetEventID := currentReviewTarget(t, db, reviewIssue.ID)
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
 		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            reviewIssue.ID,
-		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetIssueVersion: targetVersion,
+		TargetEventID:      targetEventID,
 		OccurredAt:         time.Now().UTC(),
 	})
 	if err != nil {
@@ -488,12 +489,13 @@ func TestIntegrationBoardServeSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	targetVersion, targetEventID := currentReviewTarget(t, db, issue.ID)
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
 		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
-		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetIssueVersion: targetVersion,
+		TargetEventID:      targetEventID,
 		ArtifactIDs:        []string{"board_search_review_token"},
 		OccurredAt:         time.Now().UTC(),
 	})

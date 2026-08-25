@@ -602,14 +602,16 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	}
 	decodeStructured(t, createdIssue1, &issueOutput1)
 
+	firstTargetVersion, firstTargetEventID := currentReviewTargetPosition(t, db, issueOutput1.ID)
+
 	// Create first review request: for get_review_request and list_review_requests testing.
 	firstRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB1",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB2",
 		IssueID:            issueOutput1.ID,
-		TargetIssueVersion: 2,
-		TargetEventID:      0,
+		TargetIssueVersion: firstTargetVersion,
+		TargetEventID:      firstTargetEventID,
 		OccurredAt:         source.Now().UTC(),
 	})
 	if err != nil {
@@ -650,14 +652,16 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	}
 	decodeStructured(t, createdIssue2, &issueOutput2)
 
+	secondTargetVersion, secondTargetEventID := currentReviewTargetPosition(t, db, issueOutput2.ID)
+
 	// Create a second review request for cancel testing.
 	secondRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB3",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB4",
 		IssueID:            issueOutput2.ID,
-		TargetIssueVersion: 2,
-		TargetEventID:      0,
+		TargetIssueVersion: secondTargetVersion,
+		TargetEventID:      secondTargetEventID,
 		OccurredAt:         source.Now().UTC().Add(time.Minute),
 	})
 	if err != nil {
@@ -688,26 +692,31 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	}
 	decodeStructured(t, createdIssue3, &issueOutput3)
 
+	thirdTargetVersion, thirdTargetEventID := currentReviewTargetPosition(t, db, issueOutput3.ID)
+
 	// Create a third review request for replace testing.
 	thirdRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB5",
 		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB6",
 		IssueID:            issueOutput3.ID,
-		TargetIssueVersion: 2,
-		TargetEventID:      0,
+		TargetIssueVersion: thirdTargetVersion,
+		TargetEventID:      thirdTargetEventID,
 		OccurredAt:         source.Now().UTC().Add(2 * time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("create third review request: %v", err)
 	}
 
-	// Test replace_review_request.
+	// Test replace_review_request. The successor freezes the issue's new
+	// state, since a replace onto a target that no longer matches the issue
+	// is rejected as stale (ISSUE-188).
+	successorVersion, successorEventID := advanceReviewedIssueForTest(t, db, issueOutput3.ID, source.Now().UTC())
 	replaced := call(t, client, "replace_review_request", map[string]any{
 		"predecessor_request_id":       thirdRequest.Request.ID,
 		"predecessor_expected_version": 1,
-		"target_issue_version":         3,
-		"target_event_id":              1,
+		"target_issue_version":         successorVersion,
+		"target_event_id":              successorEventID,
 		"idempotency_key":              "replace-key-conformance-1",
 	})
 	if replaced.IsError {

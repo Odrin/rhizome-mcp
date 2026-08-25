@@ -132,12 +132,13 @@ func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	targetVersion, targetEventID := currentReviewTarget(t, db, issue.ID)
 	reviewCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
 		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
-		TargetIssueVersion: 2,
-		TargetEventID:      0,
+		TargetIssueVersion: targetVersion,
+		TargetEventID:      targetEventID,
 		ArtifactIDs:        []string{"search_reviewtoken_artifact"},
 		OccurredAt:         time.Now().UTC(),
 	})

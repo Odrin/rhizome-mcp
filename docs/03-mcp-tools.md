@@ -1053,8 +1053,14 @@ Compact responses omit issue bodies, labels, timestamps, and other non-essential
 ### 7.6. Review requests
 
 Review requests bind review work to an issue version, event position, and
-optional artifact set. A review request is claimable only while its status is
-`open`.
+optional artifact set. A review request is claimable while its status is
+`open` **and** its frozen target still matches the issue: `claimable` is
+reported as `false` for an open request whose target went stale, and claiming
+one supersedes it with `STALE_REVIEW_TARGET`. Creating or replacing a request
+whose target does not match the issue's current version and event position is
+rejected with `STALE_REVIEW_TARGET` and writes nothing. See
+[docs/09](09-review-workflow.md) "Staleness and concurrency" for every
+enforcement point.
 
 #### `replace_review_request`
 
@@ -1163,7 +1169,10 @@ Input:
 }
 ```
 
-`status` and `claimable` are optional filters. Supported statuses are:
+`status` and `claimable` are optional filters. `claimable` filters on the
+derived value (open **and** target still matching), so `status: "open"` with
+`claimable: true` excludes open requests whose target has gone stale.
+Supported statuses are:
 
 ```text
 open

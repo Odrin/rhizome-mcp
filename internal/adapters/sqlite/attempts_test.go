@@ -562,7 +562,7 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
-		TargetEventID:      0,
+		TargetEventID:      captureClientVisibleEventPosition(t, fixture),
 		OccurredAt:         fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
@@ -576,6 +576,11 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	// The reviewed work changes while the review is in flight -- the only
+	// way a claimed request can still go stale now that create and claim
+	// reject a target that is already stale (ISSUE-188).
+	recordImplementationChange(t, fixture, issue.ID)
 
 	input := finishInput(claim, domain.AttemptOutcomeCompleted)
 	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
@@ -618,7 +623,7 @@ func TestReviewAttemptExpiryReopensRequest(t *testing.T) {
 		TargetID:           fixture.newID(t),
 		IssueID:            issue.ID,
 		TargetIssueVersion: issue.Issue.Version,
-		TargetEventID:      0,
+		TargetEventID:      captureClientVisibleEventPosition(t, fixture),
 		OccurredAt:         fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
@@ -674,8 +679,9 @@ func claimedReviewFixture(t *testing.T, fixture *attemptTestFixture, name string
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version, TargetEventID: 0,
-		OccurredAt: fixture.clock.Now().Add(time.Minute),
+		IssueID:   issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture),
+		OccurredAt:    fixture.clock.Now().Add(time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -884,6 +890,21 @@ func TestClaimIssueAutoBindsOpenReviewRequest(t *testing.T) {
 	}
 	if resolvedActiveAttemptID.Valid {
 		t.Fatalf("request active_attempt_id after approval = %#v, want null", resolvedActiveAttemptID)
+	}
+}
+
+// recordImplementationChange appends one ordinary issue event to issueID --
+// the kind of event an implementation change produces -- so a review target
+// frozen before the call becomes stale. Written directly because the point is
+// the event row itself, not the tool that would normally emit it.
+func recordImplementationChange(t *testing.T, fixture *attemptTestFixture, issueID string) {
+	t.Helper()
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, issueID, sqlite.FormatStorageTime(fixture.clock.Now()))
+		return err
+	}); err != nil {
+		t.Fatalf("record implementation change: %v", err)
 	}
 }
 

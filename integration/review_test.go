@@ -164,12 +164,16 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
 	}
+	// The target must match the issue's real version and event position: a
+	// request whose target is already stale is rejected at creation
+	// (ISSUE-188).
+	predecessorVersion, predecessorEventID := currentReviewTarget(t, db, issue.ID)
 	predecessorCreated, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
 		RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
 		Purposes:           []string{"implementation"},
 		IssueID:            issue.ID,
-		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetIssueVersion: predecessorVersion,
+		TargetEventID:      predecessorEventID,
 		ArtifactIDs:        []string{"artifact-1"},
 		OccurredAt:         time.Now().UTC(),
 	})
@@ -187,11 +191,12 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 	predecessor.Status = string(predecessorCreated.Request.Status)
 	predecessor.TargetIssueVersion = predecessorCreated.Request.TargetIssueVersion
 
+	successorVersion, successorEventID := advanceReviewedIssue(t, db, issue.ID)
 	replaced := callIntegrationTool(t, session, "replace_review_request", map[string]any{
 		"predecessor_request_id":       predecessor.ID,
 		"predecessor_expected_version": predecessor.Version,
-		"target_issue_version":         2,
-		"target_event_id":              0,
+		"target_issue_version":         successorVersion,
+		"target_event_id":              successorEventID,
 		"artifact_ids":                 []string{"artifact-2"},
 		"idempotency_key":              "integration-replace-1",
 	})
@@ -220,8 +225,8 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 	replayed := callIntegrationTool(t, session, "replace_review_request", map[string]any{
 		"predecessor_request_id":       predecessor.ID,
 		"predecessor_expected_version": predecessor.Version,
-		"target_issue_version":         2,
-		"target_event_id":              0,
+		"target_issue_version":         successorVersion,
+		"target_event_id":              successorEventID,
 		"artifact_ids":                 []string{"artifact-2"},
 		"idempotency_key":              "integration-replace-1",
 	})
@@ -502,4 +507,39 @@ func TestIntegrationReviewWorkflowReReview(t *testing.T) {
 	if requestStatus != string(domain.ReviewRequestStatusApproved) {
 		t.Fatalf("second review request status = %q, want approved", requestStatus)
 	}
+}
+
+// currentReviewTarget reads the issue version and the client-visible event
+// position (unfiltered MAX(id)) a caller would freeze into a review target.
+func currentReviewTarget(t *testing.T, db *sqlite.DB, issueID string) (int64, int64) {
+	t.Helper()
+	var version, latestEventID int64
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&version); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID)
+	}); err != nil {
+		t.Fatalf("read review target position: %v", err)
+	}
+	return version, latestEventID
+}
+
+// advanceReviewedIssue applies the state change a real implementation edit
+// produces -- a version bump plus one ordinary issue event -- so the next
+// review target freezes something genuinely new.
+func advanceReviewedIssue(t *testing.T, db *sqlite.DB, issueID string) (int64, int64) {
+	t.Helper()
+	now := sqlite.FormatStorageTime(time.Now().UTC())
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET version = version + 1, updated_at = ? WHERE id = ?`, now, issueID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, issueID, now)
+		return err
+	}); err != nil {
+		t.Fatalf("advance reviewed issue: %v", err)
+	}
+	return currentReviewTarget(t, db, issueID)
 }

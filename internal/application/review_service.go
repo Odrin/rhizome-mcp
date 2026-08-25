@@ -165,7 +165,7 @@ func (service *ReviewService) GetReviewRequest(ctx context.Context, requestID st
 	if err != nil {
 		return GetReviewRequestResult{}, err
 	}
-	return GetReviewRequestResult{Request: result.Request, Claimable: result.Request.Status == domain.ReviewRequestStatusOpen}, nil
+	return GetReviewRequestResult{Request: result.Request, Claimable: reviewRequestClaimable(result.Request.Status, result.TargetStale)}, nil
 }
 
 // ListReviewRequests returns a deterministic page of review requests with claimability.
@@ -202,7 +202,7 @@ func (service *ReviewService) ListReviewRequests(ctx context.Context, input List
 	}
 	items := make([]ReviewRequestListItem, 0, len(result.Items))
 	for _, request := range result.Items {
-		claimable := request.Status == domain.ReviewRequestStatusOpen
+		claimable := reviewRequestClaimable(request.Status, result.StaleTargets[request.ID])
 		if input.Claimable != nil && claimable != *input.Claimable {
 			continue
 		}
@@ -214,6 +214,15 @@ func (service *ReviewService) ListReviewRequests(ctx context.Context, input List
 		nextCursor = &value
 	}
 	return ListReviewRequestsResult{Items: items, NextCursor: nextCursor, HasMore: result.HasMore}, nil
+}
+
+// reviewRequestClaimable is the single derivation of review claimability
+// (docs/09): a request is claimable while it is open and its frozen target
+// still matches the issue. A stale target is reported as not claimable so a
+// reviewer is not sent to work that can only end in STALE_REVIEW_TARGET
+// (ISSUE-188).
+func reviewRequestClaimable(status domain.ReviewRequestStatus, targetStale bool) bool {
+	return status == domain.ReviewRequestStatusOpen && !targetStale
 }
 
 // CancelReviewRequest transitions an open or claimed request to cancelled.

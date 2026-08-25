@@ -47,9 +47,12 @@ type ReviewMutationResult struct {
 }
 
 // GetReviewRequestResult is the persisted request and target snapshot for one review request.
+// TargetStale reports whether the frozen target still matches the issue; a
+// stale request is not claimable even while its status is open (docs/09).
 type GetReviewRequestResult struct {
-	Request domain.ReviewRequest
-	Target  domain.ReviewTarget
+	Request     domain.ReviewRequest
+	Target      domain.ReviewTarget
+	TargetStale bool
 }
 
 // ListReviewRequestsQuery carries filtering and pagination for review requests.
@@ -60,10 +63,13 @@ type ListReviewRequestsQuery struct {
 }
 
 // ListReviewRequestsResult is a deterministic page of review requests.
+// StaleTargets holds the IDs of the page's requests whose frozen target no
+// longer matches the issue; those are not claimable regardless of status.
 type ListReviewRequestsResult struct {
-	Items      []domain.ReviewRequest
-	HasMore    bool
-	NextOffset int
+	Items        []domain.ReviewRequest
+	HasMore      bool
+	NextOffset   int
+	StaleTargets map[string]bool
 }
 
 // ResolveReviewRequestCommand carries the outcome for a reviewed request.
