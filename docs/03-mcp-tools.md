@@ -1970,7 +1970,46 @@ latest checkpoint
 warnings
 active_reservation_count
 conflict_count
+gates
 ```
+
+`gates` is the compact workflow-gate summary, always present. It reports the
+enforcement point it evaluated, whether that point currently passes, how many
+requirements applied and how many are satisfied, one entry per unmet
+requirement, and one imperative `next_actions` string per unmet entry in the
+same order:
+
+```json
+{
+  "enforcement_point": "complete_work_to_done",
+  "snapshot_fingerprint": "9f2c...",
+  "requirement_count": 2,
+  "satisfied_count": 1,
+  "passed": false,
+  "unmet": [
+    {"policy_id": "01J...", "requirement_key": "impl", "reason": "attempt evidence 'implementation' is missing"}
+  ],
+  "next_actions": ["submit_gate_evidence for key \"implementation\" on the active attempt"]
+}
+```
+
+The enforcement point follows the issue's own state rather than a caller
+input: an issue with an active attempt is evaluated at
+`complete_work_to_done` against that attempt's frozen claim-time snapshot
+(and `snapshot_fingerprint` is that snapshot's fingerprint), while an
+unclaimed issue is evaluated at `claim_work` against live policies (and
+`snapshot_fingerprint` is `null`). Use `evaluate_gates` to evaluate a
+different point explicitly.
+
+`unmet[].requirement_key` and `unmet[].reason` are the same values the
+`WORKFLOW_GATE_UNSATISFIED` error carries (§13, docs/02 §17.7), so context
+and rejection identify a requirement identically. The summary carries keys,
+counts and reasons only -- never policy or evidence bodies; read those with
+`get_workflow_policy` when they are actually needed.
+
+A project with no active policies gets `requirement_count: 0`, `passed:
+true` and empty `unmet`/`next_actions`: the section reports that nothing is
+required, which is different from the section being absent.
 
 `active_reservation_count` is the issue's active attempt's currently held
 active reservation count. `conflict_count` is how many `desired_resources`

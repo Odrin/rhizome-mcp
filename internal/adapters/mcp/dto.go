@@ -1127,12 +1127,60 @@ type workContextOutput struct {
 	ProjectInstructions         *string                         `json:"project_instructions"`
 	ChangesSincePreviousAttempt []issueEventDTO                 `json:"changes_since_previous_attempt"`
 	ActiveReservationCount      int64                           `json:"active_reservation_count"`
+	Gates                       workContextGatesDTO             `json:"gates"`
 	ResourceReservations        []reservationDTO                `json:"resource_reservations"`
 	ConflictCount               int64                           `json:"conflict_count"`
 	ReservationConflicts        []reservationConflictDTO        `json:"reservation_conflicts"`
 	Truncated                   bool                            `json:"truncated"`
 	TruncatedSections           []string                        `json:"truncated_sections"`
 	NextActions                 []string                        `json:"next_actions"`
+}
+
+// workContextGatesDTO is the always-present compact gate summary: which
+// enforcement point was evaluated, where its requirements came from, and what
+// is still missing. It carries requirement keys and counts, never policy or
+// evidence bodies -- those stay behind get_workflow_policy and evaluate_gates.
+type workContextGatesDTO struct {
+	EnforcementPoint    string                           `json:"enforcement_point"`
+	SnapshotFingerprint *string                          `json:"snapshot_fingerprint"`
+	RequirementCount    int64                            `json:"requirement_count"`
+	SatisfiedCount      int64                            `json:"satisfied_count"`
+	Passed              bool                             `json:"passed"`
+	Unmet               []workContextUnmetRequirementDTO `json:"unmet"`
+	NextActions         []string                         `json:"next_actions"`
+}
+
+// workContextUnmetRequirementDTO reports one failing requirement using the
+// same key and reason the WORKFLOW_GATE_UNSATISFIED error carries, so context
+// and rejection name a requirement identically.
+type workContextUnmetRequirementDTO struct {
+	PolicyID       string `json:"policy_id"`
+	RequirementKey string `json:"requirement_key"`
+	Reason         string `json:"reason"`
+}
+
+func workContextGatesDTOFromDomain(summary domain.WorkContextGateSummary) workContextGatesDTO {
+	unmet := make([]workContextUnmetRequirementDTO, len(summary.Unmet))
+	for index, requirement := range summary.Unmet {
+		unmet[index] = workContextUnmetRequirementDTO{
+			PolicyID:       requirement.PolicyID,
+			RequirementKey: requirement.RequirementKey,
+			Reason:         requirement.Reason,
+		}
+	}
+	nextActions := summary.NextActions
+	if nextActions == nil {
+		nextActions = []string{}
+	}
+	return workContextGatesDTO{
+		EnforcementPoint:    string(summary.Point),
+		SnapshotFingerprint: summary.SnapshotFingerprint,
+		RequirementCount:    summary.RequirementCount,
+		SatisfiedCount:      summary.SatisfiedCount,
+		Passed:              len(summary.Unmet) == 0,
+		Unmet:               unmet,
+		NextActions:         nextActions,
+	}
 }
 
 // reservationConflictDTO is the bounded, secret-free projection of one
@@ -1726,6 +1774,7 @@ func workContextOutputFromDomain(value domain.WorkContext) workContextOutput {
 		Artifacts:                   make([]artifactDTO, len(value.Artifacts)),
 		ChangesSincePreviousAttempt: make([]issueEventDTO, len(value.ChangesSincePreviousAttempt)),
 		ActiveReservationCount:      value.ActiveReservationCount,
+		Gates:                       workContextGatesDTOFromDomain(value.Gates),
 		ResourceReservations:        reservationDTOsFromDomain(value.ResourceReservations),
 		ConflictCount:               value.ConflictCount,
 		ReservationConflicts:        reservationConflictDTOsFromDomain(value.ReservationConflicts),

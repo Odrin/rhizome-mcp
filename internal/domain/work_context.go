@@ -329,8 +329,46 @@ type WorkContext struct {
 	// reservation_conflicts is requested and DesiredResources is non-empty.
 	ReservationConflicts []ReservationConflict
 
+	// Gates is the compact workflow-gate summary. Like
+	// ActiveReservationCount it is always populated, never behind an
+	// include: an agent must be able to see what is blocking the issue
+	// without knowing to ask (ISSUE-175 AC1).
+	Gates WorkContextGateSummary
+
 	Truncated         bool
 	TruncatedSections []WorkContextInclude
+}
+
+// WorkContextGateSummary reports what the issue's applicable workflow gates
+// require and what is still missing, in keys and counts rather than policy
+// bodies. Full requirement and evidence bodies stay behind get_workflow_policy
+// and evaluate_gates; this exists so discovering a missing requirement costs
+// no extra call.
+type WorkContextGateSummary struct {
+	// Point is the enforcement point actually evaluated, chosen from the
+	// issue's own state: complete_work_to_done against an active attempt's
+	// frozen snapshot, otherwise claim_work against live policies.
+	Point EnforcementPoint
+	// SnapshotFingerprint is the frozen snapshot's fingerprint, set only
+	// when a snapshot was the source. Nil means live policies were used.
+	SnapshotFingerprint *string
+	RequirementCount    int64
+	SatisfiedCount      int64
+	// Unmet carries one entry per failing requirement, in evaluation order.
+	Unmet []WorkContextUnmetRequirement
+	// NextActions states what clears each unmet requirement, in the same
+	// order as Unmet. Empty when nothing is unmet.
+	NextActions []string
+}
+
+// WorkContextUnmetRequirement is one failing requirement, carrying the same
+// key and reason the WORKFLOW_GATE_UNSATISFIED error reports (docs/02 §17.7),
+// so an agent reading context and an agent reading a rejection see the same
+// identity.
+type WorkContextUnmetRequirement struct {
+	PolicyID       string
+	RequirementKey string
+	Reason         string
 }
 
 // NewEmptyWorkContext returns a work context with every list field initialized to an empty nonnil slice.
@@ -351,7 +389,12 @@ func NewEmptyWorkContext() WorkContext {
 		ChangesSincePreviousAttempt: []IssueEvent{},
 		ResourceReservations:        []Reservation{},
 		ReservationConflicts:        []ReservationConflict{},
-		TruncatedSections:           []WorkContextInclude{},
+		Gates: WorkContextGateSummary{
+			Point:       EnforcementPointClaimWork,
+			Unmet:       []WorkContextUnmetRequirement{},
+			NextActions: []string{},
+		},
+		TruncatedSections: []WorkContextInclude{},
 	}
 }
 

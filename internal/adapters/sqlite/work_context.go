@@ -100,6 +100,11 @@ func (repository *WorkContextRepository) GetWorkContext(ctx context.Context, com
 			return err
 		}
 
+		result.Gates, err = buildWorkContextGateSummary(ctx, query, resolvedIssueID, targetIssue, now)
+		if err != nil {
+			return err
+		}
+
 		conflicts := []domain.ReservationConflict{}
 		if len(input.DesiredResources) > 0 {
 			conflicts, err = findReservationConflicts(ctx, query, input.DesiredResources)
