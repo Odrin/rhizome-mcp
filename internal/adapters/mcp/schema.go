@@ -443,7 +443,7 @@ func schemaApplyIssuePlan() *jsonschema.Schema {
 func schemaClaimIssue() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"issue_id":        withDescription(issueIdentifierSchema(), "Claimable ready or review issue (ULID or ISSUE-N)."),
-		"lease_seconds":   withDescription(boundedIntegerSchema(60, 3600), "Requested lease duration in seconds."),
+		"lease_seconds":   withDescription(boundedIntegerSchema(domain.MinLeaseSeconds, domain.MaxLeaseSeconds), "Requested lease duration in seconds; omit to use the server default."),
 		"resources":       withDescription(schemaResources(), "Optional resources to reserve atomically with the claim, all-or-nothing; a conflict fails the whole claim. Rejected if the claim resolves to a review attempt."),
 		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same claim request."),
 		"view":            withDescription(enumSchema("compact", "full"), "Response shape; compact is the default."),
@@ -514,7 +514,7 @@ func schemaGetResourceReservation() *jsonschema.Schema {
 func schemaRenewAttempt() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"attempt_id": boundedStringSchema(26), "lease_token": boundedStringSchema(512),
-		"lease_seconds": boundedIntegerSchema(60, 3600),
+		"lease_seconds": boundedIntegerSchema(domain.MinLeaseSeconds, domain.MaxLeaseSeconds),
 	}, "attempt_id", "lease_token"))
 }
 

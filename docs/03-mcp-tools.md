@@ -48,9 +48,9 @@ Errors use:
 
 ```json
 {
-  "code": "ISSUE_BLOCKED",
-  "message": "Issue cannot be claimed while blockers are unresolved.",
-  "details": {},
+  "code": "VERSION_CONFLICT",
+  "message": "Issue version precondition failed.",
+  "details": [],
   "retryable": false
 }
 ```
@@ -59,8 +59,8 @@ Errors use:
 
 Durable attribution is opt-in and transport-neutral. It never derives from an
 SDK `ServerSession`, `Mcp-Session-Id`, HTTP connection, or `initialize` request.
-All tool input schemas except `create_agent_session` and `end_agent_session`
-include this optional property:
+All tool input schemas except `open_project`, `create_agent_session` and
+`end_agent_session` include this optional property:
 
 ```json
 {
@@ -1688,6 +1688,11 @@ Input:
 }
 ```
 
+`lease_seconds` is bounded by `domain.MinLeaseSeconds`..`domain.MaxLeaseSeconds`
+(`60`..`3600`); omitting it or sending `null` uses `domain.DefaultLeaseSeconds`
+(`900`, fifteen minutes). The same bounds and default apply to
+`renew_attempt`.
+
 Behavior:
 
 - checks claimability;
@@ -1745,6 +1750,9 @@ Input:
   "lease_seconds": null
 }
 ```
+
+`lease_seconds` uses the same bounds and default as `claim_issue`: `60`..`3600`
+seconds, defaulting to `900`.
 
 Output:
 
@@ -2305,33 +2313,59 @@ IDs are contiguous. Event-type filtering, ordering, pagination, and
 
 ## 13. Error codes
 
-Required domain error codes:
+The complete domain error-code catalog, sorted, as defined by the `Code*`
+constants in `internal/domain/errors.go`. `TestErrorCodesDocMatchesDomain`
+(`internal/domain/errors_doc_test.go`) parses this block and fails if it
+drifts from those constants, so add or remove a code here in the same change
+that adds or removes the constant.
 
 ```text
-ISSUE_NOT_FOUND
-ISSUE_ARCHIVED
-ISSUE_BLOCKED
-ISSUE_NOT_CLAIMABLE
-INVALID_STATUS_TRANSITION
-VERSION_CONFLICT
 ACTIVE_ATTEMPT_EXISTS
-ATTEMPT_NOT_FOUND
 ATTEMPT_NOT_ACTIVE
-LEASE_EXPIRED
-INVALID_LEASE_TOKEN
-ISSUE_CHANGED_DURING_ATTEMPT
-UNRESOLVED_BLOCKERS_ADDED
+ATTEMPT_NOT_FOUND
 BLOCKS_CYCLE
-RELATION_ALREADY_EXISTS
-INVALID_EPIC_PARENT
+GATE_SNAPSHOT_NOT_FOUND
 IDEMPOTENCY_CONFLICT
-LIMIT_EXCEEDED
-VALIDATION_ERROR
-WORKFLOW_GATE_UNSATISFIED
+ID_GENERATION_FAILED
+INVALID_ARGUMENT
+INVALID_EPIC_PARENT
+INVALID_LEASE_TOKEN
 INVALID_RESERVATION_SET
-RESOURCE_RESERVATION_CONFLICT
-RESERVATION_NOT_FOUND
+INVALID_STATUS_TRANSITION
+ISSUE_ARCHIVED
+ISSUE_CHANGED_DURING_ATTEMPT
+ISSUE_NOT_FOUND
+LABEL_NOT_FOUND
+LEASE_EXPIRED
+LIMIT_EXCEEDED
+POLICY_ARCHIVED
+POLICY_NOT_FOUND
+PROJECT_CAPACITY_EXCEEDED
+PROJECT_NOT_FOUND
+PROJECT_NOT_INITIALIZED
+PROJECT_REQUIRED
 RESERVATION_NOT_ACTIVE
+RESERVATION_NOT_FOUND
+RESOURCE_RESERVATION_CONFLICT
+REVIEW_ALREADY_EXISTS
+REVIEW_PURPOSE_REQUIRED
+REVIEW_REQUEST_CLAIMED
+REVIEW_REQUEST_NOT_REPLACEABLE
+REVIEW_REQUEST_REQUIRED
+SESSION_NOT_ACTIVE
+SESSION_NOT_FOUND
+STALE_REVIEW_TARGET
+STORAGE_BUSY
+STORAGE_CONFIGURATION
+STORAGE_CONSTRAINT
+STORAGE_CORRUPT
+STORAGE_FAILURE
+STORAGE_MIGRATION
+STORAGE_UNAVAILABLE
+UNRESOLVED_BLOCKERS_ADDED
+VALIDATION_ERROR
+VERSION_CONFLICT
+WORKFLOW_GATE_UNSATISFIED
 ```
 
 `INVALID_RESERVATION_SET` identifies a malformed or internally-overlapping

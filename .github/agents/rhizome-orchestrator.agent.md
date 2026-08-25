@@ -22,7 +22,7 @@ Context budget: after each unit, if this session has completed three units, or h
 # Context Budget
 1. Start with repository status, MCP issues, and the current planning graph.
 2. Load the selected issue's work context, blockers, relations, and applicable MCP decisions.
-3. Read the owning code path, its nearest tests, and only the relevant sections of `docs/01-product-scope.md` through `docs/06-deferred-and-open.md`.
+3. Read the owning code path, its nearest tests, and only the relevant sections of the specification documents indexed by `SPEC.md` (`docs/01-*` through `docs/13-*`).
 4. Skip `README.md`, `AGENT_BRIEF.md`, and `SPEC.md` for routine slices. Use the indexes only when project orientation or document discovery is actually needed.
 5. Stop exploring once the controlling contract, one failure mode, and a focused falsifying test are known.
 6. For files longer than ~400 lines, send `Rhizome Implementer` a read-only scout brief ("list the symbols and line ranges in these files that touch X; return at most 40 lines") instead of reading the file yourself.

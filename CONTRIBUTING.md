@@ -92,9 +92,11 @@ testing.
 ### Version policy
 
 The Marketplace requires a plain `major.minor.patch`
-version, but this project's git tags carry a prerelease suffix
+version, but this project's git tags may carry a prerelease suffix
 (`v1.0.0-beta.N`). The packaging script derives the extension's version from
-the git tag:
+the git tag. The release workflow also stamps `server.json` from the tag:
+`release.yml` overwrites its `version` and `packages[0].version`, so the
+value committed in `server.json` is a placeholder, not the released version.
 
 - Beta tag `vMAJOR.MINOR.PATCH-beta.N` -> extension version
   `MAJOR.(MINOR*2+1).(PATCH*1000+N)`, published with `vsce package
@@ -108,7 +110,7 @@ the git tag:
 
 ## Documentation
 
-- Specification changes go in the modular docs/ files (01-09), not README.md
+- Specification changes go in the modular docs/ files indexed by [SPEC.md](SPEC.md), not README.md
 - Product and technical decisions are recorded as MCP decisions (durable, versioned)
 - Active backlog and implementation status live in MCP issues, not Markdown
 

@@ -17,11 +17,14 @@ We will acknowledge reports within 48 hours and will work with you to verify and
 
 ## Supported versions
 
-| Version | Status | Security fixes |
-| --- | --- | --- |
-| 1.0.x | Current | Yes |
+Only the latest released minor line receives security updates; older lines
+receive none. Prereleases (`vMAJOR.MINOR.PATCH-beta.N`) are supported only
+until the stable release that follows them. This policy deliberately names no
+specific version: consult the [releases page](https://github.com/Odrin/rhizome-mcp/releases)
+for the current line. The `version` field committed in `server.json` is not a
+release marker -- `release.yml` overwrites it from the git tag at publish time.
 
-Only the latest minor release (1.0.x) receives security updates. Users are encouraged to upgrade to the latest version promptly.
+Users are encouraged to upgrade to the latest version promptly.
 
 ## Security considerations
 
@@ -30,6 +33,41 @@ Only the latest minor release (1.0.x) receives security updates. Users are encou
 - The HTTP transport is **loopback-only** (127.0.0.1, ::1) and has **no authentication** because it is designed for local use only
 - Do not expose the HTTP endpoint to untrusted networks; it is unsafe to do so
 - SQLite database files and `.agent-tracker.json` should not be shared across untrusted systems
+
+### Network surfaces
+
+The server binds a network listener in exactly two situations, both
+loopback-only and both unauthenticated by design:
+
+- `rhizome-mcp serve --http-address ADDR` -- the MCP HTTP transport. Off by
+  default; `serve` speaks stdio unless the flag or `RHIZOME_HTTP_ADDRESS` /
+  the deprecated `HTTP_ADDRESS` selects an address, and it prints a stderr
+  warning naming the address whenever the environment rather than the flag
+  selected it, so an unexpected listener is never silent.
+- `rhizome-mcp board --serve [--http-address ADDR]` -- the read-only status
+  board, an independent process with its own loopback listener, separate from
+  any MCP session. It accepts `GET`/`HEAD` only and never accepts writes.
+
+Both listeners share the same controls:
+
+- Only literal loopback addresses bind: `127.0.0.1` and `[::1]`. Wildcards,
+  unspecified addresses, non-loopback IPs, hostnames, and Unix proxy targets
+  are rejected before listening.
+- The `Host` header must match the bound loopback authority; forwarded host
+  headers are ignored. A missing or unparseable `Host` is rejected.
+- An `Origin` header, when present, must exactly equal the endpoint's own
+  origin; anything else is refused. No `Access-Control-*` response headers are
+  ever emitted and credentials are never allowed.
+- Request bodies are capped on the MCP transport (a 1 MiB outer limit and an
+  8 KiB combined header limit); oversized requests are rejected rather than
+  buffered. The board accepts no bodies at all.
+
+Neither listener has authentication, so neither is safe to expose on a LAN,
+through a reverse proxy, or through a tunnel. See
+[docs/08-local-http-transport.md](docs/08-local-http-transport.md) for the
+full MCP transport contract and
+[docs/13-status-board.md](docs/13-status-board.md) for the board's routes and
+CSP posture.
 
 ### No permanent agent identity
 
@@ -45,7 +83,7 @@ Only the latest minor release (1.0.x) receives security updates. Users are encou
 
 ### No user authentication
 
-- Version 1.0.0 has no built-in authentication or authorization
+- The server has no built-in authentication or authorization
 - Access control must be enforced at the operating system or network boundary
 - The database is a local file; restrict file system permissions appropriately
 

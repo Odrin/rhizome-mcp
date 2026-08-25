@@ -47,7 +47,10 @@ Do not include these in the first version unless required to satisfy a core inva
 - external search services;
 - PostgreSQL;
 - distributed database access;
-- multi-node service.
+- multi-node service;
+- user-configurable SQLite busy timeout and durability (`synchronous`): both
+  are fixed internally (`busy_timeout(5000)`, `synchronous(NORMAL)`) and
+  `sqlite.Options` exposes neither; see docs/04 §17.
 
 ### Automation
 
@@ -118,12 +121,12 @@ These choices must not contradict the domain model.
 The MVP uses:
 
 ```text
-lease duration: 5 minutes
-minimum lease: 30 seconds
-maximum lease: 1 hour
+lease duration: 15 minutes (domain.DefaultLeaseSeconds = 900)
+minimum lease: 60 seconds (domain.MinLeaseSeconds)
+maximum lease: 1 hour (domain.MaxLeaseSeconds = 3600)
 session stale threshold: 15 minutes
 repeated failure warning: 3 consecutive failed/expired attempts
-busy timeout: 5 seconds
+busy timeout: 5 seconds (internal, not configurable)
 graph depth: 2
 graph maximum depth: 5
 graph default nodes: 100

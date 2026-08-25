@@ -225,6 +225,7 @@ The modular files under `docs/` are the canonical specification; [SPEC.md](SPEC.
 10. [VS Code extension](docs/10-vscode-extension.md)
 11. [Project routing contract](docs/11-project-routing.md)
 12. [Resource reservations](docs/12-resource-reservations.md)
+13. [Status board](docs/13-status-board.md)
 
 Guides for humans (quick start, workflow, CLI) live in [site/](site/) and are published via GitHub Pages. Release history is in the [CHANGELOG](CHANGELOG.md).
 

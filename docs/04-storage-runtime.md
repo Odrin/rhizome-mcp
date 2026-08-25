@@ -512,8 +512,6 @@ User-configurable in the first version:
 
 ```text
 database path override
-busy timeout
-durability: normal | full
 backup directory
 log level
 ```
@@ -524,12 +522,18 @@ Keep internal:
 journal mode
 foreign keys
 trusted schema
+busy timeout
+durability (synchronous)
 pool size
 page size
 cache size
 mmap size
 autocheckpoint
 ```
+
+`busy_timeout(5000)` and `synchronous(NORMAL)` are fixed in the connection
+DSN (`internal/adapters/sqlite`); `sqlite.Options` exposes only
+`RetryPolicy`. Making either one user-configurable is deferred (docs/06 §1).
 
 ### 17.1. Environment variables
 

@@ -19,9 +19,18 @@ Specification map:
 - `docs/04-storage-runtime.md`: SQLite, transactions, migrations, leases, and operations.
 - `docs/05-implementation-requirements.md`: architecture, algorithms, errors, and test coverage.
 - `docs/06-deferred-and-open.md`: deferred features and confirmed defaults.
+- `docs/07-logical-interchange.md`: logical project export/import format.
+- `docs/08-local-http-transport.md`: loopback HTTP transport, Host/Origin, and body limits.
+- `docs/09-review-workflow.md`: review request lifecycle and review attempts.
+- `docs/10-vscode-extension.md`: VS Code extension surface and packaging.
+- `docs/11-project-routing.md`: multi-project routing and `project_ref` resolution.
 - `docs/12-resource-reservations.md`: reservation guarantees, lifecycle, and the two-agent workflow.
 - `docs/13-status-board.md`: loopback-only read-only status board routes, data, and UI contract.
 - MCP decisions: accepted implementation and product choices.
+
+This map lists every `docs/NN-*.md`; `TestSpecIndexCoversEveryDoc`
+(`internal/domain/errors_doc_test.go`) fails if a new document is added
+without an entry here and in `SPEC.md`.
 
 ## Non-negotiable requirements
 
