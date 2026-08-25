@@ -24,7 +24,7 @@ AI coding agents are concurrent, context-limited, and interruptible. A `TODO.md`
 - **Planning and dependency graphs.** Cycle-checked `blocks` relations, epics, claimable entry-point highlighting, and atomic batch planning (up to 50 issues, 100 relations, and 20 decisions in one all-or-nothing transaction).
 - **Review workflow.** Review requests pin an exact issue version and event position; stale targets are superseded automatically, so approving changed code is impossible.
 - **Concurrency discipline throughout.** Optimistic versioning on mutations, replay-safe idempotency keys, stable machine-actionable error codes.
-- **Human observability without a server.** `rhizome-mcp board` prints live leases, blockers, and the review queue, or writes a self-contained HTML snapshot; the CLI reads everything as tables, JSON, Markdown, or Mermaid.
+- **Human observability without a server.** `rhizome-mcp board` prints live leases, blockers, and the review queue, or writes a self-contained HTML snapshot; the CLI reads everything as tables, JSON, or Mermaid.
 
 **Use it when** several agent sessions (or several agent products) work the same repository over time and you need handoffs, parallel work, and recovery after crashes or context limits.
 
@@ -190,13 +190,13 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 | Command | Purpose |
 | --- | --- |
 | `init` | Create `.agent-tracker.json` and the project database |
-| `serve` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog) |
-| `connect TARGET [--print]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `json`) |
-| `board [--output PATH]` | Status board: counts, leases, blockers, review queue; optional HTML snapshot |
+| `serve [--http-address ADDR] [--profile full\|agent\|read-only\|migration] [--project-root PATH]` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog; `--project-root` to serve a project other than the working directory) |
+| `connect TARGET [--print] [--command]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `json`) |
+| `board [--output PATH] [--serve [--http-address ADDR]]` | Status board: counts, leases, blockers, review queue; optional HTML snapshot; `--serve` runs a temporary HTTP server |
 | `issue list` / `issue show ISSUE-ID` | Inspect issues with filters |
 | `search QUERY` | Full-text search across issues, comments, decisions, notes |
 | `graph ISSUE-ID` | Dependency graph as table, JSON, or Mermaid |
-| `project info` / `project export` | Project metadata; logical JSON export |
+| `project info` / `project export` / `project import` | Project metadata; logical JSON export; logical JSON import (`--input PATH|-` with `--dry-run` or `--apply`) |
 | `backup --output PATH` | WAL-safe online backup |
 | `doctor [--full]` | Integrity, schema, and invariant checks |
 | `maintenance release-attempt` / `rebuild-search-index` | Administrative recovery |

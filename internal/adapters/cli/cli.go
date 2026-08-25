@@ -186,32 +186,11 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 
-	switch args[0] {
-	case "init":
-		return c.runInit(ctx, args[1:])
-	case "serve":
-		return c.runServe(ctx, args[1:])
-	case "backup":
-		return c.runBackup(ctx, args[1:])
-	case "doctor":
-		return c.runDoctor(ctx, args[1:])
-	case "connect":
-		return c.runConnect(ctx, args[1:])
-	case "project":
-		return c.runProject(ctx, args[1:])
-	case "issue":
-		return c.runIssue(ctx, args[1:])
-	case "search":
-		return c.runSearch(ctx, args[1:])
-	case "graph":
-		return c.runGraph(ctx, args[1:])
-	case "board":
-		return c.runBoard(ctx, args[1:])
-	case "maintenance":
-		return c.runMaintenance(ctx, args[1:])
-	default:
+	found, ok := lookupCommand(args[0])
+	if !ok {
 		return c.usageError()
 	}
+	return found.run(c, ctx, args[1:])
 }
 
 func (c *CLI) runInit(ctx context.Context, args []string) error {
@@ -268,7 +247,7 @@ func (c *CLI) runBackup(ctx context.Context, args []string) error {
 		return fmt.Errorf("output is required")
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	report, err := c.backupHandler(ctx, *output)
 	if err != nil {
@@ -295,9 +274,13 @@ func (c *CLI) runDoctor(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	report, err := c.doctorHandler(ctx, *full)
+	// An unhealthy verdict is reported even when the handler also errored:
+	// the report is the more actionable answer, and TestRunDoctor pins that
+	// ordering. The handler error is only surfaced when there is no unhealthy
+	// verdict to report, which is what used to be dropped silently.
 	if !report.Healthy() {
 		if *format == "json" {
 			if writeErr := writeJSON(c.stdoutWriter(), report); writeErr != nil {
@@ -306,7 +289,10 @@ func (c *CLI) runDoctor(ctx context.Context, args []string) error {
 		} else if writeErr := c.writeDoctorTable(report); writeErr != nil {
 			return writeErr
 		}
-		return errors.New("doctor found failed checks")
+		return NewDoctorUnhealthyError(failedCheckCount(report))
+	}
+	if err != nil {
+		return err
 	}
 	if err != nil {
 		return err
@@ -342,7 +328,7 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 		}
 	}
 	if !isValid {
-		return fmt.Errorf("unsupported target %q (valid targets: %s)", target, strings.Join(validTargets, ", "))
+		return NewUsageError(fmt.Sprintf("unsupported target %q (valid targets: %s)", target, strings.Join(validTargets, ", ")))
 	}
 
 	return c.connectHandler(ctx, target, *printFlag, *commandFlag)
@@ -378,7 +364,7 @@ func (c *CLI) runProjectInfo(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	project, err := c.services.ProjectService.GetProject(ctx)
 	if err != nil {
@@ -432,6 +418,10 @@ func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
 	inputPath := fs.String("input", "", "input path or '-' for stdin")
 	dryRun := fs.Bool("dry-run", false, "validate without applying imports")
 	apply := fs.Bool("apply", false, "apply a validated import into an empty destination")
+	// Defaults to json, not table: this command was JSON-only before it gained
+	// a --format flag, so defaulting to table would silently change what
+	// existing scripts read from stdout.
+	format := fs.String("format", "json", "output format: table|json")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -448,6 +438,9 @@ func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
 	if !*dryRun && !*apply {
 		return fmt.Errorf("--dry-run or --apply is required")
 	}
+	if *format != "table" && *format != "json" {
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
+	}
 	data, err := readProjectImportInput(*inputPath, os.Stdin)
 	if err != nil {
 		return err
@@ -457,13 +450,88 @@ func (c *CLI) runProjectImport(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if *format == "table" {
+			return c.writeProjectImportResultTable(result)
+		}
 		return writeJSON(c.stdoutWriter(), result)
 	}
 	result, err := c.services.ProjectService.ValidateLogicalProjectImport(ctx, data)
 	if err != nil {
 		return err
 	}
+	if *format == "table" {
+		return c.writeProjectImportDryRunTable(result)
+	}
 	return writeJSON(c.stdoutWriter(), result)
+}
+func (c *CLI) writeProjectImportDryRunTable(result domain.LogicalProjectImportDryRun) error {
+	var builder strings.Builder
+	builder.WriteString("entity_type\tcount\n")
+	builder.WriteString(fmt.Sprintf("project\t%d\n", result.Counts.Project))
+	builder.WriteString(fmt.Sprintf("issues\t%d\n", result.Counts.Issues))
+	builder.WriteString(fmt.Sprintf("labels\t%d\n", result.Counts.Labels))
+	builder.WriteString(fmt.Sprintf("issue_labels\t%d\n", result.Counts.IssueLabels))
+	builder.WriteString(fmt.Sprintf("relations\t%d\n", result.Counts.Relations))
+	builder.WriteString(fmt.Sprintf("comments\t%d\n", result.Counts.Comments))
+	builder.WriteString(fmt.Sprintf("decisions\t%d\n", result.Counts.Decisions))
+	builder.WriteString(fmt.Sprintf("attempts\t%d\n", result.Counts.Attempts))
+	builder.WriteString(fmt.Sprintf("attempt_notes\t%d\n", result.Counts.AttemptNotes))
+	builder.WriteString(fmt.Sprintf("artifacts\t%d\n", result.Counts.Artifacts))
+	builder.WriteString(fmt.Sprintf("events\t%d\n", result.Counts.Events))
+	if result.Counts.ReviewTargets > 0 || result.Counts.ReviewRequests > 0 || result.Counts.ReviewOutcomes > 0 || result.Counts.ReviewEvents > 0 {
+		builder.WriteString(fmt.Sprintf("review_targets\t%d\n", result.Counts.ReviewTargets))
+		builder.WriteString(fmt.Sprintf("review_requests\t%d\n", result.Counts.ReviewRequests))
+		builder.WriteString(fmt.Sprintf("review_outcomes\t%d\n", result.Counts.ReviewOutcomes))
+		builder.WriteString(fmt.Sprintf("review_events\t%d\n", result.Counts.ReviewEvents))
+	}
+	if result.Counts.Reservations > 0 {
+		builder.WriteString(fmt.Sprintf("reservations\t%d\n", result.Counts.Reservations))
+	}
+	builder.WriteString(fmt.Sprintf("writes\t%d\n", result.Writes.Count))
+	if len(result.Conflicts) > 0 {
+		builder.WriteString("\nconflicts:\n")
+		builder.WriteString("code\tmessage\tfield\n")
+		for _, conflict := range result.Conflicts {
+			builder.WriteString(fmt.Sprintf("%s\t%s\t%s\n", conflict.Code, conflict.Message, conflict.Field))
+		}
+	}
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
+}
+
+func (c *CLI) writeProjectImportResultTable(result domain.LogicalProjectImportApplyResult) error {
+	var builder strings.Builder
+	builder.WriteString("entity_type\tcount\n")
+	builder.WriteString(fmt.Sprintf("project\t%d\n", result.Counts.Project))
+	builder.WriteString(fmt.Sprintf("issues\t%d\n", result.Counts.Issues))
+	builder.WriteString(fmt.Sprintf("labels\t%d\n", result.Counts.Labels))
+	builder.WriteString(fmt.Sprintf("issue_labels\t%d\n", result.Counts.IssueLabels))
+	builder.WriteString(fmt.Sprintf("relations\t%d\n", result.Counts.Relations))
+	builder.WriteString(fmt.Sprintf("comments\t%d\n", result.Counts.Comments))
+	builder.WriteString(fmt.Sprintf("decisions\t%d\n", result.Counts.Decisions))
+	builder.WriteString(fmt.Sprintf("attempts\t%d\n", result.Counts.Attempts))
+	builder.WriteString(fmt.Sprintf("attempt_notes\t%d\n", result.Counts.AttemptNotes))
+	builder.WriteString(fmt.Sprintf("artifacts\t%d\n", result.Counts.Artifacts))
+	builder.WriteString(fmt.Sprintf("events\t%d\n", result.Counts.Events))
+	if result.Counts.ReviewTargets > 0 || result.Counts.ReviewRequests > 0 || result.Counts.ReviewOutcomes > 0 || result.Counts.ReviewEvents > 0 {
+		builder.WriteString(fmt.Sprintf("review_targets\t%d\n", result.Counts.ReviewTargets))
+		builder.WriteString(fmt.Sprintf("review_requests\t%d\n", result.Counts.ReviewRequests))
+		builder.WriteString(fmt.Sprintf("review_outcomes\t%d\n", result.Counts.ReviewOutcomes))
+		builder.WriteString(fmt.Sprintf("review_events\t%d\n", result.Counts.ReviewEvents))
+	}
+	if result.Counts.Reservations > 0 {
+		builder.WriteString(fmt.Sprintf("reservations\t%d\n", result.Counts.Reservations))
+	}
+	builder.WriteString(fmt.Sprintf("latest_event_id\t%d\n", result.LatestEventID))
+	if len(result.Conflicts) > 0 {
+		builder.WriteString("\nconflicts:\n")
+		builder.WriteString("code\tmessage\tfield\n")
+		for _, conflict := range result.Conflicts {
+			builder.WriteString(fmt.Sprintf("%s\t%s\t%s\n", conflict.Code, conflict.Message, conflict.Field))
+		}
+	}
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
 }
 
 func readProjectImportInput(path string, stdin io.Reader) ([]byte, error) {
@@ -575,7 +643,7 @@ func (c *CLI) runIssueList(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 
 	input := domain.ListIssuesInput{
@@ -608,7 +676,7 @@ func (c *CLI) runIssueShow(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	projection, err := c.services.IssueService.GetIssueProjection(ctx, positionals[0])
 	if err != nil {
@@ -648,7 +716,7 @@ func (c *CLI) runSearch(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 
 	input := domain.SearchInput{
@@ -698,7 +766,7 @@ func (c *CLI) runGraph(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" && *format != "mermaid" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 
 	input := domain.GetIssueGraphInput{RootIssueID: positionals[0], Direction: domain.GraphDirection(*direction)}
@@ -747,7 +815,7 @@ func (c *CLI) runBoard(ctx context.Context, args []string) error {
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	if *serve && *output != "" {
 		return fmt.Errorf("--serve and --output are mutually exclusive")
@@ -814,7 +882,7 @@ func (c *CLI) runMaintenanceReleaseAttempt(ctx context.Context, args []string) e
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	result, err := c.services.MaintenanceService.ForceReleaseAttempt(ctx, positionals[0])
 	if err != nil {
@@ -837,7 +905,7 @@ func (c *CLI) runMaintenanceRebuildSearchIndex(ctx context.Context, args []strin
 		return c.usageError()
 	}
 	if *format != "table" && *format != "json" {
-		return fmt.Errorf("unsupported format %q", *format)
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
 	}
 	if err := c.services.MaintenanceService.RebuildSearchIndex(ctx); err != nil {
 		return err
@@ -1105,27 +1173,31 @@ func (c *CLI) stdoutWriter() io.Writer {
 }
 
 func (c *CLI) usage() string {
-	return `Usage:
-  rhizome-mcp [--data-root PATH] init
-  rhizome-mcp [--data-root PATH] serve [--http-address ADDR] [--profile full|agent|read-only|migration]
-  rhizome-mcp [--data-root PATH] connect TARGET [--print] [--command]
-  rhizome-mcp [--data-root PATH] backup --output PATH [--format table|json]
-  rhizome-mcp [--data-root PATH] doctor [--full] [--format table|json]
-  rhizome-mcp [--data-root PATH] project info [--format table|json]
-  rhizome-mcp [--data-root PATH] project export --output PATH|- [--overwrite]
-  rhizome-mcp [--data-root PATH] issue list [--format table|json] [--limit N] [--cursor CURSOR] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]
-  rhizome-mcp [--data-root PATH] issue show ISSUE-ID [--format table|json]
-  rhizome-mcp [--data-root PATH] search QUERY [--format table|json] [--limit N] [--cursor CURSOR] [--entity-type TYPE ...] [--issue ISSUE-ID] [--epic EPIC-ID] [--status STATUS ...] [--label LABEL ...] [--include-archived] [--snippet-length N]
-  rhizome-mcp [--data-root PATH] graph ISSUE-ID [--format table|json|mermaid] [--depth N] [--max-nodes N] [--direction outgoing|incoming|both] [--relation-type TYPE ...] [--include-hierarchy] [--include-terminal]
-  rhizome-mcp [--data-root PATH] board [--format table|json] [--output PATH] [--serve [--http-address ADDR]]
-  rhizome-mcp [--data-root PATH] maintenance release-attempt ATTEMPT-ID [--format table|json]
-  rhizome-mcp [--data-root PATH] maintenance rebuild-search-index [--format table|json]
-`
+	var builder strings.Builder
+	builder.WriteString("Usage:\n")
+	for _, candidate := range commands() {
+		for _, line := range candidate.usageLines {
+			builder.WriteString("  rhizome-mcp [--data-root PATH] ")
+			builder.WriteString(line)
+			builder.WriteString("\n")
+		}
+	}
+	return builder.String()
+}
+
+func failedCheckCount(report DoctorReport) int {
+	failed := 0
+	for _, check := range report.Checks {
+		if !check.Healthy {
+			failed++
+		}
+	}
+	return failed
 }
 
 func (c *CLI) usageError() error {
 	fmt.Fprint(c.stderrWriter(), c.usage())
-	return fmt.Errorf("usage error")
+	return NewUsageError("usage error")
 }
 
 type BackupResponse struct {
@@ -1210,7 +1282,7 @@ type IssueSummary struct {
 	AcceptanceCriteria     *string    `json:"acceptance_criteria,omitempty"`
 	Status                 string     `json:"status"`
 	Priority               string     `json:"priority"`
-	ParentID               *string    `json:"parent_id,omitempty"`
+	ParentIssueID          *string    `json:"parent_issue_id,omitempty"`
 	BlockedReason          *string    `json:"blocked_reason,omitempty"`
 	Version                int64      `json:"version"`
 	CreatedBySessionID     *string    `json:"created_by_session_id,omitempty"`
@@ -1255,7 +1327,7 @@ func issueFromDomain(issue domain.Issue) IssueSummary {
 		AcceptanceCriteria:  copyOptionalString(issue.AcceptanceCriteria),
 		Status:              string(issue.Status),
 		Priority:            string(issue.Priority),
-		ParentID:            copyOptionalString(issue.ParentID),
+		ParentIssueID:       copyOptionalString(issue.ParentID),
 		BlockedReason:       copyOptionalString(issue.BlockedReason),
 		Version:             issue.Version,
 		CreatedBySessionID:  copyOptionalString(issue.CreatedBySessionID),

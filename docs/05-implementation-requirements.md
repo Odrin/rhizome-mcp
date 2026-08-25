@@ -358,9 +358,40 @@ Useful output formats:
 ```text
 table
 json
-markdown
 mermaid
 ```
+
+### Exit codes
+
+The CLI distinguishes failure modes by exit code so CI and scripts can respond
+to each appropriately:
+
+- `0` — success.
+- `1` — runtime or domain failure: the command was well-formed but could not be
+  completed (a write failed, an integrity check found a problem, a domain
+  constraint was violated).
+- `2` — usage error: the invocation itself was wrong (unknown command, missing
+  argument, unsupported flag value).
+- `3` — `doctor` ran successfully and reported failed checks. Distinct from `1`
+  so CI can tell "the data is unhealthy" from "the health check could not run".
+
+The mapping lives in `cli.ExitCodeFor` and is the single place that decides it.
+
+### Error output
+
+Errors are written to stderr as plain text (`error: MESSAGE`) for every command
+and every value of `--format`. `--format` selects the shape of *successful*
+output only; there is deliberately no JSON error envelope on stdout, so a
+consumer parsing stdout as JSON never has to distinguish a result from an error.
+Scripts should branch on the exit code and read stderr for the message.
+
+### JSON output
+
+The CLI JSON projection differs from the MCP tool output in one intentional way:
+issue labels are emitted as an array of label names (`["alpha", "beta"]`) rather
+than as objects carrying id and name, because the CLI is inspection tooling and
+the ids are not actionable there. Field names otherwise match the MCP contract,
+including `parent_issue_id`.
 
 ## 15. Testing requirements
 

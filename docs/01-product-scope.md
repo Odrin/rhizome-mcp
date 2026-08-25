@@ -32,7 +32,7 @@ A human developer is a secondary user and interacts through:
 
 - the agent;
 - a minimal CLI;
-- JSON, table, Markdown or Mermaid output;
+- JSON, table, or Mermaid output;
 - backup and diagnostic commands.
 
 A graphical user interface is not required for the first version.

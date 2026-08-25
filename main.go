@@ -187,8 +187,11 @@ func main() {
 	}
 
 	if err := runCLI(ctx, cfg, os.Stdout, os.Stderr, os.Args[1:], startingPath, pathInputs); err != nil {
+		// A usage mistake, a failed doctor check and a runtime failure are
+		// different things to a script, so they get different exit codes.
+		// cliadapter.ExitCodeFor owns the mapping (docs/05 section 14).
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(cliadapter.ExitCodeFor(err))
 	}
 }
 
@@ -325,7 +328,10 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		return runConnect(ctx, startingPath, target, realPath, printOnly, bareCommand, npxLaunched, stdout, stderr)
 	}
 
-	if len(args) > 0 && args[0] != "init" && args[0] != "connect" && args[0] != "serve" && (args[0] == "project" || args[0] == "issue" || args[0] == "search" || args[0] == "graph" || args[0] == "maintenance" || args[0] == "backup" || args[0] == "doctor" || args[0] == "board") {
+	// Which commands need an open project is declared once, in the CLI
+	// command table, instead of in a literal list here that had to be kept in
+	// sync by hand.
+	if cliadapter.NeedsProject(args) {
 		bundle, project, err = compose.Open(ctx, startingPath, pathInputs, dataRootOverride)
 		if err != nil {
 			return err
