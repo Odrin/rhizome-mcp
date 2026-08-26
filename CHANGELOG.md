@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-26
+
+### Changed
+
+- **`save_attempt_note` and `replace_review_request` are documented to first-call standard** — A tool-description review flagged both as too thin for an agent to use correctly on the first attempt. `save_attempt_note`'s advertised description now discloses the active-lease prerequisite, the four note kinds, that checkpoints seed successor recovery via `get_work_context`, and keyed-retry idempotency; its `kind` parameter explains when each value applies (and when `record_decision` or `add_comment` fits better), and `idempotency_key` documents replay-versus-duplicate-append behavior. Every `replace_review_request` parameter now states its provenance and failure mode: the predecessor version comes from `get_review_request` (mismatch fails with `VERSION_CONFLICT`), the target must be the issue's current version and event position (`STALE_REVIEW_TARGET` otherwise), `artifact_ids` are not inherited from the predecessor (unlike `purposes`), and the — unusually — *required* `idempotency_key` replays identical requests and rejects key reuse with `IDEMPOTENCY_CONFLICT`.
+
+### Fixed
+
+- **Stale guidance still pointed at the removed review request tools** — The site's review workflow quick guide told readers to call the removed `create_review_request` and to manually attach a review attempt to a request, a step `claim_issue` has performed automatically since binding became transactional. The guide now matches docs/09: a tool-agnostic request step, `replace_review_request` for refreshing a stale open request, and automatic binding on claim. A domain comment and two test comments still describing the removed tool as merely "deprecated" were corrected too; changelog history intentionally keeps its original wording.
+
+### Internal
+
+- **The integration suite runs in parallel, and CI stops running the unit suite twice** — The CI integration step invoked `go test -tags=integration ./...`, which re-ran every unit test the previous step had just finished (the build tag only adds files, and it defeats test-result caching); it now filters with `-run '^TestIntegration'`, exactly as the coverage job already did. The 63 integration tests — each driving its own server subprocess and spending most of their wall clock waiting on round trips — are now `t.Parallel()`, safe because every test owns an isolated repository, data root, and `:0` port, and lease expiries are backdated through SQL rather than awaited. Locally the package drops from 6.9s to ~2s uninstrumented and from 181s to 19s under `-race`.
+- npm package smoke tests spawn `npm` through a shell on Windows, matching how npm must be invoked there.
+
+## [1.3.1] - 2026-08-25
+
+### Fixed
+
+- **Release packaging read the tag from the wrong step** — The release workflow's packaging and upload steps referenced a stale step id for the release tag; they now read the resolve step's output, so artifacts are named and uploaded for the actually resolved tag.
+
 ## [1.3.0] - 2026-08-25
 
 ### Added
