@@ -587,10 +587,16 @@ type projectOutput struct {
 	SchemaVersion int         `json:"schema_version"`
 	ConfigVersion int         `json:"config_version"`
 	// ToolProfile is the active MCP tool exposure profile (full, agent,
-	// read-only, or migration). It is client-facing diagnostic metadata,
-	// not an authorization boundary: every tool still enforces its own
-	// domain-level validation regardless of what a client can see here.
-	ToolProfile            string         `json:"tool_profile"`
+	// read-only, or migration), or "custom" when a free-form toolset
+	// selection decides the catalog instead. It is client-facing
+	// diagnostic metadata, not an authorization boundary: every tool still
+	// enforces its own domain-level validation regardless of what a client
+	// can see here.
+	ToolProfile string `json:"tool_profile"`
+	// Toolsets lists the advertised capability groups, always including
+	// core, when ToolProfile is "custom" (a `serve --toolsets` selection);
+	// absent in profile mode.
+	Toolsets               []string       `json:"toolsets,omitempty"`
 	Limits                 limitsDTO      `json:"limits"`
 	SupportedIssueTypes    []string       `json:"supported_issue_types"`
 	SupportedStatuses      []string       `json:"supported_statuses"`
@@ -1499,7 +1505,7 @@ func applyIssuePlanOutputFromApplication(value application.ApplyIssuePlanResult)
 	return result
 }
 
-func projectOutputFor(projectRef string, project projectDTO, session *sessionDTO, appVersion string, schemaVersion int, configVersion int, toolProfile string, latestEventID int64) projectOutput {
+func projectOutputFor(projectRef string, project projectDTO, session *sessionDTO, appVersion string, schemaVersion int, configVersion int, toolProfile string, toolsets []string, latestEventID int64) projectOutput {
 	return projectOutput{
 		ProjectRef:             projectRef,
 		Project:                project,
@@ -1508,6 +1514,7 @@ func projectOutputFor(projectRef string, project projectDTO, session *sessionDTO
 		SchemaVersion:          schemaVersion,
 		ConfigVersion:          configVersion,
 		ToolProfile:            toolProfile,
+		Toolsets:               toolsets,
 		Limits:                 limitsDTO{DefaultIssueListLimit: domain.DefaultIssueListLimit, DefaultLabelListLimit: domain.DefaultLabelListLimit, MaxCollectionLimit: domain.MaxCollectionLimit},
 		SupportedIssueTypes:    domain.IssueTypeNames(),
 		SupportedStatuses:      domain.StatusNames(),

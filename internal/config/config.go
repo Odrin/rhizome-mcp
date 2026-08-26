@@ -1,8 +1,8 @@
 // Package config resolves rhizome-mcp's external process-environment
 // inputs (server name, log level, HTTP transport address, tool exposure
-// profile, plus the platform data-directory and project-root discovery
-// inputs) into one immutable Config, so this is the single place that
-// describes every environment variable the server reads.
+// profile or toolset selection, plus the platform data-directory and
+// project-root discovery inputs) into one immutable Config, so this is the
+// single place that describes every environment variable the server reads.
 package config
 
 import (
@@ -25,19 +25,28 @@ type Config struct {
 	HTTPAddress   string
 	// ToolProfile selects which capability groups of the MCP tool catalog
 	// this server instance advertises (full, agent, read-only, migration).
-	// Defaults to "full" so an unconfigured server keeps the complete
-	// existing tool catalog.
+	// Blank means unconfigured: downstream parsing treats it as "full", so
+	// an unconfigured server keeps the complete existing tool catalog.
+	// Staying blank here (rather than pre-defaulting to "full") is what
+	// lets the MCP adapter tell a configured profile apart from the
+	// default when rejecting a profile combined with Toolsets.
 	ToolProfile string
+	// Toolsets selects a free-form comma-separated list of tool capability
+	// groups to advertise instead of a named profile; the core group is
+	// always included. Blank means unconfigured. Mutually exclusive with
+	// ToolProfile; the MCP adapter rejects startup when both are set.
+	Toolsets string
 
-	// HTTPAddressFromEnv and ToolProfileFromEnv report whether the field
-	// was populated from an environment variable (namespaced or the
-	// deprecated legacy fallback), rather than left at its built-in
-	// default. A caller (serve) uses these to warn when transport
-	// selection or catalog narrowing was implicit rather than passed as
-	// an explicit flag -- the two environment inputs capable of silently
-	// changing what a client sees.
+	// HTTPAddressFromEnv, ToolProfileFromEnv, and ToolsetsFromEnv report
+	// whether the field was populated from an environment variable
+	// (namespaced or the deprecated legacy fallback), rather than left at
+	// its built-in default. A caller (serve) uses these to warn when
+	// transport selection or catalog narrowing was implicit rather than
+	// passed as an explicit flag -- the environment inputs capable of
+	// silently changing what a client sees.
 	HTTPAddressFromEnv bool
 	ToolProfileFromEnv bool
+	ToolsetsFromEnv    bool
 
 	// XDGDataHome, LocalAppData, and ProjectRoot are read here so every
 	// external environment input has one source of truth, even though
@@ -94,9 +103,9 @@ func Load(getenv Getenv) (*Config, []string) {
 	logLevelText, _ := take(envFallback{"RHIZOME_LOG_LEVEL", "LOG_LEVEL"})
 	httpAddress, httpFromEnv := take(envFallback{"RHIZOME_HTTP_ADDRESS", "HTTP_ADDRESS"})
 	toolProfile, toolProfileFromEnv := take(envFallback{"RHIZOME_TOOL_PROFILE", "TOOL_PROFILE"})
-	if toolProfile == "" {
-		toolProfile = "full"
-	}
+	// RHIZOME_TOOLSETS is newer than the namespacing migration, so it has
+	// no deprecated unprefixed fallback.
+	toolsets := getenv("RHIZOME_TOOLSETS")
 
 	return &Config{
 		ServerName:         serverName,
@@ -105,6 +114,8 @@ func Load(getenv Getenv) (*Config, []string) {
 		HTTPAddressFromEnv: httpFromEnv,
 		ToolProfile:        toolProfile,
 		ToolProfileFromEnv: toolProfileFromEnv,
+		Toolsets:           toolsets,
+		ToolsetsFromEnv:    toolsets != "",
 		XDGDataHome:        getenv("XDG_DATA_HOME"),
 		LocalAppData:       getenv("LOCALAPPDATA"),
 		ProjectRoot:        getenv("RHIZOME_PROJECT_ROOT"),

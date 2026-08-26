@@ -117,6 +117,61 @@ func TestIntegrationHTTPToolProfileFiltering(t *testing.T) {
 	}
 }
 
+// TestIntegrationStdioToolsetSelectionFiltering asserts that a free-form
+// --toolsets selection composes the advertised catalog over the real stdio
+// transport — exactly core plus the named groups — that a tool outside the
+// selection is genuinely uncallable, and that get_project reports the
+// "custom" profile plus the advertised groups.
+func TestIntegrationStdioToolsetSelectionFiltering(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	session := env.connectWithServeArgs(t, "--toolsets", "issues,planning")
+
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	want := []string{
+		"open_project", "get_project",
+		"list_labels", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue",
+		"manage_issue_relation", "get_issue_graph", "get_planning_graph",
+		"validate_issue_plan", "apply_issue_plan",
+	}
+	for _, name := range want {
+		if !hasTool(tools.Tools, name) {
+			t.Errorf("toolset selection is missing %q: %v", name, toolNames(tools.Tools))
+		}
+	}
+	if len(tools.Tools) != len(want) {
+		t.Fatalf("toolset selection tool count = %d, want %d: %v", len(tools.Tools), len(want), toolNames(tools.Tools))
+	}
+
+	// claim_issue belongs to the lifecycle group, which the selection does
+	// not name, so it is not registered at all: calling it fails as an
+	// unknown tool (a protocol-level error), never reaching any handler.
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "claim_issue",
+		Arguments: map[string]any{"issue_id": "ISSUE-1"},
+	}); err == nil {
+		t.Fatal("claim_issue unexpectedly callable outside the toolset selection")
+	}
+
+	project := callIntegrationTool(t, session, "get_project", map[string]any{})
+	var output struct {
+		ToolProfile string   `json:"tool_profile"`
+		Toolsets    []string `json:"toolsets"`
+	}
+	decodeIntegrationResult(t, project, &output)
+	if output.ToolProfile != "custom" {
+		t.Fatalf("get_project tool_profile = %q, want %q", output.ToolProfile, "custom")
+	}
+	if strings.Join(output.Toolsets, ",") != "core,issues,planning" {
+		t.Fatalf("get_project toolsets = %v, want [core issues planning]", output.Toolsets)
+	}
+}
+
 func toolNames(tools []*mcp.Tool) []string {
 	names := make([]string, len(tools))
 	for index, tool := range tools {

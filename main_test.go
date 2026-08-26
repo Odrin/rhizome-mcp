@@ -1189,6 +1189,76 @@ func TestServeWarnsWhenTransportOrProfileSelectedFromEnvironment(t *testing.T) {
 	}
 }
 
+// TestServeWarnsWhenToolsetsSelectedFromEnvironment extends the ISSUE-205
+// convention to RHIZOME_TOOLSETS: a bare `serve` must warn on stderr when
+// the toolset selection it is about to use came from the environment, and
+// stay silent when --toolsets was passed explicitly.
+func TestServeWarnsWhenToolsetsSelectedFromEnvironment(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	originalServeRunner := serveRunner
+	serveRunner = func(context.Context, *config.Config, io.Writer, projectrouting.ProjectRouter) error { return nil }
+	defer func() { serveRunner = originalServeRunner }()
+
+	stderr.Reset()
+	envConfig := &config.Config{Toolsets: "issues,planning", ToolsetsFromEnv: true}
+	if err := runCLI(ctx, envConfig, &stdout, &stderr, []string{"serve"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "toolsets \"issues,planning\" selected via environment variable") {
+		t.Fatalf("stderr = %q, want a toolsets environment-selection warning", stderr.String())
+	}
+
+	stderr.Reset()
+	flagConfig := &config.Config{Toolsets: "issues,planning", ToolsetsFromEnv: true}
+	if err := runCLI(ctx, flagConfig, &stdout, &stderr, []string{"serve", "--toolsets", "issues,planning"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if strings.Contains(stderr.String(), "selected via environment variable") {
+		t.Fatalf("stderr = %q, want no environment-selection warning when --toolsets is explicit", stderr.String())
+	}
+}
+
+// TestServeFailsWhenEnvironmentProfileMeetsToolsetsFlag drives the real,
+// unstubbed serve path: an environment-selected tool profile combined with
+// an explicit --toolsets flag has no defined precedence and must fail
+// startup before any transport opens (the mutual-exclusion check in
+// mcpadapter.NewServer), rather than silently preferring either input.
+func TestServeFailsWhenEnvironmentProfileMeetsToolsetsFlag(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	envConfig := &config.Config{ServerName: "test", Version: "v1", ToolProfile: "agent", ToolProfileFromEnv: true}
+	err := runCLI(ctx, envConfig, &stdout, &stderr, []string{"--data-root", dataRoot, "serve", "--toolsets", "issues"}, projectRoot, pathInputs)
+	if err == nil {
+		t.Fatal("serve unexpectedly started with an environment profile and a --toolsets flag")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("serve error = %v, want a mutually-exclusive message", err)
+	}
+}
+
 // TestInternalPackagesDoNotImportConfig is a regression test for ISSUE-205
 // AC4: internal/config is main's own external-input loader; no package
 // under internal/ may import it (each internal package that needs an

@@ -34,7 +34,7 @@ func commands() []command {
 		{
 			name:         "serve",
 			needsProject: false,
-			usageLines:   []string{"serve [--http-address ADDR] [--profile full|agent|read-only|migration] [--project-root PATH]"},
+			usageLines:   []string{"serve [--http-address ADDR] [--profile full|agent|read-only|migration] [--toolsets GROUP[,GROUP...]] [--project-root PATH]"},
 			run:          func(c *CLI, ctx context.Context, args []string) error { return c.runServe(ctx, args) },
 		},
 		{

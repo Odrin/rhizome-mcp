@@ -257,6 +257,195 @@ func TestToolProfileReadOnlyIgnoresGroupCoreBypassForMutatingTool(t *testing.T) 
 	}
 }
 
+// toolNamesForToolsets mirrors toolNamesFor for a free-form --toolsets
+// selection instead of a named profile.
+func toolNamesForToolsets(t *testing.T, toolsets string) []string {
+	t.Helper()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "toolsets.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.Toolsets = toolsets
+	client, stop := newClient(t, options)
+	defer stop()
+
+	tools, err := client.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	names := make([]string, len(tools.Tools))
+	for index, tool := range tools.Tools {
+		names[index] = tool.Name
+	}
+	return names
+}
+
+// TestToolsetSelectionAdvertisesExactlyCorePlusSelectedGroups asserts a
+// free-form selection composes whole capability groups: the advertised
+// catalog is the always-on core group plus every tool of each named group,
+// and nothing else.
+func TestToolsetSelectionAdvertisesExactlyCorePlusSelectedGroups(t *testing.T) {
+	names := toolNamesForToolsets(t, "issues,planning")
+	want := []string{
+		// core, advertised unconditionally
+		"open_project", "get_project",
+		// issues
+		"list_labels", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue",
+		"manage_issue_relation", "get_issue_graph", "get_planning_graph",
+		// planning
+		"validate_issue_plan", "apply_issue_plan",
+	}
+	for _, name := range want {
+		if !containsName(names, name) {
+			t.Errorf("toolset selection is missing %q", name)
+		}
+	}
+	if len(names) != len(want) {
+		t.Fatalf("toolset selection tool count = %d, want %d (got %v)", len(names), len(want), names)
+	}
+}
+
+// TestToolsetSelectionGovernanceIsAnExplicitOptIn asserts that, unlike the
+// agent profile's deliberate governance carve-out, an operator who names
+// governance in a selection gets the policy administration tools.
+func TestToolsetSelectionGovernanceIsAnExplicitOptIn(t *testing.T) {
+	names := toolNamesForToolsets(t, "governance")
+	want := []string{"open_project", "get_project", "manage_workflow_policy", "get_workflow_policy", "list_workflow_policies"}
+	for _, name := range want {
+		if !containsName(names, name) {
+			t.Errorf("governance selection is missing %q", name)
+		}
+	}
+	if len(names) != len(want) {
+		t.Fatalf("governance selection tool count = %d, want %d (got %v)", len(names), len(want), names)
+	}
+}
+
+// TestToolsetSelectionCoreIsAcceptedButRedundant asserts naming core
+// changes nothing: core is advertised whether or not it is listed.
+func TestToolsetSelectionCoreIsAcceptedButRedundant(t *testing.T) {
+	withCore := toolNamesForToolsets(t, "core,sync")
+	withoutCore := toolNamesForToolsets(t, "sync")
+	if len(withCore) != len(withoutCore) {
+		t.Fatalf("catalog with explicit core = %v, without = %v, want identical", withCore, withoutCore)
+	}
+	for _, name := range withCore {
+		if !containsName(withoutCore, name) {
+			t.Errorf("catalogs differ on %q, want identical", name)
+		}
+	}
+	for _, name := range []string{"open_project", "get_project", "get_changes"} {
+		if !containsName(withoutCore, name) {
+			t.Errorf("sync selection is missing %q", name)
+		}
+	}
+}
+
+// TestToolsetSelectionDisabledToolsAreUncallable mirrors the profile
+// equivalent: a tool outside the selection is not merely absent from
+// tools/list but fails as an unknown tool when called directly.
+func TestToolsetSelectionDisabledToolsAreUncallable(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "toolsets-uncallable.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.Toolsets = "issues"
+	client, stop := newClient(t, options)
+	defer stop()
+
+	_, err := client.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: "get_changes", Arguments: map[string]any{"since_event_id": 0}})
+	if err == nil {
+		t.Fatal("get_changes unexpectedly callable under a toolset selection that excludes sync")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unknown tool") && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		t.Fatalf("get_changes call error = %v, want an unknown-tool style error", err)
+	}
+}
+
+// TestNewServerRejectsProfileCombinedWithToolsets asserts the two catalog
+// selection inputs are mutually exclusive at composition time, before any
+// transport opens.
+func TestNewServerRejectsProfileCombinedWithToolsets(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "toolsets-exclusive.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.ToolProfile = "agent"
+	options.Toolsets = "issues"
+	if _, err := mcpadapter.NewServer(options); err == nil {
+		t.Fatal("NewServer unexpectedly accepted a profile combined with a toolset selection")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("NewServer error = %v, want a mutually-exclusive message", err)
+	}
+}
+
+// TestNewServerRejectsUnknownToolset asserts startup fails with a
+// structured, actionable error for an unsupported toolset name.
+func TestNewServerRejectsUnknownToolset(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "toolsets-invalid.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.Toolsets = "issues,repos"
+	if _, err := mcpadapter.NewServer(options); err == nil {
+		t.Fatal("NewServer unexpectedly accepted an unsupported toolset")
+	} else if !strings.Contains(err.Error(), "repos") || !strings.Contains(err.Error(), "valid toolsets") {
+		t.Fatalf("NewServer error = %v, want an actionable message naming the value and valid toolsets", err)
+	}
+}
+
+// TestToolsetSelectionReportedByGetProject asserts get_project reports the
+// active selection — tool_profile "custom" plus the advertised groups in
+// canonical order, always including core — so a client can diagnose a
+// missing tool in toolset mode exactly as it can in profile mode.
+func TestToolsetSelectionReportedByGetProject(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "toolsets-get-project.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.Toolsets = "planning,issues"
+	client, stop := newClient(t, options)
+	defer stop()
+
+	result := call(t, client, "get_project", map[string]any{})
+	var output struct {
+		ToolProfile string   `json:"tool_profile"`
+		Toolsets    []string `json:"toolsets"`
+	}
+	decodeStructured(t, result, &output)
+	if output.ToolProfile != "custom" {
+		t.Fatalf("get_project tool_profile = %q, want %q", output.ToolProfile, "custom")
+	}
+	want := []string{"core", "issues", "planning"}
+	if len(output.Toolsets) != len(want) {
+		t.Fatalf("get_project toolsets = %v, want %v", output.Toolsets, want)
+	}
+	for index, name := range want {
+		if output.Toolsets[index] != name {
+			t.Fatalf("get_project toolsets = %v, want %v (canonical order)", output.Toolsets, want)
+		}
+	}
+}
+
+// TestToolProfileModeOmitsToolsetsFromGetProject asserts profile mode is
+// unchanged: no toolsets field appears alongside the reported profile.
+func TestToolProfileModeOmitsToolsetsFromGetProject(t *testing.T) {
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "profile-omits-toolsets.db"))
+	defer db.Close(context.Background())
+	options := composeServices(t, db, source)
+	options.ToolProfile = "agent"
+	client, stop := newClient(t, options)
+	defer stop()
+
+	result := call(t, client, "get_project", map[string]any{})
+	var output struct {
+		ToolProfile string   `json:"tool_profile"`
+		Toolsets    []string `json:"toolsets"`
+	}
+	decodeStructured(t, result, &output)
+	if output.ToolProfile != "agent" {
+		t.Fatalf("get_project tool_profile = %q, want %q", output.ToolProfile, "agent")
+	}
+	if output.Toolsets != nil {
+		t.Fatalf("get_project toolsets = %v, want omitted in profile mode", output.Toolsets)
+	}
+}
+
 // TestToolProfileReportedByGetProject asserts get_project exposes the
 // active profile so a client can diagnose a missing tool.
 func TestToolProfileReportedByGetProject(t *testing.T) {

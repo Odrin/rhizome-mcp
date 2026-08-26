@@ -28,11 +28,33 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddress != "" || cfg.HTTPAddressFromEnv {
 		t.Errorf("HTTPAddress = %q fromEnv=%v, want empty/false", cfg.HTTPAddress, cfg.HTTPAddressFromEnv)
 	}
-	if cfg.ToolProfile != "full" || cfg.ToolProfileFromEnv {
-		t.Errorf("ToolProfile = %q fromEnv=%v, want full/false", cfg.ToolProfile, cfg.ToolProfileFromEnv)
+	// Blank, not "full": downstream parsing defaults blank to full, and
+	// keeping it blank here lets serve distinguish a configured profile
+	// from the default when rejecting --profile combined with --toolsets.
+	if cfg.ToolProfile != "" || cfg.ToolProfileFromEnv {
+		t.Errorf("ToolProfile = %q fromEnv=%v, want blank/false", cfg.ToolProfile, cfg.ToolProfileFromEnv)
+	}
+	if cfg.Toolsets != "" || cfg.ToolsetsFromEnv {
+		t.Errorf("Toolsets = %q fromEnv=%v, want blank/false", cfg.Toolsets, cfg.ToolsetsFromEnv)
 	}
 	if len(warnings) != 0 {
 		t.Errorf("warnings = %v, want none", warnings)
+	}
+}
+
+// TestLoadReadsToolsets covers the namespaced-only RHIZOME_TOOLSETS input:
+// newer than the namespacing migration, it has no deprecated unprefixed
+// fallback and therefore never produces a deprecation warning.
+func TestLoadReadsToolsets(t *testing.T) {
+	cfg, warnings := config.Load(fakeEnv(map[string]string{
+		"RHIZOME_TOOLSETS": "issues,planning",
+		"TOOLSETS":         "review",
+	}))
+	if cfg.Toolsets != "issues,planning" || !cfg.ToolsetsFromEnv {
+		t.Errorf("Toolsets = %q fromEnv=%v, want the namespaced value/true", cfg.Toolsets, cfg.ToolsetsFromEnv)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none (no legacy fallback exists for toolsets)", warnings)
 	}
 }
 

@@ -40,7 +40,13 @@ type Options struct {
 	ExportDirectory string
 	// ToolProfile selects which capability groups of the tool catalog this
 	// server instance advertises. Blank defaults to domain.ToolProfileFull.
+	// Mutually exclusive with Toolsets.
 	ToolProfile string
+	// Toolsets selects a free-form comma-separated list of capability
+	// groups (domain.AllToolsets) to advertise instead of a named profile;
+	// the core group is always included. Blank means no selection.
+	// Mutually exclusive with ToolProfile.
+	Toolsets string
 }
 
 type adapter struct {
@@ -49,7 +55,10 @@ type adapter struct {
 	appVersion    string
 	configVersion int
 	toolProfile   domain.ToolProfile
-	exports       *exportArtifactStore
+	// toolsets is the active free-form catalog selection; nil means the
+	// named toolProfile decides registration instead (profile.go).
+	toolsets map[domain.Toolset]bool
+	exports  *exportArtifactStore
 }
 
 // Server owns the MCP SDK server and its adapter lifecycle tracking.
@@ -69,9 +78,26 @@ func NewServer(options Options) (*Server, error) {
 	if options.ServerVersion == "" {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "server version is required", false)
 	}
+	if strings.TrimSpace(options.ToolProfile) != "" && strings.TrimSpace(options.Toolsets) != "" {
+		return nil, domain.NewError(domain.CodeInvalidArgument,
+			"tool profile and toolsets are mutually exclusive; configure at most one of --profile/RHIZOME_TOOL_PROFILE and --toolsets/RHIZOME_TOOLSETS", false,
+			domain.Detail{Field: "tool_profile", Code: "MUTUALLY_EXCLUSIVE"},
+			domain.Detail{Field: "toolsets", Code: "MUTUALLY_EXCLUSIVE"})
+	}
 	toolProfile, err := domain.ParseToolProfile(options.ToolProfile)
 	if err != nil {
 		return nil, err
+	}
+	selectedToolsets, err := domain.ParseToolsets(options.Toolsets)
+	if err != nil {
+		return nil, err
+	}
+	var toolsets map[domain.Toolset]bool
+	if selectedToolsets != nil {
+		toolsets = make(map[domain.Toolset]bool, len(selectedToolsets))
+		for _, toolset := range selectedToolsets {
+			toolsets[toolset] = true
+		}
 	}
 	exports, err := newExportArtifactStore(options.ExportDirectory)
 	if err != nil {
@@ -100,6 +126,7 @@ func NewServer(options Options) (*Server, error) {
 		appVersion:    options.ServerVersion,
 		configVersion: options.ConfigVersion,
 		toolProfile:   toolProfile,
+		toolsets:      toolsets,
 		exports:       exports,
 	}
 	server := sdkmcp.NewServer(
@@ -828,11 +855,37 @@ func (adapter *adapter) importDocument(document *string, sourceURI *string) ([]b
 	return adapter.exports.read(*sourceURI)
 }
 
+// toolProfileCustom is the tool_profile value get_project and open_project
+// report when a free-form toolset selection, not a named profile, decides
+// the advertised catalog. It is a report-only value: ParseToolProfile does
+// not accept it.
+const toolProfileCustom = "custom"
+
+// catalogReport renders the active catalog selection for get_project and
+// open_project: the named profile with no toolset list in profile mode, or
+// toolProfileCustom plus the advertised groups (canonical domain.AllToolsets
+// order, always including core, which is advertised unconditionally) in
+// toolset mode — so a client that expects a tool and doesn't see it in
+// tools/list can tell exactly which selection is the reason.
+func (adapter *adapter) catalogReport() (toolProfile string, toolsets []string) {
+	if adapter.toolsets == nil {
+		return string(adapter.toolProfile), nil
+	}
+	names := make([]string, 0, len(adapter.toolsets)+1)
+	for _, candidate := range domain.AllToolsets {
+		if candidate == domain.ToolsetCore || adapter.toolsets[candidate] {
+			names = append(names, string(candidate))
+		}
+	}
+	return toolProfileCustom, names
+}
+
 func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallToolRequest, input getProjectInput) (*sdkmcp.CallToolResult, any, error) {
 	project, err := adapter.services.ProjectService.GetProject(ctx)
 	if err != nil {
 		return adapter.failure(err)
 	}
+	toolProfile, toolsets := adapter.catalogReport()
 	output := projectOutputFor(
 		ProjectRefFromContext(ctx),
 		projectDTOFromDomain(project, input.IncludeInstructions),
@@ -840,7 +893,8 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		adapter.appVersion,
 		project.SchemaVersion,
 		adapter.configVersion,
-		string(adapter.toolProfile),
+		toolProfile,
+		toolsets,
 		project.LatestEventID,
 	)
 	return success(output, "project metadata returned")
@@ -861,6 +915,7 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
+	toolProfile, toolsets := adapter.catalogReport()
 	output := projectOutputFor(
 		lease.ProjectRef(),
 		projectDTOFromDomain(project, false),
@@ -868,7 +923,8 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 		adapter.appVersion,
 		project.SchemaVersion,
 		adapter.configVersion,
-		string(adapter.toolProfile),
+		toolProfile,
+		toolsets,
 		project.LatestEventID,
 	)
 	return success(output, "project opened")

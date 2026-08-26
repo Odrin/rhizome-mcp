@@ -190,7 +190,7 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 | Command | Purpose |
 | --- | --- |
 | `init` | Create `.agent-tracker.json` and the project database |
-| `serve [--http-address ADDR] [--profile full\|agent\|read-only\|migration] [--project-root PATH]` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog; `--project-root` to serve a project other than the working directory) |
+| `serve [--http-address ADDR] [--profile full\|agent\|read-only\|migration] [--toolsets GROUP[,GROUP...]] [--project-root PATH]` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog to a named profile, or `--toolsets` to compose one from capability groups; `--project-root` to serve a project other than the working directory) |
 | `connect TARGET [--print] [--command]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `json`) |
 | `board [--output PATH] [--serve [--http-address ADDR]]` | Status board: counts, leases, blockers, review queue; optional HTML snapshot; `--serve` runs a temporary HTTP server |
 | `issue list` / `issue show ISSUE-ID` | Inspect issues with filters |
@@ -207,7 +207,7 @@ Run `rhizome-mcp` without arguments for complete usage, `rhizome-mcp version` fo
 
 The server exposes 42 tools covering the full lifecycle: project discovery, issue CRUD with labels and relations, planning and dependency graphs, batch plan validation/apply, comments and decisions, claim/renew/checkpoint/finish work attempts with optional atomic resource reservations, work-context assembly, review requests, full-text search, delta changes, logical project export/import, and workflow-policy administration with gate evidence and diagnostics. The complete contract, including the MCP tool annotation matrix and the `full`/`agent`/`read-only`/`migration` exposure profile matrix, is in [docs/03-mcp-tools.md](docs/03-mcp-tools.md).
 
-By default `serve` advertises the complete `full` catalog. Pass `--profile agent|read-only|migration` (or set `RHIZOME_TOOL_PROFILE`) to narrow it — for example `serve --profile read-only` for a client that should never see a mutating tool. Profiles are an exposure and prompt-size control, not an authorization boundary: every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. See [docs/04-storage-runtime.md](docs/04-storage-runtime.md) §17.1 for the full environment-variable set and precedence, including the deprecated unprefixed fallback names.
+By default `serve` advertises the complete `full` catalog. Pass `--profile agent|read-only|migration` (or set `RHIZOME_TOOL_PROFILE`) to narrow it — for example `serve --profile read-only` for a client that should never see a mutating tool. When no named profile fits, pass `--toolsets` (or set `RHIZOME_TOOLSETS`) with a comma-separated list of capability groups instead — for example `serve --toolsets issues,planning` — to advertise exactly those groups plus the always-on `core` pair (`open_project`, `get_project`); the two flags are mutually exclusive. Profiles and toolsets are an exposure and prompt-size control, not an authorization boundary: every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. See [docs/04-storage-runtime.md](docs/04-storage-runtime.md) §17.1 for the full environment-variable set and precedence, including the deprecated unprefixed fallback names.
 
 ## Documentation
 

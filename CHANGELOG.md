@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Free-form toolset selection: `serve --toolsets`** — When none of the four named profiles fits a deployment, `serve --toolsets issues,planning` (or `RHIZOME_TOOLSETS`) composes the advertised catalog directly from the capability groups every tool already declares (`core`, `issues`, `planning`, `review`, `knowledge`, `lifecycle`, `governance`, `migration`, `sync`); the `core` pair (`open_project`, `get_project`) stays always-on so a client can still route and diagnose a missing tool. Mutually exclusive with `--profile`/`RHIZOME_TOOL_PROFILE`: both flags together fail as a usage error, and a mixed flag/environment combination fails startup before any transport opens rather than silently preferring either input. An unsupported, duplicate, or empty group name fails startup with an error naming the valid vocabulary; selecting toolsets from the environment prints the same explicit stderr notice profile selection does. In toolset mode `get_project`/`open_project` report `"tool_profile": "custom"` plus a `toolsets` array of the advertised groups. Like profiles, toolsets are an exposure and prompt-size control, not an authorization boundary (docs/03 §5.4).
+
 ## [1.3.3] - 2026-08-26
 
 ### Fixed

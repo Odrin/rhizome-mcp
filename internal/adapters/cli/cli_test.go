@@ -196,7 +196,7 @@ func TestRunUsageAndErrors(t *testing.T) {
 func TestServeCommandParsesHTTPAddress(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	var capturedAddress, capturedProfile string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string, profile string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string, profile string, _ string) error {
 		capturedAddress = httpAddress
 		capturedProfile = profile
 		return nil
@@ -218,7 +218,7 @@ func TestServeCommandParsesHTTPAddress(t *testing.T) {
 func TestServeCommandParsesToolProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	var capturedProfile string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string, _ string) error {
 		capturedProfile = profile
 		return nil
 	})
@@ -232,7 +232,7 @@ func TestServeCommandParsesToolProfile(t *testing.T) {
 
 func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
 		t.Fatal("serve handler unexpectedly invoked for an unsupported profile")
 		return nil
 	})
@@ -242,6 +242,61 @@ func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read-write") || !strings.Contains(err.Error(), "valid profiles") {
 		t.Fatalf("error = %v, want an actionable message naming the value and valid profiles", err)
+	}
+}
+
+func TestServeCommandParsesToolsets(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var capturedProfile, capturedToolsets string
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string, toolsets string) error {
+		capturedProfile = profile
+		capturedToolsets = toolsets
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"serve", "--toolsets", "issues,planning"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedToolsets != "issues,planning" {
+		t.Fatalf("captured toolsets = %q, want %q", capturedToolsets, "issues,planning")
+	}
+	if capturedProfile != "" {
+		t.Fatalf("captured profile = %q, want blank when --toolsets is passed", capturedProfile)
+	}
+}
+
+func TestServeCommandRejectsUnknownToolset(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
+		t.Fatal("serve handler unexpectedly invoked for an unsupported toolset")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"serve", "--toolsets", "issues,repos"})
+	if err == nil {
+		t.Fatal("expected an error for an unsupported toolset")
+	}
+	if !strings.Contains(err.Error(), "repos") || !strings.Contains(err.Error(), "valid toolsets") {
+		t.Fatalf("error = %v, want an actionable message naming the value and valid toolsets", err)
+	}
+}
+
+// TestServeCommandRejectsProfileWithToolsets asserts the two catalog
+// selection flags are mutually exclusive and fail as a usage error (exit
+// code 2) before the serve handler runs.
+func TestServeCommandRejectsProfileWithToolsets(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
+		t.Fatal("serve handler unexpectedly invoked with both --profile and --toolsets")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"serve", "--profile", "agent", "--toolsets", "issues"})
+	if err == nil {
+		t.Fatal("expected an error for --profile combined with --toolsets")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want a mutually-exclusive message", err)
+	}
+	if ExitCodeFor(err) != ExitUsage {
+		t.Fatalf("ExitCodeFor(%v) = %d, want %d (usage error)", err, ExitCodeFor(err), ExitUsage)
 	}
 }
 

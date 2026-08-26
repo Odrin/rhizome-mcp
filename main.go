@@ -242,7 +242,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 	}
 
-	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string) (err error) {
+	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string, toolsets string) (err error) {
 		if httpAddress != "" {
 			cfg.HTTPAddress = httpAddress
 		} else if cfg.HTTPAddressFromEnv {
@@ -252,6 +252,11 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 			cfg.ToolProfile = toolProfile
 		} else if cfg.ToolProfileFromEnv {
 			fmt.Fprintf(stderr, "warning: tool profile %q selected via environment variable; pass --profile explicitly to make this intentional\n", cfg.ToolProfile)
+		}
+		if toolsets != "" {
+			cfg.Toolsets = toolsets
+		} else if cfg.ToolsetsFromEnv {
+			fmt.Fprintf(stderr, "warning: toolsets %q selected via environment variable; pass --toolsets explicitly to make this intentional\n", cfg.Toolsets)
 		}
 		if router == nil {
 			dataRoot, dataRootErr := resolveDataRoot(pathInputs, dataRootOverride)
@@ -549,6 +554,7 @@ func newMCPServer(cfg *config.Config, router projectrouting.ProjectRouter) (*mcp
 		ServerVersion:   cfg.Version,
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,
 		ToolProfile:     cfg.ToolProfile,
+		Toolsets:        cfg.Toolsets,
 		ExportDirectory: exportDirectory,
 	})
 }

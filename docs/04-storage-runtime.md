@@ -554,6 +554,7 @@ RHIZOME_SERVER_NAME    legacy fallback: SERVER_NAME    default: rhizome-mcp
 RHIZOME_LOG_LEVEL      legacy fallback: LOG_LEVEL       default: info
 RHIZOME_HTTP_ADDRESS   legacy fallback: HTTP_ADDRESS    default: unset (stdio only)
 RHIZOME_TOOL_PROFILE   legacy fallback: TOOL_PROFILE    default: full
+RHIZOME_TOOLSETS       no legacy fallback (newer than the namespacing migration)   default: unset; mutually exclusive with RHIZOME_TOOL_PROFILE (docs/03 §5.4)
 RHIZOME_PROJECT_ROOT   no legacy fallback (already namespaced)
 VERSION                overrides the resolved build version; no legacy form
 XDG_DATA_HOME          Linux data-root input; platform-standard name, not namespaced
@@ -563,10 +564,11 @@ LOCALAPPDATA           Windows data-root input; platform-standard name, not name
 Using an unprefixed legacy variable (`SERVER_NAME`, `LOG_LEVEL`,
 `HTTP_ADDRESS`, `TOOL_PROFILE`) logs one stderr deprecation warning per
 variable actually used; it will stop working in a future release. Separately,
-`serve` prints its own stderr notice whenever the HTTP transport or the
-tool profile was selected by an environment variable rather than an
-explicit `--http-address` / `--profile` flag (docs/03 §5.1, docs/08),
-since those two inputs can otherwise silently change what a client sees or
+`serve` prints its own stderr notice whenever the HTTP transport, the
+tool profile, or the toolset selection was selected by an environment
+variable rather than an explicit `--http-address` / `--profile` /
+`--toolsets` flag (docs/03 §5.1 and §5.4, docs/08),
+since those inputs can otherwise silently change what a client sees or
 connects to.
 
 ## 18. Logging

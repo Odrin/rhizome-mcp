@@ -15,21 +15,24 @@ type agentSessionContextKey struct{}
 // registered tool must declare through registerTool. It is reviewed
 // alongside the ISSUE-53 annotation hints whenever a tool is added: a new
 // tool cannot be registered without picking a group, since registerTool
-// requires one.
-type toolCapabilityGroup string
+// requires one. It aliases domain.Toolset so the group vocabulary that
+// `serve --toolsets` selects from and the groups declared at registration
+// are one list that can never diverge.
+type toolCapabilityGroup = domain.Toolset
 
 const (
-	// groupCore tools are advertised in every profile, including
-	// migration and agent: open_project establishes explicit routing and
-	// get_project reports the active profile, so clients retain both tools.
-	groupCore toolCapabilityGroup = "core"
+	// groupCore tools are advertised in every profile and every toolset
+	// selection, including migration and agent: open_project establishes
+	// explicit routing and get_project reports the active catalog
+	// selection, so clients retain both tools.
+	groupCore = domain.ToolsetCore
 	// groupMigration is the bulk project transfer workflow: export,
 	// validate, and apply a logical project document. Excluded from the
 	// agent profile; the entire point of the migration profile.
-	groupMigration toolCapabilityGroup = "migration"
+	groupMigration = domain.ToolsetMigration
 	// groupSync is incremental synchronization (get_changes). Excluded
 	// from the agent profile alongside groupMigration.
-	groupSync toolCapabilityGroup = "sync"
+	groupSync = domain.ToolsetSync
 	// groupGovernance is project-wide workflow policy administration:
 	// defining, inspecting and archiving the gates that constrain every
 	// agent's work. It is excluded from the agent profile deliberately — an
@@ -38,12 +41,14 @@ const (
 	// constraints. Its read tools still reach the read-only profile, because
 	// read-only membership is decided by readOnlyHint before any group check,
 	// so an inspector can see the policy set without being able to change it.
-	groupGovernance toolCapabilityGroup = "governance"
-	groupIssues     toolCapabilityGroup = "issues"
-	groupPlanning   toolCapabilityGroup = "planning"
-	groupReview     toolCapabilityGroup = "review"
-	groupKnowledge  toolCapabilityGroup = "knowledge"
-	groupLifecycle  toolCapabilityGroup = "lifecycle"
+	// (A toolset selection that names governance is an explicit operator
+	// decision, so no such carve-out applies there.)
+	groupGovernance = domain.ToolsetGovernance
+	groupIssues     = domain.ToolsetIssues
+	groupPlanning   = domain.ToolsetPlanning
+	groupReview     = domain.ToolsetReview
+	groupKnowledge  = domain.ToolsetKnowledge
+	groupLifecycle  = domain.ToolsetLifecycle
 )
 
 // toolProfileIncludes reports whether group (and, for the read-only
@@ -78,13 +83,28 @@ func toolProfileIncludes(profile domain.ToolProfile, group toolCapabilityGroup, 
 	}
 }
 
+// toolsetSelectionIncludes reports whether group belongs in the catalog a
+// free-form `serve --toolsets` selection advertises: exactly the selected
+// groups, plus groupCore unconditionally — the same "a client can always
+// open a project and reach get_project to diagnose a missing tool" rule
+// every named profile applies. Unlike the read-only profile, a toolset
+// selection never consults annotation hints: it composes whole groups.
+func toolsetSelectionIncludes(selected map[domain.Toolset]bool, group toolCapabilityGroup) bool {
+	return group == groupCore || selected[group]
+}
+
 // registerTool builds toolDef exactly once and registers it with server
-// through addFn only if the adapter's active profile includes group. A
-// newly added tool call is required to pass a group here — there is no
-// group-less registration path — so omitting a profile decision does not
-// compile.
+// through addFn only if the adapter's active catalog selection — a
+// free-form toolset selection when one is configured, the named profile
+// otherwise — includes group. A newly added tool call is required to pass
+// a group here — there is no group-less registration path — so omitting an
+// exposure decision does not compile.
 func (adapter *adapter) registerTool(server *sdkmcp.Server, group toolCapabilityGroup, toolDef *sdkmcp.Tool, addFn func(*sdkmcp.Tool)) {
-	if !toolProfileIncludes(adapter.toolProfile, group, toolDef) {
+	if adapter.toolsets != nil {
+		if !toolsetSelectionIncludes(adapter.toolsets, group) {
+			return
+		}
+	} else if !toolProfileIncludes(adapter.toolProfile, group, toolDef) {
 		return
 	}
 	addFn(toolDef)

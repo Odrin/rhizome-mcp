@@ -455,10 +455,12 @@ it against that same in-code matrix (both in
 
 A server instance can advertise a reduced tool catalog by selecting a
 **tool profile** at startup — an exposure and prompt-size control for
-narrowing what a given deployment shows a client. It is not an
+narrowing what a given deployment shows a client. When no named profile
+fits, a **free-form toolset selection** (section 5.4) composes a catalog
+directly from the same capability groups instead. Neither is an
 authorization boundary: every tool that is advertised still enforces its
 own domain-level validation exactly as if every tool were advertised.
-Nothing about profile filtering weakens optimistic concurrency, lease
+Nothing about catalog filtering weakens optimistic concurrency, lease
 checks, or any other server-side rule.
 
 ### 5.1. Selecting a profile
@@ -500,9 +502,10 @@ every valid name:
 ```
 
 `get_project`'s `tool_profile` field always reports the profile actually
-in effect, so a client that expects a tool and doesn't see it in
-`tools/list` can immediately tell whether a profile — not a bug — is the
-reason.
+in effect (or `custom` when a free-form toolset selection is active,
+section 5.4), so a client that expects a tool and doesn't see it in
+`tools/list` can immediately tell whether a catalog selection — not a
+bug — is the reason.
 
 ### 5.2. Profile membership matrix
 
@@ -558,17 +561,66 @@ annotation matrix.
 
 `tools/list` output is lexically ordered by the SDK regardless of profile
 or registration order, so it stays deterministic across all four
-profiles.
+profiles and any toolset selection.
 
 ### 5.3. Disabled tools are absent and uncallable
 
-A tool excluded by the active profile is never registered with the
-underlying MCP server at all: it is both absent from `tools/list` and
-fails as an unknown tool if a client calls it directly by name — there is
-no hidden registration path that leaves it reachable. Stdio and local
-HTTP transports are filtered identically, since both are built from the
-same server composition and the same active profile
-(`internal/adapters/mcp.Options.ToolProfile`).
+A tool excluded by the active profile or toolset selection is never
+registered with the underlying MCP server at all: it is both absent from
+`tools/list` and fails as an unknown tool if a client calls it directly by
+name — there is no hidden registration path that leaves it reachable.
+Stdio and local HTTP transports are filtered identically, since both are
+built from the same server composition and the same active selection
+(`internal/adapters/mcp.Options.ToolProfile` / `Options.Toolsets`).
+
+### 5.4. Free-form toolset selection (`--toolsets`)
+
+When none of the four named profiles fits a deployment, `--toolsets`
+composes a catalog directly from the section 5.2 capability groups:
+
+```bash
+rhizome-mcp serve --toolsets issues,planning
+```
+
+```bash
+RHIZOME_TOOLSETS=knowledge,sync rhizome-mcp serve
+```
+
+The advertised catalog is exactly the named groups plus `core`
+(`open_project`, `get_project`), which is always included for the same
+reason every named profile includes it: a client must always be able to
+route explicitly and diagnose a missing tool. Naming `core` in the list is
+valid but redundant. The valid group names are the section 5.2 vocabulary:
+`core`, `issues`, `planning`, `review`, `knowledge`, `lifecycle`,
+`governance`, `migration`, `sync` (`internal/domain.AllToolsets` — the
+same single list registration declares groups from, so the flag's
+vocabulary can never drift from the catalog). An unsupported, duplicate,
+or empty entry fails startup before any transport opens with a structured
+error naming every valid group, exactly like an unrecognized profile name.
+
+A toolset selection differs from the named profiles in two deliberate
+ways. It never consults annotation hints — it composes whole groups, so
+`read-only` narrowing is available only as the profile. And it has no
+governance carve-out: the `agent` profile withholds `governance` so an
+agent cannot widen its own gates, but an operator who explicitly names
+`governance` in a selection gets the policy administration tools.
+
+`--profile` and `--toolsets` (and their environment variables) are
+mutually exclusive. Passing both flags fails argument parsing as a usage
+error; a mixed flag/environment combination (for example an inherited
+`RHIZOME_TOOL_PROFILE` meeting an explicit `--toolsets`) has no defined
+precedence and fails startup before any transport opens with a
+`MUTUALLY_EXCLUSIVE` invalid-argument error. The `--toolsets` flag takes
+precedence over `RHIZOME_TOOLSETS`; selecting toolsets from the
+environment rather than the flag prints the same stderr notice the
+profile does (docs/04 §17.1). `RHIZOME_TOOLSETS` is newer than the
+namespacing migration, so it has no deprecated unprefixed fallback.
+
+In toolset mode `get_project` and `open_project` report
+`"tool_profile": "custom"` plus a `toolsets` array listing the advertised
+groups (always including `core`) in the canonical order above; in profile
+mode the `toolsets` field is absent. `custom` is a report-only value —
+`--profile custom` is not accepted.
 
 ---
 
@@ -621,6 +673,7 @@ app_version
 schema_version
 config_version
 tool_profile
+toolsets        (only when tool_profile is "custom"; section 5.4)
 limits
 supported_issue_types
 supported_statuses

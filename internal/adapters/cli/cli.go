@@ -76,9 +76,10 @@ type InitHandler func(context.Context, string) error
 
 // ServeHandler runs CLI serve logic after the adapter parses the command.
 // The second parameter is the requested HTTP address (blank for stdio); the
-// third is the requested tool exposure profile (blank keeps the caller's
-// configured default).
-type ServeHandler func(context.Context, string, string) error
+// third is the requested tool exposure profile and the fourth the requested
+// free-form toolset selection (blank keeps the caller's configured default;
+// runServe guarantees at most one of the two is non-blank).
+type ServeHandler func(context.Context, string, string, string) error
 
 // BoardServeHandler runs CLI board serve logic after the adapter parses the command.
 type BoardServeHandler func(context.Context, string, io.Writer) error
@@ -216,6 +217,7 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	httpAddress := fs.String("http-address", "", "serve over loopback HTTP instead of stdio")
 	profile := fs.String("profile", "", "tool exposure profile: full, agent, read-only, or migration (default full)")
+	toolsets := fs.String("toolsets", "", "comma-separated tool capability groups to advertise instead of a profile (core is always included): issues, planning, review, knowledge, lifecycle, governance, migration, sync")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -223,10 +225,16 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	if len(positionals) != 0 {
 		return c.usageError()
 	}
+	if *profile != "" && *toolsets != "" {
+		return NewUsageError("--profile and --toolsets are mutually exclusive; pass at most one")
+	}
 	if _, err := domain.ParseToolProfile(*profile); err != nil {
 		return err
 	}
-	return c.serveHandler(ctx, *httpAddress, *profile)
+	if _, err := domain.ParseToolsets(*toolsets); err != nil {
+		return err
+	}
+	return c.serveHandler(ctx, *httpAddress, *profile, *toolsets)
 }
 
 func (c *CLI) runBackup(ctx context.Context, args []string) error {
