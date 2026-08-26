@@ -77,11 +77,11 @@ test('launcher forwards SIGTERM to the child process', { skip: process.platform 
 
     await waitForLine(child.stdout, (buf) => buf.includes('fake-binary-ready'), 5000);
 
-    const exitPromise = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    const closePromise = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
 
     child.kill('SIGTERM');
 
-    await exitPromise;
+    await closePromise;
 
     assert.match(stdout, /fake-binary-received:SIGTERM/, 'expected the fake binary to have received SIGTERM');
   } finally {
