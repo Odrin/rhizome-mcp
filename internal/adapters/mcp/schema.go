@@ -422,13 +422,13 @@ func schemaReplaceReviewRequest() *jsonschema.Schema {
 	purposes := boundedStringsSchema(domain.MaxReviewPurposes, domain.MaxPolicyKeyRunes)
 	purposes.Description = "Purposes the successor covers. Omit to inherit the predecessor's purposes; a non-empty list must cover every purpose an active review_approval policy currently requires for this target, or the call fails with REVIEW_PURPOSE_REQUIRED."
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"predecessor_request_id":       reviewRequestIdentifierSchema(),
-		"predecessor_expected_version": boundedIntegerSchema(1, 9_223_372_036_854_775_807),
-		"target_issue_version":         boundedIntegerSchema(1, 9_223_372_036_854_775_807),
-		"target_event_id":              boundedIntegerSchema(0, 9_223_372_036_854_775_807),
-		"artifact_ids":                 boundedStringsSchema(domain.MaxReviewArtifactIDs, 4_096),
+		"predecessor_request_id":       withDescription(reviewRequestIdentifierSchema(), "Review request (ULID) to supersede; must be open. A claimed predecessor fails with REVIEW_REQUEST_CLAIMED, a resolved one with REVIEW_REQUEST_NOT_REPLACEABLE."),
+		"predecessor_expected_version": withDescription(boundedIntegerSchema(1, 9_223_372_036_854_775_807), "Predecessor request version from get_review_request; a mismatch fails with VERSION_CONFLICT (re-read and retry)."),
+		"target_issue_version":         withDescription(boundedIntegerSchema(1, 9_223_372_036_854_775_807), "Issue version the successor reviews, from get_issue; must be current or the call fails with STALE_REVIEW_TARGET."),
+		"target_event_id":              withDescription(boundedIntegerSchema(0, 9_223_372_036_854_775_807), "Project event ID the reviewed work is current as of (latest_event_id from open_project, get_changes, or finish_attempt); reviewed work changing after it fails with STALE_REVIEW_TARGET."),
+		"artifact_ids":                 withDescription(boundedStringsSchema(domain.MaxReviewArtifactIDs, 4_096), "Artifact IDs the successor's frozen target covers. Not inherited: omitting this leaves the successor without artifacts even if the predecessor had them."),
 		"purposes":                     purposes,
-		"idempotency_key":              boundedStringSchema(domain.MaxIdempotencyKeyRunes),
+		"idempotency_key":              withDescription(boundedStringSchema(domain.MaxIdempotencyKeyRunes), "Required key for idempotent retries; identical requests replay the saved response, a reused key with a different request fails with IDEMPOTENCY_CONFLICT."),
 	}, "predecessor_request_id", "predecessor_expected_version", "target_issue_version", "target_event_id", "idempotency_key"))
 }
 
@@ -623,14 +623,14 @@ func schemaArtifacts() *jsonschema.Schema {
 
 func schemaSaveAttemptNote() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
-		"attempt_id":      withDescription(boundedStringSchema(26), "Active attempt receiving the note."),
-		"lease_token":     withDescription(boundedStringSchema(512), "Secret proof of the active attempt lease."),
-		"kind":            withDescription(enumSchema("progress", "finding", "warning", "checkpoint"), "How the note should be classified."),
-		"content":         withDescription(boundedStringSchema(50_000), "Required restartable note content."),
+		"attempt_id":      withDescription(boundedStringSchema(26), "Attempt ULID receiving the note; its lease must still be active."),
+		"lease_token":     withDescription(boundedStringSchema(512), "Opaque lease proof from claim_issue; required."),
+		"kind":            withDescription(enumSchema("progress", "finding", "warning", "checkpoint"), "Note classification: progress for routine status, finding for discoveries worth keeping, warning for risks or pitfalls, checkpoint for restartable state a successor resumes from (get_work_context surfaces the latest checkpoint). For durable decisions use record_decision; for issue-level discussion use add_comment."),
+		"content":         withDescription(boundedStringSchema(50_000), "Note body. Write checkpoints as self-contained restartable state (what is done, what remains, how to verify), not a transcript."),
 		"next_steps":      withDescription(boundedStringsSchema(20, 1_000), "Optional concrete actions after this note."),
-		"important":       withDescription(booleanSchema(), "Marks the note as important."),
+		"important":       withDescription(booleanSchema(), "Marks the note as important in activity and work-context views."),
 		"artifacts":       withDescription(schemaArtifacts(), "Optional artifacts created or referenced by this work."),
-		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key that replays the same note request."),
+		"idempotency_key": withDescription(nullableBoundedStringSchema(128), "Optional key for idempotent retries; replays the exact response for identical requests. Bare repeats without it append duplicate notes."),
 	}, "attempt_id", "lease_token", "kind", "content"))
 }
 

@@ -306,7 +306,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupLifecycle, tool("renew_attempt", "Extend an active work or review lease before it expires.", schemaRenewAttempt(), schemaRenewAttemptOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[renewAttemptInput, any](target, t, (*adapter).renewAttempt))
 	})
-	target.registerTool(server, groupLifecycle, tool("save_attempt_note", "Append a restartable checkpoint, finding, warning, or progress note.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupLifecycle, tool("save_attempt_note", "Append a progress, finding, warning, or checkpoint note to a leased attempt; checkpoints seed successor recovery via get_work_context; keyed retries replay.", schemaSaveAttemptNote(), schemaSaveAttemptNoteOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[saveAttemptNoteInput, any](target, t, (*adapter).saveAttemptNote))
 	})
 	// finish_attempt is lease-gated (repository requires status = 'active'),
