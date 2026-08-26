@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-08-26
+
+### Fixed
+
+- **npm launcher signal-forwarding test no longer races the child's final write** — The test asserted on the launcher's captured stdout after the child process's `exit` event, which can fire while the fake binary's `fake-binary-received:SIGTERM` acknowledgement is still buffered in the shared `stdio: 'inherit'` pipe; on slower runners the assertion ran first, which failed the v1.3.2 release's `Test npm launcher` jobs on Linux and macOS. The test now awaits `close`, which fires only after every writer has released the pipe and all buffered output has been delivered, so the assertion always sees the complete output.
+
 ## [1.3.2] - 2026-08-26
 
 ### Changed
