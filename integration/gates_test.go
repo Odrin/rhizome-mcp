@@ -77,6 +77,7 @@ func assertGateUnsatisfied(t *testing.T, result *mcp.CallToolResult, wantKeys ..
 // task without acceptance criteria cannot be claimed, evaluate_gates
 // explains why, and filling the field unlocks the claim.
 func TestIntegrationAcceptanceCriteriaGateBlocksClaim(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -129,6 +130,7 @@ func TestIntegrationAcceptanceCriteriaGateBlocksClaim(t *testing.T) {
 // clears one requirement at a time, and completion succeeds once both are
 // recorded.
 func TestIntegrationEvidenceGatesBlockCompletion(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -232,6 +234,7 @@ func TestIntegrationEvidenceGatesBlockCompletion(t *testing.T) {
 // purposes cover "security" grants the approval and closes the issue
 // through the approve_review enforcement point.
 func TestIntegrationSecurityReviewGateRequiresPurposeScopedApproval(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

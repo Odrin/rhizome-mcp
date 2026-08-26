@@ -15,6 +15,7 @@ import (
 // any type that is not a task or bug, so a finished epic had no route to a
 // terminal status at all.
 func TestIntegrationEpicReachesTerminalStatus(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

@@ -44,8 +44,11 @@ jobs:
 
       # A race-instrumented harness builds a race-instrumented server; see
       # integrationBuildArgs in integration/environment_test.go.
+      # -run '^TestIntegration' stops this step from re-running every unit test
+      # the previous step just ran (the integration build tag only adds files,
+      # so ./... alone would), the same way the coverage job filters.
       - name: Run integration tests
-        run: go test ${{ matrix.race }} -tags=integration ./...
+        run: go test ${{ matrix.race }} -tags=integration -run '^TestIntegration' ./...
 
       # Seed corpora run everywhere as ordinary unit tests; the generative pass
       # costs wall-clock time, so it runs on Linux only with a short fixed

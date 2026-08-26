@@ -30,6 +30,7 @@ import (
 // SQLITE_BUSY/"database is locked" failure, and the loser's non-conflicting
 // resource is never partially written.
 func TestIntegrationReservationRace(t *testing.T) {
+	t.Parallel()
 	// Every case reserves under its own top-level directory (or logical
 	// namespace): reservations acquired by a winning subtest stay active for
 	// the rest of the run, so sharing one path across cases would make later
@@ -131,6 +132,7 @@ func TestIntegrationReservationRace(t *testing.T) {
 // in one atomic call. The reservation A held must end up released with reason
 // "expired" rather than permanently stuck.
 func TestIntegrationReservationExpiryRecovery(t *testing.T) {
+	t.Parallel()
 	const contendedPath = "internal/reservation/expiry.go"
 
 	env := newIntegrationEnvironment(t)

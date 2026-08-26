@@ -16,6 +16,7 @@ import (
 // read-only) and list_issues (non-core, read-only) must not durably write
 // agent_sessions.last_seen_at, while create_issue (mutating) must.
 func TestIntegrationStdioReadOnlyToolsDoNotTouchAgentSession(t *testing.T) {
+	t.Parallel()
 	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
@@ -57,6 +58,7 @@ func TestIntegrationStdioReadOnlyToolsDoNotTouchAgentSession(t *testing.T) {
 // test above over the HTTP transport, confirming the same contract holds
 // regardless of which transport carries the session.
 func TestIntegrationHTTPReadOnlyToolsDoNotTouchAgentSession(t *testing.T) {
+	t.Parallel()
 	t.Skip("explicit agent_session_handle lifecycle replaces connection-derived attribution")
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")

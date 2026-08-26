@@ -12,6 +12,7 @@ import (
 )
 
 func TestIntegrationDefaultResponseBudgets(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 	baselineProject := callIntegrationTool(t, session, "get_project", map[string]any{})

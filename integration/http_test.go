@@ -26,6 +26,7 @@ import (
 )
 
 func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
+	t.Parallel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen on loopback: %v", err)
@@ -82,6 +83,7 @@ func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
 }
 
 func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 	repoRoot := filepath.Join(tempDir, "repo")
 	startupDir := filepath.Join(tempDir, "outside")
@@ -289,6 +291,7 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 }
 
 func TestIntegrationHTTPServeEphemeralPortWorkflow(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
 	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })
@@ -300,6 +303,7 @@ func TestIntegrationHTTPServeEphemeralPortWorkflow(t *testing.T) {
 }
 
 func TestIntegrationHTTPServeConcurrentClientsOnEphemeralPort(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
 	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })
@@ -325,6 +329,7 @@ func TestIntegrationHTTPServeConcurrentClientsOnEphemeralPort(t *testing.T) {
 }
 
 func TestIntegrationHTTPServeStopsOnInterrupt(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
 	endpoint := "http://" + server.waitForEndpoint(t) + "/mcp"
@@ -343,6 +348,7 @@ func TestIntegrationHTTPServeStopsOnInterrupt(t *testing.T) {
 }
 
 func TestIntegrationHTTPServeRejectsHostnameAddress(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "localhost:0")
 	if err := server.waitForExit(t); err == nil {
@@ -354,6 +360,7 @@ func TestIntegrationHTTPServeRejectsHostnameAddress(t *testing.T) {
 }
 
 func TestIntegrationMCPConformanceMatrix(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
 	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })

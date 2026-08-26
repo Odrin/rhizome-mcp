@@ -17,6 +17,7 @@ import (
 )
 
 func TestIntegrationSearchClassifiesParserNoSuchColumnAsInvalidInput(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 	result := callIntegrationTool(t, session, "search", map[string]any{"query": "multi-project"})
@@ -38,6 +39,7 @@ func TestIntegrationSearchClassifiesParserNoSuchColumnAsInvalidInput(t *testing.
 }
 
 func TestIntegrationSearchFreshnessLiveIndexAndRebuild(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

@@ -8,6 +8,7 @@ import (
 )
 
 func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -149,6 +150,7 @@ func TestIntegrationForceReleaseAttemptObservedByRunningServer(t *testing.T) {
 }
 
 func TestIntegrationForceReleaseAttemptErrorCases(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	t.Run("missing attempt", func(t *testing.T) {

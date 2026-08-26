@@ -14,6 +14,7 @@ import (
 )
 
 func TestIntegrationEveryAdvertisedToolIsCallable(t *testing.T) {
+	t.Parallel()
 	// Tools that were never previously exercised over a real transport
 	requiredTools := []string{
 		"apply_issue_plan",

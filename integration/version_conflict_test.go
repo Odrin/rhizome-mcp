@@ -10,6 +10,7 @@ import (
 )
 
 func TestIntegrationVersionConflict(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	attached := env.attach()
 

@@ -37,6 +37,7 @@ const (
 // tests (main_test.go:TestBackupCommandCreatesValidatedBackup,
 // internal/adapters/cli/cli_test.go:TestRunBackup) cannot answer.
 func TestIntegrationBackupConsistencyDuringConcurrentWrites(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

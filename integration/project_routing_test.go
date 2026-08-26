@@ -14,6 +14,7 @@ import (
 )
 
 func TestIntegrationProjectRoutingSharedStdioServer(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 	repoA := filepath.Join(tempDir, "repo-a")
 	repoB := filepath.Join(tempDir, "repo-b")

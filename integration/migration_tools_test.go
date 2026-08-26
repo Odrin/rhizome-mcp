@@ -14,6 +14,7 @@ import (
 )
 
 func TestIntegrationMigrationProfileExportValidateApply(t *testing.T) {
+	t.Parallel()
 	sourceEnv := newIntegrationEnvironment(t)
 	destEnv := newIntegrationEnvironment(t)
 
@@ -115,6 +116,7 @@ func TestIntegrationMigrationProfileExportValidateApply(t *testing.T) {
 }
 
 func TestIntegrationMigrationProfileValidateImportRejectsInvalidDocument(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connectWithServeArgs(t, "--profile", "migration")
 

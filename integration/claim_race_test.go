@@ -27,6 +27,7 @@ import (
 // boundaries, and that a loser observes a stable ACTIVE_ATTEMPT_EXISTS domain
 // error rather than a raw SQLITE_BUSY/"database is locked" failure.
 func TestIntegrationClaimRace(t *testing.T) {
+	t.Parallel()
 	const raceIterations = 5
 
 	env := newIntegrationEnvironment(t)

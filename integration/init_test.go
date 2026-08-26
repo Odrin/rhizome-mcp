@@ -12,6 +12,7 @@ import (
 )
 
 func TestIntegrationInitRejectsExistingInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 	repository := filepath.Join(tempDir, "repository")
 	if err := os.Mkdir(repository, 0o755); err != nil {
@@ -43,6 +44,7 @@ func TestIntegrationInitRejectsExistingInRepositoryDataRootThenRetrySucceeds(t *
 }
 
 func TestIntegrationInitRejectsNonexistentInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 	repository := filepath.Join(tempDir, "repository")
 	if err := os.Mkdir(repository, 0o755); err != nil {

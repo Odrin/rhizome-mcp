@@ -18,6 +18,7 @@ import (
 // against the same data root and asserts the checkpoint, the active lease,
 // and the pre-crash lease token all survived.
 func TestIntegrationAttemptSurvivesCrashAndRestart(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0")

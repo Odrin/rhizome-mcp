@@ -18,6 +18,7 @@ import (
 // mutating tool is genuinely uncallable (not just unlisted) once excluded,
 // and that get_project reports the active profile.
 func TestIntegrationStdioToolProfileFiltering(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connectWithServeArgs(t, "--profile", "read-only")
 
@@ -59,6 +60,7 @@ func TestIntegrationStdioToolProfileFiltering(t *testing.T) {
 // the HTTP transport, and additionally asserts both transports agree on
 // exactly the same advertised tool set for the same profile.
 func TestIntegrationHTTPToolProfileFiltering(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	server := launchIntegrationHTTPServer(t, env, "127.0.0.1:0", "--profile", "read-only")
 	t.Cleanup(func() { stopIntegrationHTTPServer(t, server) })

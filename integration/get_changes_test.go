@@ -15,6 +15,7 @@ import (
 // equivalence between paged and unpaged results, issue_id/event_types filtering,
 // and the idle-consumer steady state.
 func TestIntegrationGetChangesIncrementalSync(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

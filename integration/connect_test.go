@@ -15,6 +15,7 @@ import (
 )
 
 func TestIntegrationConnectClaudeCreatesConfig(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	output := runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "claude")
@@ -66,6 +67,7 @@ func TestIntegrationConnectClaudeCreatesConfig(t *testing.T) {
 }
 
 func TestIntegrationConnectClaudePrintDoesNotWrite(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "claude", "--print")
@@ -77,6 +79,7 @@ func TestIntegrationConnectClaudePrintDoesNotWrite(t *testing.T) {
 }
 
 func TestIntegrationConnectClaudeIdempotent(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "claude")
@@ -100,6 +103,7 @@ func TestIntegrationConnectClaudeIdempotent(t *testing.T) {
 }
 
 func TestIntegrationConnectClaudePreservesOtherEntries(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	mcpJSONPath := filepath.Join(env.repository, ".mcp.json")
@@ -145,6 +149,7 @@ func TestIntegrationConnectClaudePreservesOtherEntries(t *testing.T) {
 }
 
 func TestIntegrationConnectVSCodeCreatesConfig(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "vscode")
@@ -190,6 +195,7 @@ func TestIntegrationConnectVSCodeCreatesConfig(t *testing.T) {
 }
 
 func TestIntegrationConnectVSCodeIdempotent(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "vscode")
@@ -213,6 +219,7 @@ func TestIntegrationConnectVSCodeIdempotent(t *testing.T) {
 }
 
 func TestIntegrationConnectCodexPrint(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
@@ -240,6 +247,7 @@ func TestIntegrationConnectCodexPrint(t *testing.T) {
 }
 
 func TestIntegrationConnectJSON(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
@@ -273,6 +281,7 @@ func TestIntegrationConnectJSON(t *testing.T) {
 }
 
 func TestIntegrationConnectUnknownTarget(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	_, stderr, err := runIntegrationCommandExpectingFailure(t, env.repository, "--data-root", env.dataRoot, "connect", "unknown")
@@ -296,6 +305,7 @@ func TestIntegrationConnectUnknownTarget(t *testing.T) {
 // (walking up from cwd) and write the config there, not at whatever
 // subdirectory it was invoked from.
 func TestIntegrationConnectFromSubdirectoryUsesDiscoveredRoot(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	subdirectory := filepath.Join(env.repository, "nested", "deeper")
 	if err := os.MkdirAll(subdirectory, 0o755); err != nil {
@@ -339,6 +349,7 @@ func TestIntegrationConnectFromSubdirectoryUsesDiscoveredRoot(t *testing.T) {
 // project identity is found at or above the starting directory, rather
 // than silently writing a config for a project that does not exist.
 func TestIntegrationConnectOutsideProjectFailsClearly(t *testing.T) {
+	t.Parallel()
 	outsideDir := t.TempDir()
 	dataRoot := filepath.Join(t.TempDir(), "data")
 
@@ -359,6 +370,7 @@ func TestIntegrationConnectOutsideProjectFailsClearly(t *testing.T) {
 // --project-root to the same discovered root, using the same shared
 // command-resolution logic, modulo each target's own envelope shape.
 func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	extractArgs := func(t *testing.T, target string) []interface{} {
@@ -416,6 +428,7 @@ func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
 // instead of this resolved binary's absolute path, which points into the
 // npx cache and goes stale on eviction or a version bump.
 func TestIntegrationConnectEmitsNpxFormUnderLauncherEnvVar(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)

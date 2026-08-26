@@ -32,6 +32,7 @@ import (
 // through the MCP server, then verifies `rhizome-mcp board` in all three
 // modes: --format table, --format json, and --output (self-contained HTML).
 func TestIntegrationBoardCommand(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -244,6 +245,7 @@ func TestIntegrationBoardCommand(t *testing.T) {
 }
 
 func TestIntegrationBoardServe(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 	openIssue := mustCreateBoardIssue(t, session, map[string]any{
@@ -470,6 +472,7 @@ func TestIntegrationBoardServe(t *testing.T) {
 }
 
 func TestIntegrationBoardServeSearch(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -691,6 +694,7 @@ func TestIntegrationBoardServeSearch(t *testing.T) {
 }
 
 func TestIntegrationBoardRefresh(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 	issue := mustCreateBoardIssue(t, session, map[string]any{
@@ -955,6 +959,7 @@ func parseIntegrationBoardServeURL(line string) string {
 }
 
 func TestIntegrationGraphProjectionStaysBoundedWithLargeBodies(t *testing.T) {
+	t.Parallel()
 	const largeGraphFixtureTimeout = 30 * time.Second
 
 	env := newIntegrationEnvironment(t)
@@ -1032,6 +1037,7 @@ func mustCreateBoardIssue(t *testing.T, session *mcp.ClientSession, arguments ma
 // thousands of ULIDs on every board poll. count > len(list) plus the
 // truncation reason is what makes the shrink explicit instead of silent.
 func TestIntegrationBoardTruncationReportsTrueEntryPoints(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

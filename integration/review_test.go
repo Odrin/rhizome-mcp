@@ -13,6 +13,7 @@ import (
 )
 
 func TestIntegrationReviewWorkflow(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -129,6 +130,7 @@ func TestIntegrationReviewWorkflow(t *testing.T) {
 }
 
 func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
@@ -306,6 +308,7 @@ func TestIntegrationReplaceReviewRequestWorkflow(t *testing.T) {
 }
 
 func TestIntegrationReviewWorkflowReReview(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

@@ -17,6 +17,7 @@ import (
 )
 
 func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
+	t.Parallel()
 	sourceEnv := newIntegrationEnvironment(t)
 	destEnv := newIntegrationEnvironment(t)
 	session := sourceEnv.connect(t)
@@ -191,6 +192,7 @@ func assertRoundTripReservation(t *testing.T, side string, document domain.Logic
 // see docs/07 §7), must still import successfully now that the importer
 // also understands version 2's reservations namespace.
 func TestIntegrationLogicalProjectVersion1DocumentImportsWithoutExtensions(t *testing.T) {
+	t.Parallel()
 	destEnv := newIntegrationEnvironment(t)
 
 	const issueID = "01ARZ3NDEKTSV4RRFFQ69G5FJB"
@@ -776,6 +778,7 @@ func canonicalizeLogicalProjectDocumentWithMappings(document domain.LogicalProje
 // kept its frozen target version, so the restored request was immediately
 // stale and no reviewer could ever claim it.
 func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
+	t.Parallel()
 	sourceEnv := newIntegrationEnvironment(t)
 	destEnv := newIntegrationEnvironment(t)
 	session := sourceEnv.connect(t)
@@ -891,6 +894,7 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 // Restored verbatim, that cursor could never be passed: post-import activity
 // on the reviewed issue left the request looking fresh forever.
 func TestIntegrationLogicalProjectRemapsEventCursorsAcrossASparseExport(t *testing.T) {
+	t.Parallel()
 	sourceEnv := newIntegrationEnvironment(t)
 	destEnv := newIntegrationEnvironment(t)
 	session := sourceEnv.connect(t)

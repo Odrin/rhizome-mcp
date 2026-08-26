@@ -9,6 +9,7 @@ import (
 )
 
 func TestIntegrationSmoke(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	runIntegrationCommand(t, env, "--data-root", env.dataRoot, "doctor", "--format", "json")
 
@@ -45,6 +46,7 @@ func TestIntegrationSmoke(t *testing.T) {
 }
 
 func TestIntegrationIssueWorkflow(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 

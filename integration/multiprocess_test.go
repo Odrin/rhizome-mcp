@@ -44,6 +44,7 @@ func killIntegrationHTTPServer(t *testing.T, server *integrationHTTPServer) {
 // torn down via killIntegrationHTTPServer so that helper is exercised by a
 // committed test rather than only compiled.
 func TestIntegrationMultiProcessServersShareDataRoot(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	attached := env.attach()
 	if got, want := mustProjectDatabasePath(t, attached), mustProjectDatabasePath(t, env); got != want {

@@ -17,6 +17,7 @@ import (
 // absent from compact items (not merely truncated), and that view: "full"
 // is a strictly larger, opt-in response containing them.
 func TestIntegrationListIssuesCompactViewStaysWithinByteBudget(t *testing.T) {
+	t.Parallel()
 	env := newIntegrationEnvironment(t)
 	session := env.connect(t)
 
