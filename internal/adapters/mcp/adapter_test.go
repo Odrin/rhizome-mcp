@@ -1485,7 +1485,7 @@ func TestReviewRequestToolsLifecycle(t *testing.T) {
 		t.Fatalf("create issue = %#v", createdIssue)
 	}
 
-	// Create review request using direct repository access (create_review_request MCP tool is deprecated).
+	// Create review request using direct repository access (no MCP tool creates an initial review request).
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)

@@ -583,7 +583,7 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 		resolved[name] = r
 	}
 
-	// Create a review request using direct repository access (create_review_request MCP tool is deprecated).
+	// Create a review request using direct repository access (no MCP tool creates an initial review request).
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)

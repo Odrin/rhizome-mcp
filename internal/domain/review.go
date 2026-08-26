@@ -146,7 +146,7 @@ type ReviewEvent struct {
 }
 
 // MaxReviewArtifactIDs bounds the artifact set carried by one review request
-// or replacement, matching the existing create_review_request bound.
+// or replacement, enforced at every request creation and replacement path.
 const MaxReviewArtifactIDs = 20
 
 // MaxReviewPurposes bounds the purposes list on a review request or target,

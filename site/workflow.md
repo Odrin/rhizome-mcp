@@ -29,9 +29,9 @@ Validation failures leave the destination untouched, so recover by correcting th
 
 Use the review workflow when implementation is ready for a reviewer to verify it against a frozen snapshot of the target issue.
 
-1. Request: create a review request with `create_review_request` and the exact target issue version, event position, and artifact IDs you want to preserve.
+1. Request: create a review request that freezes the exact target issue version, event position, and artifact IDs you want to preserve. An open request whose target went stale is refreshed with `replace_review_request`, which supersedes it and opens a successor against the new target in one transaction.
 2. Discover: use `get_review_request` or `list_review_requests` to find open or claimable review requests. A claimable request stays visible until it is claimed or superseded.
-3. Claim: create a review attempt with `claim_issue` against the review issue, then attach that active review attempt to the review request. If the lease expires before completion, the request returns to `open` and can be claimed again.
+3. Claim: start a review attempt with `claim_issue` against the review issue; the claim automatically binds the issue's open review request to the new attempt in the same transaction. If the lease expires before completion, the request returns to `open` and can be claimed again.
 4. Complete: finish the review attempt with `finish_attempt` using `approved`, `changes_requested`, or `blocked`. `approved` marks the review request approved and the issue `done`; `changes_requested` leaves the issue `ready` and records follow-up work; `blocked` marks the issue `blocked`.
 5. Follow-up and re-request: after `changes_requested`, create a follow-up implementation task and then create a fresh review request for the new target version/event. Re-run the discover/claim/complete loop for the new request.
 
