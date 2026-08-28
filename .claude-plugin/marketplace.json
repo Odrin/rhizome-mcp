@@ -1,0 +1,15 @@
+{
+  "name": "rhizome",
+  "owner": {
+    "name": "Odrin",
+    "url": "https://github.com/Odrin"
+  },
+  "plugins": [
+    {
+      "name": "rhizome-mcp",
+      "source": "./plugins/rhizome-mcp",
+      "description": "Crash-safe task tracking and coordination for AI coding agents: renewable expiring leases, resumable attempts, review workflow. Local SQLite, no daemon, no accounts.",
+      "category": "productivity"
+    }
+  ]
+}
