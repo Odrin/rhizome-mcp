@@ -12,9 +12,18 @@
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "model-context-protocol",
     "ai-agents",
+    "agent-coordination",
+    "multi-agent",
+    "coding-agents",
     "task-tracker",
+    "issue-tracker",
+    "claude-code",
+    "local-first",
+    "sqlite",
+    "lease",
     "rhizome-mcp"
   ],
   "mcpName": "io.github.Odrin/rhizome-mcp",
