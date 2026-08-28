@@ -10,6 +10,8 @@
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Odrin/rhizome-mcp" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Odrin/rhizome-mcp" alt="License"></a>
   <a href="https://www.npmjs.com/package/rhizome-mcp"><img src="https://img.shields.io/npm/v/rhizome-mcp" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/rhizome-mcp"><img src="https://img.shields.io/npm/dm/rhizome-mcp" alt="npm downloads"></a>
+  <a href="https://registry.modelcontextprotocol.io"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0%2Fservers%3Fsearch%3Dio.github.Odrin%252Frhizome-mcp%26version%3Dlatest&query=%24.servers%5B0%5D.server.version&label=MCP%20Registry&prefix=v&color=8A2BE2" alt="MCP Registry"></a>
 </p>
 
 **rhizome-mcp** is a local-first MCP server for task tracking and coordination of autonomous AI coding agents. It gives agents from different products — Claude Code, Codex, GitHub Copilot, VS Code, and any other MCP-compatible client — a shared, durable view of project work: one static Go binary, one SQLite database per project, no accounts, no Docker, no network dependency.
