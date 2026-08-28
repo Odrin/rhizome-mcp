@@ -2,4 +2,5 @@
 - [Quick start](./quick-start.md)
 - [Workflow](./workflow.md)
 - [Project routing](./project-routing.md)
+- [Comparison](./compare.md)
 - [CLI reference](./cli.md)
