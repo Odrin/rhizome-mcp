@@ -11,6 +11,7 @@ tapes in `tapes/`; nothing is staged by hand.
 | `lease-expiry.gif` | [01-lease-expiry.sh](01-lease-expiry.sh) | Claims are renewable expiring leases; a second claim fails with `ACTIVE_ATTEMPT_EXISTS`; `in_progress` is derived from the live lease; after the lease expires, another session claims the issue and resumes from the checkpoint. |
 | `reservation-conflict.gif` | [02-reservation-conflict.sh](02-reservation-conflict.sh) | Resource reservations are leased with the claim, all-or-nothing; an overlapping reservation fails the whole claim atomically with `RESOURCE_RESERVATION_CONFLICT`, naming the holder and its lease expiry. |
 | `board.png` | [03-seed-board.sh](03-seed-board.sh) | `rhizome-mcp board` on a busy project: live leases, a reservation, blocked issues with reasons — no server, no login. |
+| `review-superseded.gif` | [04-review-superseded.sh](04-review-superseded.sh) | A review request pins an exact issue version and event position; after the issue changes, approval is refused with `REVIEW_REQUEST_REQUIRED` and the request can only be superseded into a successor pinned to the new target. |
 
 Each driver talks to a real `rhizome-mcp serve --http-address 127.0.0.1:0`
 process over the stateless HTTP transport (docs/08) with curl + jq, against a
@@ -33,6 +34,7 @@ really waits for the lease to expire):
 bash demo/01-lease-expiry.sh all
 bash demo/02-reservation-conflict.sh all
 bash demo/03-seed-board.sh all
+bash demo/04-review-superseded.sh all
 ```
 
 The 60-second lease wait is hidden in the tape with `Hide`/`Show`; everything
