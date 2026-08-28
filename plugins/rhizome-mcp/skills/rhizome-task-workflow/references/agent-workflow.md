@@ -46,7 +46,8 @@ Call `finish_attempt` with the retained `project_ref` exactly once when work com
 - Completed implementation normally targets `review` or `done` according to project policy.
 - Failed work records a failure reason and truthful details.
 - Handoffs use `outcome: interrupted` with `interruption_reason_code: handoff`.
-- Review attempts set `review_outcome`: `approved` marks the review request approved and the issue `done`; `changes_requested` returns the issue to `ready` and records follow-up work; `blocked` marks the issue `blocked`.
+- Completing to `review` does not itself open a review request. Call `create_review_request` with the issue version and `latest_event_id` that `finish_attempt` returned to freeze the exact target a reviewer will verify. Use `replace_review_request` only to supersede a request that is still `open`; a resolved one cannot be replaced.
+- Review attempts set `review_outcome`: `approved` marks the review request approved and the issue `done`; `changes_requested` returns the issue to `ready` and records follow-up work; `blocked` marks the issue `blocked`. A re-review after `changes_requested` needs a fresh `create_review_request` against the new target.
 - If relevant changes happened after the claim, inspect them and acknowledge the issue version and latest event ID.
 
 Never leave an attempt active merely because the agent is stopping.

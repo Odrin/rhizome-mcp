@@ -37,7 +37,9 @@ Do not retry a stale patch blindly. Use bounded plan validation plus atomic plan
 
 ## Review and completion
 
-Implementation attempts should record verification and artifacts before moving work to review or done. Review attempts finish with one explicit outcome and the server maps it to issue state: `approved` marks the review request approved and the issue `done`; `changes_requested` returns the issue to `ready` so follow-up work stays claimable; `blocked` marks the issue `blocked`.
+Implementation attempts should record verification and artifacts before moving work to review or done. Moving an issue to `review` does not by itself ask anyone to review it: open a review request with `create_review_request`, freezing the issue version and event position the reviewer must verify. `claim_issue` then binds that open request to the review attempt automatically. Use `replace_review_request` only to supersede a request that is still `open`; once a request has resolved, the next one is a fresh `create_review_request`.
+
+Review attempts finish with one explicit outcome and the server maps it to issue state: `approved` marks the review request approved and the issue `done`; `changes_requested` returns the issue to `ready` so follow-up work stays claimable; `blocked` marks the issue `blocked`.
 
 Use comments for transient collaboration. Use decisions for durable choices that future agents must follow. Supersede decisions append-only rather than rewriting history.
 
