@@ -546,3 +546,184 @@ func advanceReviewedIssue(t *testing.T, db *sqlite.DB, issueID string) (int64, i
 	}
 	return currentReviewTarget(t, db, issueID)
 }
+
+// TestIntegrationReviewRequestBootstrapUsesOnlyAdvertisedTools walks the
+// whole review workflow -- open a request, discover it, claim it, resolve it
+// -- without touching the repository directly. Every other review test in
+// this file reaches past the MCP surface to seed its request through
+// sqlite.ReviewRepository, which is exactly why ISSUE-247 went unnoticed:
+// create_review_request was removed on the premise that
+// replace_review_request "provides the combined functionality", but replace
+// rejects a blank predecessor_request_id, so step 1 of docs/09's operational
+// guide had no tool behind it and no test could tell. Keeping this test
+// repository-free is the point -- it fails if the first request ever again
+// becomes unreachable from tools/call alone.
+func TestIntegrationReviewRequestBootstrapUsesOnlyAdvertisedTools(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type":        "task",
+		"title":       "Review request bootstrap",
+		"description": "Open the first review request entirely over the MCP surface.",
+		"status":      "ready",
+	})
+	var issue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" || issue.DisplayID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+
+	claimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
+		"issue_id":      issue.DisplayID,
+		"lease_seconds": 60,
+	})
+	var workClaim struct {
+		Attempt struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeIntegrationResult(t, claimed, &workClaim)
+	if claimed.IsError || workClaim.Attempt.Kind != "work" || workClaim.LeaseToken == "" {
+		t.Fatalf("claim_issue result = %#v, decoded = %#v", claimed, workClaim)
+	}
+
+	// finish_attempt hands back the exact target the request must freeze:
+	// the issue version it left behind and the event position it observed.
+	finishedWork := callIntegrationTool(t, session, "finish_attempt", map[string]any{
+		"attempt_id":          workClaim.Attempt.ID,
+		"lease_token":         workClaim.LeaseToken,
+		"outcome":             "completed",
+		"result_summary":      "Implementation ready for review.",
+		"target_issue_status": "review",
+		"verification":        []string{"go test -tags=integration ."},
+	})
+	var workCompletion struct {
+		Issue struct {
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
+		} `json:"issue"`
+		LatestEventID int64 `json:"latest_event_id"`
+	}
+	decodeIntegrationResult(t, finishedWork, &workCompletion)
+	if finishedWork.IsError || workCompletion.Issue.Status != "review" || workCompletion.Issue.Version < 1 {
+		t.Fatalf("finish_attempt result = %#v, decoded = %#v", finishedWork, workCompletion)
+	}
+
+	// Completing to review does not create a request on its own, so nothing
+	// is claimable yet. This assertion is the empirical finding ISSUE-247
+	// recorded, kept as a guard: if that behavior ever changes, the tool
+	// this test then goes on to call would silently create a second request.
+	listedBefore := callIntegrationTool(t, session, "list_review_requests", map[string]any{})
+	var beforeBootstrap struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	decodeIntegrationResult(t, listedBefore, &beforeBootstrap)
+	if listedBefore.IsError || len(beforeBootstrap.Items) != 0 {
+		t.Fatalf("list_review_requests before bootstrap = %#v, decoded = %#v", listedBefore, beforeBootstrap)
+	}
+
+	requested := callIntegrationTool(t, session, "create_review_request", map[string]any{
+		"issue_id":             issue.DisplayID,
+		"target_issue_version": workCompletion.Issue.Version,
+		"target_event_id":      workCompletion.LatestEventID,
+		"artifact_ids":         []string{"artifact-bootstrap"},
+	})
+	var openRequest struct {
+		ID                 string   `json:"id"`
+		IssueID            string   `json:"issue_id"`
+		Status             string   `json:"status"`
+		Claimable          bool     `json:"claimable"`
+		Purposes           []string `json:"purposes"`
+		TargetIssueVersion int64    `json:"target_issue_version"`
+		Version            int64    `json:"version"`
+	}
+	decodeIntegrationResult(t, requested, &openRequest)
+	if requested.IsError || openRequest.ID == "" || openRequest.Status != "open" || !openRequest.Claimable {
+		t.Fatalf("create_review_request result = %#v, decoded = %#v", requested, openRequest)
+	}
+	if openRequest.IssueID != issue.ID || openRequest.TargetIssueVersion != workCompletion.Issue.Version {
+		t.Fatalf("create_review_request froze %#v, want issue %s at version %d", openRequest, issue.ID, workCompletion.Issue.Version)
+	}
+	if len(openRequest.Purposes) != 1 || openRequest.Purposes[0] != "implementation" {
+		t.Fatalf("create_review_request purposes = %v, want the [implementation] default", openRequest.Purposes)
+	}
+
+	// Discover: the request must be visible as claimable to a reviewer that
+	// only ever calls advertised tools.
+	listed := callIntegrationTool(t, session, "list_review_requests", map[string]any{"claimable": true})
+	var discovered struct {
+		Items []struct {
+			ID        string `json:"id"`
+			Claimable bool   `json:"claimable"`
+		} `json:"items"`
+	}
+	decodeIntegrationResult(t, listed, &discovered)
+	if listed.IsError || len(discovered.Items) != 1 || discovered.Items[0].ID != openRequest.ID || !discovered.Items[0].Claimable {
+		t.Fatalf("list_review_requests result = %#v, decoded = %#v", listed, discovered)
+	}
+
+	// Claim: claim_issue binds the open request to the new review attempt in
+	// the same transaction, with no separate bind operation.
+	reviewClaimed := callIntegrationTool(t, session, "claim_issue", map[string]any{
+		"issue_id":      issue.DisplayID,
+		"lease_seconds": 60,
+	})
+	var reviewClaim struct {
+		Attempt struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeIntegrationResult(t, reviewClaimed, &reviewClaim)
+	if reviewClaimed.IsError || reviewClaim.Attempt.Kind != "review" || reviewClaim.LeaseToken == "" {
+		t.Fatalf("claim_issue on a review issue result = %#v, decoded = %#v", reviewClaimed, reviewClaim)
+	}
+
+	bound := callIntegrationTool(t, session, "get_review_request", map[string]any{"review_request_id": openRequest.ID})
+	var boundRequest struct {
+		Status          string  `json:"status"`
+		ActiveAttemptID *string `json:"active_attempt_id"`
+	}
+	decodeIntegrationResult(t, bound, &boundRequest)
+	if bound.IsError || boundRequest.Status != "claimed" || boundRequest.ActiveAttemptID == nil || *boundRequest.ActiveAttemptID != reviewClaim.Attempt.ID {
+		t.Fatalf("get_review_request after claim = %#v, decoded = %#v", bound, boundRequest)
+	}
+
+	// Complete: the review outcome resolves the request the bootstrap opened.
+	finishedReview := callIntegrationTool(t, session, "finish_attempt", map[string]any{
+		"attempt_id":     reviewClaim.Attempt.ID,
+		"lease_token":    reviewClaim.LeaseToken,
+		"outcome":        "completed",
+		"result_summary": "Bootstrapped review approved.",
+		"review_outcome": "approved",
+	})
+	var reviewCompletion struct {
+		Issue struct {
+			Status string `json:"status"`
+		} `json:"issue"`
+	}
+	decodeIntegrationResult(t, finishedReview, &reviewCompletion)
+	if finishedReview.IsError || reviewCompletion.Issue.Status != "done" {
+		t.Fatalf("finish_attempt review result = %#v, decoded = %#v", finishedReview, reviewCompletion)
+	}
+
+	resolved := callIntegrationTool(t, session, "get_review_request", map[string]any{"review_request_id": openRequest.ID})
+	var resolvedRequest struct {
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeIntegrationResult(t, resolved, &resolvedRequest)
+	if resolved.IsError || resolvedRequest.Status != "approved" || resolvedRequest.Claimable {
+		t.Fatalf("get_review_request after approval = %#v, decoded = %#v", resolved, resolvedRequest)
+	}
+}

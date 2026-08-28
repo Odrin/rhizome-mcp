@@ -50,7 +50,7 @@ when its request content is identical; otherwise it fails with
 
 | Current | Action | Next | Effect |
 | --- | --- | --- | --- |
-| none | request review | open | captures target version/event and artifacts |
+| none | request review (`create_review_request`) | open | captures target version/event and artifacts |
 | open | claim | claimed | creates one `review` work attempt |
 | claimed | approve | approved | reviewed issue becomes `done` |
 | claimed | request changes | changes_requested | reviewed issue becomes `ready`; creates linked follow-up |
@@ -58,7 +58,19 @@ when its request content is identical; otherwise it fails with
 | open, claimed | cancel | cancelled | no issue status change; a claimed request's review attempt is cancelled with it |
 | open, claimed | target becomes stale | superseded | request is no longer claimable |
 | open | claim with a stale target | superseded | claim fails with `STALE_REVIEW_TARGET`; no review attempt is bound |
-| approved, changes_requested, blocked, cancelled, superseded | request re-review | open | creates a new request with a new exact target |
+| approved, changes_requested, blocked, cancelled, superseded | request re-review (`create_review_request`) | open | creates a new request with a new exact target |
+
+Two tools cover these rows and they are not interchangeable.
+`create_review_request` opens a request where none is live: the `none` row, and
+the re-review row after a previous request has already resolved.
+`replace_review_request` covers the one case `create_review_request` cannot —
+an `open` request that must be closed and re-opened against a new target in a
+single transaction — and it rejects any predecessor that is not `open`
+(`REVIEW_REQUEST_CLAIMED` for a claimed one, `REVIEW_REQUEST_NOT_REPLACEABLE`
+for a resolved one). Neither has a bootstrap mode for the other's case:
+`replace_review_request` requires a `predecessor_request_id`, and
+`create_review_request` fails with `REVIEW_ALREADY_EXISTS` while a live
+request still holds the target.
 
 `claimed` is derived from its active review attempt and is not a persisted
 general workflow status. Any path that ends the claiming review attempt
@@ -87,19 +99,19 @@ attempt is bound to it.
 
 Use the review workflow in this order when you need a durable review handoff:
 
-1. Request: create a review request with the exact target issue version, latest event position, artifact IDs, and purposes you want to freeze (purposes default to `[implementation]`, and any purpose an active `review_approval` policy currently requires for this target must be included or the call fails with `REVIEW_PURPOSE_REQUIRED`). The request captures that immutable snapshot and remains open until it is claimed or superseded.
+1. Request: call `create_review_request` with the exact target issue version, latest event position, artifact IDs, and purposes you want to freeze (purposes default to `[implementation]`, and any purpose an active `review_approval` policy currently requires for this target must be included or the call fails with `REVIEW_PURPOSE_REQUIRED`). The request captures that immutable snapshot and remains open until it is claimed or superseded.
 2. Discover: list or get review requests to find the request for the target you want to review. Review requests are discoverable from planning and work context, and a request that is still claimable is reported as `claimable`.
 3. Claim: start a review attempt with `claim_issue` against the review issue. The attempt automatically binds the issue's open review request to the new attempt in the same transaction (no separate operation needed); if no open request exists, the attempt simply proceeds unbound. A claimed request is derived from the active review attempt; if the lease expires before completion, the request returns to `open` and can be claimed again.
 4. Complete: finish the active review attempt with `finish_attempt` and an explicit review outcome of `approved`, `changes_requested`, or `blocked`. `approved` finishes the request and marks the issue `done`; `changes_requested` leaves the issue `ready` and records that follow-up is required; `blocked` marks the issue `blocked`.
-5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, create a fresh review request for the new target version/event (via `replace_review_request`, which inherits the predecessor's purposes unless the new request names different ones) and repeat the discover/claim/complete cycle.
+5. Follow-up and re-request: `changes_requested` should create an explicit implementation follow-up linked to the request and preserve reviewer findings. When the follow-up is complete, open a fresh request for the new target version/event with `create_review_request` and repeat the discover/claim/complete cycle. Not `replace_review_request`: the `changes_requested` predecessor is already resolved, and replacement rejects a resolved predecessor with `REVIEW_REQUEST_NOT_REPLACEABLE`. Purposes are not inherited across a resolved request either, so name them again if the re-review covers more than the `[implementation]` default.
 
 Recovery examples:
 
 - If a session disappears after claim, the review request returns to `open` when the lease expires. Re-discover the request and repeat the claim step with a fresh review attempt.
 - If the review attempt is finished with outcome `failed` or `interrupted` (e.g. a handoff or context limit) instead of a review outcome, the request returns to `open` the same way — the caller does not need to wait for the lease to expire. Re-discover and re-claim.
 - If the attempt is administratively force-released (a stuck or abandoned session, released via the CLI), the request likewise returns to `open` immediately rather than staying `claimed` against a session that will never return.
-- If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Create a new review request against the new target instead of reusing the stale one.
-- If the implementation changed before anyone claimed the request, the request stops being reported as `claimable`; claiming it explicitly supersedes it and returns `STALE_REVIEW_TARGET`, and a `claim_issue` review attempt simply starts unbound. Replace the request with one that freezes the new target.
+- If the implementation changed while the request was claimed, `finish_attempt` returns `STALE_REVIEW_TARGET` and the request becomes `superseded`. Open a new request against the new target with `create_review_request` instead of reusing the stale one; the superseded predecessor is resolved, so it cannot be replaced.
+- If the implementation changed before anyone claimed the request, the request stops being reported as `claimable`; claiming it explicitly supersedes it and returns `STALE_REVIEW_TARGET`, and a `claim_issue` review attempt simply starts unbound. While the stale request is still `open` — nobody has claimed it — `replace_review_request` supersedes it and freezes the new target in one transaction. Once an explicit claim has already superseded it, use `create_review_request`.
 - If two agents race to claim the same request, one wins and the other gets `VERSION_CONFLICT` or `ACTIVE_ATTEMPT_EXISTS`. Re-discover the request and retry the claim with the new state.
 - If a review request is created after an unbound attempt has already claimed the issue, `finish_attempt` with `review_outcome=approved` returns `REVIEW_REQUEST_REQUIRED` and does not mutate state. This ensures the new request is not silently orphaned; the caller must resolve or discover the request through the normal review flow (which most often means re-attempting the review with a fresh claim against the newly-bound request).
 

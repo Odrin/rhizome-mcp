@@ -396,6 +396,18 @@ func schemaArchiveIssue() *jsonschema.Schema {
 	}, "issue_id", "expected_version"))
 }
 
+func schemaCreateReviewRequest() *jsonschema.Schema {
+	purposes := boundedStringsSchema(domain.MaxReviewPurposes, domain.MaxPolicyKeyRunes)
+	purposes.Description = "Purposes this review covers; defaults to [implementation]. Must cover every purpose an active review_approval policy currently requires for this target, or the call fails with REVIEW_PURPOSE_REQUIRED."
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"issue_id":             withDescription(issueIdentifierSchema(), "Issue to request review of. Its open or claimed request, if any, must be resolved first: a second request for the same target fails with REVIEW_ALREADY_EXISTS unless its content is identical, which replays instead."),
+		"target_issue_version": withDescription(boundedIntegerSchema(1, 9_223_372_036_854_775_807), "Issue version this review covers, from get_issue; must be current or the call fails with STALE_REVIEW_TARGET."),
+		"target_event_id":      withDescription(boundedIntegerSchema(0, 9_223_372_036_854_775_807), "Project event ID the reviewed work is current as of (latest_event_id from open_project, get_changes, or finish_attempt); reviewed work changing after it fails with STALE_REVIEW_TARGET."),
+		"artifact_ids":         withDescription(boundedStringsSchema(domain.MaxReviewArtifactIDs, 4_096), "Artifact IDs the frozen target covers."),
+		"purposes":             purposes,
+	}, "issue_id", "target_issue_version", "target_event_id"))
+}
+
 func schemaGetReviewRequest() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"review_request_id": reviewRequestIdentifierSchema()}, "review_request_id"))
 }

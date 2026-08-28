@@ -169,11 +169,11 @@ Audited baselines from prior review work are informative but are not current def
 **Catalog budget.** The advertised tool catalog is itself a bounded payload: a client sends the entire `tools/list` result to its model before any work happens, so the catalog is part of every agent session's fixed token cost and gets the same budget-plus-test treatment as response payloads. Two mechanisms keep it compact without losing anything an agent uses:
 
 - **Advertised output schemas are compact projections of the strict schemas.** Field names, types, nullability, enums, and descriptions are advertised in full; per-object `required` arrays (which re-list every property name) and `additionalProperties` markers — validator strictness, not caller information — are stripped, `oneOf` unions are advertised as `anyOf`, and two intentionally shallow branches replace bulky legacy payloads: the `view: "full"` response shapes of `create_issue`, `update_issue`, `archive_issue`, `claim_issue`, and `finish_attempt` (their compact defaults stay fully specified) and `export_project`'s inline logical document (specified in [docs/07](07-logical-interchange.md)). The strict originals remain the validation contract: the output-conformance suite (`TestOutputSchemaConformance` and its companions in `internal/adapters/mcp/output_conformance_test.go`) validates every real response against the strict schema, so trimming the advertisement never weakens what CI proves about actual outputs. Input schemas are advertised unmodified — their `required` lists and closed-property sets are caller-facing contract.
-- **Enforced budgets.** The full-profile catalog stays within **112 KiB** total and **16 KiB** per tool, asserted by `TestToolCatalogStaysWithinByteBudget`; `TestAdvertisedOutputSchemasAreCompactProjections` (both in `internal/adapters/mcp/catalog_budget_test.go`) structurally guarantees the projection is applied to every advertised output schema. Measured after this compaction: approximately 96 KiB across 42 tools, down from approximately 129 KiB before it.
+- **Enforced budgets.** The full-profile catalog stays within **112 KiB** total and **16 KiB** per tool, asserted by `TestToolCatalogStaysWithinByteBudget`; `TestAdvertisedOutputSchemasAreCompactProjections` (both in `internal/adapters/mcp/catalog_budget_test.go`) structurally guarantees the projection is applied to every advertised output schema. Measured after this compaction: approximately 96 KiB across 43 tools, down from approximately 129 KiB before it.
 
 ## 3.1. Tool inventory
 
-The catalog exposes 42 full tools, 35 agent tools, 5 migration tools, and 21 read-only tools:
+The catalog exposes 43 full tools, 36 agent tools, 5 migration tools, and 21 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
@@ -188,35 +188,36 @@ The catalog exposes 42 full tools, 35 agent tools, 5 migration tools, and 21 rea
 11. `get_issue`
 12. `list_issues`
 13. `archive_issue`
-14. `get_review_request`
-15. `list_review_requests`
-16. `cancel_review_request`
-17. `replace_review_request`
-18. `manage_issue_relation`
-19. `get_issue_graph`
-20. `get_planning_graph`
-21. `validate_issue_plan`
-22. `apply_issue_plan`
-23. `add_comment`
-24. `record_decision`
-25. `list_decisions`
-26. `get_issue_activity`
-27. `claim_issue`
-28. `renew_attempt`
-29. `save_attempt_note`
-30. `finish_attempt`
-31. `get_work_context`
-32. `reserve_resources`
-33. `release_resources`
-34. `list_resource_reservations`
-35. `get_resource_reservation`
-36. `search`
-37. `get_changes`
-38. `manage_workflow_policy`
-39. `get_workflow_policy`
-40. `list_workflow_policies`
-41. `submit_gate_evidence`
-42. `evaluate_gates`
+14. `create_review_request`
+15. `get_review_request`
+16. `list_review_requests`
+17. `cancel_review_request`
+18. `replace_review_request`
+19. `manage_issue_relation`
+20. `get_issue_graph`
+21. `get_planning_graph`
+22. `validate_issue_plan`
+23. `apply_issue_plan`
+24. `add_comment`
+25. `record_decision`
+26. `list_decisions`
+27. `get_issue_activity`
+28. `claim_issue`
+29. `renew_attempt`
+30. `save_attempt_note`
+31. `finish_attempt`
+32. `get_work_context`
+33. `reserve_resources`
+34. `release_resources`
+35. `list_resource_reservations`
+36. `get_resource_reservation`
+37. `search`
+38. `get_changes`
+39. `manage_workflow_policy`
+40. `get_workflow_policy`
+41. `list_workflow_policies`
+42. `submit_gate_evidence`
+43. `evaluate_gates`
 
 ### 3.1. `create_agent_session`
 
@@ -369,6 +370,14 @@ issue, comment, decision, note, policy, or reservation set, or (for
 actually supplies one — it is not part of the unconditional invocation
 contract, so it does not change the hint.
 
+`create_review_request` is `idempotentHint: false` for a narrower reason: it
+does have a gate — a repeat whose content matches the target's still-live
+`open` or `claimed` request replays that request instead of opening a second
+one — but the gate is that live request, and `cancel_review_request` resolves
+it without changing the issue. An identical repeat after a cancel therefore
+opens a new request rather than replaying or failing. A conditional guarantee
+is not the unconditional one this hint asserts.
+
 `destructiveHint` follows the guidance's own examples — overwrite, archive,
 cancel, supersede, bulk-apply, or otherwise destroying prior effective state —
 rather than the tool's read/write split alone:
@@ -409,6 +418,7 @@ rather than the tool's read/write split alone:
 | `get_issue` | ✓ | | ✓ | |
 | `list_issues` | ✓ | | ✓ | |
 | `archive_issue` | | ✓ | ✓ | |
+| `create_review_request` | | | | |
 | `get_review_request` | ✓ | | ✓ | |
 | `list_review_requests` | ✓ | | ✓ | |
 | `cancel_review_request` | | ✓ | ✓ | |
@@ -529,13 +539,13 @@ annotation matrix.
 | sync | `get_changes` | no | no |
 | issues | `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
 | planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
-| review | `get_review_request`, `list_review_requests`, `cancel_review_request`, `replace_review_request` | yes | no |
+| review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `replace_review_request` | yes | no |
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
 | lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation`, `submit_gate_evidence`, `evaluate_gates` | yes | no |
 | governance | `manage_workflow_policy`, `get_workflow_policy`, `list_workflow_policies` | no | no |
 
-- **`full`** (default): every group, all 42 tools.
-- **`agent`** (35 tools): every group except `migration`, `sync` and
+- **`full`** (default): every group, all 43 tools.
+- **`agent`** (36 tools): every group except `migration`, `sync` and
   `governance` — the complete ordinary issue discovery, planning, review,
   knowledge, and leased work lifecycle workflow, without bulk project
   transfer, incremental synchronization, or the ability to rewrite the
@@ -1165,6 +1175,67 @@ whose target does not match the issue's current version and event position is
 rejected with `STALE_REVIEW_TARGET` and writes nothing. See
 [docs/09](09-review-workflow.md) "Staleness and concurrency" for every
 enforcement point.
+
+#### `create_review_request`
+
+Opens the first review request for a target. It is the only path from "no
+request" to `open` in the [docs/09](09-review-workflow.md) state-transition
+table, and the only one available once the previous request is terminal —
+`replace_review_request` rejects an `approved`, `changes_requested`,
+`blocked`, `cancelled`, or `superseded` predecessor with
+`REVIEW_REQUEST_NOT_REPLACEABLE`. Use `replace_review_request` instead when a
+live (`open`) request must be superseded in the same transaction.
+
+Input:
+
+```json
+{
+  "issue_id": "ISSUE-42",
+  "target_issue_version": 10,
+  "target_event_id": 1900,
+  "artifact_ids": [],
+  "purposes": ["implementation", "security"]
+}
+```
+
+`issue_id`, `target_issue_version`, and `target_event_id` are required.
+
+There is no `supersedes_id`: recording a supersession link without closing the
+predecessor was exactly the split `replace_review_request` exists to fix, so
+this tool only ever opens an unlinked request.
+
+There is no `idempotency_key` either, and `idempotentHint` is
+correspondingly `false` (§4). A repeat whose content matches the target's
+still-live request replays that request rather than opening a second one, but
+that gate is the live request itself: once it has been cancelled — which
+resolves the request without changing the issue — an identical repeat opens a
+new one. The guarantee is therefore conditional, which §4 does not accept as
+`idempotentHint: true`.
+
+`target_issue_version` and `target_event_id` freeze the same immutable target
+`replace_review_request` describes: pass the issue's current version from
+`get_issue` and the `latest_event_id` any read tool reports. A target that
+already fails the comparison is rejected with `STALE_REVIEW_TARGET` and
+writes nothing — a request can never be born stale.
+
+`purposes` is optional and defaults to `["implementation"]`: a unique, sorted
+list of 1-10 normalized keys naming what this review covers. The purposes in
+effect must cover every purpose an active `review_approval` policy currently
+requires for this target, or the call fails with `REVIEW_PURPOSE_REQUIRED`
+(detail field `purposes`, one entry per missing purpose) and makes no write.
+
+Output is a single review request record (the shared field list below).
+
+Failure modes, all structured and side-effect-free (zero writes):
+
+- Target does not match the issue's current version and event position →
+  `STALE_REVIEW_TARGET`.
+- The issue already has an `open` or `claimed` request for a different
+  target, or for the same target with different content →
+  `REVIEW_ALREADY_EXISTS`. Resolve it first (`cancel_review_request`, or
+  finish the review), or supersede it with `replace_review_request`.
+- Purposes do not cover an active `review_approval` requirement →
+  `REVIEW_PURPOSE_REQUIRED`.
 
 #### `replace_review_request`
 

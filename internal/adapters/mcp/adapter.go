@@ -239,6 +239,22 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[cancelReviewRequestInput, any](target, t, (*adapter).cancelReviewRequest))
 	})
+	// create_review_request opens the first request for a target; it is the
+	// only path from "no request" to `open` (docs/09 state transitions), and
+	// the only one available once a predecessor is terminal, which
+	// replace_review_request rejects with REVIEW_REQUEST_NOT_REPLACEABLE. It
+	// carries no supersedes_id -- superseding a live predecessor is
+	// replace_review_request's whole job -- and no idempotency_key: the
+	// repository already replays an identical duplicate against the same
+	// target and rejects a differing one with REVIEW_ALREADY_EXISTS, so
+	// creation is content-idempotent while that request is still live.
+	// idempotentHint is still false, though: the replay gate is the target's
+	// open-or-claimed request, which a cancel resolves without changing the
+	// issue, so a bare repeat after that opens a second request rather than
+	// replaying -- short of the unconditional guarantee section 4 requires.
+	target.registerTool(server, groupReview, tool("create_review_request", "Open a review request freezing an exact issue version, event position, artifact set, and purposes.", schemaCreateReviewRequest(), schemaReviewRequestOutput(), toolHints(false, false, false, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[createReviewRequestInput, any](target, t, (*adapter).createReviewRequest))
+	})
 	target.registerTool(server, groupReview, tool("get_review_request", "Get one review request by identifier.", schemaGetReviewRequest(), schemaReviewRequestOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getReviewRequestInput, any](target, t, (*adapter).getReviewRequest))
 	})
@@ -1118,6 +1134,20 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 		return success(issueDTOFromDomain(result.Issue), "issue archived")
 	}
 	return success(archiveIssueCompactOutputFromDomain(result.Issue), "issue archived")
+}
+
+func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.services.ReviewService.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID:            input.IssueID,
+		TargetIssueVersion: input.TargetIssueVersion,
+		TargetEventID:      input.TargetEventID,
+		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
+		Purposes:           append([]string(nil), input.Purposes...),
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request created")
 }
 
 func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {

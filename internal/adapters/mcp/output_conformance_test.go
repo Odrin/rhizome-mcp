@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"rhizome-mcp/internal/adapters/mcp"
-	"rhizome-mcp/internal/adapters/sqlite"
-	"rhizome-mcp/internal/ports"
 )
 
 // TestOutputSchemaConformance implements ISSUE-199 AC1: success() always
@@ -571,7 +568,7 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 
 	// Resolve the strict schemas for the review-request tools.
 	resolved := make(map[string]*jsonschema.Resolved)
-	for _, name := range []string{"get_review_request", "list_review_requests", "cancel_review_request", "replace_review_request"} {
+	for _, name := range []string{"create_review_request", "get_review_request", "list_review_requests", "cancel_review_request", "replace_review_request"} {
 		schema := mcp.StrictOutputSchemaForTest(name)
 		if schema == nil {
 			t.Fatalf("%s has no strict output schema", name)
@@ -583,11 +580,10 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 		resolved[name] = r
 	}
 
-	// Create a review request using direct repository access (no MCP tool creates an initial review request).
-	reviewRepository, err := sqlite.NewReviewRepository(db)
-	if err != nil {
-		t.Fatalf("new review repository: %v", err)
-	}
+	// Every request below is opened through create_review_request rather than
+	// the repository: the tool is the only advertised path from "no request"
+	// to `open` (ISSUE-247), and seeding past it here is what let its removal
+	// go unnoticed.
 
 	// Create a review-status issue for get/list testing.
 	createdIssue1 := call(t, client, "create_issue", map[string]any{
@@ -604,22 +600,24 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	firstTargetVersion, firstTargetEventID := currentReviewTargetPosition(t, db, issueOutput1.ID)
 
 	// Create first review request: for get_review_request and list_review_requests testing.
-	firstRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
-		Purposes:           []string{"implementation"},
-		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB1",
-		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB2",
-		IssueID:            issueOutput1.ID,
-		TargetIssueVersion: firstTargetVersion,
-		TargetEventID:      firstTargetEventID,
-		OccurredAt:         source.Now().UTC(),
+	createdRequest1 := call(t, client, "create_review_request", map[string]any{
+		"issue_id": issueOutput1.ID, "target_issue_version": firstTargetVersion, "target_event_id": firstTargetEventID,
+		"purposes": []string{"implementation"},
 	})
-	if err != nil {
-		t.Fatalf("create first review request: %v", err)
+	if createdRequest1.IsError {
+		t.Fatalf("create_review_request failed: %#v", createdRequest1)
 	}
+	if err := resolved["create_review_request"].Validate(createdRequest1.StructuredContent); err != nil {
+		t.Errorf("create_review_request output failed schema validation: %v\noutput: %#v", err, createdRequest1.StructuredContent)
+	}
+	var firstRequest struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, createdRequest1, &firstRequest)
 
 	// Test get_review_request.
 	gotRequest := call(t, client, "get_review_request", map[string]any{
-		"review_request_id": firstRequest.Request.ID,
+		"review_request_id": firstRequest.ID,
 	})
 	if gotRequest.IsError {
 		t.Fatalf("get_review_request failed: %#v", gotRequest)
@@ -654,22 +652,20 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	secondTargetVersion, secondTargetEventID := currentReviewTargetPosition(t, db, issueOutput2.ID)
 
 	// Create a second review request for cancel testing.
-	secondRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
-		Purposes:           []string{"implementation"},
-		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB3",
-		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB4",
-		IssueID:            issueOutput2.ID,
-		TargetIssueVersion: secondTargetVersion,
-		TargetEventID:      secondTargetEventID,
-		OccurredAt:         source.Now().UTC().Add(time.Minute),
+	createdRequest2 := call(t, client, "create_review_request", map[string]any{
+		"issue_id": issueOutput2.ID, "target_issue_version": secondTargetVersion, "target_event_id": secondTargetEventID,
 	})
-	if err != nil {
-		t.Fatalf("create second review request: %v", err)
+	if createdRequest2.IsError {
+		t.Fatalf("create_review_request (second) failed: %#v", createdRequest2)
 	}
+	var secondRequest struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, createdRequest2, &secondRequest)
 
 	// Test cancel_review_request.
 	cancelled := call(t, client, "cancel_review_request", map[string]any{
-		"review_request_id": secondRequest.Request.ID,
+		"review_request_id": secondRequest.ID,
 		"expected_version":  1,
 	})
 	if cancelled.IsError {
@@ -694,25 +690,23 @@ func TestOutputSchemaConformanceReviewRequests(t *testing.T) {
 	thirdTargetVersion, thirdTargetEventID := currentReviewTargetPosition(t, db, issueOutput3.ID)
 
 	// Create a third review request for replace testing.
-	thirdRequest, err := reviewRepository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
-		Purposes:           []string{"implementation"},
-		RequestID:          "01ARZ3NDEKTSV4RRFFQ69G5FB5",
-		TargetID:           "01ARZ3NDEKTSV4RRFFQ69G5FB6",
-		IssueID:            issueOutput3.ID,
-		TargetIssueVersion: thirdTargetVersion,
-		TargetEventID:      thirdTargetEventID,
-		OccurredAt:         source.Now().UTC().Add(2 * time.Minute),
+	createdRequest3 := call(t, client, "create_review_request", map[string]any{
+		"issue_id": issueOutput3.ID, "target_issue_version": thirdTargetVersion, "target_event_id": thirdTargetEventID,
 	})
-	if err != nil {
-		t.Fatalf("create third review request: %v", err)
+	if createdRequest3.IsError {
+		t.Fatalf("create_review_request (third) failed: %#v", createdRequest3)
 	}
+	var thirdRequest struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, createdRequest3, &thirdRequest)
 
 	// Test replace_review_request. The successor freezes the issue's new
 	// state, since a replace onto a target that no longer matches the issue
 	// is rejected as stale (ISSUE-188).
 	successorVersion, successorEventID := advanceReviewedIssueForTest(t, db, issueOutput3.ID, source.Now().UTC())
 	replaced := call(t, client, "replace_review_request", map[string]any{
-		"predecessor_request_id":       thirdRequest.Request.ID,
+		"predecessor_request_id":       thirdRequest.ID,
 		"predecessor_expected_version": 1,
 		"target_issue_version":         successorVersion,
 		"target_event_id":              successorEventID,
