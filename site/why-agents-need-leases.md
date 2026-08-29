@@ -158,7 +158,7 @@ The repository contains only a small project pointer. The database lives in the 
 
 ## Scope and tradeoffs
 
-rhizome-mcp currently exposes 32 MCP tools for issues, dependency graphs, comments, decisions, attempts, reviews, search, context assembly, and logical import/export. Stdio is the primary transport; an optional loopback-only HTTP transport is available for local clients.
+rhizome-mcp currently exposes 43 MCP tools for issues, dependency graphs, comments, decisions, attempts, resource reservations, reviews, workflow gates, search, context assembly, and logical import/export. Stdio is the primary transport; an optional loopback-only HTTP transport is available for local clients.
 
 The narrow scope is intentional:
 
@@ -185,6 +185,13 @@ For a zero-install trial:
 npx rhizome-mcp serve
 ```
 
+In Claude Code, a plugin installs the server and the workflow skills together:
+
+```text
+/plugin marketplace add Odrin/rhizome-mcp
+/plugin install rhizome-mcp@rhizome
+```
+
 Or install the binary and connect a client:
 
 ```bash
@@ -195,6 +202,6 @@ rhizome-mcp connect claude   # or: codex | vscode | json
 
 There is also a [VS Code extension](https://marketplace.visualstudio.com/items?itemName=odrin.rhizome-mcp) that bundles the binary and registers the MCP server.
 
-Source, documentation, and the full tool contract are at [github.com/Odrin/rhizome-mcp](https://github.com/Odrin/rhizome-mcp). The project is Apache-2.0.
+Source, documentation, and the full tool contract are at [github.com/Odrin/rhizome-mcp](https://github.com/Odrin/rhizome-mcp). The README has 30-second recordings of the lease-expiry, reservation-conflict, and stale-review flows, generated from real server output by a scripted [demo harness](https://github.com/Odrin/rhizome-mcp/tree/main/demo). The project is Apache-2.0.
 
 I would especially value reports from people running multiple Copilot, Claude Code, Codex, or other MCP sessions against one repository. I am curious where clients fail to follow the workflow, which coordination failures the lease model misses, and whether the context responses are compact enough in larger real projects.
