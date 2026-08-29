@@ -753,3 +753,49 @@ jobs:
           fi
           echo "All publish jobs succeeded."
 
+
+  stamp-plugin-manifest:
+    name: Stamp plugin manifest version
+    # The Claude Code plugin manifest is consumed from the repository itself
+    # (marketplace installs read plugins/rhizome-mcp/.claude-plugin/plugin.json
+    # from main), so unlike server.json a run-local stamp is not enough: the
+    # released version must be committed back. Runs only after a fully
+    # successful release, and only for real release events (not the
+    # workflow_dispatch VS Code republish fallback).
+    if: github.event_name == 'release'
+    needs:
+      - release-status
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Commit released version into plugin.json on main
+        uses: actions/github-script@v7
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        with:
+          script: |
+            const version = process.env.TAG.replace(/^v/, '');
+            const path = 'plugins/rhizome-mcp/.claude-plugin/plugin.json';
+            const { data: file } = await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path,
+              ref: 'main',
+            });
+            const manifest = JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
+            if (manifest.version === version) {
+              core.info(`plugin.json already at ${version}; nothing to commit`);
+              return;
+            }
+            manifest.version = version;
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path,
+              message: `chore(plugin): stamp plugin manifest to ${version}`,
+              content: Buffer.from(JSON.stringify(manifest, null, 2) + '\n').toString('base64'),
+              sha: file.sha,
+              branch: 'main',
+            });
+            core.info(`plugin.json stamped to ${version}`);
