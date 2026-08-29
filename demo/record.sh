@@ -16,7 +16,7 @@ CGO_ENABLED=0 go build -o rhizome-mcp .
 
 mkdir -p site/assets/demo
 
-for tape in demo/tapes/01-lease-expiry.tape demo/tapes/02-reservation-conflict.tape demo/tapes/03-board.tape; do
+for tape in demo/tapes/01-lease-expiry.tape demo/tapes/02-reservation-conflict.tape demo/tapes/04-review-superseded.tape demo/tapes/03-board.tape; do
   echo "recording $tape..."
   vhs "$tape"
 done

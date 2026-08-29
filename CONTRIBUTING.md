@@ -108,6 +108,16 @@ value committed in `server.json` is a placeholder, not the released version.
   the server's own version from then on; there is no more odd/even
   remapping after that point.
 
+## Release verification
+
+Every release run (`.github/workflows/release.yml`) verifies:
+
+- Full `go test ./...` suite runs before binary upload
+- Built binaries are smoke-tested (e.g., `./rhizome-mcp --version` verifies version string matches tag)
+- npm launcher test suite runs before npm publish (catches regressions in the Node.js launcher wrapper)
+- VS Code extension binaries are checked out from the tagged source (not `main`) on workflow_dispatch re-publish, ensuring version lockstep
+- Aggregate release-status job fails the workflow if any publish step (npm, MCP Registry, Marketplace, Open VSX) fails, making partial failures visible
+
 ## Documentation
 
 - Specification changes go in the modular docs/ files indexed by [SPEC.md](SPEC.md), not README.md

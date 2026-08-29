@@ -14,23 +14,61 @@
   <a href="https://registry.modelcontextprotocol.io"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0%2Fservers%3Fsearch%3Dio.github.Odrin%252Frhizome-mcp%26version%3Dlatest&query=%24.servers%5B0%5D.server.version&label=MCP%20Registry&prefix=v&color=8A2BE2" alt="MCP Registry"></a>
 </p>
 
-**rhizome-mcp** is a local-first MCP server for task tracking and coordination of autonomous AI coding agents. It gives agents from different products — Claude Code, Codex, GitHub Copilot, VS Code, and any other MCP-compatible client — a shared, durable view of project work: one static Go binary, one SQLite database per project, no accounts, no Docker, no network dependency.
+**When a coding agent dies mid-task, the task frees itself.**
+
+**rhizome-mcp** gives autonomous coding agents crash-safe task coordination over MCP: claims are renewable expiring leases, `in_progress` is derived — never stored — and an interrupted attempt hands its checkpoint to whichever session picks the work up next. One static Go binary, one SQLite database per project. No daemon, no accounts, no cloud.
+
+It works with agents from different products at once — Claude Code, Codex, GitHub Copilot, VS Code, and any other MCP-compatible client — giving them one shared, durable view of project work.
+
+<p align="center">
+  <img src="site/assets/demo/lease-expiry.gif" alt="Two agent sessions on one issue: the second claim is denied with ACTIVE_ATTEMPT_EXISTS, the first agent dies, its lease expires, and the second session claims the issue and resumes from the checkpoint" width="820">
+</p>
+<p align="center"><em>Recorded from real server output by <a href="demo/README.md"><code>demo/record.sh</code></a> — nothing staged.</em></p>
+
+**[Why](#why)** · **[How it compares](#how-it-compares)** · **[Quick start](#quick-start)** · **[Monitor your project](#monitor-your-project)** · **[MCP surface](#mcp-surface)** · **[Documentation](#documentation)**
 
 ## Why
 
 AI coding agents are concurrent, context-limited, and interruptible. A `TODO.md` or a single chat context doesn't survive that. rhizome-mcp is built around those failure modes:
 
 - **Crash-safe claiming.** Issues are claimed atomically with renewable leases. `in_progress` is never a stored status — it is derived from an active lease, so a vanished agent can't lock an issue forever. When the lease expires, the issue becomes claimable again. A partial unique index guarantees at most one active attempt per issue at the database level.
-- **Durable project memory.** Checkpoints with next steps, supersedable decision records, append-only event history, and FTS5 full-text search across issues, comments, decisions, and notes. A fresh session resumes from the last checkpoint instead of re-deriving state.
 - **Token-efficient by contract.** Compact list projections (a 100-issue page stays under 64 KB — enforced by an integration test), graph nodes that exclude free-text bodies at the SQL layer, snippet-only search, delta sync via event IDs, and a bounded single-call work-context package.
+- **Durable project memory.** Checkpoints with next steps, supersedable decision records, append-only event history, and FTS5 full-text search across issues, comments, decisions, and notes. A fresh session resumes from the last checkpoint instead of re-deriving state.
 - **Planning and dependency graphs.** Cycle-checked `blocks` relations, epics, claimable entry-point highlighting, and atomic batch planning (up to 50 issues, 100 relations, and 20 decisions in one all-or-nothing transaction).
-- **Review workflow.** Review requests pin an exact issue version and event position; stale targets are superseded automatically, so approving changed code is impossible.
+- **Review workflow.** Review requests pin an exact issue version and event position; approving changed code is structurally impossible — a stale request can only be superseded and re-pinned.
+
+  <details>
+  <summary>Watch a stale approval get refused</summary>
+  <p align="center"><img src="site/assets/demo/review-superseded.gif" alt="A review request pinned to version 2 refuses approval after the issue moves to version 3; replace_review_request supersedes it into a successor pinned to the new version" width="820"></p>
+  </details>
+- **Resource reservations.** A claim can atomically reserve files, directories, globs, or logical resources (a port, a migration window, a deploy slot); an overlapping claim fails fast with the holder and its lease expiry named, instead of two agents colliding later.
+
+  <details>
+  <summary>Watch a reservation conflict fail a claim atomically</summary>
+  <p align="center"><img src="site/assets/demo/reservation-conflict.gif" alt="An overlapping resource reservation fails the whole claim with RESOURCE_RESERVATION_CONFLICT, naming the holding attempt and its lease expiry" width="820"></p>
+  </details>
 - **Concurrency discipline throughout.** Optimistic versioning on mutations, replay-safe idempotency keys, stable machine-actionable error codes.
 - **Human observability without a server.** `rhizome-mcp board` prints live leases, blockers, and the review queue, or writes a self-contained HTML snapshot; the CLI reads everything as tables, JSON, or Mermaid.
+
+This repository tracks its own backlog through the server it ships — work is selected, claimed, checkpointed, and reviewed via rhizome-mcp itself ([AGENTS.md](AGENTS.md)).
 
 **Use it when** several agent sessions (or several agent products) work the same repository over time and you need handoffs, parallel work, and recovery after crashes or context limits.
 
 **Skip it if** you need a hosted multi-user tracker with auth, permissions, and a web UI — this is a local single-developer tool by design.
+
+## How it compares
+
+Compare agent task trackers on guarantees under failure, not on feature lists — local-first SQLite storage and MCP support are table stakes in this category.
+
+| When things go wrong | rhizome-mcp | beads | Kata | Guild |
+| --- | --- | --- | --- | --- |
+| Task frees itself after a crash | **Yes** — expiring lease | No | No | No |
+| Double-claim prevented at the storage layer | **Yes** | Atomic claim | Atomic claim | Atomic claim |
+| Stale review approval impossible | **Yes** — version-pinned | No | No | No |
+| Response sizes bounded by a tested contract | **Yes** — ≤ 64 KiB / 100 issues | No | No | No |
+| Interrupted attempt resumable by another session | **Yes** — checkpoints | No | No | Note only |
+
+Full comparison with sources, pinned versions, and honest "choose X if" guidance: **[How rhizome-mcp compares](https://odrin.github.io/rhizome-mcp/#/compare)**.
 
 ## Quick start
 
@@ -47,6 +85,15 @@ npx rhizome-mcp serve
 ```
 
 Works with any MCP client. See [packages/npm/README.md](packages/npm/README.md) for platform coverage. Great for quick evaluation.
+
+#### Claude Code plugin
+
+```
+/plugin marketplace add Odrin/rhizome-mcp
+/plugin install rhizome-mcp@rhizome
+```
+
+Registers the MCP server (via `npx`, no binary install) and adds the `rhizome-task-workflow` and `rhizome-execution-plan` skills. Each repository you track still needs a one-time `npx rhizome-mcp init` in its root.
 
 #### VS Code
 
@@ -154,6 +201,10 @@ rhizome-mcp graph ISSUE-42 --format mermaid
 rhizome-mcp doctor --full
 ```
 
+<p align="center">
+  <img src="site/assets/demo/board.png" alt="rhizome-mcp board on a seeded project: status counts, two live leased attempts, an active directory reservation, and blocked issues with reasons" width="820">
+</p>
+
 The status board reports live lease counts, blocked issues and their reasons, open review requests, and the project-wide planning graph. The planning graph excludes finished work (done, cancelled) from the node budget, so the entry-point count always reflects claimable work. When the graph is truncated due to the 100-node budget, the board marks it as truncated and reports the retained node count in both table and JSON formats.
 
 ### Optional: local HTTP transport
@@ -245,12 +296,7 @@ The integration tag runs real-process MCP smoke and workflow tests: they build a
 
 CI runs `go vet`, unit, and integration tests on Ubuntu, macOS, and Windows for every push and pull request targeting `main`. Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
 
-Release verification includes:
-- Full `go test ./...` suite runs before binary upload
-- Built binaries are smoke-tested (e.g., `./rhizome-mcp --version` verifies version string matches tag)
-- npm launcher test suite runs before npm publish (catches regressions in the Node.js launcher wrapper)
-- VS Code extension binaries are checked out from the tagged source (not `main`) on workflow_dispatch re-publish, ensuring version lockstep
-- Aggregate release-status job fails the workflow if any publish step (npm, MCP Registry, Marketplace, Open VSX) fails, making partial failures visible
+Release verification steps are documented in [CONTRIBUTING.md](CONTRIBUTING.md#release-verification).
 
 This repository tracks its own backlog in rhizome-mcp: work is selected, claimed, and finished through the MCP server, and durable choices are recorded as decisions. Markdown holds specification only, not task status. See [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
