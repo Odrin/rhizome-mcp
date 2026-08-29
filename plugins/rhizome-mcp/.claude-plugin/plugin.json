@@ -1,6 +1,6 @@
 {
   "name": "rhizome-mcp",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "description": "Crash-safe task tracking and coordination for AI coding agents: renewable expiring leases, resumable attempts, review workflow. Local SQLite, no daemon, no accounts.",
   "author": {
     "name": "Odrin",
