@@ -5,6 +5,10 @@
 
 A shared, durable local task tracker for AI coding agents. Rhizome bundles the rhizome-mcp server as a VS Code MCP provider for Copilot and other MCP-compatible clients — no setup, no accounts, no network calls, everything stays local.
 
+![Two agent sessions on one issue: the second claim is denied, the first agent dies, its lease expires, and the second session resumes from the checkpoint](https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/site/assets/demo/lease-expiry.gif)
+
+*Recorded from real server output by the repository's [scripted demo harness](https://github.com/Odrin/rhizome-mcp/tree/main/demo) — nothing staged.*
+
 ## What it is
 
 AI coding agents are concurrent, context-limited, and interruptible. A checklist or single chat context doesn't survive that. **Rhizome** gives multiple agent sessions — Claude Code, Copilot, Codex, or any other MCP client — a shared, durable view of project work. It's built around agent failure modes:
@@ -20,6 +24,10 @@ AI coding agents are concurrent, context-limited, and interruptible. A checklist
 3. **Use it** in Copilot's agent mode. Start with `open_project`, retain its `project_ref`, and pass that reference to later rhizome MCP tools (`get_project`, `list_issues`, `claim_issue`, etc.).
 
 That's it. The database lives outside your repo, in your OS's standard application-data directory (e.g. `~/Library/Application Support/rhizome-mcp` on macOS, `~/.local/share/rhizome-mcp` on Linux, `%LOCALAPPDATA%\rhizome-mcp` on Windows), and all data stays local.
+
+To see what your agents are doing, run `rhizome-mcp board` in a terminal — live leases, blockers, reservations, and the review queue, no server or login:
+
+![rhizome-mcp board on a busy project: status counts, two live leased attempts, an active directory reservation, and blocked issues with reasons](https://raw.githubusercontent.com/Odrin/rhizome-mcp/main/site/assets/demo/board.png)
 
 ## Settings
 
