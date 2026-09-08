@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -277,6 +278,9 @@ func TestOpenReadOnlyDBSeesWALVisibilityWithoutMutatingArtifacts(t *testing.T) {
 }
 
 func TestListProjectsRejectsRootReadFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny directory reads on Windows")
+	}
 	root := t.TempDir()
 	projectsRoot := filepath.Join(root, "projects")
 	if err := os.MkdirAll(projectsRoot, 0o700); err != nil {
@@ -287,9 +291,26 @@ func TestListProjectsRejectsRootReadFailure(t *testing.T) {
 	}
 	defer os.Chmod(projectsRoot, 0o700)
 
+	if _, err := os.ReadDir(projectsRoot); err == nil {
+		t.Skip("host can read directories despite mode 000")
+	} else if !os.IsPermission(err) {
+		t.Fatalf("probe unreadable projects directory: %v", err)
+	}
+
 	_, err := List(root, projectconfig.PathInputs{GOOS: "linux", HomeDir: root, XDGDataHome: root})
 	if err == nil {
 		t.Fatal("List() expected error when projects dir is unreadable")
+	}
+}
+
+func TestListProjectsRejectsNonDirectoryRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "projects"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("create projects file: %v", err)
+	}
+	_, err := List(root, projectconfig.PathInputs{})
+	if err == nil || !strings.Contains(err.Error(), "projects path is not a directory") {
+		t.Fatalf("List() error = %v, want non-directory projects path error", err)
 	}
 }
 
