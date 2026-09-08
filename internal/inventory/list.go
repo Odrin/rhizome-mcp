@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/projectconfig"
 )
 
@@ -92,11 +93,9 @@ func inspectEntry(projectsDir, name string) Entry {
 	} else if !info.Mode().IsRegular() {
 		return withDiagnostic(entry, "unsafe", "tasks.db is not a regular file", "tasks.db")
 	}
-	var diagnostics []Diagnostic
 	item, ok := inspectDatabase(projectDir, databasePath)
 	if !ok {
-		entry = item
-		return entry
+		return item
 	}
 	entry.ID = item.ID
 	entry.Name = item.Name
@@ -105,7 +104,7 @@ func inspectEntry(projectsDir, name string) Entry {
 	entry.SchemaVersion = item.SchemaVersion
 	entry.Size = item.Size
 	entry.Status = item.Status
-	entry.Diagnostics = diagnostics
+	entry.Diagnostics = item.Diagnostics
 	return entry
 }
 
@@ -119,16 +118,21 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	if err := db.Ping(); err != nil {
 		return withDiagnostic(entry, "locked", fmt.Sprintf("database is unavailable: %v", err), "tasks.db"), false
 	}
-	var id, name, origin sql.NullString
-	var issueCount, schemaVersion sql.NullInt64
-	if err := db.QueryRowContext(context.Background(), `SELECT id, name, origin FROM projects ORDER BY id LIMIT 2`).Scan(&id, &name, &origin); err != nil {
-		if strings.Contains(err.Error(), "no such column") || strings.Contains(err.Error(), "does not exist") {
-			if err := db.QueryRowContext(context.Background(), `SELECT id, name FROM projects ORDER BY id LIMIT 2`).Scan(&id, &name); err != nil {
-				return withDiagnostic(entry, "corrupt", fmt.Sprintf("project row is unreadable: %v", err), "projects"), false
-			}
-		} else {
-			return withDiagnostic(entry, "corrupt", fmt.Sprintf("project row is unreadable: %v", err), "projects"), false
-		}
+
+	schemaVersion, err := readSchemaVersion(db)
+	if err != nil {
+		return withDiagnostic(entry, "unsupported", fmt.Sprintf("schema version is unreadable: %v", err), "schema_migrations"), false
+	}
+	if schemaVersion > migrations.CurrentVersion() {
+		return withDiagnostic(entry, "unsupported",
+			fmt.Sprintf("database schema version %d is newer than the supported version %d", schemaVersion, migrations.CurrentVersion()),
+			"schema_migrations.version"), false
+	}
+	entry.SchemaVersion = ptrInt(schemaVersion)
+
+	id, name, origin, err := readProjectRow(db)
+	if err != nil {
+		return withDiagnostic(entry, "corrupt", fmt.Sprintf("project row is unreadable: %v", err), "projects"), false
 	}
 	if !id.Valid || id.String == "" {
 		return withDiagnostic(entry, "corrupt", "stored project id is missing", "projects.id"), false
@@ -140,14 +144,11 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	if origin.Valid && origin.String != "" {
 		entry.Origin = ptrString(origin.String)
 	}
+	var issueCount int64
 	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
 		return withDiagnostic(entry, "corrupt", fmt.Sprintf("issue count is unreadable: %v", err), "issues"), false
 	}
-	entry.IssueCount = ptrInt64(issueCount.Int64)
-	if err := db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
-		return withDiagnostic(entry, "unsupported", fmt.Sprintf("schema version is unreadable: %v", err), "schema_migrations"), false
-	}
-	entry.SchemaVersion = ptrInt(int(schemaVersion.Int64))
+	entry.IssueCount = ptrInt64(issueCount)
 	entry.Size = ptrInt64(sumDatabaseSizes(databasePath))
 	if id.String != entry.ProjectID {
 		return withDiagnostic(entry, "mismatched", "project directory name does not match stored project id", "project_id"), false
@@ -156,6 +157,79 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 		return withDiagnostic(entry, "mismatched", "stored project id is not canonical", "projects.id"), false
 	}
 	return entry, true
+}
+
+func readSchemaVersion(db *sql.DB) (int, error) {
+	var version sql.NullInt64
+	if err := db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0, err
+	}
+	if !version.Valid {
+		return 0, errors.New("schema history is empty or missing")
+	}
+	return int(version.Int64), nil
+}
+
+func readProjectRow(db *sql.DB) (sql.NullString, sql.NullString, sql.NullString, error) {
+	queryPatterns := []struct {
+		sql        string
+		withOrigin bool
+	}{
+		{sql: `SELECT id, name, origin FROM projects ORDER BY id`, withOrigin: true},
+		{sql: `SELECT id, name FROM projects ORDER BY id`, withOrigin: false},
+	}
+	for _, query := range queryPatterns {
+		rows, err := db.QueryContext(context.Background(), query.sql)
+		if err != nil {
+			if query.withOrigin && (strings.Contains(err.Error(), "no such column") || strings.Contains(err.Error(), "does not exist")) {
+				continue
+			}
+			return sql.NullString{}, sql.NullString{}, sql.NullString{}, err
+		}
+		id, name, origin, ok, scanErr := scanProjectRows(rows, query.withOrigin)
+		if scanErr != nil {
+			return sql.NullString{}, sql.NullString{}, sql.NullString{}, scanErr
+		}
+		if ok {
+			return id, name, origin, nil
+		}
+		if query.withOrigin {
+			continue
+		}
+		return sql.NullString{}, sql.NullString{}, sql.NullString{}, fmt.Errorf("expected exactly one project row but found 0")
+	}
+	return sql.NullString{}, sql.NullString{}, sql.NullString{}, fmt.Errorf("project row is unreadable")
+}
+
+func scanProjectRows(rows *sql.Rows, withOrigin bool) (sql.NullString, sql.NullString, sql.NullString, bool, error) {
+	defer rows.Close()
+	var id, name, origin sql.NullString
+	var count int
+	for rows.Next() {
+		count++
+		if count > 1 {
+			return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, fmt.Errorf("expected exactly one project row but found %d", count)
+		}
+		if withOrigin {
+			if err := rows.Scan(&id, &name, &origin); err != nil {
+				if strings.Contains(err.Error(), "no such column") || strings.Contains(err.Error(), "does not exist") {
+					return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, nil
+				}
+				return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, err
+			}
+			continue
+		}
+		if err := rows.Scan(&id, &name); err != nil {
+			return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, err
+	}
+	if count == 0 {
+		return sql.NullString{}, sql.NullString{}, sql.NullString{}, false, fmt.Errorf("expected exactly one project row but found 0")
+	}
+	return id, name, origin, true, nil
 }
 
 func openReadOnlyDB(path string) (*sql.DB, error) {
@@ -168,7 +242,7 @@ func openReadOnlyDB(path string) (*sql.DB, error) {
 		uriPath = "/" + uriPath
 	}
 	query := url.Values{}
-	query.Add("_pragma", "mode=ro")
+	query.Set("mode", "ro")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(ON)")
 	query.Add("_pragma", "trusted_schema(OFF)")
