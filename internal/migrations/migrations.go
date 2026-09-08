@@ -60,6 +60,9 @@ var searchIndexReservationsSQL string
 //go:embed sql/014_search_index_gates.sql
 var searchIndexGatesSQL string
 
+//go:embed sql/015_project_origin.sql
+var projectOriginSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
@@ -76,6 +79,7 @@ const reservationsChecksum = "a2bc262cdf41e6f643d7daba0f5cafa19636b28cdb8c194299
 const reviewPurposeApprovalsChecksum = "7babb65d28af851c17b4c791c301b2acf0ed5300ce8154eccd433a892997b126"
 const searchIndexReservationsChecksum = "32816b3bbc35b56831fc70330ed0c4c53f0084bade2214cd4348bf7fc4dbf24f"
 const searchIndexGatesChecksum = "cd1437f0d9013f554074aa68f3e1a11a20f7556ea5082fc35104042b5f87ea45"
+const projectOriginChecksum = "27b1a4282449ad54071bd5ace3735430a5e54c0f04aac43b9870ea1d103497bb"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -163,6 +167,12 @@ var (
 			name:     "search_index_gates",
 			checksum: searchIndexGatesChecksum,
 			sql:      searchIndexGatesSQL,
+		},
+		{
+			version:  15,
+			name:     "project_origin",
+			checksum: projectOriginChecksum,
+			sql:      projectOriginSQL,
 		},
 	}
 )

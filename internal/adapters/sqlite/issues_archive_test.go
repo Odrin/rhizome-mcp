@@ -574,3 +574,270 @@ func TestIssueArchiveEpicWithOnlyArchivedChildrenSucceeds(t *testing.T) {
 		t.Fatalf("archived epic version = %d, want 2", result.Issue.Version)
 	}
 }
+
+func TestIssueUnarchiveBlocksActiveAttemptWithoutMutation(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: issue.ID, ExpectedVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Issue.ArchivedAt == nil {
+		t.Fatal("archive result should have archived_at set")
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?)`,
+			"01BX5ZZKBKACTAV9WEVGEMMVS4", issue.ID, []byte("hash"),
+			sqlite.FormatStorageTime(now.Add(time.Minute)), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var before struct {
+		version    int
+		archivedAt sql.NullString
+		events     int
+	}
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT version, archived_at FROM issues WHERE id = ?", issue.ID).Scan(&before.version, &before.archivedAt); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", issue.ID).Scan(&before.events)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: issue.ID, ExpectedVersion: archived.Issue.Version})
+	assertDomainCode(t, err, domain.CodeActiveAttemptExists)
+	var unarchiveError *domain.Error
+	if !errors.As(err, &unarchiveError) || unarchiveError.Retryable {
+		t.Fatalf("active attempt error retryable = %v", unarchiveError != nil && unarchiveError.Retryable)
+	}
+
+	var after struct {
+		version    int
+		archivedAt sql.NullString
+		events     int
+	}
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT version, archived_at FROM issues WHERE id = ?", issue.ID).Scan(&after.version, &after.archivedAt); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", issue.ID).Scan(&after.events)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if before.version != after.version || before.archivedAt.Valid != after.archivedAt.Valid || before.events != after.events {
+		t.Fatalf("database changed on active-attempt rejection: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestIssueUnarchiveExpiresAtBoundaryAndWritesExpiryAndRestoreEvents(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Restore when expired"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: issue.ID, ExpectedVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := now.Add(5 * time.Minute)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'work', 'active', 1, 0, ?, ?, ?, ?)`,
+			"01BX5ZZKBKACTAV9WEVGEMMVS5", issue.ID, []byte("hash"),
+			sqlite.FormatStorageTime(boundary), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var beforeEvents int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", issue.ID).Scan(&beforeEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.UnarchiveIssue(ctx, ports.UnarchiveIssueCommand{
+		Identifier:      domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: issue.ID},
+		ExpectedVersion: archived.Issue.Version,
+		UnarchivedAt:    boundary,
+	})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue(exact expiry boundary) error = %v", err)
+	}
+	if result.Issue.ArchivedAt != nil || result.Issue.Version != 3 || !result.Issue.UpdatedAt.Equal(boundary) {
+		t.Fatalf("unarchive result at expiry boundary = %#v", result.Issue)
+	}
+
+	var eventTypes []string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		rows, err := query.QueryContext(ctx, `SELECT event_type FROM issue_events WHERE issue_id = ? ORDER BY id DESC LIMIT 2`, issue.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var eventType string
+			if err := rows.Scan(&eventType); err != nil {
+				return err
+			}
+			eventTypes = append(eventTypes, eventType)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(eventTypes) != 2 || !reflect.DeepEqual(eventTypes, []string{"issue_unarchived", "attempt_expired"}) {
+		t.Fatalf("unarchive expiry boundary produced event sequence %#v, want [issue_unarchived attempt_expired]", eventTypes)
+	}
+
+	var afterEvents int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", issue.ID).Scan(&afterEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if afterEvents != beforeEvents+2 {
+		t.Fatalf("issue_events count = %d, want %d", afterEvents, beforeEvents+2)
+	}
+}
+
+func TestIssueUnarchiveRestoresVisibilityAndWritesSingleAuditEvent(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Restore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: issue.ID, ExpectedVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Issue.ArchivedAt == nil {
+		t.Fatal("archive result should have archived_at set")
+	}
+
+	result, err := service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: issue.ID, ExpectedVersion: archived.Issue.Version})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue() error = %v", err)
+	}
+	if result.Issue.ArchivedAt != nil || result.Issue.Version != 3 || !result.Issue.UpdatedAt.Equal(now) {
+		t.Fatalf("unarchive result = %#v", result.Issue)
+	}
+	if result.Issue.Status != issue.Issue.Status || result.Issue.Title != issue.Issue.Title {
+		t.Fatalf("unarchive preserved data = %#v", result.Issue)
+	}
+
+	var eventType, payload string
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT event_type, payload FROM issue_events
+			WHERE issue_id = ? ORDER BY id DESC LIMIT 1`, issue.ID).Scan(&eventType, &payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if eventType != "issue_unarchived" || payload != `{"version":3,"unarchived_at":"`+sqlite.FormatStorageTime(now)+`"}` {
+		t.Fatalf("unarchive event = type %q payload %s", eventType, payload)
+	}
+	if !json.Valid([]byte(payload)) {
+		t.Fatalf("unarchive event payload is invalid JSON: %s", payload)
+	}
+}
+
+func TestIssueUnarchiveWritesDurableSessionIDAndRejectsArchivedParent(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVS6"
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'test-session', ?, ?)`, sessionID, sqlite.FormatStorageTime(time.Now()), sqlite.FormatStorageTime(time.Now()))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Child", ParentID: &parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: child.ID, ExpectedVersion: 1}); err != nil {
+		t.Fatalf("ArchiveIssue(child) error = %v", err)
+	}
+	if _, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: parent.ID, ExpectedVersion: 1}); err != nil {
+		t.Fatalf("ArchiveIssue(parent) error = %v", err)
+	}
+
+	_, err = service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: child.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err == nil {
+		t.Fatal("UnarchiveIssue(child with archived parent) unexpectedly succeeded")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidEpicParent {
+		t.Fatalf("UnarchiveIssue(child with archived parent) error = %#v, want code %q", err, domain.CodeInvalidEpicParent)
+	}
+	if details := domainErr.Details; len(details) != 1 || details[0].Field != "parent_id" || details[0].Code != "PARENT_ARCHIVED" {
+		t.Fatalf("UnarchiveIssue(child with archived parent) details = %#v, want field=parent_id code=PARENT_ARCHIVED", details)
+	}
+
+	var beforeVersion, beforeEvents int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT version FROM issues WHERE id = ?", child.ID).Scan(&beforeVersion); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", child.ID).Scan(&beforeEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if beforeVersion != 2 {
+		t.Fatalf("child version before parent restore = %d, want 2", beforeVersion)
+	}
+	if beforeEvents != 2 {
+		t.Fatalf("child issue_events before parent restore = %d, want 2 (create+archive)", beforeEvents)
+	}
+
+	parentRestored, err := service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: parent.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue(parent) error = %v", err)
+	}
+	if parentRestored.Issue.ArchivedAt != nil {
+		t.Fatalf("UnarchiveIssue(parent) archived_at = %v, want nil", parentRestored.Issue.ArchivedAt)
+	}
+
+	childRestored, err := service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: child.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue(child after parent restore) error = %v", err)
+	}
+	if childRestored.Issue.ArchivedAt != nil || childRestored.Issue.Version != 3 {
+		t.Fatalf("UnarchiveIssue(child after parent restore) = %#v, want archived_at=nil version=3", childRestored.Issue)
+	}
+
+	var storedSessionID sql.NullString
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'issue_unarchived' ORDER BY id DESC LIMIT 1`, child.ID).Scan(&storedSessionID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !storedSessionID.Valid || storedSessionID.String != sessionID {
+		t.Fatalf("issue_unarchived.session_id = %#v, want %q", storedSessionID, sessionID)
+	}
+}

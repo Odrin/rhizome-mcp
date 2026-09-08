@@ -54,6 +54,21 @@ type ArchiveIssueResult struct {
 	Issue domain.Issue
 }
 
+// UnarchiveIssueCommand contains a validated unarchive request and its mutation timestamp.
+type UnarchiveIssueCommand struct {
+	Identifier      domain.IssueIdentifier
+	ExpectedVersion int64
+	SessionID       *string
+	UnarchivedAt    time.Time
+	IdempotencyKey  string
+	RequestHash     []byte
+}
+
+// UnarchiveIssueResult is the full persisted projection after unarchiving.
+type UnarchiveIssueResult struct {
+	Issue domain.Issue
+}
+
 // ListLabelsCommand contains a validated page request.
 type ListLabelsCommand struct {
 	Input domain.ListLabelsInput
@@ -86,6 +101,8 @@ type IssueRepository interface {
 	LookupUpdateIssue(context.Context, string, []byte) (UpdateIssueResult, bool, error)
 	ArchiveIssue(context.Context, ArchiveIssueCommand) (ArchiveIssueResult, error)
 	LookupArchiveIssue(context.Context, string, []byte) (ArchiveIssueResult, bool, error)
+	UnarchiveIssue(context.Context, UnarchiveIssueCommand) (UnarchiveIssueResult, error)
+	LookupUnarchiveIssue(context.Context, string, []byte) (UnarchiveIssueResult, bool, error)
 	GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error)
 	GetIssueProjection(context.Context, GetIssueProjectionCommand) (domain.IssueProjection, error)
 	ListLabels(context.Context, ListLabelsCommand) (domain.LabelList, error)

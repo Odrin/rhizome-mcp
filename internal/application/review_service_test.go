@@ -239,6 +239,14 @@ func (stub *issueRepositoryStub) LookupArchiveIssue(context.Context, string, []b
 	return ports.ArchiveIssueResult{}, false, nil
 }
 
+func (stub *issueRepositoryStub) UnarchiveIssue(context.Context, ports.UnarchiveIssueCommand) (ports.UnarchiveIssueResult, error) {
+	return ports.UnarchiveIssueResult{}, nil
+}
+
+func (stub *issueRepositoryStub) LookupUnarchiveIssue(context.Context, string, []byte) (ports.UnarchiveIssueResult, bool, error) {
+	return ports.UnarchiveIssueResult{}, false, nil
+}
+
 func (stub *issueRepositoryStub) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	return stub.issue, nil
 }

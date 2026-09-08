@@ -31,6 +31,7 @@ import (
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/inventory"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	"rhizome-mcp/internal/projectrouting"
@@ -370,6 +371,17 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	adapter.SetBackupHandler(backupHandler)
 	adapter.SetDoctorHandler(doctorHandler)
 	adapter.SetConnectHandler(connectHandler)
+	adapter.SetProjectsListHandler(func(ctx context.Context, _ string) (inventory.Result, error) {
+		dataRoot := dataRootOverride
+		if dataRoot == "" {
+			resolved, err := projectconfig.ResolveDataRoot(pathInputs)
+			if err != nil {
+				return inventory.Result{}, err
+			}
+			dataRoot = resolved
+		}
+		return inventory.List(dataRoot, pathInputs)
+	})
 	adapter.SetAppVersion(cfg.Version)
 	return adapter.Run(ctx, args)
 }

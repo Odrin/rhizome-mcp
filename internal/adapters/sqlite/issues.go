@@ -20,9 +20,10 @@ type IssueRepository struct {
 }
 
 const (
-	createIssueOperation  = "create_issue"
-	updateIssueOperation  = "update_issue"
-	archiveIssueOperation = "archive_issue"
+	createIssueOperation    = "create_issue"
+	updateIssueOperation    = "update_issue"
+	archiveIssueOperation   = "archive_issue"
+	unarchiveIssueOperation = "unarchive_issue"
 )
 
 // NewIssueRepository returns an issue repository backed by database.
@@ -573,6 +574,148 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 	return result, nil
 }
 
+// LookupUnarchiveIssue serves a replay before the writer transaction begins.
+func (repository *IssueRepository) LookupUnarchiveIssue(ctx context.Context, key string, hash []byte) (ports.UnarchiveIssueResult, bool, error) {
+	var result ports.UnarchiveIssueResult
+	var found bool
+	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
+		var savedHash []byte
+		var savedResponse string
+		err := query.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+			WHERE operation = ? AND idempotency_key = ?`, unarchiveIssueOperation, key).Scan(&savedHash, &savedResponse)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(savedHash, hash) {
+			return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+				domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+		}
+		if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+			return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+		}
+		found = true
+		return nil
+	})
+	return result, found, err
+}
+
+// UnarchiveIssue atomically validates the current projection, conditionally restores visibility, and appends its one corresponding event.
+func (repository *IssueRepository) UnarchiveIssue(ctx context.Context, command ports.UnarchiveIssueCommand) (ports.UnarchiveIssueResult, error) {
+	var result ports.UnarchiveIssueResult
+	now := command.UnarchivedAt.UTC()
+	timestamp := formatStorageTime(now)
+	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
+		if command.IdempotencyKey != "" {
+			var savedHash []byte
+			var savedResponse string
+			err := tx.QueryRowContext(ctx, `SELECT request_hash, response_json FROM idempotency_records
+				WHERE operation = ? AND idempotency_key = ?`, unarchiveIssueOperation, command.IdempotencyKey).Scan(&savedHash, &savedResponse)
+			switch {
+			case err == nil:
+				if !bytes.Equal(savedHash, command.RequestHash) {
+					return domain.NewError(domain.CodeIdempotencyConflict, "idempotency key was used with a different request", false,
+						domain.Detail{Field: "idempotency_key", Code: domain.CodeIdempotencyConflict})
+				}
+				if err := json.Unmarshal([]byte(savedResponse), &result); err != nil {
+					return domain.WrapError(err, domain.CodeStorageCorrupt, "stored idempotency response is invalid", false)
+				}
+				return nil
+			case err == sql.ErrNoRows:
+			default:
+				return err
+			}
+		}
+		current, err := loadIssueForMutation(ctx, tx, command.Identifier)
+		if err != nil {
+			return err
+		}
+		if current.ArchivedAt == nil {
+			return domain.NewError(domain.CodeIssueNotArchived, "issue is not archived", false)
+		}
+		if current.Version != command.ExpectedVersion {
+			return domain.NewError(domain.CodeVersionConflict, "issue version conflict", true)
+		}
+		if current.Type == domain.TypeEpic {
+			// Restoring an epic does not recursively unarchive its children; they remain archived until individually restored.
+		} else if current.ParentID != nil {
+			resolved, err := validateParent(ctx, tx, current.ParentID)
+			if err != nil {
+				return err
+			}
+			if resolved == nil {
+				return invalidParentError()
+			}
+		}
+		if err := expireAttemptsForIssue(ctx, tx, current.ID, now); err != nil {
+			return err
+		}
+		var hasActiveAttempt bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM work_attempts
+				WHERE issue_id = ? AND status = 'active'
+			)`, current.ID).Scan(&hasActiveAttempt); err != nil {
+			return err
+		}
+		if hasActiveAttempt {
+			return domain.NewError(domain.CodeActiveAttemptExists, "issue has an active work attempt", false)
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET archived_at = NULL, archived_by_session_id = NULL,
+				version = version + 1, updated_at = ?
+			WHERE id = ? AND version = ? AND archived_at IS NOT NULL`,
+			timestamp, current.ID, command.ExpectedVersion,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return classifyConditionalUpdateFailure(ctx, tx, current.ID)
+		}
+		payload, err := json.Marshal(issueUnarchivedPayload{
+			Version:      command.ExpectedVersion + 1,
+			UnarchivedAt: timestamp,
+		})
+		if err != nil {
+			return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue unarchive event", false)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+			VALUES (?, 'issue_unarchived', ?, NULL, ?, ?)`, current.ID, nullableString(command.SessionID), string(payload), timestamp); err != nil {
+			return err
+		}
+		result.Issue, err = loadIssueForMutation(ctx, tx, domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: current.ID})
+		if err != nil {
+			return err
+		}
+		if command.IdempotencyKey != "" {
+			response, err := json.Marshal(result)
+			if err != nil {
+				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue unarchive response", false)
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_records(
+				idempotency_key, operation, request_hash, response_json, created_at
+			) VALUES (?, ?, ?, ?, ?)`, command.IdempotencyKey, unarchiveIssueOperation, command.RequestHash, string(response), timestamp)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return ports.UnarchiveIssueResult{}, err
+	}
+	return result, nil
+}
+
 func loadIssueForMutation(ctx context.Context, tx Queryer, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	var row *sql.Row
 	switch identifier.Kind {
@@ -818,6 +961,11 @@ type issueArchivedPayload struct {
 	ArchivedAt string `json:"archived_at"`
 }
 
+type issueUnarchivedPayload struct {
+	Version      int64  `json:"version"`
+	UnarchivedAt string `json:"unarchived_at"`
+}
+
 func validateParent(ctx context.Context, tx Executor, parentID *string) (*string, error) {
 	if parentID == nil {
 		return nil, nil
@@ -853,8 +1001,11 @@ func validateParent(ctx context.Context, tx Executor, parentID *string) (*string
 	if err != nil {
 		return nil, err
 	}
-	if issueType != domain.TypeEpic || archivedAt.Valid {
+	if issueType != domain.TypeEpic {
 		return nil, invalidParentError()
+	}
+	if archivedAt.Valid {
+		return nil, archivedParentError()
 	}
 	return &resolvedID, nil
 }
@@ -865,6 +1016,15 @@ func invalidParentError() error {
 		"parent_id must reference a non-archived epic",
 		false,
 		domain.Detail{Field: "parent_id", Code: domain.CodeInvalidEpicParent},
+	)
+}
+
+func archivedParentError() error {
+	return domain.NewError(
+		domain.CodeInvalidEpicParent,
+		"parent_id must reference a non-archived epic",
+		false,
+		domain.Detail{Field: "parent_id", Code: "PARENT_ARCHIVED"},
 	)
 }
 

@@ -138,6 +138,7 @@ The following defaults are covered by the integration gate and should be treated
 | `create_issue` | compact: `id`, `display_id`, `sequence_no`, `type`, `status`, `priority`, `version` | 32 KiB |
 | `update_issue` | compact `issue` (`id`, `display_id`, `status`, `version`) and `changed_fields` | 32 KiB |
 | `archive_issue` | compact: `id`, `display_id`, `status`, `version` | 32 KiB |
+| `unarchive_issue` | compact: `id`, `display_id`, `status`, `version` | 32 KiB |
 | `claim_issue` | compact `issue`, compact `attempt`, `lease_token` | 32 KiB |
 | `renew_attempt` | `lease_expires_at`, `server_time`, `next_actions` | 32 KiB |
 | `save_attempt_note` | `attempt_note`, `artifacts`, `next_actions` | 64 KiB |
@@ -173,7 +174,7 @@ Audited baselines from prior review work are informative but are not current def
 
 ## 3.1. Tool inventory
 
-The catalog exposes 43 full tools, 36 agent tools, 5 migration tools, and 21 read-only tools:
+The catalog exposes 44 full tools, 37 agent tools, 5 migration tools, and 21 read-only tools:
 
 1. `create_agent_session`
 2. `end_agent_session`
@@ -188,36 +189,37 @@ The catalog exposes 43 full tools, 36 agent tools, 5 migration tools, and 21 rea
 11. `get_issue`
 12. `list_issues`
 13. `archive_issue`
-14. `create_review_request`
-15. `get_review_request`
-16. `list_review_requests`
-17. `cancel_review_request`
-18. `replace_review_request`
-19. `manage_issue_relation`
-20. `get_issue_graph`
-21. `get_planning_graph`
-22. `validate_issue_plan`
-23. `apply_issue_plan`
-24. `add_comment`
-25. `record_decision`
-26. `list_decisions`
-27. `get_issue_activity`
-28. `claim_issue`
-29. `renew_attempt`
-30. `save_attempt_note`
-31. `finish_attempt`
-32. `get_work_context`
-33. `reserve_resources`
-34. `release_resources`
-35. `list_resource_reservations`
-36. `get_resource_reservation`
-37. `search`
-38. `get_changes`
-39. `manage_workflow_policy`
-40. `get_workflow_policy`
-41. `list_workflow_policies`
-42. `submit_gate_evidence`
-43. `evaluate_gates`
+14. `unarchive_issue`
+15. `create_review_request`
+16. `get_review_request`
+17. `list_review_requests`
+18. `cancel_review_request`
+19. `replace_review_request`
+20. `manage_issue_relation`
+21. `get_issue_graph`
+22. `get_planning_graph`
+23. `validate_issue_plan`
+24. `apply_issue_plan`
+25. `add_comment`
+26. `record_decision`
+27. `list_decisions`
+28. `get_issue_activity`
+29. `claim_issue`
+30. `renew_attempt`
+31. `save_attempt_note`
+32. `finish_attempt`
+33. `get_work_context`
+34. `reserve_resources`
+35. `release_resources`
+36. `list_resource_reservations`
+37. `get_resource_reservation`
+38. `search`
+39. `get_changes`
+40. `manage_workflow_policy`
+41. `get_workflow_policy`
+42. `list_workflow_policies`
+43. `submit_gate_evidence`
+44. `evaluate_gates`
 
 ### 3.1. `create_agent_session`
 
@@ -418,6 +420,7 @@ rather than the tool's read/write split alone:
 | `get_issue` | ✓ | | ✓ | |
 | `list_issues` | ✓ | | ✓ | |
 | `archive_issue` | | ✓ | ✓ | |
+| `unarchive_issue` | | ✓ | ✓ | |
 | `create_review_request` | | | | |
 | `get_review_request` | ✓ | | ✓ | |
 | `list_review_requests` | ✓ | | ✓ | |
@@ -537,15 +540,15 @@ annotation matrix.
 | core | `open_project`, `get_project` | always | always |
 | migration | `export_project`, `validate_import`, `apply_import` | no | yes |
 | sync | `get_changes` | no | no |
-| issues | `list_labels`, `create_issue`, `update_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
+| issues | `list_labels`, `create_issue`, `update_issue`, `unarchive_issue`, `get_issue`, `list_issues`, `archive_issue`, `manage_issue_relation`, `get_issue_graph`, `get_planning_graph` | yes | no |
 | planning | `validate_issue_plan`, `apply_issue_plan` | yes | no |
 | review | `create_review_request`, `get_review_request`, `list_review_requests`, `cancel_review_request`, `replace_review_request` | yes | no |
 | knowledge | `add_comment`, `record_decision`, `list_decisions`, `get_issue_activity`, `search` | yes | no |
 | lifecycle | `claim_issue`, `renew_attempt`, `save_attempt_note`, `finish_attempt`, `get_work_context`, `reserve_resources`, `release_resources`, `list_resource_reservations`, `get_resource_reservation`, `submit_gate_evidence`, `evaluate_gates` | yes | no |
 | governance | `manage_workflow_policy`, `get_workflow_policy`, `list_workflow_policies` | no | no |
 
-- **`full`** (default): every group, all 43 tools.
-- **`agent`** (36 tools): every group except `migration`, `sync` and
+- **`full`** (default): every group, all 44 tools.
+- **`agent`** (37 tools): every group except `migration`, `sync` and
   `governance` — the complete ordinary issue discovery, planning, review,
   knowledge, and leased work lifecycle workflow, without bulk project
   transfer, incremental synchronization, or the ability to rewrite the
@@ -1164,7 +1167,38 @@ Compact output (`view: "compact"`, default):
 
 Compact responses omit issue bodies, labels, timestamps, and other non-essential issue metadata. Migration guidance is the same as for create: callers that need the full issue payload should pass `view: "full"`.
 
-### 7.6. Review requests
+### 7.6. `unarchive_issue`
+
+Input:
+
+```json
+{
+  "issue_id": "ISSUE-42",
+  "expected_version": 9,
+  "idempotency_key": null,
+  "view": "compact"
+}
+```
+
+Rules:
+
+- a visible issue is not archived and cannot be unarchived again; repeated
+  unarchive attempts against an already visible issue fail with
+  `ISSUE_NOT_ARCHIVED`;
+- the issue's archived state is cleared without deleting history;
+- unarchiving restores the issue to its default visible state while preserving
+  the prior event history and version semantics.
+
+`idempotency_key` is optional. When supplied, it must be a non-blank string up
+to 128 runes. Reusing the same key with the same normalized request (`issue_id`
+and `expected_version`) replays the original unarchive response, including after
+the issue has already been unarchived by that same call. Reusing the key with a
+different normalized request returns `IDEMPOTENCY_CONFLICT`.
+
+The compact result matches `archive_issue`: it returns the visible issue's
+`id`, `display_id`, `status`, and current `version`.
+
+### 7.7. Review requests
 
 Review requests bind review work to an issue version, event position, and
 optional artifact set. A review request is claimable while its status is
@@ -2544,6 +2578,7 @@ INVALID_RESERVATION_SET
 INVALID_STATUS_TRANSITION
 ISSUE_ARCHIVED
 ISSUE_CHANGED_DURING_ATTEMPT
+ISSUE_NOT_ARCHIVED
 ISSUE_NOT_FOUND
 LABEL_NOT_FOUND
 LEASE_EXPIRED

@@ -454,6 +454,14 @@ func (r *recordingIssueRepository) LookupArchiveIssue(context.Context, string, [
 	return ports.ArchiveIssueResult{}, false, nil
 }
 
+func (r *recordingIssueRepository) UnarchiveIssue(context.Context, ports.UnarchiveIssueCommand) (ports.UnarchiveIssueResult, error) {
+	return ports.UnarchiveIssueResult{}, nil
+}
+
+func (r *recordingIssueRepository) LookupUnarchiveIssue(context.Context, string, []byte) (ports.UnarchiveIssueResult, bool, error) {
+	return ports.UnarchiveIssueResult{}, false, nil
+}
+
 func (r *recordingIssueRepository) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	r.calls++
 	r.lastIdentifier = identifier

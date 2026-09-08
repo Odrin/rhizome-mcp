@@ -135,7 +135,7 @@ func TestIntegrationStdioToolsetSelectionFiltering(t *testing.T) {
 	}
 	want := []string{
 		"open_project", "get_project",
-		"list_labels", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue",
+		"list_labels", "create_issue", "update_issue", "get_issue", "list_issues", "archive_issue", "unarchive_issue",
 		"manage_issue_relation", "get_issue_graph", "get_planning_graph",
 		"validate_issue_plan", "apply_issue_plan",
 	}
