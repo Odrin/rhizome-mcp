@@ -760,3 +760,84 @@ func TestIssueUnarchiveRestoresVisibilityAndWritesSingleAuditEvent(t *testing.T)
 		t.Fatalf("unarchive event payload is invalid JSON: %s", payload)
 	}
 }
+
+func TestIssueUnarchiveWritesDurableSessionIDAndRejectsArchivedParent(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	sessionID := "01BX5ZZKBKACTAV9WEVGEMMVS6"
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(id, client_name, started_at, last_seen_at) VALUES (?, 'test-session', ?, ?)`, sessionID, sqlite.FormatStorageTime(time.Now()), sqlite.FormatStorageTime(time.Now()))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "Child", ParentID: &parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: child.ID, ExpectedVersion: 1}); err != nil {
+		t.Fatalf("ArchiveIssue(child) error = %v", err)
+	}
+	if _, err := service.ArchiveIssue(ctx, domain.ArchiveIssueInput{IssueID: parent.ID, ExpectedVersion: 1}); err != nil {
+		t.Fatalf("ArchiveIssue(parent) error = %v", err)
+	}
+
+	_, err = service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: child.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err == nil {
+		t.Fatal("UnarchiveIssue(child with archived parent) unexpectedly succeeded")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidEpicParent {
+		t.Fatalf("UnarchiveIssue(child with archived parent) error = %#v, want code %q", err, domain.CodeInvalidEpicParent)
+	}
+	if details := domainErr.Details; len(details) != 1 || details[0].Field != "parent_id" || details[0].Code != "PARENT_ARCHIVED" {
+		t.Fatalf("UnarchiveIssue(child with archived parent) details = %#v, want field=parent_id code=PARENT_ARCHIVED", details)
+	}
+
+	var beforeVersion, beforeEvents int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT version FROM issues WHERE id = ?", child.ID).Scan(&beforeVersion); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM issue_events WHERE issue_id = ?", child.ID).Scan(&beforeEvents)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if beforeVersion != 2 {
+		t.Fatalf("child version before parent restore = %d, want 2", beforeVersion)
+	}
+	if beforeEvents != 2 {
+		t.Fatalf("child issue_events before parent restore = %d, want 2 (create+archive)", beforeEvents)
+	}
+
+	parentRestored, err := service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: parent.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue(parent) error = %v", err)
+	}
+	if parentRestored.Issue.ArchivedAt != nil {
+		t.Fatalf("UnarchiveIssue(parent) archived_at = %v, want nil", parentRestored.Issue.ArchivedAt)
+	}
+
+	childRestored, err := service.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{IssueID: child.ID, ExpectedVersion: 2, SessionID: &sessionID})
+	if err != nil {
+		t.Fatalf("UnarchiveIssue(child after parent restore) error = %v", err)
+	}
+	if childRestored.Issue.ArchivedAt != nil || childRestored.Issue.Version != 3 {
+		t.Fatalf("UnarchiveIssue(child after parent restore) = %#v, want archived_at=nil version=3", childRestored.Issue)
+	}
+
+	var storedSessionID sql.NullString
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'issue_unarchived' ORDER BY id DESC LIMIT 1`, child.ID).Scan(&storedSessionID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !storedSessionID.Valid || storedSessionID.String != sessionID {
+		t.Fatalf("issue_unarchived.session_id = %#v, want %q", storedSessionID, sessionID)
+	}
+}

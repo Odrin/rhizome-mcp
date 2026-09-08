@@ -58,6 +58,7 @@ type ArchiveIssueResult struct {
 type UnarchiveIssueCommand struct {
 	Identifier      domain.IssueIdentifier
 	ExpectedVersion int64
+	SessionID       *string
 	UnarchivedAt    time.Time
 	IdempotencyKey  string
 	RequestHash     []byte

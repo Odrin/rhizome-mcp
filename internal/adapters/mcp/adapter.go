@@ -1147,6 +1147,7 @@ func (adapter *adapter) unarchiveIssue(ctx context.Context, request *sdkmcp.Call
 	result, err := adapter.services.IssueService.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey:  input.IdempotencyKey,
 	})
 	if err != nil {

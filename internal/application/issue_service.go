@@ -285,6 +285,7 @@ func (service *IssueService) UnarchiveIssue(ctx context.Context, input domain.Un
 	result, err := service.repository.UnarchiveIssue(ctx, ports.UnarchiveIssueCommand{
 		Identifier:      identifier,
 		ExpectedVersion: normalized.ExpectedVersion,
+		SessionID:       normalized.SessionID,
 		UnarchivedAt:    service.clock.Now().UTC(),
 		IdempotencyKey:  idempotencyKey,
 		RequestHash:     requestHash,

@@ -60,6 +60,7 @@ func CanonicalArchiveIssueRequest(input ArchiveIssueInput) ([]byte, error) {
 type UnarchiveIssueInput struct {
 	IssueID         string
 	ExpectedVersion int64
+	SessionID       *string
 	IdempotencyKey  *string
 }
 
@@ -72,6 +73,10 @@ func (input UnarchiveIssueInput) Validate() (normalized UnarchiveIssueInput, err
 		return UnarchiveIssueInput{}, validationError("expected_version", "REQUIRED", "must be at least 1")
 	}
 	identifier, err := ParseIssueIdentifier(input.IssueID)
+	if err != nil {
+		return UnarchiveIssueInput{}, err
+	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
 	if err != nil {
 		return UnarchiveIssueInput{}, err
 	}
@@ -89,6 +94,7 @@ func (input UnarchiveIssueInput) Validate() (normalized UnarchiveIssueInput, err
 	return UnarchiveIssueInput{
 		IssueID:         identifier.Value,
 		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       sessionID,
 		IdempotencyKey:  idempotencyKey,
 	}, nil
 }

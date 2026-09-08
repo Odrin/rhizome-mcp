@@ -143,8 +143,8 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 			if err := json.Unmarshal(envelope.Result, &toolsResponse); err != nil {
 				t.Fatalf("decode tools/list result: %v", err)
 			}
-			if len(toolsResponse.Tools) != 43 {
-				t.Fatalf("tools/list tool count = %d, want 43", len(toolsResponse.Tools))
+			if len(toolsResponse.Tools) != 44 {
+				t.Fatalf("tools/list tool count = %d, want 44", len(toolsResponse.Tools))
 			}
 
 			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-open", "tools/call", map[string]any{
@@ -285,6 +285,115 @@ func TestIntegrationHTTPProjectRoutingUsesProjectRefArguments(t *testing.T) {
 			}
 			if !foundRoutedIssue {
 				t.Fatalf("list_issues titles = %#v, want %q", listResult.StructuredContent.Items, tc.name+"-routed")
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-archive", "tools/call", map[string]any{
+				"name": "create_issue",
+				"arguments": map[string]any{
+					"project_ref": openProjectResult.StructuredContent.ProjectRef,
+					"type":        "task",
+					"title":       tc.name + "-archive-target",
+				},
+				"_meta": tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("create_issue archive target failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("create_issue archive target status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode archive target response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("archive target rpc error = %#v", envelope.Error)
+			}
+			var createdTarget struct {
+				IsError           bool `json:"isError"`
+				StructuredContent struct {
+					ID      string `json:"id"`
+					Version int64  `json:"version"`
+					Status  string `json:"status"`
+				} `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(envelope.Result, &createdTarget); err != nil {
+				t.Fatalf("decode archive target result: %v", err)
+			}
+			if createdTarget.IsError || createdTarget.StructuredContent.ID == "" {
+				t.Fatalf("create_issue archive target unexpectedly returned an error: %s", body)
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-archive-step", "tools/call", map[string]any{
+				"name": "archive_issue",
+				"arguments": map[string]any{
+					"project_ref":      openProjectResult.StructuredContent.ProjectRef,
+					"issue_id":         createdTarget.StructuredContent.ID,
+					"expected_version": createdTarget.StructuredContent.Version,
+				},
+				"_meta": tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("archive_issue failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("archive_issue status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode archive_issue response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("archive_issue rpc error = %#v", envelope.Error)
+			}
+			var archiveResult struct {
+				IsError           bool `json:"isError"`
+				StructuredContent struct {
+					Version int64  `json:"version"`
+					Status  string `json:"status"`
+				} `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(envelope.Result, &archiveResult); err != nil {
+				t.Fatalf("decode archive_issue result: %v", err)
+			}
+			if archiveResult.IsError || archiveResult.StructuredContent.Version != createdTarget.StructuredContent.Version+1 {
+				t.Fatalf("archive_issue result = %#v, want version %d", archiveResult, createdTarget.StructuredContent.Version+1)
+			}
+
+			status, _, body, err = postJSONRPCRequest(t, endpoint, tc.protocolVersion, "ignored-session", tc.name+"-unarchive-step", "tools/call", map[string]any{
+				"name": "unarchive_issue",
+				"arguments": map[string]any{
+					"project_ref":      openProjectResult.StructuredContent.ProjectRef,
+					"issue_id":         createdTarget.StructuredContent.ID,
+					"expected_version": archiveResult.StructuredContent.Version,
+				},
+				"_meta": tc.params["_meta"],
+			})
+			if err != nil {
+				t.Fatalf("unarchive_issue failed: %v", err)
+			}
+			if status < http.StatusOK || status >= http.StatusMultipleChoices {
+				t.Fatalf("unarchive_issue status = %d, body = %s", status, body)
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("decode unarchive_issue response: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("unarchive_issue rpc error = %#v", envelope.Error)
+			}
+			var unarchiveResult struct {
+				IsError           bool `json:"isError"`
+				StructuredContent struct {
+					Version int64  `json:"version"`
+					Status  string `json:"status"`
+				} `json:"structuredContent"`
+			}
+			if err := json.Unmarshal(envelope.Result, &unarchiveResult); err != nil {
+				t.Fatalf("decode unarchive_issue result: %v", err)
+			}
+			if unarchiveResult.IsError || unarchiveResult.StructuredContent.Version != archiveResult.StructuredContent.Version+1 {
+				t.Fatalf("unarchive_issue result = %#v, want version %d", unarchiveResult, archiveResult.StructuredContent.Version+1)
+			}
+			if unarchiveResult.StructuredContent.Status == "archived" {
+				t.Fatalf("unarchive_issue left issue archived: %#v", unarchiveResult)
 			}
 		})
 	}

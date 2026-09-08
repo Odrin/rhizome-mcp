@@ -689,7 +689,7 @@ func (repository *IssueRepository) UnarchiveIssue(ctx context.Context, command p
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, 'issue_unarchived', NULL, NULL, ?, ?)`, current.ID, string(payload), timestamp); err != nil {
+			VALUES (?, 'issue_unarchived', ?, NULL, ?, ?)`, current.ID, nullableString(command.SessionID), string(payload), timestamp); err != nil {
 			return err
 		}
 		result.Issue, err = loadIssueForMutation(ctx, tx, domain.IssueIdentifier{Kind: domain.IssueIdentifierInternalID, Value: current.ID})
@@ -1001,8 +1001,11 @@ func validateParent(ctx context.Context, tx Executor, parentID *string) (*string
 	if err != nil {
 		return nil, err
 	}
-	if issueType != domain.TypeEpic || archivedAt.Valid {
+	if issueType != domain.TypeEpic {
 		return nil, invalidParentError()
+	}
+	if archivedAt.Valid {
+		return nil, archivedParentError()
 	}
 	return &resolvedID, nil
 }
@@ -1013,6 +1016,15 @@ func invalidParentError() error {
 		"parent_id must reference a non-archived epic",
 		false,
 		domain.Detail{Field: "parent_id", Code: domain.CodeInvalidEpicParent},
+	)
+}
+
+func archivedParentError() error {
+	return domain.NewError(
+		domain.CodeInvalidEpicParent,
+		"parent_id must reference a non-archived epic",
+		false,
+		domain.Detail{Field: "parent_id", Code: "PARENT_ARCHIVED"},
 	)
 }
 
