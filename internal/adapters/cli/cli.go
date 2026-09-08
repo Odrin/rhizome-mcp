@@ -16,6 +16,7 @@ import (
 
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/inventory"
 )
 
 const (
@@ -84,6 +85,9 @@ type ServeHandler func(context.Context, string, string, string) error
 // BoardServeHandler runs CLI board serve logic after the adapter parses the command.
 type BoardServeHandler func(context.Context, string, io.Writer) error
 
+// ProjectsListHandler lists project inventory entries without opening a project.
+type ProjectsListHandler func(context.Context, string) (inventory.Result, error)
+
 // BackupReport summarizes a validated backup database artifact for CLI output.
 type BackupReport struct {
 	OutputPath    string
@@ -139,16 +143,17 @@ type ConnectHandler func(context.Context, string, bool, bool) error
 
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
-	services          Services
-	stdout            io.Writer
-	stderr            io.Writer
-	initHandler       InitHandler
-	serveHandler      ServeHandler
-	boardServeHandler BoardServeHandler
-	backupHandler     BackupHandler
-	doctorHandler     DoctorHandler
-	connectHandler    ConnectHandler
-	appVersion        string
+	services            Services
+	stdout              io.Writer
+	stderr              io.Writer
+	initHandler         InitHandler
+	serveHandler        ServeHandler
+	boardServeHandler   BoardServeHandler
+	backupHandler       BackupHandler
+	doctorHandler       DoctorHandler
+	connectHandler      ConnectHandler
+	projectsListHandler ProjectsListHandler
+	appVersion          string
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -174,6 +179,11 @@ func (c *CLI) SetDoctorHandler(handler DoctorHandler) {
 // SetConnectHandler installs a handler for the connect command.
 func (c *CLI) SetConnectHandler(handler ConnectHandler) {
 	c.connectHandler = handler
+}
+
+// SetProjectsListHandler installs a handler for the projects list command.
+func (c *CLI) SetProjectsListHandler(handler ProjectsListHandler) {
+	c.projectsListHandler = handler
 }
 
 // SetAppVersion sets the application version string for display in CLI outputs.
@@ -356,6 +366,44 @@ func (c *CLI) runProject(ctx context.Context, args []string) error {
 	default:
 		return c.usageError()
 	}
+}
+
+func (c *CLI) runProjects(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return c.usageError()
+	}
+	switch args[0] {
+	case "list":
+		return c.runProjectsList(ctx, args[1:])
+	default:
+		return c.usageError()
+	}
+}
+
+func (c *CLI) runProjectsList(ctx context.Context, args []string) error {
+	if c.projectsListHandler == nil {
+		return fmt.Errorf("projects list handler is not configured")
+	}
+	fs := flag.NewFlagSet("projects list", flag.ContinueOnError)
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
+	}
+	result, err := c.projectsListHandler(ctx, "")
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), result)
+	}
+	return c.writeProjectsListTable(result)
 }
 
 func (c *CLI) runProjectInfo(ctx context.Context, args []string) error {
@@ -937,6 +985,67 @@ func (c *CLI) writeMaintenanceReleaseAttemptTable(result application.ForceReleas
 		finishedAt = result.Attempt.FinishedAt.Format(time.RFC3339Nano)
 	}
 	builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%d\n", result.Attempt.ID, result.Attempt.Status, interruptionReason, finishedAt, result.LatestEventID))
+	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
+	return err
+}
+
+func (c *CLI) writeProjectsListTable(result inventory.Result) error {
+	var builder strings.Builder
+	builder.WriteString("project_id\tid\tname\torigin\tissue_count\tschema_version\tsize\tstatus\tdiagnostics\n")
+	for _, item := range result.Items {
+		id := ""
+		if item.ID != nil {
+			id = *item.ID
+		}
+		name := ""
+		if item.Name != nil {
+			name = *item.Name
+		}
+		origin := ""
+		if item.Origin != nil {
+			origin = *item.Origin
+		}
+		issueCount := ""
+		if item.IssueCount != nil {
+			issueCount = strconv.FormatInt(*item.IssueCount, 10)
+		}
+		schemaVersion := ""
+		if item.SchemaVersion != nil {
+			schemaVersion = strconv.Itoa(*item.SchemaVersion)
+		}
+		size := ""
+		if item.Size != nil {
+			size = strconv.FormatInt(*item.Size, 10)
+		}
+		status := item.Status
+		if status == "" {
+			status = "unknown"
+		}
+		diagnostics := make([]string, 0, len(item.Diagnostics))
+		for _, diagnostic := range item.Diagnostics {
+			piece := diagnostic.Code
+			if diagnostic.Field != "" {
+				piece = piece + "@" + diagnostic.Field
+			}
+			if diagnostic.Message != "" {
+				piece = piece + ": " + diagnostic.Message
+			}
+			if piece != "" {
+				diagnostics = append(diagnostics, escapeTableValue(piece))
+			}
+		}
+		builder.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			item.ProjectID,
+			id,
+			escapeTableValue(name),
+			escapeTableValue(origin),
+			issueCount,
+			schemaVersion,
+			size,
+			status,
+			strings.Join(diagnostics, "; "),
+		))
+	}
 	_, err := fmt.Fprint(c.stdoutWriter(), builder.String())
 	return err
 }

@@ -117,7 +117,7 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureProjectRow(ctx, db, discovered.Identity.ProjectID, options.Clock.Now()); err != nil {
+	if err := ensureProjectRow(ctx, db, discovered.Identity.ProjectID, discovered.Root, options.Clock.Now()); err != nil {
 		return nil, err
 	}
 	if !databaseExists {
@@ -277,7 +277,7 @@ func verifyProjectRowIdentity(ctx context.Context, db *sqlite.DB, projectID stri
 	return nil
 }
 
-func ensureProjectRow(ctx context.Context, db *sqlite.DB, projectID string, now time.Time) error {
+func ensureProjectRow(ctx context.Context, db *sqlite.DB, projectID, repositoryRoot string, now time.Time) error {
 	return db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		rows, err := tx.QueryContext(ctx, "SELECT id FROM projects ORDER BY id")
 		if err != nil {
@@ -298,8 +298,8 @@ func ensureProjectRow(ctx context.Context, db *sqlite.DB, projectID string, now 
 		if len(ids) == 0 {
 			timestamp := now.UTC().Format(time.RFC3339Nano)
 			if _, err := tx.ExecContext(ctx, `INSERT INTO projects(
-				id, next_issue_number, created_at, updated_at
-			) VALUES (?, 1, ?, ?)`, projectID, timestamp, timestamp); err != nil {
+				id, origin, next_issue_number, created_at, updated_at
+			) VALUES (?, ?, 1, ?, ?)`, projectID, repositoryRoot, timestamp, timestamp); err != nil {
 				return lifecycleError(err, CodeProjectOpen, "cannot initialize project database identity")
 			}
 			return nil

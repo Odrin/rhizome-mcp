@@ -66,6 +66,14 @@ func commands() []command {
 			run: func(c *CLI, ctx context.Context, args []string) error { return c.runProject(ctx, args) },
 		},
 		{
+			name:         "projects",
+			needsProject: false,
+			usageLines: []string{
+				"projects list [--format table|json]",
+			},
+			run: func(c *CLI, ctx context.Context, args []string) error { return c.runProjects(ctx, args) },
+		},
+		{
 			name:         "issue",
 			needsProject: true,
 			usageLines: []string{

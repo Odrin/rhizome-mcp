@@ -10,6 +10,7 @@ import (
 
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/inventory"
 )
 
 func TestWriteTableWriters(t *testing.T) {
@@ -25,6 +26,48 @@ func TestWriteTableWriters(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Fatalf("output %q does not contain %q", got, want)
 			}
+		}
+	})
+
+	t.Run("project list", func(t *testing.T) {
+		var stdout bytes.Buffer
+		cli := New(Services{}, &stdout, nil, nil, nil)
+		projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+		projectName := "Northwind"
+		projectOrigin := "/tmp/repo"
+		issueCount := int64(7)
+		schemaVersion := 15
+		size := int64(2048)
+		result := inventory.Result{Items: []inventory.Entry{{
+			ProjectID:     projectID,
+			ID:            &projectID,
+			Name:          &projectName,
+			Origin:        &projectOrigin,
+			IssueCount:    &issueCount,
+			SchemaVersion: &schemaVersion,
+			Size:          &size,
+			Status:        "ok",
+		}, {
+			ProjectID: "missing",
+			Status:    "unsafe",
+			Diagnostics: []inventory.Diagnostic{{
+				Code:    "unsafe",
+				Message: "project entry is not a directory",
+				Field:   "path",
+			}},
+		}}}
+		if err := cli.writeProjectsListTable(result); err != nil {
+			t.Fatalf("writeProjectsListTable: %v", err)
+		}
+		got := stdout.String()
+		if !strings.Contains(got, "project_id\tid\tname\torigin\tissue_count\tschema_version\tsize\tstatus\tdiagnostics") {
+			t.Fatalf("missing project list header: %q", got)
+		}
+		if !strings.Contains(got, projectID+"\t"+projectID+"\tNorthwind\t/tmp/repo\t7\t15\t2048\tok\t") {
+			t.Fatalf("unexpected project list output: %q", got)
+		}
+		if !strings.Contains(got, "unsafe@path: project entry is not a directory") {
+			t.Fatalf("missing diagnostics in project list output: %q", got)
 		}
 	})
 
