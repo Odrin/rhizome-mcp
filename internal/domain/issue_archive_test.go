@@ -39,3 +39,36 @@ func TestArchiveIssueInputValidateRejectsMissingOrInvalidValues(t *testing.T) {
 		}
 	}
 }
+
+func TestUnarchiveIssueInputValidateNormalizesIdentifier(t *testing.T) {
+	input, err := (domain.UnarchiveIssueInput{
+		IssueID: "issue-9", ExpectedVersion: 3,
+	}).Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.IssueID != "ISSUE-9" || input.ExpectedVersion != 3 {
+		t.Fatalf("normalized input = %#v", input)
+	}
+}
+
+func TestUnarchiveIssueInputValidateRejectsMissingOrInvalidValues(t *testing.T) {
+	tests := []domain.UnarchiveIssueInput{
+		{IssueID: "", ExpectedVersion: 1},
+		{IssueID: "not-an-issue", ExpectedVersion: 1},
+		{IssueID: "ISSUE-1", ExpectedVersion: 0},
+	}
+	for _, input := range tests {
+		_, err := input.Validate()
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) {
+			t.Fatalf("Validate(%#v) error = %v, want domain error", input, err)
+		}
+		if domainErr.Code != domain.CodeValidationError {
+			t.Fatalf("Validate(%#v) code = %q, want %q", input, domainErr.Code, domain.CodeValidationError)
+		}
+		if domainErr.Retryable {
+			t.Fatalf("Validate(%#v) unexpectedly retryable", input)
+		}
+	}
+}

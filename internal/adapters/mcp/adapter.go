@@ -236,6 +236,9 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupIssues, tool("archive_issue", "Archive one issue using its current version; history remains available.", schemaArchiveIssue(), schemaArchiveIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[archiveIssueInput, any](target, t, (*adapter).archiveIssue))
 	})
+	target.registerTool(server, groupIssues, tool("unarchive_issue", "Restore one archived issue to its default visible state using its current version; history remains available.", schemaUnarchiveIssue(), schemaUnarchiveIssueOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
+		sdkmcp.AddTool(server, t, routeProjectRequest[unarchiveIssueInput, any](target, t, (*adapter).unarchiveIssue))
+	})
 	target.registerTool(server, groupReview, tool("cancel_review_request", "Cancel an open or claimed review request using its current version.", schemaCancelReviewRequest(), schemaReviewRequestOutput(), toolHints(false, true, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[cancelReviewRequestInput, any](target, t, (*adapter).cancelReviewRequest))
 	})
@@ -1134,6 +1137,25 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 		return success(issueDTOFromDomain(result.Issue), "issue archived")
 	}
 	return success(archiveIssueCompactOutputFromDomain(result.Issue), "issue archived")
+}
+
+func (adapter *adapter) unarchiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input unarchiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
+	view, err := resolveView(input.View, "compact", "compact", "full")
+	if err != nil {
+		return adapter.failure(err)
+	}
+	result, err := adapter.services.IssueService.UnarchiveIssue(ctx, domain.UnarchiveIssueInput{
+		IssueID:         input.IssueID,
+		ExpectedVersion: input.ExpectedVersion,
+		IdempotencyKey:  input.IdempotencyKey,
+	})
+	if err != nil {
+		return adapter.failure(err)
+	}
+	if view == "full" {
+		return success(issueDTOFromDomain(result.Issue), "issue unarchived")
+	}
+	return success(unarchiveIssueCompactOutputFromDomain(result.Issue), "issue unarchived")
 }
 
 func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {

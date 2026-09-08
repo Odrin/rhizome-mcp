@@ -20,6 +20,8 @@ const (
 	CodeLabelNotFound = "LABEL_NOT_FOUND"
 	// CodeIssueArchived identifies an issue that cannot be mutated.
 	CodeIssueArchived = "ISSUE_ARCHIVED"
+	// CodeIssueNotArchived identifies a visible issue that is not currently archived.
+	CodeIssueNotArchived = "ISSUE_NOT_ARCHIVED"
 	// CodeVersionConflict identifies a failed optimistic version precondition.
 	CodeVersionConflict = "VERSION_CONFLICT"
 	// CodeActiveAttemptExists identifies an issue protected by an active attempt.

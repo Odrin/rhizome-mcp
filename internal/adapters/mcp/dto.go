@@ -152,6 +152,13 @@ type archiveIssueInput struct {
 	View            string  `json:"view,omitempty"`
 }
 
+type unarchiveIssueInput struct {
+	IssueID         string  `json:"issue_id"`
+	ExpectedVersion int64   `json:"expected_version"`
+	IdempotencyKey  *string `json:"idempotency_key,omitempty"`
+	View            string  `json:"view,omitempty"`
+}
+
 type addCommentInput struct {
 	IssueID        string  `json:"issue_id"`
 	Content        string  `json:"content"`
@@ -913,6 +920,13 @@ type archiveIssueCompactOutput struct {
 	Version   int64  `json:"version"`
 }
 
+type unarchiveIssueCompactOutput struct {
+	ID        string `json:"id"`
+	DisplayID string `json:"display_id"`
+	Status    string `json:"status"`
+	Version   int64  `json:"version"`
+}
+
 type updateIssueCompactOutput struct {
 	Issue         updateIssueCompactIssueDTO `json:"issue"`
 	ChangedFields []string                   `json:"changed_fields"`
@@ -1570,6 +1584,10 @@ func createIssueCompactOutputFromDomain(issue domain.Issue) createIssueCompactOu
 
 func archiveIssueCompactOutputFromDomain(issue domain.Issue) archiveIssueCompactOutput {
 	return archiveIssueCompactOutput{ID: issue.ID, DisplayID: issue.DisplayID, Status: string(issue.Status), Version: issue.Version}
+}
+
+func unarchiveIssueCompactOutputFromDomain(issue domain.Issue) unarchiveIssueCompactOutput {
+	return unarchiveIssueCompactOutput{ID: issue.ID, DisplayID: issue.DisplayID, Status: string(issue.Status), Version: issue.Version}
 }
 
 func updateIssueCompactOutputFromDomain(issue domain.Issue, changedFields []string) updateIssueCompactOutput {

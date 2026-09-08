@@ -396,6 +396,12 @@ func schemaArchiveIssue() *jsonschema.Schema {
 	}, "issue_id", "expected_version"))
 }
 
+func schemaUnarchiveIssue() *jsonschema.Schema {
+	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
+		"issue_id": issueIdentifierSchema(), "expected_version": integerSchema(), "idempotency_key": nullableBoundedStringSchema(128), "view": enumSchema("compact", "full"),
+	}, "issue_id", "expected_version"))
+}
+
 func schemaCreateReviewRequest() *jsonschema.Schema {
 	purposes := boundedStringsSchema(domain.MaxReviewPurposes, domain.MaxPolicyKeyRunes)
 	purposes.Description = "Purposes this review covers; defaults to [implementation]. Must cover every purpose an active review_approval policy currently requires for this target, or the call fails with REVIEW_PURPOSE_REQUIRED."
@@ -680,6 +686,7 @@ func schemaLabelListOutput() *jsonschema.Schema       { return typedSchema[label
 func schemaIssueOutput() *jsonschema.Schema           { return schemaCreateIssueUnion() }
 func schemaCreateIssueOutput() *jsonschema.Schema     { return schemaCreateIssueUnion() }
 func schemaArchiveIssueOutput() *jsonschema.Schema    { return schemaArchiveIssueUnion() }
+func schemaUnarchiveIssueOutput() *jsonschema.Schema  { return schemaUnarchiveIssueUnion() }
 func schemaGetIssueOutput() *jsonschema.Schema {
 	properties := map[string]*jsonschema.Schema{
 		"id":                  stringSchema(),
@@ -735,6 +742,10 @@ func schemaUpdateIssueUnion() *jsonschema.Schema {
 
 func schemaArchiveIssueUnion() *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[archiveIssueCompactOutput](), legacyFullViewBranch(typedSchema[issueDTO]())}}
+}
+
+func schemaUnarchiveIssueUnion() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "object", OneOf: []*jsonschema.Schema{typedSchema[unarchiveIssueCompactOutput](), legacyFullViewBranch(typedSchema[issueDTO]())}}
 }
 
 func schemaClaimIssueUnion() *jsonschema.Schema {

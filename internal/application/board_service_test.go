@@ -293,6 +293,14 @@ func (repository *boardRecordingIssueRepository) LookupArchiveIssue(context.Cont
 	return ports.ArchiveIssueResult{}, false, nil
 }
 
+func (repository *boardRecordingIssueRepository) UnarchiveIssue(context.Context, ports.UnarchiveIssueCommand) (ports.UnarchiveIssueResult, error) {
+	return ports.UnarchiveIssueResult{}, nil
+}
+
+func (repository *boardRecordingIssueRepository) LookupUnarchiveIssue(context.Context, string, []byte) (ports.UnarchiveIssueResult, bool, error) {
+	return ports.UnarchiveIssueResult{}, false, nil
+}
+
 func (repository *boardRecordingIssueRepository) GetIssue(context.Context, domain.IssueIdentifier) (domain.Issue, error) {
 	return domain.Issue{}, nil
 }

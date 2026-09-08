@@ -44,6 +44,11 @@ type ArchiveIssueResult struct {
 	Issue domain.Issue
 }
 
+// UnarchiveIssueResult contains the full persisted projection after unarchiving.
+type UnarchiveIssueResult struct {
+	Issue domain.Issue
+}
+
 // NewIssueService composes the issue use case from its required dependencies.
 func NewIssueService(repository ports.IssueRepository, source clock.Clock, generator IDGenerator) (*IssueService, error) {
 	if repository == nil {
@@ -247,6 +252,47 @@ func (service *IssueService) ArchiveIssue(ctx context.Context, input domain.Arch
 		return ArchiveIssueResult{}, err
 	}
 	return ArchiveIssueResult{Issue: result.Issue}, nil
+}
+
+// UnarchiveIssue validates and atomically reverses archival visibility for one issue.
+func (service *IssueService) UnarchiveIssue(ctx context.Context, input domain.UnarchiveIssueInput) (UnarchiveIssueResult, error) {
+	normalized, err := input.Validate()
+	if err != nil {
+		return UnarchiveIssueResult{}, err
+	}
+	identifier, err := domain.ParseIssueIdentifier(normalized.IssueID)
+	if err != nil {
+		return UnarchiveIssueResult{}, err
+	}
+	var idempotencyKey string
+	var requestHash []byte
+	if normalized.IdempotencyKey != nil {
+		canonical, err := domain.CanonicalUnarchiveIssueRequest(normalized)
+		if err != nil {
+			return UnarchiveIssueResult{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode unarchive issue request", false)
+		}
+		hash := sha256.Sum256(canonical)
+		requestHash = append([]byte(nil), hash[:]...)
+		idempotencyKey = *normalized.IdempotencyKey
+		result, found, err := service.repository.LookupUnarchiveIssue(ctx, idempotencyKey, requestHash)
+		if err != nil {
+			return UnarchiveIssueResult{}, err
+		}
+		if found {
+			return UnarchiveIssueResult{Issue: result.Issue}, nil
+		}
+	}
+	result, err := service.repository.UnarchiveIssue(ctx, ports.UnarchiveIssueCommand{
+		Identifier:      identifier,
+		ExpectedVersion: normalized.ExpectedVersion,
+		UnarchivedAt:    service.clock.Now().UTC(),
+		IdempotencyKey:  idempotencyKey,
+		RequestHash:     requestHash,
+	})
+	if err != nil {
+		return UnarchiveIssueResult{}, err
+	}
+	return UnarchiveIssueResult{Issue: result.Issue}, nil
 }
 
 // GetIssue validates an internal or display issue identifier and returns the

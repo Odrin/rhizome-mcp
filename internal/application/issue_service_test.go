@@ -61,6 +61,14 @@ func (repository *recordingIssueRepository) LookupArchiveIssue(context.Context, 
 	return ports.ArchiveIssueResult{}, false, nil
 }
 
+func (repository *recordingIssueRepository) UnarchiveIssue(context.Context, ports.UnarchiveIssueCommand) (ports.UnarchiveIssueResult, error) {
+	return ports.UnarchiveIssueResult{}, nil
+}
+
+func (repository *recordingIssueRepository) LookupUnarchiveIssue(context.Context, string, []byte) (ports.UnarchiveIssueResult, bool, error) {
+	return ports.UnarchiveIssueResult{}, false, nil
+}
+
 func (repository *recordingIssueRepository) GetIssue(_ context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	repository.getCalled = true
 	repository.identifier = identifier
