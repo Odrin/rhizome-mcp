@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-08
+
+### Added
+
+- **Stored-project inventory** — New `rhizome-mcp projects list` command discovers every project database under the configured data root without opening or migrating it. Table and JSON output report the directory and stored project IDs, name, originating repository path, issue count, schema version, database size, status, and per-entry diagnostics, so operators can find projects and identify missing, locked, corrupt, unsupported, mismatched, or unsafe entries from one command. Project initialization now records the canonical source path for new databases, while inventory remains compatible with databases created before that metadata existed.
+
+- **Issue unarchiving over MCP** — New `unarchive_issue` tool reverses `archive_issue` without discarding history. It uses the same compact/full response model, optimistic `expected_version` check, optional replay-safe idempotency key, and durable event trail as archive; restoring an epic does not implicitly restore its archived children. The issues toolset and full and agent profiles expose the operation, completing archive recovery through the public MCP surface.
+
+### Fixed
+
+- **Project inventory is non-mutating and preserves SQLite sidecars** — Inventory inspection now rejects symlinked or non-canonical entries, verifies schema history and the single project row, reports failures per project instead of aborting the whole listing, and reads databases through isolated read-only snapshots. Inspection does not alter the source database or its `-wal`/`-shm` files, including when a live WAL contains committed data, and permission tests use portable failure cases across Unix and Windows.
+
+- **Unarchive events retain agent attribution** — The unarchive path now carries the caller's agent session through validation and persistence, so the append-only `issue_unarchived` event records who restored the issue. Idempotent retries still replay the original result without writing a second event.
+
 ## [1.4.0] - 2026-08-29
 
 ### Added
