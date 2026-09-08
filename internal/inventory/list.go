@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,17 @@ import (
 // Result is the read-only project inventory for a data root.
 type Result struct {
 	Items []Entry `json:"items"`
+}
+
+type readOnlyDatabase struct {
+	*sql.DB
+	cleanup func()
+}
+
+func (database *readOnlyDatabase) Close() error {
+	err := database.DB.Close()
+	database.cleanup()
+	return err
 }
 
 // Entry is a single inspected project directory entry.
@@ -119,7 +131,7 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 		return withDiagnostic(entry, "locked", fmt.Sprintf("database is unavailable: %v", err), "tasks.db"), false
 	}
 
-	schemaVersion, err := readSchemaVersion(db)
+	schemaVersion, err := readSchemaVersion(db.DB)
 	if err != nil {
 		return withDiagnostic(entry, "unsupported", fmt.Sprintf("schema version is unreadable: %v", err), "schema_migrations"), false
 	}
@@ -130,7 +142,7 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	}
 	entry.SchemaVersion = ptrInt(schemaVersion)
 
-	id, name, origin, err := readProjectRow(db)
+	id, name, origin, err := readProjectRow(db.DB)
 	if err != nil {
 		return withDiagnostic(entry, "corrupt", fmt.Sprintf("project row is unreadable: %v", err), "projects"), false
 	}
@@ -160,14 +172,38 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 }
 
 func readSchemaVersion(db *sql.DB) (int, error) {
-	var version sql.NullInt64
-	if err := db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+	rows, err := db.QueryContext(context.Background(), `SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
 		return 0, err
 	}
-	if !version.Valid {
+	defer rows.Close()
+
+	var maxVersion sql.NullInt64
+	for rows.Next() {
+		var version sql.NullInt64
+		if err := rows.Scan(&version); err != nil {
+			return 0, err
+		}
+		if !version.Valid {
+			return 0, errors.New("schema history contains a null version")
+		}
+		if version.Int64 < 1 {
+			return 0, fmt.Errorf("schema history contains invalid version %d", version.Int64)
+		}
+		if !maxVersion.Valid || version.Int64 > maxVersion.Int64 {
+			maxVersion = version
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if !maxVersion.Valid {
 		return 0, errors.New("schema history is empty or missing")
 	}
-	return int(version.Int64), nil
+	if maxVersion.Int64 < 1 {
+		return 0, fmt.Errorf("schema history has invalid maximum version %d", maxVersion.Int64)
+	}
+	return int(maxVersion.Int64), nil
 }
 
 func readProjectRow(db *sql.DB) (sql.NullString, sql.NullString, sql.NullString, error) {
@@ -232,12 +268,27 @@ func scanProjectRows(rows *sql.Rows, withOrigin bool) (sql.NullString, sql.NullS
 	return id, name, origin, true, nil
 }
 
-func openReadOnlyDB(path string) (*sql.DB, error) {
+func openReadOnlyDB(path string) (*readOnlyDatabase, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	uriPath := filepath.ToSlash(absPath)
+	snapshotDirectory, err := os.MkdirTemp("", "rhizome-inventory-")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(snapshotDirectory) }
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := copyDatabaseArtifact(absPath+suffix, snapshotDirectory); err != nil {
+			if errors.Is(err, os.ErrNotExist) && suffix != "" {
+				continue
+			}
+			cleanup()
+			return nil, err
+		}
+	}
+
+	uriPath := filepath.ToSlash(filepath.Join(snapshotDirectory, filepath.Base(absPath)))
 	if len(uriPath) >= 2 && uriPath[1] == ':' && !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
 	}
@@ -245,15 +296,42 @@ func openReadOnlyDB(path string) (*sql.DB, error) {
 	query.Set("mode", "ro")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(ON)")
+	query.Add("_pragma", "query_only(ON)")
 	query.Add("_pragma", "trusted_schema(OFF)")
 	uri := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: query.Encode()}).String()
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
+		cleanup()
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	return db, nil
+	return &readOnlyDatabase{DB: db, cleanup: cleanup}, nil
+}
+
+func copyDatabaseArtifact(sourcePath, destinationDirectory string) error {
+	info, err := os.Lstat(sourcePath)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("database artifact is not a regular file: %s", sourcePath)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(filepath.Join(destinationDirectory, filepath.Base(sourcePath)), os.O_CREATE|os.O_WRONLY|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(destination, source)
+	closeErr := destination.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func sumDatabaseSizes(path string) int64 {

@@ -1,9 +1,11 @@
 package inventory
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -135,6 +137,52 @@ func TestListProjectsRejectsFutureSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestListProjectsRejectsInvalidSchemaHistory(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, path string)
+	}{
+		{name: "empty history", prepare: createProjectDBWithEmptyHistory},
+		{name: "zero version", prepare: func(t *testing.T, path string) {
+			createProjectDBSchemaVersion(t, path, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "demo", "/tmp/repo", 0)
+		}},
+		{name: "negative version", prepare: func(t *testing.T, path string) {
+			createProjectDBSchemaVersion(t, path, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "demo", "/tmp/repo", -1)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			projectsRoot := filepath.Join(root, "projects")
+			projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+			projectDir := filepath.Join(projectsRoot, projectID)
+			if err := os.MkdirAll(projectDir, 0o700); err != nil {
+				t.Fatalf("mkdir project: %v", err)
+			}
+			path := filepath.Join(projectDir, "tasks.db")
+			tc.prepare(t, path)
+
+			result, err := List(root, projectconfig.PathInputs{GOOS: "linux", HomeDir: root, XDGDataHome: root})
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(result.Items) != 1 {
+				t.Fatalf("List() item count = %d, want 1", len(result.Items))
+			}
+			item := result.Items[0]
+			if item.Status == "ok" {
+				t.Fatalf("invalid history should not be OK: %#v", item)
+			}
+			if len(item.Diagnostics) == 0 || item.Diagnostics[0].Code != "unsupported" {
+				t.Fatalf("invalid history diagnostics = %#v", item.Diagnostics)
+			}
+			if item.ID != nil || item.IssueCount != nil {
+				t.Fatalf("invalid history should not interpret project/issue tables: %#v", item)
+			}
+		})
+	}
+}
+
 func TestListProjectsRejectsMultipleProjectRows(t *testing.T) {
 	root := t.TempDir()
 	projectsRoot := filepath.Join(root, "projects")
@@ -196,39 +244,21 @@ func TestListProjectsSupportsLegacySchemaWithoutOrigin(t *testing.T) {
 func TestOpenReadOnlyDBSeesWALVisibilityWithoutMutatingArtifacts(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tasks.db")
-	writerDB, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatalf("open writer db: %v", err)
+	if err := spawnCrashLeftWALWriter(path); err != nil {
+		t.Fatalf("spawn crash-left WAL writer: %v", err)
 	}
-	defer writerDB.Close()
-	if _, err := writerDB.Exec(`
-		CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
-		INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (15, 'project_origin', 'deadbeef', '2026-01-01T00:00:00Z');
-		CREATE TABLE projects (id TEXT PRIMARY KEY CHECK (length(id) = 26), name TEXT, origin TEXT, next_issue_number INTEGER NOT NULL CHECK (next_issue_number >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-		INSERT INTO projects(id, name, origin, next_issue_number, created_at, updated_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'demo', '/tmp/repo', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-		CREATE TABLE issues (id TEXT PRIMARY KEY CHECK (length(id)=26), title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT);
-	`); err != nil {
-		t.Fatalf("create base database: %v", err)
+	if _, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("writer did not leave tasks.db-wal behind: %v", err)
 	}
-	modDB, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatalf("open modify db: %v", err)
+	if _, err := os.Stat(path + "-shm"); err != nil {
+		t.Fatalf("writer did not leave tasks.db-shm behind: %v", err)
 	}
-	if _, err := modDB.Exec(`
-		INSERT INTO issues(id, title, created_at, updated_at, archived_at)
-		VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB0', 'wal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);
-	`); err != nil {
-		t.Fatalf("insert WAL row: %v", err)
-	}
-	if err := modDB.Close(); err != nil {
-		t.Fatalf("close modify db: %v", err)
-	}
-	beforeNames, beforeFiles := snapshotDatabaseFiles(t, path)
+	before := snapshotDatabaseArtifacts(t, path)
+
 	readOnlyDB, err := openReadOnlyDB(path)
 	if err != nil {
 		t.Fatalf("openReadOnlyDB() error = %v", err)
 	}
-	defer readOnlyDB.Close()
 	var issueCount int
 	if err := readOnlyDB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
 		t.Fatalf("query WAL-visible issue count: %v", err)
@@ -236,9 +266,13 @@ func TestOpenReadOnlyDBSeesWALVisibilityWithoutMutatingArtifacts(t *testing.T) {
 	if issueCount != 1 {
 		t.Fatalf("readOnlyDB issue count = %d, want 1 (WAL committed row visible)", issueCount)
 	}
-	afterNames, afterFiles := snapshotDatabaseFiles(t, path)
-	if !reflect.DeepEqual(beforeNames, afterNames) || !reflect.DeepEqual(beforeFiles, afterFiles) {
-		t.Fatalf("read-only inspection modified database artifacts: before=%v after=%v", beforeFiles, afterFiles)
+	if err := readOnlyDB.Close(); err != nil {
+		t.Fatalf("close read-only inspector: %v", err)
+	}
+
+	after := snapshotDatabaseArtifacts(t, path)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only inspection modified database artifacts: before=%v after=%v", databaseArtifactSummary(before), databaseArtifactSummary(after))
 	}
 }
 
@@ -256,6 +290,36 @@ func TestListProjectsRejectsRootReadFailure(t *testing.T) {
 	_, err := List(root, projectconfig.PathInputs{GOOS: "linux", HomeDir: root, XDGDataHome: root})
 	if err == nil {
 		t.Fatal("List() expected error when projects dir is unreadable")
+	}
+}
+
+func createProjectDBWithEmptyHistory(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE projects (id TEXT PRIMARY KEY CHECK (length(id) = 26), name TEXT, origin TEXT, next_issue_number INTEGER NOT NULL CHECK (next_issue_number >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;`); err != nil {
+		t.Fatalf("create projects table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects(id, name, origin, next_issue_number, created_at, updated_at) VALUES (?, ?, ?, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');`, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "demo", "/tmp/repo"); err != nil {
+		t.Fatalf("insert project row: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issues (id TEXT PRIMARY KEY CHECK (length(id)=26), title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT);`); err != nil {
+		t.Fatalf("create issues table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO issues(id, title, created_at, updated_at, archived_at) VALUES (?, 'demo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);`, "01ARZ3NDEKTSV4RRFFQ69G5FAV"); err != nil {
+		t.Fatalf("insert issue row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database missing after creation: %v", err)
 	}
 }
 
@@ -368,20 +432,77 @@ func createLegacyProjectDB(t *testing.T, path, projectID, projectName string) {
 	}
 }
 
-func snapshotDatabaseFiles(t *testing.T, path string) ([]string, map[string]int64) {
+func spawnCrashLeftWALWriter(path string) error {
+	cmd := exec.Command(os.Args[0], "-test.run=TestCrashWriterLeavesWALArtifacts")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "RHIZOME_TEST_DB_PATH="+path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("writer subprocess failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func TestCrashWriterLeavesWALArtifacts(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	path := os.Getenv("RHIZOME_TEST_DB_PATH")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		panic(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
+		INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (15, 'project_origin', 'deadbeef', '2026-01-01T00:00:00Z');
+		CREATE TABLE projects (id TEXT PRIMARY KEY CHECK (length(id) = 26), name TEXT, origin TEXT, next_issue_number INTEGER NOT NULL CHECK (next_issue_number >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+		INSERT INTO projects(id, name, origin, next_issue_number, created_at, updated_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 'demo', '/tmp/repo', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		CREATE TABLE issues (id TEXT PRIMARY KEY CHECK (length(id)=26), title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT);
+		INSERT INTO issues(id, title, created_at, updated_at, archived_at) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB0', 'wal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);
+	`); err != nil {
+		panic(err)
+	}
+	os.Exit(0)
+}
+
+func snapshotDatabaseArtifacts(t *testing.T, path string) map[string]databaseArtifact {
 	t.Helper()
-	files := map[string]int64{}
+	artifacts := map[string]databaseArtifact{}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		candidate := path + suffix
 		info, err := os.Stat(candidate)
-		if err == nil && info.Mode().IsRegular() {
-			files[candidate] = info.Size()
+		if err != nil {
+			if os.IsNotExist(err) {
+				artifacts[candidate] = databaseArtifact{Exists: false}
+				continue
+			}
+			t.Fatalf("stat %s: %v", candidate, err)
 		}
+		if !info.Mode().IsRegular() {
+			artifacts[candidate] = databaseArtifact{Exists: false}
+			continue
+		}
+		bytes, err := os.ReadFile(candidate)
+		if err != nil {
+			t.Fatalf("read %s: %v", candidate, err)
+		}
+		artifacts[candidate] = databaseArtifact{Exists: true, Bytes: append([]byte(nil), bytes...)}
 	}
-	keys := make([]string, 0, len(files))
-	for name := range files {
-		keys = append(keys, name)
+	return artifacts
+}
+
+type databaseArtifact struct {
+	Exists bool
+	Bytes  []byte
+}
+
+func databaseArtifactSummary(artifacts map[string]databaseArtifact) map[string]string {
+	summary := make(map[string]string, len(artifacts))
+	for path, artifact := range artifacts {
+		if !artifact.Exists {
+			summary[path] = "absent"
+			continue
+		}
+		summary[path] = fmt.Sprintf("present:%x", sha256.Sum256(artifact.Bytes))
 	}
-	sort.Strings(keys)
-	return keys, files
+	return summary
 }
