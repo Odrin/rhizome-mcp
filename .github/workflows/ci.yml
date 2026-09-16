@@ -29,12 +29,16 @@ jobs:
           - os: windows-latest
             race: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
 
       - name: Run go vet
         run: go vet ./...
@@ -49,6 +53,32 @@ jobs:
       # so ./... alone would), the same way the coverage job filters.
       - name: Run integration tests
         run: go test ${{ matrix.race }} -tags=integration -run '^TestIntegration' ./...
+
+      - name: Stage binary for npm launcher tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_NAME="rhizome-mcp"
+          [ "$RUNNER_OS" = "Windows" ] && BIN_NAME="rhizome-mcp.exe"
+          go build -trimpath -o "$BIN_NAME" .
+
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) PKG_DIR="linux-x64" ;;
+            Linux/ARM64) PKG_DIR="linux-arm64" ;;
+            macOS/X64) PKG_DIR="darwin-x64" ;;
+            macOS/ARM64) PKG_DIR="darwin-arm64" ;;
+            Windows/X64) PKG_DIR="win32-x64" ;;
+            Windows/ARM64) PKG_DIR="win32-arm64" ;;
+            *) echo "Unsupported runner: $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+
+          mkdir -p "packages/npm/$PKG_DIR/bin"
+          cp "$BIN_NAME" "packages/npm/$PKG_DIR/bin/$BIN_NAME"
+          chmod +x "packages/npm/$PKG_DIR/bin/$BIN_NAME" || true
+
+      - name: Run npm launcher tests
+        working-directory: packages/npm/rhizome-mcp
+        run: node --test test/*.test.js
 
       # Seed corpora run everywhere as ordinary unit tests; the generative pass
       # costs wall-clock time, so it runs on Linux only with a short fixed
@@ -67,9 +97,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -122,7 +152,7 @@ jobs:
 
       - name: Publish coverage badge data
         if: github.ref_name == 'main'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const badges = [

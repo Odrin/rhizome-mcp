@@ -53,11 +53,11 @@ jobs:
             goarch: arm64
             ext: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -90,7 +90,7 @@ jobs:
           rm -f "dist/${BIN_NAME}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -104,11 +104,11 @@ jobs:
       - build-release-assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -116,7 +116,7 @@ jobs:
         run: go test ./...
 
       - name: Download linux-amd64 release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux-amd64
           path: verify-dist
@@ -157,7 +157,7 @@ jobs:
       contents: write
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
@@ -214,19 +214,19 @@ jobs:
     name: Publish npm packages
     needs:
       - build-release-assets
+      - npm-launcher
     runs-on: ubuntu-latest
-    # This job's success/failure must not affect upload-release-assets (no
-    # needs: publish-npm anywhere) and must not fail the overall release.
-    continue-on-error: true
+    # This job's success/failure does not affect upload-release-assets (it has
+    # no publish-npm dependency), but release-status reports partial releases.
     permissions:
       contents: read
       # Required for npm's OIDC Trusted Publishing (`npm publish
       # --provenance` with no NODE_AUTH_TOKEN/NPM_TOKEN secret at all).
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -237,7 +237,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
@@ -321,10 +321,10 @@ jobs:
 
   publish-mcp-registry:
     name: Publish to MCP Registry
-    # Hard dependency, not just ordering: the registry validates that the
-    # referenced npm package version actually exists (and carries the
-    # matching mcpName marker) before accepting the entry, so this can only
-    # succeed after publish-npm has actually published that version.
+    # On release events this is a hard dependency, not just ordering: the
+    # registry validates that npm already exposes the referenced package.
+    # On targeted workflow_dispatch recovery, publish-npm is skipped and the
+    # always() condition below deliberately allows this job to proceed.
     needs:
       - publish-npm
     if: >-
@@ -332,31 +332,58 @@ jobs:
       ((github.event_name == 'release' && needs.publish-npm.result == 'success') ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'mcp-registry'))
     runs-on: ubuntu-latest
-    # Same isolation rule as publish-npm: a registry-listing hiccup must
-    # never fail the overall release.
-    continue-on-error: true
+    # Same isolation rule as publish-npm: release assets remain independent,
+    # while release-status reports a registry-listing failure.
     permissions:
       contents: read
       # Required for `mcp-publisher login github-oidc`.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Install mcp-publisher
         env:
-          GH_TOKEN: ${{ github.token }}
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
         run: |
           set -euo pipefail
-          # Always fetch the current release rather than pinning a version
-          # here, so this step doesn't need manual bumps over time.
-          URL=$(gh api repos/modelcontextprotocol/registry/releases/latest \
-            --jq '.assets[] | select(.name == "mcp-publisher_linux_amd64.tar.gz") | .browser_download_url')
-          curl -fsSL "$URL" -o mcp-publisher.tar.gz
+          ARCHIVE=mcp-publisher_linux_amd64.tar.gz
+          URL="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${ARCHIVE}"
+          curl -fsSL --connect-timeout 10 --max-time 120 \
+            --retry 5 --retry-delay 2 --retry-all-errors "$URL" -o "$ARCHIVE"
+          echo "${MCP_PUBLISHER_SHA256}  ${ARCHIVE}" | sha256sum --check --strict
           mkdir -p mcp-publisher-bin
-          tar -xzf mcp-publisher.tar.gz -C mcp-publisher-bin
+          tar -xzf "$ARCHIVE" -C mcp-publisher-bin
           echo "$(pwd)/mcp-publisher-bin" >> "$GITHUB_PATH"
+
+      - name: Wait for npm package visibility
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          URL="https://registry.npmjs.org/rhizome-mcp/${VERSION}"
+
+          for attempt in {1..12}; do
+            if curl -fsSL --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 2 --retry-all-errors "$URL" \
+              | jq -e --arg version "$VERSION" '.version == $version' >/dev/null; then
+              echo "rhizome-mcp@$VERSION is publicly visible on npm."
+              exit 0
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              break
+            fi
+            delay=$((attempt * 5))
+            [ "$delay" -gt 30 ] && delay=30
+            echo "rhizome-mcp@$VERSION is not visible yet; retrying in ${delay}s."
+            sleep "$delay"
+          done
+
+          echo "rhizome-mcp@$VERSION did not become visible on npm in time." >&2
+          exit 1
 
       - name: Stamp server.json version from the tag
         env:
@@ -372,7 +399,46 @@ jobs:
         run: mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        run: mcp-publisher publish
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          URL="https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Odrin%2Frhizome-mcp&version=${VERSION}&limit=100"
+
+          registry_has_version() {
+            curl -fsSL --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 2 --retry-all-errors "$URL" \
+              | jq -e --arg version "$VERSION" \
+                'any(.servers[]?; .server.name == "io.github.Odrin/rhizome-mcp" and .server.version == $version)' \
+                >/dev/null
+          }
+
+          if registry_has_version; then
+            echo "MCP Registry already contains io.github.Odrin/rhizome-mcp@$VERSION."
+          elif ! mcp-publisher publish; then
+            # A stale read can miss an existing version and make an idempotent
+            # recovery attempt receive an already-exists response. The exact
+            # post-publish verification below decides whether this is fatal.
+            echo "Registry publish returned an error; checking whether version $VERSION is present." >&2
+          fi
+
+          for attempt in {1..12}; do
+            if registry_has_version; then
+              echo "Verified io.github.Odrin/rhizome-mcp@$VERSION in the public MCP Registry."
+              exit 0
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              break
+            fi
+            delay=$((attempt * 5))
+            [ "$delay" -gt 30 ] && delay=30
+            echo "Registry version $VERSION is not visible yet; retrying in ${delay}s."
+            sleep "$delay"
+          done
+
+          echo "MCP Registry did not expose io.github.Odrin/rhizome-mcp@$VERSION in time." >&2
+          exit 1
 
   publish-vscode-extension:
     name: Publish VS Code extension
@@ -390,9 +456,8 @@ jobs:
       (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
       (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
-    # Same isolation rule as publish-npm/publish-mcp-registry: a Marketplace
-    # publishing hiccup must never fail the overall release.
-    continue-on-error: true
+    # Marketplace failures remain isolated from release assets, while
+    # release-status reports the partial release.
     permissions:
       # write, unlike publish-npm/publish-mcp-registry: this job's last step
       # attaches VSIX assets to the GitHub release via `gh release upload`.
@@ -412,11 +477,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ steps.resolve-tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -538,11 +603,9 @@ jobs:
       (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
       (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
-    # Same isolation rule as the other publish-* jobs: an Open VSX hiccup
-    # must never fail the overall release. No release-asset writes here (the
-    # VSIXes are already attached by publish-vscode-extension), so this only
-    # needs read access.
-    continue-on-error: true
+    # Open VSX failures remain isolated from release assets, while
+    # release-status reports the partial release. No release-asset writes here
+    # (the VSIXes are already attached by publish-vscode-extension).
     permissions:
       contents: read
     steps:
@@ -560,11 +623,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ steps.resolve-tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -664,15 +727,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -738,11 +801,11 @@ jobs:
 
   release-status:
     name: Release status
-    # Aggregate job: runs after all publish-* jobs complete, fails if any
-    # of them failed (despite their individual continue-on-error isolation).
-    # This makes a partial release visible as an overall red run.
+    # Aggregate job: runs after launcher validation and all publish-* jobs,
+    # making any partial release visible as an overall red run.
     if: always()
     needs:
+      - npm-launcher
       - publish-npm
       - publish-mcp-registry
       - publish-vscode-extension
@@ -753,6 +816,7 @@ jobs:
         run: |
           set -euo pipefail
           declare -A results
+          results[npm-launcher]="${{ needs.npm-launcher.result }}"
           results[publish-npm]="${{ needs.publish-npm.result }}"
           results[publish-mcp-registry]="${{ needs.publish-mcp-registry.result }}"
           results[publish-vscode-extension]="${{ needs.publish-vscode-extension.result }}"
@@ -792,7 +856,7 @@ jobs:
       contents: write
     steps:
       - name: Commit released version into plugin.json on main
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           TAG: ${{ github.event.release.tag_name }}
         with:

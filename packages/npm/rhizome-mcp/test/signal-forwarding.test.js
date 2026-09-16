@@ -20,39 +20,76 @@ const { spawn } = require('node:child_process');
 
 const MAIN_PKG_DIR = path.resolve(__dirname, '..');
 const PLATFORM_KEY = `${process.platform}-${process.arch}`;
+const STARTUP_TIMEOUT_MS = 15000;
+const EXIT_TIMEOUT_MS = 5000;
 
 const FAKE_BINARY_SOURCE = `#!/usr/bin/env node
-process.stdout.write('fake-binary-ready\\n');
+const fs = require('node:fs');
 function handle(signal) {
-  process.stdout.write('fake-binary-received:' + signal + '\\n');
+  fs.writeFileSync(process.env.RHIZOME_MCP_SIGNAL_MARKER, signal);
   process.exit(0);
 }
 process.on('SIGTERM', () => handle('SIGTERM'));
 process.on('SIGINT', () => handle('SIGINT'));
+process.stdout.write('fake-binary-ready\\n');
 setInterval(() => {}, 1000);
 `;
 
-function waitForLine(readable, predicate, timeoutMs) {
+function waitForLine(child, predicate, timeoutMs) {
   return new Promise((resolve, reject) => {
-    let buffer = '';
+    let stdout = '';
+    let stderr = '';
     const timer = setTimeout(() => {
-      readable.off('data', onData);
-      reject(new Error(`timed out waiting for expected output; got so far:\n${buffer}`));
+      cleanup();
+      reject(new Error(
+        `timed out waiting for expected output; stdout:\n${stdout}\nstderr:\n${stderr}`
+      ));
     }, timeoutMs);
-    function onData(chunk) {
-      buffer += chunk.toString('utf8');
-      if (predicate(buffer)) {
-        clearTimeout(timer);
-        readable.off('data', onData);
-        resolve(buffer);
+    function cleanup() {
+      clearTimeout(timer);
+      child.stdout.off('data', onStdout);
+      child.stderr.off('data', onStderr);
+      child.off('close', onClose);
+    }
+    function onStdout(chunk) {
+      stdout += chunk.toString('utf8');
+      if (predicate(stdout)) {
+        cleanup();
+        resolve(stdout);
       }
     }
-    readable.on('data', onData);
+    function onStderr(chunk) {
+      stderr += chunk.toString('utf8');
+    }
+    function onClose(code, signal) {
+      cleanup();
+      reject(new Error(
+        `launcher exited before readiness (code=${code}, signal=${signal}); stdout:\n${stdout}\nstderr:\n${stderr}`
+      ));
+    }
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    child.once('close', onClose);
+  });
+}
+
+function waitForClose(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.off('close', onClose);
+      reject(new Error('timed out waiting for launcher to exit'));
+    }, timeoutMs);
+    function onClose(code, signal) {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    }
+    child.once('close', onClose);
   });
 }
 
 test('launcher forwards SIGTERM to the child process', { skip: process.platform === 'win32' }, async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'rhizome-mcp-signal-test-'));
+  let child;
   try {
     const mainDest = path.join(sandbox, 'node_modules', 'rhizome-mcp');
     fs.mkdirSync(mainDest, { recursive: true });
@@ -68,23 +105,27 @@ test('launcher forwards SIGTERM to the child process', { skip: process.platform 
     fs.chmodSync(fakeBinaryPath, 0o755);
 
     const launcherPath = path.join(mainDest, 'bin', 'launcher.js');
-    const child = spawn(process.execPath, [launcherPath, 'serve'], { cwd: sandbox });
-
-    let stdout = '';
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString('utf8');
+    const signalMarkerPath = path.join(sandbox, 'received-signal');
+    child = spawn(process.execPath, [launcherPath, 'serve'], {
+      cwd: sandbox,
+      env: { ...process.env, RHIZOME_MCP_SIGNAL_MARKER: signalMarkerPath },
     });
 
-    await waitForLine(child.stdout, (buf) => buf.includes('fake-binary-ready'), 5000);
-
-    const closePromise = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
-
-    child.kill('SIGTERM');
-
+    await waitForLine(child, (buf) => buf.includes('fake-binary-ready'), STARTUP_TIMEOUT_MS);
+    const closePromise = waitForClose(child, EXIT_TIMEOUT_MS);
+    assert.equal(child.kill('SIGTERM'), true, 'expected launcher to accept SIGTERM');
     await closePromise;
 
-    assert.match(stdout, /fake-binary-received:SIGTERM/, 'expected the fake binary to have received SIGTERM');
+    assert.equal(fs.readFileSync(signalMarkerPath, 'utf8'), 'SIGTERM');
   } finally {
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    try {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const closePromise = waitForClose(child, EXIT_TIMEOUT_MS);
+        child.kill('SIGKILL');
+        await closePromise;
+      }
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
   }
 });
