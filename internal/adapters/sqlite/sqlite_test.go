@@ -388,6 +388,117 @@ func TestBackupCreatesIndependentCopyFromWALData(t *testing.T) {
 	}
 }
 
+func TestBackupCheckpointRetriesBusyResult(t *testing.T) {
+	delays := []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}
+	sleeper := &recordingSleeper{}
+	db := &DB{retry: retryPolicy{delays: delays, sleeper: sleeper}}
+
+	attempts := 0
+	err := db.retryBackupCheckpoint(context.Background(), func(context.Context) (bool, error) {
+		attempts++
+		return attempts < 3, nil
+	})
+	if err != nil {
+		t.Fatalf("retryBackupCheckpoint() error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	if got := sleeper.Delays(); !reflect.DeepEqual(got, delays[:2]) {
+		t.Fatalf("retry delays = %v, want %v", got, delays[:2])
+	}
+}
+
+func TestBackupCheckpointMapsBusyExhaustion(t *testing.T) {
+	delays := []time.Duration{time.Millisecond, 2 * time.Millisecond}
+	sleeper := &recordingSleeper{}
+	db := &DB{retry: retryPolicy{delays: delays, sleeper: sleeper}}
+
+	attempts := 0
+	err := db.retryBackupCheckpoint(context.Background(), func(context.Context) (bool, error) {
+		attempts++
+		return true, nil
+	})
+	assertDomainCode(t, err, domain.CodeStorageBusy)
+	if attempts != len(delays)+1 {
+		t.Fatalf("attempts = %d, want %d", attempts, len(delays)+1)
+	}
+	if got := sleeper.Delays(); !reflect.DeepEqual(got, delays) {
+		t.Fatalf("retry delays = %v, want %v", got, delays)
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || !domainErr.Retryable {
+		t.Fatalf("retryBackupCheckpoint() error = %v, want retryable domain error", err)
+	}
+}
+
+func TestBackupCheckpointRetriesSQLiteBusyError(t *testing.T) {
+	delays := []time.Duration{time.Millisecond}
+	sleeper := &recordingSleeper{}
+	db := &DB{retry: retryPolicy{delays: delays, sleeper: sleeper}}
+	busyErr := obtainBusyError(t, filepath.Join(t.TempDir(), "backup-retry.db"))
+
+	attempts := 0
+	err := db.retryBackupCheckpoint(context.Background(), func(context.Context) (bool, error) {
+		attempts++
+		if attempts == 1 {
+			return false, busyErr
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("retryBackupCheckpoint() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if got := sleeper.Delays(); !reflect.DeepEqual(got, delays) {
+		t.Fatalf("retry delays = %v, want %v", got, delays)
+	}
+}
+
+func TestBackupCheckpointDoesNotRetryNonLockError(t *testing.T) {
+	sleeper := &recordingSleeper{}
+	db := &DB{retry: retryPolicy{delays: defaultRetryDelays, sleeper: sleeper}}
+	wantErr := errors.New("checkpoint failed")
+
+	attempts := 0
+	err := db.retryBackupCheckpoint(context.Background(), func(context.Context) (bool, error) {
+		attempts++
+		return false, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("retryBackupCheckpoint() error = %v, want %v", err, wantErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if got := sleeper.Delays(); len(got) != 0 {
+		t.Fatalf("retry delays = %v, want none", got)
+	}
+}
+
+func TestBackupCheckpointCancellationStopsRetryWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sleeper := SleepFunc(func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	})
+	db := &DB{retry: retryPolicy{delays: []time.Duration{time.Hour}, sleeper: sleeper}}
+
+	attempts := 0
+	err := db.retryBackupCheckpoint(ctx, func(context.Context) (bool, error) {
+		attempts++
+		return true, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("retryBackupCheckpoint() error = %v, want context cancellation", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 func TestBackupRejectsInvalidDestinationsWithoutOverwritingData(t *testing.T) {
 	db := openTestDB(t, noRetryOptions())
 	ctx := context.Background()

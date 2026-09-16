@@ -207,12 +207,8 @@ func (db *DB) Backup(ctx context.Context, output string) (string, error) {
 	}
 	defer conn.Close()
 
-	var checkpointBusy, checkpointLog, checkpointCheckpointed int
-	if err := conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)").Scan(&checkpointBusy, &checkpointLog, &checkpointCheckpointed); err != nil {
-		return "", TranslateError(err)
-	}
-	if checkpointBusy != 0 {
-		return "", domain.WrapError(errors.New("wal checkpoint reported busy readers"), domain.CodeStorageBusy, "storage is busy; retry the operation", true)
+	if err := db.checkpointForBackup(ctx, conn); err != nil {
+		return "", err
 	}
 	if _, err := conn.ExecContext(ctx, "VACUUM INTO ?", tempOutput); err != nil {
 		return "", TranslateError(err)
@@ -225,6 +221,35 @@ func (db *DB) Backup(ctx context.Context, output string) (string, error) {
 	}
 	tempOutput = ""
 	return absOutput, nil
+}
+
+func (db *DB) checkpointForBackup(ctx context.Context, conn *sql.Conn) error {
+	return db.retryBackupCheckpoint(ctx, func(ctx context.Context) (bool, error) {
+		var busy, logFrames, checkpointedFrames int
+		err := conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)").Scan(&busy, &logFrames, &checkpointedFrames)
+		return busy != 0, err
+	})
+}
+
+func (db *DB) retryBackupCheckpoint(ctx context.Context, checkpoint func(context.Context) (bool, error)) error {
+	for attempt := 0; ; attempt++ {
+		busy, err := checkpoint(ctx)
+		if err == nil && !busy {
+			return nil
+		}
+		if err != nil && !isLockContention(err) {
+			return TranslateError(err)
+		}
+		if err == nil {
+			err = errors.New("wal checkpoint reported busy readers")
+		}
+		if attempt >= len(db.retry.delays) {
+			return domain.WrapError(err, domain.CodeStorageBusy, "storage is busy; retry the operation", true)
+		}
+		if err := db.retry.sleeper.Sleep(ctx, db.retry.delays[attempt]); err != nil {
+			return err
+		}
+	}
 }
 
 func (db *DB) validateBackupOutput(ctx context.Context, output string) (string, error) {
