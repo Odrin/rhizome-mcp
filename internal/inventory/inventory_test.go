@@ -369,6 +369,69 @@ func TestOpenReadOnlyDBDoesNotCreateMissingSidecars(t *testing.T) {
 	}
 }
 
+func TestListProjectsSkipsWALWithoutSHM(t *testing.T) {
+	root := t.TempDir()
+	projectsRoot := filepath.Join(root, "projects")
+	projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	projectDir := filepath.Join(projectsRoot, projectID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	path := filepath.Join(projectDir, "tasks.db")
+	if err := spawnCrashLeftWALWriter(path); err != nil {
+		t.Fatalf("spawn crash-left WAL writer: %v", err)
+	}
+	if _, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("writer did not leave tasks.db-wal behind: %v", err)
+	}
+	if _, err := os.Stat(path + "-shm"); err != nil {
+		t.Fatalf("writer did not leave tasks.db-shm behind: %v", err)
+	}
+	before := snapshotDatabaseArtifacts(t, path)
+	if err := os.Remove(path + "-shm"); err != nil {
+		t.Fatalf("remove tasks.db-shm before inventory: %v", err)
+	}
+	afterDelete := snapshotDatabaseArtifacts(t, path)
+	if afterDelete[path+"-shm"].Exists {
+		t.Fatalf("tasks.db-shm still exists after manual removal: %v", databaseArtifactSummary(afterDelete))
+	}
+
+	result, err := List(root, projectconfig.PathInputs{GOOS: "linux", HomeDir: root, XDGDataHome: root})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("List() item count = %d, want 1", len(result.Items))
+	}
+	item := result.Items[0]
+	if item.Status != "unavailable" {
+		t.Fatalf("List() status = %q, want %q", item.Status, "unavailable")
+	}
+	if len(item.Diagnostics) != 1 || item.Diagnostics[0].Code != "unavailable" {
+		t.Fatalf("List() diagnostics = %#v, want a single unavailable diagnostic", item.Diagnostics)
+	}
+	if !strings.Contains(item.Diagnostics[0].Message, "tasks.db-shm") || !strings.Contains(item.Diagnostics[0].Message, "skip") {
+		t.Fatalf("unavailable diagnostic = %#v, want message naming tasks.db-shm and explaining skip", item.Diagnostics)
+	}
+	if item.Diagnostics[0].Field != "tasks.db-shm" {
+		t.Fatalf("unavailable diagnostic field = %q, want %q", item.Diagnostics[0].Field, "tasks.db-shm")
+	}
+	if item.ID != nil || item.IssueCount != nil {
+		t.Fatalf("skipped WAL-without-SHM item should not be authoritative: %#v", item)
+	}
+
+	afterList := snapshotDatabaseArtifacts(t, path)
+	if !reflect.DeepEqual(afterDelete[path], afterList[path]) || !reflect.DeepEqual(afterDelete[path+"-wal"], afterList[path+"-wal"]) {
+		t.Fatalf("inventory mutated database or WAL after skip: before=%v after=%v", databaseArtifactSummary(afterDelete), databaseArtifactSummary(afterList))
+	}
+	if afterList[path+"-shm"].Exists {
+		t.Fatalf("inventory recreated tasks.db-shm: before=%v after=%v", databaseArtifactSummary(afterDelete), databaseArtifactSummary(afterList))
+	}
+	if !reflect.DeepEqual(before[path+"-wal"], afterList[path+"-wal"]) {
+		t.Fatalf("inventory changed WAL content unexpectedly: before=%v after=%v", databaseArtifactSummary(before), databaseArtifactSummary(afterList))
+	}
+}
+
 func TestReadOnlyTransactionMatchesWholeWALStateBeforeOrAfterCommit(t *testing.T) {
 	root := t.TempDir()
 	projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"

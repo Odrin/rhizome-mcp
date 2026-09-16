@@ -107,6 +107,11 @@ func inspectEntry(projectsDir, name string) Entry {
 	} else if !info.Mode().IsRegular() {
 		return withDiagnostic(entry, "unsafe", "tasks.db is not a regular file", "tasks.db")
 	}
+	if hasRegularWALWithoutSHM(databasePath) {
+		return withDiagnostic(entry, "unavailable",
+			"inspection skipped because tasks.db-shm is missing while tasks.db-wal is present; opening SQLite would create tasks.db-shm",
+			"tasks.db-shm")
+	}
 	item, ok := inspectDatabase(projectDir, databasePath)
 	if !ok {
 		return item
@@ -120,6 +125,17 @@ func inspectEntry(projectsDir, name string) Entry {
 	entry.Status = item.Status
 	entry.Diagnostics = item.Diagnostics
 	return entry
+}
+
+func hasRegularWALWithoutSHM(databasePath string) bool {
+	walPath := databasePath + "-wal"
+	shmPath := databasePath + "-shm"
+	walInfo, err := os.Lstat(walPath)
+	if err != nil || !walInfo.Mode().IsRegular() {
+		return false
+	}
+	_, err = os.Lstat(shmPath)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
