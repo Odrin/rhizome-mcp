@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +13,9 @@ import (
 
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/projectconfig"
+
+	moderncsqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Result is the read-only project inventory for a data root.
@@ -23,13 +25,13 @@ type Result struct {
 
 type readOnlyDatabase struct {
 	*sql.DB
-	cleanup func()
 }
 
 func (database *readOnlyDatabase) Close() error {
-	err := database.DB.Close()
-	database.cleanup()
-	return err
+	if database.DB == nil {
+		return nil
+	}
+	return database.DB.Close()
 }
 
 // Entry is a single inspected project directory entry.
@@ -130,10 +132,15 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	if err := db.Ping(); err != nil {
 		return withDiagnostic(entry, "locked", fmt.Sprintf("database is unavailable: %v", err), "tasks.db"), false
 	}
-
-	schemaVersion, err := readSchemaVersion(db.DB)
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return withDiagnostic(entry, "unsupported", fmt.Sprintf("schema version is unreadable: %v", err), "schema_migrations"), false
+		return withDiagnostic(entry, "locked", fmt.Sprintf("cannot begin read-only inspection: %v", err), "tasks.db"), false
+	}
+	defer tx.Rollback()
+
+	schemaVersion, err := readSchemaVersion(tx)
+	if err != nil {
+		return withDatabaseReadError(entry, err, "unsupported", "schema version is unreadable", "schema_migrations"), false
 	}
 	if schemaVersion > migrations.CurrentVersion() {
 		return withDiagnostic(entry, "unsupported",
@@ -142,9 +149,9 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	}
 	entry.SchemaVersion = ptrInt(schemaVersion)
 
-	id, name, origin, err := readProjectRow(db.DB)
+	id, name, origin, err := readProjectRow(tx)
 	if err != nil {
-		return withDiagnostic(entry, "corrupt", fmt.Sprintf("project row is unreadable: %v", err), "projects"), false
+		return withDatabaseReadError(entry, err, "corrupt", "project row is unreadable", "projects"), false
 	}
 	if !id.Valid || id.String == "" {
 		return withDiagnostic(entry, "corrupt", "stored project id is missing", "projects.id"), false
@@ -157,8 +164,8 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 		entry.Origin = ptrString(origin.String)
 	}
 	var issueCount int64
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
-		return withDiagnostic(entry, "corrupt", fmt.Sprintf("issue count is unreadable: %v", err), "issues"), false
+	if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
+		return withDatabaseReadError(entry, err, "corrupt", "issue count is unreadable", "issues"), false
 	}
 	entry.IssueCount = ptrInt64(issueCount)
 	entry.Size = ptrInt64(sumDatabaseSizes(databasePath))
@@ -171,7 +178,11 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	return entry, true
 }
 
-func readSchemaVersion(db *sql.DB) (int, error) {
+type readOnlyQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func readSchemaVersion(db readOnlyQueryer) (int, error) {
 	rows, err := db.QueryContext(context.Background(), `SELECT version FROM schema_migrations ORDER BY version`)
 	if err != nil {
 		return 0, err
@@ -206,7 +217,7 @@ func readSchemaVersion(db *sql.DB) (int, error) {
 	return int(maxVersion.Int64), nil
 }
 
-func readProjectRow(db *sql.DB) (sql.NullString, sql.NullString, sql.NullString, error) {
+func readProjectRow(db readOnlyQueryer) (sql.NullString, sql.NullString, sql.NullString, error) {
 	queryPatterns := []struct {
 		sql        string
 		withOrigin bool
@@ -273,22 +284,7 @@ func openReadOnlyDB(path string) (*readOnlyDatabase, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshotDirectory, err := os.MkdirTemp("", "rhizome-inventory-")
-	if err != nil {
-		return nil, err
-	}
-	cleanup := func() { _ = os.RemoveAll(snapshotDirectory) }
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := copyDatabaseArtifact(absPath+suffix, snapshotDirectory); err != nil {
-			if errors.Is(err, os.ErrNotExist) && suffix != "" {
-				continue
-			}
-			cleanup()
-			return nil, err
-		}
-	}
-
-	uriPath := filepath.ToSlash(filepath.Join(snapshotDirectory, filepath.Base(absPath)))
+	uriPath := filepath.ToSlash(absPath)
 	if len(uriPath) >= 2 && uriPath[1] == ':' && !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
 	}
@@ -301,37 +297,11 @@ func openReadOnlyDB(path string) (*readOnlyDatabase, error) {
 	uri := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: query.Encode()}).String()
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
-		cleanup()
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	return &readOnlyDatabase{DB: db, cleanup: cleanup}, nil
-}
-
-func copyDatabaseArtifact(sourcePath, destinationDirectory string) error {
-	info, err := os.Lstat(sourcePath)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("database artifact is not a regular file: %s", sourcePath)
-	}
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	destination, err := os.OpenFile(filepath.Join(destinationDirectory, filepath.Base(sourcePath)), os.O_CREATE|os.O_WRONLY|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(destination, source)
-	closeErr := destination.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
+	return &readOnlyDatabase{DB: db}, nil
 }
 
 func sumDatabaseSizes(path string) int64 {
@@ -350,6 +320,17 @@ func withDiagnostic(entry Entry, code, message, field string) Entry {
 	entry.Status = code
 	entry.Diagnostics = append(entry.Diagnostics, Diagnostic{Code: code, Message: message, Field: field})
 	return entry
+}
+
+func withDatabaseReadError(entry Entry, err error, fallbackCode, message, field string) Entry {
+	var sqliteErr *moderncsqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+			return withDiagnostic(entry, "locked", fmt.Sprintf("database is busy: %v", err), "tasks.db")
+		}
+	}
+	return withDiagnostic(entry, fallbackCode, fmt.Sprintf("%s: %v", message, err), field)
 }
 
 func ptrString(value string) *string { return &value }

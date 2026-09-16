@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -242,7 +243,7 @@ func TestListProjectsSupportsLegacySchemaWithoutOrigin(t *testing.T) {
 	}
 }
 
-func TestOpenReadOnlyDBSeesWALVisibilityWithoutMutatingArtifacts(t *testing.T) {
+func TestOpenReadOnlyDBSeesWALWithoutMutatingPersistentArtifacts(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tasks.db")
 	if err := spawnCrashLeftWALWriter(path); err != nil {
@@ -272,8 +273,207 @@ func TestOpenReadOnlyDBSeesWALVisibilityWithoutMutatingArtifacts(t *testing.T) {
 	}
 
 	after := snapshotDatabaseArtifacts(t, path)
+	for _, suffix := range []string{"", "-wal"} {
+		candidate := path + suffix
+		if !reflect.DeepEqual(before[candidate], after[candidate]) {
+			t.Fatalf("read-only inspection modified %s: before=%v after=%v", candidate, databaseArtifactSummary(before), databaseArtifactSummary(after))
+		}
+	}
+	if before[path+"-shm"].Exists != after[path+"-shm"].Exists || len(before[path+"-shm"].Bytes) != len(after[path+"-shm"].Bytes) {
+		t.Fatalf("read-only inspection changed SHM lifecycle or size: before=%v after=%v", databaseArtifactSummary(before), databaseArtifactSummary(after))
+	}
+}
+
+func TestOpenReadOnlyDBDoesNotChangePersistentArtifactMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tasks.db")
+	if err := spawnCrashLeftWALWriter(path); err != nil {
+		t.Fatalf("spawn crash-left WAL writer: %v", err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		candidate := path + suffix
+		if _, err := os.Stat(candidate); err != nil {
+			t.Fatalf("stat %s: %v", candidate, err)
+		}
+		setTime := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+		if err := os.Chtimes(candidate, setTime, setTime); err != nil {
+			t.Fatalf("set modtime on %s: %v", candidate, err)
+		}
+		if meta, err := os.Stat(candidate); err != nil {
+			t.Fatalf("stat %s after setting modtime: %v", candidate, err)
+		} else if !meta.ModTime().Equal(setTime) {
+			t.Fatalf("artifact %s modtime = %v, want %v", candidate, meta.ModTime(), setTime)
+		}
+	}
+	shmInfo, err := os.Stat(path + "-shm")
+	if err != nil {
+		t.Fatalf("stat SHM artifact before inspection: %v", err)
+	}
+	beforeSHMSize := shmInfo.Size()
+
+	readOnlyDB, err := openReadOnlyDB(path)
+	if err != nil {
+		t.Fatalf("openReadOnlyDB() error = %v", err)
+	}
+	var issueCount int
+	if err := readOnlyDB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
+		t.Fatalf("query WAL-visible issue count: %v", err)
+	}
+	if issueCount != 1 {
+		t.Fatalf("readOnlyDB issue count = %d, want 1 (WAL committed row visible)", issueCount)
+	}
+	if err := readOnlyDB.Close(); err != nil {
+		t.Fatalf("close read-only inspector: %v", err)
+	}
+
+	for _, suffix := range []string{"", "-wal"} {
+		candidate := path + suffix
+		info, err := os.Stat(candidate)
+		if err != nil {
+			t.Fatalf("stat %s after close: %v", candidate, err)
+		}
+		if !info.ModTime().Equal(time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)) {
+			t.Fatalf("artifact %s changed after Close(): before=%v after=%v", candidate, time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC), info.ModTime())
+		}
+	}
+	if info, err := os.Stat(path + "-shm"); err != nil {
+		t.Fatalf("SHM artifact removed after Close(): %v", err)
+	} else if info.Size() != beforeSHMSize {
+		t.Fatalf("SHM artifact size = %d, want %d", info.Size(), beforeSHMSize)
+	}
+}
+
+func TestOpenReadOnlyDBDoesNotCreateMissingSidecars(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	createProjectDB(t, path, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "demo", "/tmp/repo")
+	before := snapshotDatabaseArtifacts(t, path)
+	if before[path+"-wal"].Exists || before[path+"-shm"].Exists {
+		t.Fatalf("sidecars exist before inspection: %v", databaseArtifactSummary(before))
+	}
+
+	readOnlyDB, err := openReadOnlyDB(path)
+	if err != nil {
+		t.Fatalf("openReadOnlyDB() error = %v", err)
+	}
+	var issueCount int64
+	if err := readOnlyDB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
+		t.Fatalf("query issue count: %v", err)
+	}
+	if err := readOnlyDB.Close(); err != nil {
+		t.Fatalf("close read-only inspector: %v", err)
+	}
+
+	after := snapshotDatabaseArtifacts(t, path)
 	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("read-only inspection modified database artifacts: before=%v after=%v", databaseArtifactSummary(before), databaseArtifactSummary(after))
+		t.Fatalf("read-only inspection created a sidecar or changed the database: before=%v after=%v", databaseArtifactSummary(before), databaseArtifactSummary(after))
+	}
+}
+
+func TestReadOnlyTransactionMatchesWholeWALStateBeforeOrAfterCommit(t *testing.T) {
+	root := t.TempDir()
+	projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	projectDir := filepath.Join(root, "projects", projectID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	path := filepath.Join(projectDir, "tasks.db")
+	createProjectDB(t, path, projectID, "before", "/tmp/repo")
+
+	writer, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open writer db: %v", err)
+	}
+	defer writer.Close()
+	if err := writer.PingContext(t.Context()); err != nil {
+		t.Fatalf("configure writer db: %v", err)
+	}
+
+	reader, err := openReadOnlyDB(path)
+	if err != nil {
+		t.Fatalf("openReadOnlyDB() error = %v", err)
+	}
+	defer reader.Close()
+	readTx, err := reader.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	defer readTx.Rollback()
+
+	version, err := readSchemaVersion(readTx)
+	if err != nil || version != 15 {
+		t.Fatalf("schema version = (%d, %v), want (15, nil)", version, err)
+	}
+	id, name, _, err := readProjectRow(readTx)
+	if err != nil || !id.Valid || id.String != projectID || !name.Valid || name.String != "before" {
+		t.Fatalf("before project row = (id=%q name=%q err=%v)", id.String, name.String, err)
+	}
+
+	writeTx, err := writer.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin writer transaction: %v", err)
+	}
+	if _, err := writeTx.ExecContext(t.Context(), `UPDATE projects SET name = 'after' WHERE id = ?`, projectID); err != nil {
+		t.Fatalf("update project name: %v", err)
+	}
+	if _, err := writeTx.ExecContext(t.Context(), `INSERT INTO issues(id, title, created_at, updated_at, archived_at) VALUES (?, 'wal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL)`, "01ARZ3NDEKTSV4RRFFQ69G5FB0"); err != nil {
+		t.Fatalf("insert WAL issue row: %v", err)
+	}
+	if err := writeTx.Commit(); err != nil {
+		t.Fatalf("commit concurrent writer transaction: %v", err)
+	}
+
+	var checkpointBusy, logFrames, checkpointedFrames int
+	if err := writer.QueryRowContext(t.Context(), `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&checkpointBusy, &logFrames, &checkpointedFrames); err != nil {
+		t.Fatalf("attempt concurrent passive checkpoint: %v", err)
+	}
+	if logFrames <= checkpointedFrames {
+		t.Fatalf("passive checkpoint was not held behind reader: busy=%d log=%d checkpointed=%d", checkpointBusy, logFrames, checkpointedFrames)
+	}
+
+	var issueCount int64
+	if err := readTx.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
+		t.Fatalf("read issue count from established snapshot: %v", err)
+	}
+	if issueCount != 1 {
+		t.Fatalf("before snapshot tuple = (name=%q issue_count=%d), want (before, 1)", name.String, issueCount)
+	}
+	if err := readTx.Rollback(); err != nil {
+		t.Fatalf("end read transaction: %v", err)
+	}
+
+	item, ok := inspectDatabase(projectDir, path)
+	if !ok || item.Name == nil || *item.Name != "after" || item.IssueCount == nil || *item.IssueCount != 2 {
+		t.Fatalf("after snapshot = (%#v, %v), want name=after issue_count=2", item, ok)
+	}
+}
+
+func TestDatabaseReadContentionProducesLockedDiagnostic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	first, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open first connection: %v", err)
+	}
+	defer first.Close()
+	second, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open second connection: %v", err)
+	}
+	defer second.Close()
+	if _, err := first.ExecContext(t.Context(), `CREATE TABLE test_lock (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create lock fixture: %v", err)
+	}
+	if _, err := first.ExecContext(t.Context(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("hold write lock: %v", err)
+	}
+	defer first.ExecContext(t.Context(), `ROLLBACK`)
+	if _, err := second.ExecContext(t.Context(), `BEGIN IMMEDIATE`); err == nil {
+		second.ExecContext(t.Context(), `ROLLBACK`)
+		t.Fatal("second writer unexpectedly acquired lock")
+	} else {
+		entry := withDatabaseReadError(Entry{ProjectID: "test", Status: "ok"}, err, "corrupt", "issue count is unreadable", "issues")
+		if entry.Status != "locked" || len(entry.Diagnostics) != 1 || entry.Diagnostics[0].Code != "locked" || entry.Diagnostics[0].Field != "tasks.db" {
+			t.Fatalf("lock diagnostic = %#v, want status/code locked on tasks.db", entry)
+		}
 	}
 }
 
