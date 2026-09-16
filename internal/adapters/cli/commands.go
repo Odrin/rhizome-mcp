@@ -70,6 +70,7 @@ func commands() []command {
 			needsProject: false,
 			usageLines: []string{
 				"projects list [--format table|json]",
+				"projects migrate --project-id ID",
 			},
 			run: func(c *CLI, ctx context.Context, args []string) error { return c.runProjects(ctx, args) },
 		},

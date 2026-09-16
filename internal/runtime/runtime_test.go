@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,9 @@ func TestOpenExistingProjectRejectsStaleMigrationHistoryWithoutMigrating(t *test
 
 	_, err = projectruntime.OpenExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
 	assertDomainCode(t, err, domain.CodeStorageMigration)
+	if !strings.Contains(err.Error(), "stored version") || !strings.Contains(err.Error(), "expected current version") || !strings.Contains(err.Error(), "projects migrate --project-id "+projectID) {
+		t.Fatalf("stale migration error = %q, want stored+expected version details and recovery command", err)
+	}
 
 	db, err = sqlite.Open(context.Background(), project.DatabasePath, sqlite.Options{})
 	if err != nil {
@@ -320,6 +324,50 @@ func TestOpenExistingProjectRejectsStaleMigrationHistoryWithoutMigrating(t *test
 	if afterRows != beforeRows-1 {
 		t.Fatalf("schema_migrations rows = %d, want %d", afterRows, beforeRows-1)
 	}
+}
+
+func TestMigrateExistingProjectMigratesStaleProject(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	project, err := projectruntime.OpenProject(context.Background(), projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sqlite.Open(context.Background(), project.DatabasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE projects DROP COLUMN origin"); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := projectruntime.MigrateExistingProject(context.Background(), projectID, dataRoot, clock.NewFakeClock(testTime), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("MigrateExistingProject() error = %v", err)
+	}
+	defer func() { _ = migrated.Close(context.Background()) }()
+	if migrated.SchemaVersion != migrations.CurrentVersion() {
+		t.Fatalf("schema version = %d, want %d", migrated.SchemaVersion, migrations.CurrentVersion())
+	}
+	assertProjectRow(t, migrated, projectID, testTime.UTC().Format(time.RFC3339Nano))
 }
 
 func TestOpenExistingProjectRejectsInvalidProjectRows(t *testing.T) {

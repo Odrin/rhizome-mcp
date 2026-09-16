@@ -193,6 +193,25 @@ func TestRunUsageAndErrors(t *testing.T) {
 	}
 }
 
+func TestProjectsMigrateCommandParsesProjectID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var capturedProjectID string
+	cli := New(Services{}, &stdout, &stderr, nil, nil)
+	cli.SetProjectsMigrateHandler(func(_ context.Context, projectID string) error {
+		capturedProjectID = projectID
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"projects", "migrate", "--project-id", "01ARZ3NDEKTSV4RRFFQ69G5FAV"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedProjectID != "01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+		t.Fatalf("captured project ID = %q, want %q", capturedProjectID, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr output, got %q", stderr.String())
+	}
+}
+
 func TestServeCommandParsesHTTPAddress(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	var capturedAddress, capturedProfile string

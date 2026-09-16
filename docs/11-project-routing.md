@@ -35,7 +35,7 @@ The server distinguishes two cases:
 - A normal default opening is the ordinary startup path for a server instance that resolves one project root at startup.
 - A routed open is an existing-only request-driven open for a known project selected by `project_ref` or `project_root`.
 
-Routed opens are existing-only under one configured data root. They do not create a new project database and they do not run init or migration flows for a missing project.
+Routed opens are existing-only under one configured data root. They do not create a new project database and they do not run init or migration flows for a missing project. A stale database is not silently auto-migrated by routed `project_ref` access; instead, the non-mutating open error includes the stored and expected versions and tells the user to run `rhizome-mcp projects migrate --project-id ID` to apply the supported forward migration explicitly. The migration path is projectless and uses the canonical stored project ID, not a repository root or a newly created marker.
 
 ## 5. Router behavior and lifecycle
 
