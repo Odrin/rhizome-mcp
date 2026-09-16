@@ -27,6 +27,7 @@ import (
 	"rhizome-mcp/internal/config"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
 	"rhizome-mcp/internal/projectconfig"
 	"rhizome-mcp/internal/projectrouting"
@@ -171,6 +172,64 @@ func TestInitRejectsInRepositoryDataRootThenRetrySucceeds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repoRoot, projectconfig.IdentityFileName)); err != nil {
 		t.Fatalf("expected identity file after retry: %v", err)
+	}
+}
+
+func TestProjectsMigrateCommandMigratesStaleProject(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	project, err := projectruntime.OpenProject(ctx, projectruntime.Options{StartingPath: repoRoot, DataRoot: dataRoot, PathInputs: pathInputs, Clock: clock.RealClock{}, SQLite: sqlite.Options{}})
+	if err != nil {
+		t.Fatalf("open project: %v", err)
+	}
+	if err := project.Close(ctx); err != nil {
+		t.Fatalf("close project: %v", err)
+	}
+
+	db, err := sqlite.Open(ctx, project.DatabasePath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("open project database: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE projects DROP COLUMN origin"); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("downgrade project schema for migration test: %v", err)
+	}
+	if err := db.Close(ctx); err != nil {
+		t.Fatalf("close inspection db: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "projects", "migrate", "--project-id", project.ProjectID}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("projects migrate command failed: %v", err)
+	}
+
+	reopened, err := projectruntime.OpenExistingProject(ctx, project.ProjectID, dataRoot, clock.RealClock{}, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("reopen migrated project: %v", err)
+	}
+	defer func() { _ = reopened.Close(context.Background()) }()
+	if reopened.SchemaVersion != migrations.CurrentVersion() {
+		t.Fatalf("schema version after migrate = %d, want %d", reopened.SchemaVersion, migrations.CurrentVersion())
 	}
 }
 

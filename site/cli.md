@@ -107,6 +107,20 @@ Supported flags:
 - `--full`
 - `--format table|json`
 
+### `projects migrate`
+
+Apply supported forward migrations to an already stored project database selected by canonical ID.
+
+```bash
+rhizome-mcp projects migrate --project-id 01J...
+```
+
+Supported flags:
+
+- `--project-id ID` (required)
+
+This command opens the existing project database by canonical ID without repository root discovery or marker creation. It refuses missing databases, newer schemas, corrupt or checksum-invalid histories, and identity mismatches without partial writes. Forward migration is one-way; there is no automatic downgrade path. This is the explicit recovery surface for a stale stored project, and it is the command named by stale `OpenExistingProject` errors.
+
 ### `project info`
 
 Show project metadata.

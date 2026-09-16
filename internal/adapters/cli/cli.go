@@ -88,6 +88,9 @@ type BoardServeHandler func(context.Context, string, io.Writer) error
 // ProjectsListHandler lists project inventory entries without opening a project.
 type ProjectsListHandler func(context.Context, string) (inventory.Result, error)
 
+// ProjectsMigrateHandler migrates an already stored project database selected by canonical ID.
+type ProjectsMigrateHandler func(context.Context, string) error
+
 // BackupReport summarizes a validated backup database artifact for CLI output.
 type BackupReport struct {
 	OutputPath    string
@@ -152,8 +155,9 @@ type CLI struct {
 	backupHandler       BackupHandler
 	doctorHandler       DoctorHandler
 	connectHandler      ConnectHandler
-	projectsListHandler ProjectsListHandler
-	appVersion          string
+	projectsListHandler  ProjectsListHandler
+	projectsMigrateHandler ProjectsMigrateHandler
+	appVersion           string
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -184,6 +188,11 @@ func (c *CLI) SetConnectHandler(handler ConnectHandler) {
 // SetProjectsListHandler installs a handler for the projects list command.
 func (c *CLI) SetProjectsListHandler(handler ProjectsListHandler) {
 	c.projectsListHandler = handler
+}
+
+// SetProjectsMigrateHandler installs a handler for the projects migrate command.
+func (c *CLI) SetProjectsMigrateHandler(handler ProjectsMigrateHandler) {
+	c.projectsMigrateHandler = handler
 }
 
 // SetAppVersion sets the application version string for display in CLI outputs.
@@ -375,9 +384,27 @@ func (c *CLI) runProjects(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "list":
 		return c.runProjectsList(ctx, args[1:])
+	case "migrate":
+		return c.runProjectsMigrate(ctx, args[1:])
 	default:
 		return c.usageError()
 	}
+}
+
+func (c *CLI) runProjectsMigrate(ctx context.Context, args []string) error {
+	if c.projectsMigrateHandler == nil {
+		return fmt.Errorf("projects migrate handler is not configured")
+	}
+	fs := flag.NewFlagSet("projects migrate", flag.ContinueOnError)
+	projectID := fs.String("project-id", "", "canonical project ID to migrate")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 || *projectID == "" {
+		return c.usageError()
+	}
+	return c.projectsMigrateHandler(ctx, *projectID)
 }
 
 func (c *CLI) runProjectsList(ctx context.Context, args []string) error {

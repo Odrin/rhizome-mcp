@@ -171,9 +171,71 @@ func OpenExistingProject(ctx context.Context, projectID, dataRoot string, clock 
 		}
 	}()
 
-	schemaVersion, err := verifyProjectHistory(ctx, db)
+	schemaVersion, err := verifyProjectHistory(ctx, db, projectID)
 	if err != nil {
 		return nil, err
+	}
+	if err := verifyProjectRowIdentity(ctx, db, projectID); err != nil {
+		return nil, err
+	}
+
+	keep = true
+	return &Project{
+		ProjectID:     projectID,
+		DatabasePath:  databasePath,
+		SchemaVersion: schemaVersion,
+		Database:      db,
+		SQLite:        sqliteOptions,
+		clock:         clock,
+	}, nil
+}
+
+// MigrateExistingProject opens an already stored project selected by project ID,
+// applies only supported forward schema migrations, and validates the stored
+// project identity without creating a missing database.
+func MigrateExistingProject(ctx context.Context, projectID, dataRoot string, clock clock.Clock, sqliteOptions sqlite.Options) (_ *Project, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clock == nil {
+		return nil, domain.NewError(CodeProjectOpen, "project clock is required", false)
+	}
+
+	databasePath, err := projectconfig.ProjectDatabasePath(dataRoot, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingDatabasePath(databasePath); err != nil {
+		return nil, err
+	}
+
+	db, err := sqlite.Open(ctx, databasePath, sqliteOptions)
+	if err != nil {
+		return nil, lifecycleError(err, CodeProjectOpen, "cannot open project database")
+	}
+	keep := false
+	defer func() {
+		if keep || err == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		closeErr := db.Close(closeCtx)
+		if err == nil && closeErr != nil {
+			err = lifecycleError(closeErr, CodeProjectOpen, "cannot close project database after startup failure")
+		}
+	}()
+
+	schemaVersion, err := readProjectSchemaVersion(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if schemaVersion < migrations.CurrentVersion() {
+		migrationResult, err := migrations.Migrate(ctx, db, clock)
+		if err != nil {
+			return nil, err
+		}
+		schemaVersion = migrationResult.Version
 	}
 	if err := verifyProjectRowIdentity(ctx, db, projectID); err != nil {
 		return nil, err
@@ -231,7 +293,7 @@ func validateExistingDatabasePath(path string) error {
 	}
 }
 
-func verifyProjectHistory(ctx context.Context, db *sqlite.DB) (int, error) {
+func readProjectSchemaVersion(ctx context.Context, db *sqlite.DB) (int, error) {
 	var version int
 	err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
 		var verifyErr error
@@ -241,8 +303,16 @@ func verifyProjectHistory(ctx context.Context, db *sqlite.DB) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return version, nil
+}
+
+func verifyProjectHistory(ctx context.Context, db *sqlite.DB, projectID string) (int, error) {
+	version, err := readProjectSchemaVersion(ctx, db)
+	if err != nil {
+		return 0, err
+	}
 	if version != migrations.CurrentVersion() {
-		return 0, domain.NewError(domain.CodeStorageMigration, fmt.Sprintf("project database schema version %d is out of date", version), false)
+		return 0, domain.NewError(domain.CodeStorageMigration, fmt.Sprintf("project database schema version %d is out of date; stored version %d is behind expected current version %d; run 'projects migrate --project-id %s' to migrate this project database", version, version, migrations.CurrentVersion(), projectID), false)
 	}
 	return version, nil
 }

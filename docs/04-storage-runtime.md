@@ -314,6 +314,14 @@ Startup sequence:
 8. Run `PRAGMA foreign_key_check`.
 9. Start services.
 
+Explicit recovery for stale project databases is a separate, projectless CLI path:
+
+```bash
+rhizome-mcp projects migrate --project-id 01J...
+```
+
+This command opens an already stored project database by canonical ID and runs only supported forward migrations. It never creates a missing database and never hydrates a repository marker; the target is the stored project reference itself. Forward migration is intentionally one-way: once a database is migrated, the application does not offer a downgrade path. A stale `OpenExistingProject` error remains non-mutating and points callers to this exact recovery command. This matters for both backups and projectless recovery: a stale database can be inspected, backed up, or safely repaired by explicit migration without creating a new project or silently mutating the wrong repository root.
+
 ## 11. Search
 
 Use SQLite FTS5.

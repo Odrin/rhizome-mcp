@@ -382,6 +382,21 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 		return inventory.List(dataRoot, pathInputs)
 	})
+	adapter.SetProjectsMigrateHandler(func(ctx context.Context, projectID string) error {
+		dataRoot := dataRootOverride
+		if dataRoot == "" {
+			resolved, err := projectconfig.ResolveDataRoot(pathInputs)
+			if err != nil {
+				return err
+			}
+			dataRoot = resolved
+		}
+		project, err := projectruntime.MigrateExistingProject(ctx, projectID, dataRoot, clock.RealClock{}, sqlite.Options{})
+		if err != nil {
+			return err
+		}
+		return project.Close(ctx)
+	})
 	adapter.SetAppVersion(cfg.Version)
 	return adapter.Run(ctx, args)
 }
