@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-16
+
+### Added
+
+- **Explicit recovery for stale stored projects** — New `rhizome-mcp projects migrate --project-id ID` command applies supported forward migrations to an existing project database selected by canonical ID, without repository discovery, marker creation, or creation of a missing database. Routed opens remain non-mutating when they encounter an old schema and now direct operators to this command; migration refuses newer schemas, corrupt or checksum-invalid histories, and project-identity mismatches without partial writes.
+
+### Fixed
+
+- **Project inventory reads one SQLite-consistent snapshot** — `projects list` now opens each live database with SQLite `mode=ro` and reads schema history, project metadata, and issue count through one explicit read transaction, so a concurrent commit or WAL checkpoint cannot produce a row combining states that never coexisted. Committed WAL-only data remains visible, busy or locked reads return a non-authoritative diagnostic instead of partial fields, and inspection does not checkpoint or alter `tasks.db` or `tasks.db-wal`. Existing SHM files may receive SQLite reader-coordination updates; when a regular WAL is already present without SHM, inventory skips the database rather than creating the missing sidecar.
+
+- **Inventory distinguishes lock contention from operational unavailability** — SQLite `BUSY` and `LOCKED` failures retain the `locked` status, while I/O, permission, missing-file, protocol, memory, and open failures now report `unavailable` instead of being mislabeled as lock contention or corrupt content. Live inspection no longer depends on temporary snapshot directories, so an unusable `TMPDIR` does not prevent `projects list` from reading a healthy database.
+
+### Internal
+
+- **Coverage jobs always generate profiles from the checked-out revision** — Unit and integration coverage runs now bypass Go's test-result cache. This prevents repository-wide `-coverpkg` profiles from replaying blocks instrumented against an older source tree and ensures integration tests execute their server subprocesses to emit fresh coverage counters.
+
 ## [1.5.0] - 2026-09-08
 
 ### Added
