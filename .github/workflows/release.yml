@@ -6,9 +6,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to (re)publish the VS Code extension for (e.g. v1.0.0-beta.3). Only re-runs the Marketplace publish, not the binary build/upload path.'
+        description: 'Release tag to republish (e.g. v1.0.0-beta.3). Does not rebuild or re-upload binaries.'
         required: true
         type: string
+      target:
+        description: 'Distribution target to republish.'
+        required: true
+        default: vscode
+        type: choice
+        options:
+          - vscode
+          - mcp-registry
 
 permissions:
   contents: read
@@ -319,6 +327,10 @@ jobs:
     # succeed after publish-npm has actually published that version.
     needs:
       - publish-npm
+    if: >-
+      always() &&
+      ((github.event_name == 'release' && needs.publish-npm.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'mcp-registry'))
     runs-on: ubuntu-latest
     # Same isolation rule as publish-npm: a registry-listing hiccup must
     # never fail the overall release.
@@ -329,14 +341,18 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Install mcp-publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Always fetch the current release rather than pinning a version
           # here, so this step doesn't need manual bumps over time.
-          URL=$(curl -fsSL https://api.github.com/repos/modelcontextprotocol/registry/releases/latest \
-            | jq -r '.assets[] | select(.name == "mcp-publisher_linux_amd64.tar.gz") | .browser_download_url')
+          URL=$(gh api repos/modelcontextprotocol/registry/releases/latest \
+            --jq '.assets[] | select(.name == "mcp-publisher_linux_amd64.tar.gz") | .browser_download_url')
           curl -fsSL "$URL" -o mcp-publisher.tar.gz
           mkdir -p mcp-publisher-bin
           tar -xzf mcp-publisher.tar.gz -C mcp-publisher-bin
@@ -344,7 +360,7 @@ jobs:
 
       - name: Stamp server.json version from the tag
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -369,7 +385,10 @@ jobs:
     # so this job's own `if` explicitly allows that "skipped" case through.
     needs:
       - upload-release-assets
-    if: always() && (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped')
+    if: >-
+      always() &&
+      (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
+      (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
     # Same isolation rule as publish-npm/publish-mcp-registry: a Marketplace
     # publishing hiccup must never fail the overall release.
@@ -514,7 +533,10 @@ jobs:
     # the two jobs run in parallel with no ordering between them.
     needs:
       - upload-release-assets
-    if: always() && (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped')
+    if: >-
+      always() &&
+      (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
+      (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
     # Same isolation rule as the other publish-* jobs: an Open VSX hiccup
     # must never fail the overall release. No release-asset writes here (the
