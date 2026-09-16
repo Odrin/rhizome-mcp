@@ -142,15 +142,15 @@ func inspectDatabase(projectDir, databasePath string) (Entry, bool) {
 	entry := Entry{ProjectID: filepath.Base(projectDir), Status: "ok"}
 	db, err := openReadOnlyDB(databasePath)
 	if err != nil {
-		return withDiagnostic(entry, "locked", fmt.Sprintf("cannot open database read-only: %v", err), "tasks.db"), false
+		return withDatabaseOpenError(entry, err, "open", "tasks.db"), false
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return withDiagnostic(entry, "locked", fmt.Sprintf("database is unavailable: %v", err), "tasks.db"), false
+		return withDatabaseOpenError(entry, err, "ping", "tasks.db"), false
 	}
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return withDiagnostic(entry, "locked", fmt.Sprintf("cannot begin read-only inspection: %v", err), "tasks.db"), false
+		return withDatabaseOpenError(entry, err, "begin read-only inspection", "tasks.db"), false
 	}
 	defer tx.Rollback()
 
@@ -325,11 +325,43 @@ func sumDatabaseSizes(path string) int64 {
 	var total int64
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		candidate := base + suffix
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
 			total += info.Size()
 		}
 	}
 	return total
+}
+
+func withDatabaseOpenError(entry Entry, err error, operation, resource string) Entry {
+	return withDatabaseAccessError(entry, err, operation, resource)
+}
+
+func withDiagnosticsForAccess(entry Entry, err error, operation, resource string) Entry {
+	return withDatabaseAccessError(entry, err, operation, resource)
+}
+
+func withDatabaseAccessError(entry Entry, err error, operation, resource string) Entry {
+	if err == nil {
+		return entry
+	}
+	code, message, field := classifyDatabaseAccessError(err, operation, resource)
+	return withDiagnostic(entry, code, message, field)
+}
+
+func classifyDatabaseAccessError(err error, operation, resource string) (string, string, string) {
+	var sqliteErr *moderncsqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+			return "locked", fmt.Sprintf("%s %s failed because the database is locked: %v", operation, resource, err), resource
+		case sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_FULL, sqlite3.SQLITE_NOMEM, sqlite3.SQLITE_PROTOCOL, sqlite3.SQLITE_PERM:
+			return "unavailable", fmt.Sprintf("%s %s failed: %v", operation, resource, err), resource
+		}
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrInvalid) {
+		return "unavailable", fmt.Sprintf("%s %s failed: %v", operation, resource, err), resource
+	}
+	return "unavailable", fmt.Sprintf("%s %s failed: %v", operation, resource, err), resource
 }
 
 func withDiagnostic(entry Entry, code, message, field string) Entry {
@@ -344,7 +376,12 @@ func withDatabaseReadError(entry Entry, err error, fallbackCode, message, field 
 		switch sqliteErr.Code() & 0xff {
 		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
 			return withDiagnostic(entry, "locked", fmt.Sprintf("database is busy: %v", err), "tasks.db")
+		case sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_FULL, sqlite3.SQLITE_NOMEM, sqlite3.SQLITE_PROTOCOL, sqlite3.SQLITE_PERM:
+			return withDiagnostic(entry, "unavailable", fmt.Sprintf("read %s failed: %v", "tasks.db", err), "tasks.db")
 		}
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrInvalid) {
+		return withDiagnostic(entry, "unavailable", fmt.Sprintf("read %s failed: %v", "tasks.db", err), field)
 	}
 	return withDiagnostic(entry, fallbackCode, fmt.Sprintf("%s: %v", message, err), field)
 }
