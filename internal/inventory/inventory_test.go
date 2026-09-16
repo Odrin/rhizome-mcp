@@ -510,6 +510,92 @@ func TestReadOnlyTransactionMatchesWholeWALStateBeforeOrAfterCommit(t *testing.T
 	}
 }
 
+func TestDatabaseReadErrorsClassifyOperationalFailuresAsUnavailable(t *testing.T) {
+	entry := withDatabaseReadError(Entry{ProjectID: "test", Status: "ok"}, os.ErrPermission, "corrupt", "issue count is unreadable", "issues")
+	if entry.Status != "unavailable" {
+		t.Fatalf("permission failure status = %q, want %q", entry.Status, "unavailable")
+	}
+	if len(entry.Diagnostics) != 1 || entry.Diagnostics[0].Code != "unavailable" || entry.Diagnostics[0].Field != "issues" {
+		t.Fatalf("permission diagnostic = %#v, want unavailable on issues", entry.Diagnostics)
+	}
+	if !strings.Contains(entry.Diagnostics[0].Message, "read") || !strings.Contains(entry.Diagnostics[0].Message, "tasks.db") {
+		t.Fatalf("permission message = %q, want read operation on tasks.db", entry.Diagnostics[0].Message)
+	}
+}
+
+func TestOpenReadOnlyDBSurvivesUnusableTMPDIR(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tasks.db")
+	projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	createProjectDB(t, path, projectID, "demo", "/tmp/repo")
+
+	badTMP := filepath.Join(root, "no-write-tmp")
+	if err := os.MkdirAll(badTMP, 0o500); err != nil {
+		t.Fatalf("mkdir unusable TMPDIR: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("TMPDIR permissions are not enforced the same way on Windows")
+	}
+	t.Setenv("TMPDIR", badTMP)
+	t.Setenv("TMP", badTMP)
+	t.Setenv("TEMP", badTMP)
+
+	db, err := openReadOnlyDB(path)
+	if err != nil {
+		t.Fatalf("openReadOnlyDB() with unusable TMPDIR error = %v", err)
+	}
+	defer db.Close()
+
+	var count int64
+	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM issues`).Scan(&count); err != nil {
+		t.Fatalf("query issue count with unusable TMPDIR: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("issue count = %d, want 1", count)
+	}
+}
+
+func TestListProjectsDoesNotCreateInventoryTempFiles(t *testing.T) {
+	root := t.TempDir()
+	projectID := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	projectDir := filepath.Join(root, "projects", projectID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	path := filepath.Join(projectDir, "tasks.db")
+	createProjectDB(t, path, projectID, "demo", "/tmp/repo")
+
+	t.Setenv("TMPDIR", root)
+	matches, err := filepath.Glob(filepath.Join(root, "rhizome-inventory-*"))
+	if err != nil {
+		t.Fatalf("glob inventory temp dir: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("preexisting inventory temp files = %#v", matches)
+	}
+
+	result, err := List(root, projectconfig.PathInputs{GOOS: "linux", HomeDir: root, XDGDataHome: root})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Status != "ok" {
+		t.Fatalf("List() result = %#v, want one healthy item", result.Items)
+	}
+
+	matches, err = filepath.Glob(filepath.Join(root, "rhizome-inventory-*"))
+	if err != nil {
+		t.Fatalf("glob inventory temp dir after list: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("List() created inventory temp files/directories: %#v", matches)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat database after list: %v", err)
+	} else if info.Size() == 0 {
+		t.Fatal("database size unexpectedly zero after list")
+	}
+}
+
 func TestDatabaseReadContentionProducesLockedDiagnostic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.db")
 	first, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)")
