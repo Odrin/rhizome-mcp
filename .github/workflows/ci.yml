@@ -75,7 +75,9 @@ jobs:
           cache: true
 
       - name: Generate unit test coverage
-        run: go test ./... -covermode=atomic -coverpkg=./... -coverprofile=unit-coverage.out
+        # Coverage profiles are output artifacts, so cached test results can
+        # replay blocks instrumented against an older repository-wide source set.
+        run: go test -count=1 ./... -covermode=atomic -coverpkg=./... -coverprofile=unit-coverage.out
 
       - name: Check unit test coverage
         id: unit-coverage
@@ -92,12 +94,13 @@ jobs:
       # find them. It is deliberately not GOCOVERDIR: go test -coverprofile
       # overwrites GOCOVERDIR in the test process with a temporary build-cache
       # directory that is discarded when the run ends.
+      # -count=1 also ensures cached tests cannot skip those subprocess writes.
       - name: Generate integration test coverage
         env:
           RHIZOME_INTEGRATION_COVERDIR: ${{ github.workspace }}/integration-covdata
         run: |
           mkdir -p "$RHIZOME_INTEGRATION_COVERDIR"
-          go test -tags=integration -run '^TestIntegration' ./... \
+          go test -count=1 -tags=integration -run '^TestIntegration' ./... \
             -covermode=atomic -coverpkg=./... -coverprofile=integration-inprocess.out
 
       # Both halves are mode: atomic, so appending the subprocess profile

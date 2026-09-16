@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/parser"
@@ -735,6 +736,56 @@ func TestMaintenanceCommandsUseCustomDataRoot(t *testing.T) {
 	}
 	if searchCount == 0 {
 		t.Fatal("expected search index to contain rebuilt rows")
+	}
+}
+
+func TestProjectsListCommandUsesResolvedAndCustomDataRoot(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot, err := projectconfig.ResolveDataRoot(pathInputs)
+	if err != nil {
+		t.Fatalf("resolve data root: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"init"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+	discovered, err := projectconfig.Discover(repoRoot)
+	if err != nil {
+		t.Fatalf("discover initialized project: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"projects", "list"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("projects list command failed: %v", err)
+	}
+	if output := stdout.String(); !strings.Contains(output, "project_id\tid\tname") || !strings.Contains(output, discovered.Identity.ProjectID) {
+		t.Fatalf("projects list table output = %q, want header and project %s", output, discovered.Identity.ProjectID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "projects", "list", "--format", "json"}, repoRoot, pathInputs); err != nil {
+		t.Fatalf("projects list JSON command failed: %v", err)
+	}
+	var result struct {
+		Items []struct {
+			ProjectID string `json:"project_id"`
+			Status    string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode projects list JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Items) != 1 || result.Items[0].ProjectID != discovered.Identity.ProjectID || result.Items[0].Status != "ok" {
+		t.Fatalf("projects list JSON = %#v, want one healthy project %s", result.Items, discovered.Identity.ProjectID)
 	}
 }
 
