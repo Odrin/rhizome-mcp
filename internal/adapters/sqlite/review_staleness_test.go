@@ -166,6 +166,279 @@ func TestClaimReviewRequestSupersedesStaleTarget(t *testing.T) {
 	}
 }
 
+func TestCreateReviewRequestFutureEvent(t *testing.T) {
+	t.Run("future_project_cursor_is_rejected_and_writes_nothing", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-create-future-event")
+		defer fixture.close()
+
+		issueID := fixture.insertIssue(t, "future cursor create")
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		_, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      current + 1,
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if !errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
+			t.Fatalf("CreateReviewRequest() error = %v, want STALE_REVIEW_TARGET", err)
+		}
+		assertReviewRequestCount(t, fixture.ctx, fixture.db, issueID, 0)
+	})
+
+	t.Run("current_project_cursor_is_valid_for_other_issue_activity", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-create-global-cursor-other-issue")
+		defer fixture.close()
+
+		issueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, "review target on current global cursor",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		otherIssueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 2, 'task', ?, 'ready', 'medium', 1, ?, ?)`, otherIssueID, "other issue activity",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+				VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, otherIssueID, sqlite.FormatStorageTime(time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      current,
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRequest() error = %v", err)
+		}
+		if created.Request.TargetEventID != current {
+			t.Fatalf("created target_event_id = %d, want %d", created.Request.TargetEventID, current)
+		}
+	})
+
+	t.Run("current_global_cursor_is_valid_for_excluded_event_types", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-create-global-cursor-excluded-event")
+		defer fixture.close()
+
+		issueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, "review target on excluded event",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+				VALUES (?, 'attempt_started', NULL, NULL, '{}', ?)`, issueID, sqlite.FormatStorageTime(time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      current,
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRequest() error = %v", err)
+		}
+		if created.Request.TargetEventID != current {
+			t.Fatalf("created target_event_id = %d, want %d", created.Request.TargetEventID, current)
+		}
+	})
+}
+
+func TestReplaceReviewRequestFutureEvent(t *testing.T) {
+	t.Run("future_project_cursor_is_rejected_and_leaves_predecessor_open", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-replace-future-event")
+		defer fixture.close()
+
+		issueID := fixture.insertIssue(t, "future cursor replace")
+		created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      0,
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRequest() error = %v", err)
+		}
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		_, err = fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+			PredecessorRequestID:       created.Request.ID,
+			PredecessorExpectedVersion: created.Request.Version,
+			SuccessorID:                fixture.newID(t),
+			SuccessorTargetID:          fixture.newID(t),
+			TargetIssueVersion:         1,
+			TargetEventID:              current + 1,
+			OccurredAt:                 time.Date(2026, 7, 17, 12, 1, 0, 0, time.UTC),
+		})
+		if !errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
+			t.Fatalf("ReplaceReviewRequest() error = %v, want STALE_REVIEW_TARGET", err)
+		}
+
+		var status string
+		var version int64
+		if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+			return query.QueryRowContext(ctx, `SELECT status, version FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&status, &version)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(domain.ReviewRequestStatusOpen) || version != created.Request.Version {
+			t.Fatalf("predecessor after rejected replace = status %q version %d", status, version)
+		}
+		assertReviewRequestCount(t, fixture.ctx, fixture.db, issueID, 1)
+	})
+
+	t.Run("current_project_cursor_is_valid_for_other_issue_activity", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-replace-global-cursor-other-issue")
+		defer fixture.close()
+
+		issueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, "replace target on current global cursor",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		otherIssueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 2, 'task', ?, 'ready', 'medium', 1, ?, ?)`, otherIssueID, "other issue activity",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+				VALUES (?, 'issue_updated', NULL, NULL, '{}', ?)`, otherIssueID, sqlite.FormatStorageTime(time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      current,
+			ArtifactIDs:        []string{},
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRequest() error = %v", err)
+		}
+		successor, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+			PredecessorRequestID:       created.Request.ID,
+			PredecessorExpectedVersion: created.Request.Version,
+			SuccessorID:                fixture.newID(t),
+			SuccessorTargetID:          fixture.newID(t),
+			TargetIssueVersion:         1,
+			TargetEventID:              current,
+			ArtifactIDs:                []string{},
+			OccurredAt:                 time.Date(2026, 7, 17, 12, 1, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("ReplaceReviewRequest() error = %v", err)
+		}
+		if successor.Successor.TargetEventID != current {
+			t.Fatalf("successor target_event_id = %d, want %d", successor.Successor.TargetEventID, current)
+		}
+		if current <= 0 {
+			t.Fatalf("project current cursor = %d, want > 0", current)
+		}
+	})
+
+	t.Run("current_global_cursor_is_valid_for_excluded_event_types", func(t *testing.T) {
+		fixture := newReviewFixture(t, "review-replace-global-cursor-excluded-event")
+		defer fixture.close()
+
+		issueID := fixture.newID(t)
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES (?, 1, 'task', ?, 'ready', 'medium', 1, ?, ?)`, issueID, "replace target on excluded event",
+				sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)), sqlite.FormatStorageTime(time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
+				VALUES (?, 'attempt_started', NULL, NULL, '{}', ?)`, issueID, sqlite.FormatStorageTime(time.Date(2026, 7, 17, 11, 0, 0, 0, time.UTC)))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := currentEventPosition(t, fixture.ctx, fixture.db)
+		created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+			Purposes:           []string{"implementation"},
+			RequestID:          fixture.newID(t),
+			TargetID:           fixture.newID(t),
+			IssueID:            issueID,
+			TargetIssueVersion: 1,
+			TargetEventID:      current,
+			ArtifactIDs:        []string{},
+			OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRequest() error = %v", err)
+		}
+		successor, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+			PredecessorRequestID:       created.Request.ID,
+			PredecessorExpectedVersion: created.Request.Version,
+			SuccessorID:                fixture.newID(t),
+			SuccessorTargetID:          fixture.newID(t),
+			TargetIssueVersion:         1,
+			TargetEventID:              current,
+			ArtifactIDs:                []string{},
+			OccurredAt:                 time.Date(2026, 7, 17, 12, 1, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("ReplaceReviewRequest() error = %v", err)
+		}
+		if successor.Successor.TargetEventID != current {
+			t.Fatalf("successor target_event_id = %d, want %d", successor.Successor.TargetEventID, current)
+		}
+		if current <= 0 {
+			t.Fatalf("project current cursor = %d, want > 0", current)
+		}
+	})
+}
+
 func TestGetAndListReportStaleTargetsAsNotClaimable(t *testing.T) {
 	fixture := newReviewFixture(t, "review-stale-projection")
 	defer fixture.close()

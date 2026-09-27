@@ -25,13 +25,14 @@ func TestReviewRepositoryLifecycleCreatesEventsAndOutcome(t *testing.T) {
 	issueID := fixture.insertIssue(t, "review issue")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      7,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"artifact-1", "artifact-2"},
 		OccurredAt:         time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC),
 	})
@@ -90,13 +91,14 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 
 	issueID := fixture.insertIssue(t, "follow-up review")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"artifact-1"},
 		OccurredAt:         time.Date(2026, 7, 17, 17, 0, 0, 0, time.UTC),
 	})
@@ -134,13 +136,14 @@ func TestReviewRepositorySupportsChangesRequestedFollowUpAndReReview(t *testing.
 	}
 
 	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
+	reviewedCurrent := currentEventPosition(t, fixture.ctx, fixture.db)
 	reviewed, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 2,
-		TargetEventID:      5,
+		TargetEventID:      reviewedCurrent,
 		ArtifactIDs:        []string{"artifact-2"},
 		OccurredAt:         time.Date(2026, 7, 17, 17, 4, 0, 0, time.UTC),
 	})
@@ -168,13 +171,14 @@ func TestReviewRepositoryBlockedOutcomeKeepsReason(t *testing.T) {
 
 	issueID := fixture.insertIssue(t, "blocked review")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"artifact-1"},
 		OccurredAt:         time.Date(2026, 7, 17, 18, 0, 0, 0, time.UTC),
 	})
@@ -215,6 +219,7 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "duplicate review")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 
 	command := ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
@@ -222,7 +227,7 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      4,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"same-artifact"},
 		OccurredAt:         time.Date(2026, 7, 17, 13, 0, 0, 0, time.UTC),
 	}
@@ -272,7 +277,7 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      4,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"different-artifact"},
 		OccurredAt:         time.Date(2026, 7, 17, 13, 10, 0, 0, time.UTC),
 	})
@@ -290,13 +295,14 @@ func TestReviewRepositoryConcurrentClaimsHaveOneWinner(t *testing.T) {
 
 	issueID := fixture.insertIssue(t, "concurrent review claim")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 1,
-		TargetEventID:      0,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"artifact"},
 		OccurredAt:         time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC),
 	})
@@ -348,6 +354,7 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 	issueID := fixture.insertIssue(t, "version conflict")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
 	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:           []string{"implementation"},
@@ -355,7 +362,7 @@ func TestReviewRepositoryVersionConflictRollsBackMutations(t *testing.T) {
 		TargetID:           fixture.newID(t),
 		IssueID:            issueID,
 		TargetIssueVersion: 2,
-		TargetEventID:      9,
+		TargetEventID:      current,
 		ArtifactIDs:        []string{"one"},
 		OccurredAt:         time.Date(2026, 7, 17, 14, 0, 0, 0, time.UTC),
 	})
@@ -395,11 +402,12 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "replace target issue")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 3, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -407,11 +415,12 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 	}
 
 	setReviewedIssueVersion(t, fixture.ctx, fixture.db, issueID, 2)
+	nextCurrent := currentEventPosition(t, fixture.ctx, fixture.db)
 	replaced, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
-		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"artifact-2"},
+		TargetIssueVersion: 2, TargetEventID: nextCurrent, ArtifactIDs: []string{"artifact-2"},
 		OccurredAt:     time.Date(2026, 7, 24, 9, 1, 0, 0, time.UTC),
 		IdempotencyKey: "replace-once", RequestHash: []byte("hash-1"),
 	})
@@ -457,7 +466,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
-		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"artifact-2"},
+		TargetIssueVersion: 2, TargetEventID: nextCurrent, ArtifactIDs: []string{"artifact-2"},
 		OccurredAt:     time.Date(2026, 7, 24, 9, 2, 0, 0, time.UTC),
 		IdempotencyKey: "replace-once", RequestHash: []byte("hash-1"),
 	})
@@ -481,7 +490,7 @@ func TestReviewRepositoryReplaceSupersedesPredecessorAndCreatesSuccessor(t *test
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
-		TargetIssueVersion: 2, TargetEventID: 9, ArtifactIDs: []string{"different-artifact"},
+		TargetIssueVersion: 2, TargetEventID: nextCurrent, ArtifactIDs: []string{"different-artifact"},
 		OccurredAt:     time.Date(2026, 7, 24, 9, 3, 0, 0, time.UTC),
 		IdempotencyKey: "replace-once", RequestHash: []byte("hash-2"),
 	}); !errors.Is(err, &domain.Error{Code: domain.CodeIdempotencyConflict}) {
@@ -495,11 +504,12 @@ func TestReviewRepositoryReplaceRejectsClaimedPredecessorWithZeroWrites(t *testi
 
 	issueID := fixture.insertIssue(t, "claimed predecessor issue")
 	attemptID := fixture.insertReviewAttempt(t, issueID)
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -517,7 +527,7 @@ func TestReviewRepositoryReplaceRejectsClaimedPredecessorWithZeroWrites(t *testi
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: claimed.Request.ID, PredecessorExpectedVersion: claimed.Request.Version,
-		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		TargetIssueVersion: 2, TargetEventID: current, ArtifactIDs: []string{"artifact-2"},
 		OccurredAt: time.Date(2026, 7, 24, 10, 2, 0, 0, time.UTC),
 	})
 	if !errors.Is(err, &domain.Error{Code: domain.CodeReviewRequestClaimed}) {
@@ -548,11 +558,12 @@ func TestReviewRepositoryReplaceRejectsTerminalPredecessor(t *testing.T) {
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "terminal predecessor issue")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 11, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -570,7 +581,7 @@ func TestReviewRepositoryReplaceRejectsTerminalPredecessor(t *testing.T) {
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: cancelled.Request.ID, PredecessorExpectedVersion: cancelled.Request.Version,
-		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		TargetIssueVersion: 2, TargetEventID: current, ArtifactIDs: []string{"artifact-2"},
 		OccurredAt: time.Date(2026, 7, 24, 11, 2, 0, 0, time.UTC),
 	})
 	if !errors.Is(err, &domain.Error{Code: domain.CodeReviewRequestNotReplaceable}) {
@@ -583,11 +594,12 @@ func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) 
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "version conflict predecessor")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -598,7 +610,7 @@ func TestReviewRepositoryReplaceVersionConflictRollsBackAllWrites(t *testing.T) 
 		SuccessorID:          fixture.newID(t),
 		SuccessorTargetID:    fixture.newID(t),
 		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version + 1,
-		TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+		TargetIssueVersion: 2, TargetEventID: current, ArtifactIDs: []string{"artifact-2"},
 		OccurredAt: time.Date(2026, 7, 24, 12, 1, 0, 0, time.UTC),
 	})
 	if !errors.Is(err, &domain.Error{Code: domain.CodeVersionConflict}) {
@@ -635,11 +647,12 @@ func TestReviewRepositoryConcurrentReplaceHaveOneWinner(t *testing.T) {
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "concurrent replace issue")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 13, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -659,7 +672,7 @@ func TestReviewRepositoryConcurrentReplaceHaveOneWinner(t *testing.T) {
 				SuccessorID:          fixture.newID(t),
 				SuccessorTargetID:    fixture.newID(t),
 				PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
-				TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+				TargetIssueVersion: 2, TargetEventID: current, ArtifactIDs: []string{"artifact-2"},
 				OccurredAt:     time.Date(2026, 7, 24, 13, 1, 0, 0, time.UTC),
 				IdempotencyKey: "concurrent-replace", RequestHash: []byte("same-hash"),
 			})
@@ -704,11 +717,12 @@ func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *t
 	defer fixture.close()
 
 	issueID := fixture.insertIssue(t, "concurrent independent replace issue")
+	current := currentEventPosition(t, fixture.ctx, fixture.db)
 	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		Purposes:  []string{"implementation"},
 		RequestID: fixture.newID(t),
 		TargetID:  fixture.newID(t),
-		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: 0, ArtifactIDs: []string{"artifact-1"},
+		IssueID:   issueID, TargetIssueVersion: 1, TargetEventID: current, ArtifactIDs: []string{"artifact-1"},
 		OccurredAt: time.Date(2026, 7, 24, 14, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -728,7 +742,7 @@ func TestReviewRepositoryConcurrentReplaceByIndependentCallersHaveOneWinner(t *t
 				SuccessorID:          fixture.newID(t),
 				SuccessorTargetID:    fixture.newID(t),
 				PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
-				TargetIssueVersion: 2, TargetEventID: 5, ArtifactIDs: []string{"artifact-2"},
+				TargetIssueVersion: 2, TargetEventID: current, ArtifactIDs: []string{"artifact-2"},
 				OccurredAt:     time.Date(2026, 7, 24, 14, 1, 0, 0, time.UTC),
 				IdempotencyKey: fmt.Sprintf("independent-caller-%d", index), RequestHash: []byte{byte(index)},
 			})

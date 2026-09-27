@@ -92,6 +92,14 @@ func staleReviewTargetError() *domain.Error {
 	return domain.NewError(domain.CodeReviewTargetStale, "review target is stale", false)
 }
 
+func reviewTargetFuture(ctx context.Context, queryer Queryer, targetEventID int64) (bool, error) {
+	var latestEventID int64
+	if err := queryer.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEventID); err != nil {
+		return false, err
+	}
+	return targetEventID > latestEventID, nil
+}
+
 func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, command ports.CreateReviewRequestCommand) (ports.CreateReviewRequestResult, error) {
 	if repository == nil || repository.db == nil {
 		return ports.CreateReviewRequestResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
@@ -143,6 +151,13 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 		// A request whose target no longer matches the issue must never be
 		// born: it would be advertised as claimable, consume a reviewer's
 		// attempt, and only fail at finish (ISSUE-188).
+		future, err := reviewTargetFuture(ctx, tx, command.TargetEventID)
+		if err != nil {
+			return err
+		}
+		if future {
+			return staleReviewTargetError()
+		}
 		stale, err := reviewTargetStale(ctx, tx, command.IssueID, command.TargetIssueVersion, command.TargetEventID)
 		if err != nil {
 			return err
@@ -455,6 +470,13 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 		// The successor freezes a new target, so it is held to the same rule
 		// as a fresh create: replacing a stale request with another stale
 		// one just moves the eventual finish-time failure (ISSUE-188).
+		future, err := reviewTargetFuture(ctx, tx, command.TargetEventID)
+		if err != nil {
+			return err
+		}
+		if future {
+			return staleReviewTargetError()
+		}
 		stale, err := reviewTargetStale(ctx, tx, predecessor.IssueID, command.TargetIssueVersion, command.TargetEventID)
 		if err != nil {
 			return err
