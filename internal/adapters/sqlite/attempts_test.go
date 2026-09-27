@@ -137,6 +137,49 @@ func TestClaimIssueIdempotentReplayAfterAttemptEndedReturnsNotActive(t *testing.
 	}
 }
 
+func TestClaimIssueIdempotentReplayAfterLeaseExpiryReturnsNotActive(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "claim-idempotency-expired")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "claim retry expired", domain.StatusReady)
+	key := "claim-retry-expired"
+	input := domain.ClaimIssueInput{IssueID: issue.ID, IdempotencyKey: &key, LeaseSeconds: intPointer(60)}
+	claimed, err := fixture.attempts.ClaimIssue(fixture.ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalExpires := claimed.Attempt.LeaseExpiresAt
+	fixture.clock.Advance(61 * time.Second)
+
+	if _, err := fixture.attempts.ClaimIssue(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("replay after lease expiry = %v, want ATTEMPT_NOT_ACTIVE", err)
+	}
+
+	var status, leaseExpiresAt string
+	var storedHash []byte
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status, lease_expires_at, lease_token_hash FROM work_attempts WHERE id = ?`, claimed.Attempt.ID).
+			Scan(&status, &leaseExpiresAt, &storedHash); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(domain.AttemptStatusExpired) {
+		t.Fatalf("attempt status after replay = %q, want %q", status, domain.AttemptStatusExpired)
+	}
+	if leaseExpiresAt != sqlite.FormatStorageTime(originalExpires) {
+		t.Fatalf("lease_expires_at after replay = %s, want unchanged %s", leaseExpiresAt, sqlite.FormatStorageTime(originalExpires))
+	}
+	wantHash := sha256.Sum256([]byte(claimed.LeaseToken))
+	if !bytes.Equal(storedHash, wantHash[:]) {
+		t.Fatal("stored lease_token_hash changed after an expired replay")
+	}
+	if countAttemptEvents(t, fixture, claimed.Attempt.ID, "attempt_expired") != 1 {
+		t.Fatalf("attempt_expired event count = %d, want 1", countAttemptEvents(t, fixture, claimed.Attempt.ID, "attempt_expired"))
+	}
+}
+
 func TestFinishAttemptIdempotentReplayAndConflict(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "finish-idempotency")
 	defer fixture.close()

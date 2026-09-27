@@ -246,6 +246,7 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 	expires := now.Add(command.LeaseDuration).UTC()
 	expiresTimestamp := formatStorageTime(expires)
 	var result ports.ClaimIssueResult
+	var replayAttemptNotActive bool
 	err := repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		if command.IdempotencyKey != "" {
 			var savedHash []byte
@@ -267,8 +268,9 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 				// rotate the lease and issue this call's freshly generated
 				// token instead; the previous token, if the original caller
 				// ever received it, stops working the moment this succeeds.
-				var attemptStatus string
-				scanErr := tx.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, result.Attempt.ID).Scan(&attemptStatus)
+				var attemptStatus, leaseExpiresAt string
+				scanErr := tx.QueryRowContext(ctx, `SELECT status, lease_expires_at FROM work_attempts WHERE id = ?`, result.Attempt.ID).
+					Scan(&attemptStatus, &leaseExpiresAt)
 				if scanErr == sql.ErrNoRows {
 					return domain.WrapError(scanErr, domain.CodeStorageCorrupt, "idempotency record references a missing attempt", false)
 				}
@@ -276,8 +278,22 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 					return scanErr
 				}
 				if attemptStatus != string(domain.AttemptStatusActive) {
-					return domain.NewError(domain.CodeAttemptNotActive, "claimed attempt is no longer active; the original claim response was not retained", false,
-						domain.Detail{Field: "attempt_id", Code: "NOT_ACTIVE"})
+					replayAttemptNotActive = true
+					return nil
+				}
+				expiry, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
+				if err != nil {
+					return err
+				}
+				if !expiry.After(now) {
+					expired, expireErr := expireAttempt(ctx, tx, result.Attempt.ID, now)
+					if expireErr != nil {
+						return expireErr
+					}
+					if expired {
+						replayAttemptNotActive = true
+						return nil
+					}
 				}
 				res, updateErr := tx.ExecContext(ctx, `UPDATE work_attempts SET lease_token_hash = ?, lease_expires_at = ?
 						WHERE id = ? AND status = 'active'`, command.TokenHash, expiresTimestamp, result.Attempt.ID)
@@ -287,8 +303,8 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 				if affected, rowsErr := res.RowsAffected(); rowsErr != nil {
 					return rowsErr
 				} else if affected != 1 {
-					return domain.NewError(domain.CodeAttemptNotActive, "claimed attempt is no longer active; the original claim response was not retained", false,
-						domain.Detail{Field: "attempt_id", Code: "NOT_ACTIVE"})
+					replayAttemptNotActive = true
+					return nil
 				}
 				result.Attempt.LeaseExpiresAt = expires
 				result.LeaseToken = command.LeaseToken
@@ -415,6 +431,10 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 	})
 	if err != nil {
 		return ports.ClaimIssueResult{}, err
+	}
+	if replayAttemptNotActive {
+		return ports.ClaimIssueResult{}, domain.NewError(domain.CodeAttemptNotActive, "claimed attempt is no longer active; the original claim response was not retained", false,
+			domain.Detail{Field: "attempt_id", Code: "NOT_ACTIVE"})
 	}
 	return result, nil
 }
