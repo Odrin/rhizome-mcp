@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-28
+
+### Fixed
+
+- **Review requests reject event cursors from the future** — Creating or replacing a review request now verifies that `target_event_id` is at or behind the project's current event position before persisting anything. A caller can no longer pin a request to an event that has not happened and thereby keep the review fresh through later issue changes; invalid cursors fail with `STALE_REVIEW_TARGET`, including in concurrent create and replace paths.
+
+- **Expired idempotent claim replays no longer return dead leases** — Reusing a successful `claim_issue` idempotency key after its attempt expires now returns `IDEMPOTENCY_CONFLICT` instead of replaying the original lease token as though the claim were still active. Exact retries remain replay-safe while the attempt is active, and a new key can claim the issue once the expired lease is available again.
+
+- **Overlapping VS Code board commands keep ownership of their own process** — Starting, restarting, or closing board panels concurrently no longer lets an older command dispose the newer board process or overwrite its tracked state. Process ownership is transferred explicitly, stale launches clean up only their own child, and extension shutdown still terminates the active board.
+
+- **Backups retry transient WAL checkpoint contention** — `backup` now applies the configured SQLite retry policy when `PRAGMA wal_checkpoint(FULL)` reports busy readers or lock contention. Short-lived readers no longer make an otherwise valid backup fail immediately; exhausted retries still return the existing retryable `STORAGE_BUSY` error, and cancellation stops the wait promptly.
+
+### Internal
+
+- **Release publication is recoverable and reports partial failures** — Distribution jobs now verify public npm and MCP Registry visibility, make registry publication idempotent, support targeted MCP Registry republishing through `workflow_dispatch`, and feed npm, registry, Marketplace, and Open VSX failures into one release-status job without coupling them to binary asset publication. GitHub Actions dependencies were updated to their current major versions.
+
+- **MCP Registry publisher downloads are pinned and verified** — The release workflow downloads a fixed `mcp-publisher` version with bounded retries and validates its SHA-256 digest before execution, removing the unauthenticated latest-release API lookup and preventing an unverified publisher binary from entering the release path.
+
 ## [1.5.1] - 2026-09-16
 
 ### Added
