@@ -64,22 +64,22 @@
  *   3. `git describe --tags --abbrev=0` run at the repo root
  * and maps it as follows:
  *
- *   - Beta tag `vMAJOR.MINOR.PATCH-beta.N` (pre-release channel):
- *       marketplace version = MAJOR.(MINOR*2+1).(PATCH*1000+N)
- *       published with `vsce package --pre-release`
- *     Forcing the minor number odd follows the Marketplace's own documented
- *     convention that pre-release builds use an odd minor version to keep
- *     them in a separate update channel from stable. The `*1000+N` patch
- *     encoding keeps successive beta publishes (and any future patch bump
- *     while still in beta) monotonically increasing, which the Marketplace
- *     requires for each new publish of the same target.
+ *   - Beta tag `vMAJOR.MINOR.PATCH-beta.N`, N = 0..998:
+ *       marketplace version = (MAJOR+2).MINOR.(PATCH*1000+N+1)
+ *       published with `vsce package --pre-release`.
  *
  *   - Stable tag `vMAJOR.MINOR.PATCH` (no `-beta.N` suffix):
- *       marketplace version = MAJOR.MINOR.PATCH, published WITHOUT
- *       `--pre-release` (stable channel).
- *     Once the server ships a stable release, this extension's version
- *     locks step with the server's own version, verbatim, forever after
- *     (no more odd/even remapping).
+ *       marketplace version = (MAJOR+2).MINOR.((PATCH+1)*1000)
+ *       published without `--pre-release`.
+ *
+ * The epoch offset puts every new tagged version above the legacy 1.x
+ * Marketplace history (maximum 1.5.2 observed 2026-09-30). Beta slots 1..999
+ * precede stable; the next patch's beta.0 is one higher than that stable.
+ * Product minor and major bumps preserve numeric version ordering. The
+ * --pre-release flag, not odd/even minor numbering, selects the channel.
+ * Canonical numeric tags only: no leading zeroes, MAJOR <= 2147483645,
+ * MINOR <= 2147483647, PATCH <= 2147482. Out-of-range tags fail rather than
+ * collide or overflow. The bundled server keeps its original product version.
  *
  * If no tag can be resolved at all (e.g. a shallow local checkout with no
  * tags), the script leaves package.json's existing `version` field alone and
@@ -112,6 +112,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
   copyFileSync,
   chmodSync,
@@ -147,6 +148,9 @@ const WIN32_TARGETS = new Set(['win32-x64', 'win32-arm64']);
 // on POSIX, spawning without a shell avoids re-quoting argv (which matters
 // for paths containing spaces) and Node's shell-arg-escaping warning.
 const USE_SHELL = process.platform === 'win32';
+const MARKETPLACE_EPOCH = 2;
+const VERSION_SLOT_COUNT = 1000;
+const MAX_VERSION_COMPONENT = 2_147_483_647;
 
 function printHelp() {
   console.log(`Usage:
@@ -230,7 +234,7 @@ function binaryFileName(goos, goarch) {
  * Resolves the marketplace version + pre-release flag to use, per the
  * VERSION POLICY documented above.
  */
-function deriveVersion({ tagOverride, fallbackVersion }) {
+export function deriveVersion({ tagOverride, fallbackVersion }) {
   let tag = tagOverride || process.env.RHIZOME_RELEASE_TAG || null;
   let tagSource = tagOverride ? '--tag' : process.env.RHIZOME_RELEASE_TAG ? 'RHIZOME_RELEASE_TAG' : null;
   if (!tag) {
@@ -253,7 +257,7 @@ function deriveVersion({ tagOverride, fallbackVersion }) {
     return { version: fallbackVersion, preRelease: false, tag: null };
   }
 
-  const match = /^v(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(tag);
+  const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$/.exec(tag);
   if (!match) {
     throw new Error(
       `Tag "${tag}" (from ${tagSource}) does not match the expected vMAJOR.MINOR.PATCH[-beta.N] format.`,
@@ -263,19 +267,24 @@ function deriveVersion({ tagOverride, fallbackVersion }) {
   const major = Number(majorStr);
   const minor = Number(minorStr);
   const patch = Number(patchStr);
-
-  if (betaStr !== undefined) {
-    const beta = Number(betaStr);
-    const marketplaceMinor = minor * 2 + 1;
-    const marketplacePatch = patch * 1000 + beta;
-    return {
-      version: `${major}.${marketplaceMinor}.${marketplacePatch}`,
-      preRelease: true,
-      tag,
-    };
+  const beta = betaStr === undefined ? null : Number(betaStr);
+  const maxProductPatch = Math.floor(MAX_VERSION_COMPONENT / VERSION_SLOT_COUNT) - 1;
+  if (
+    ![major, minor, patch].every(Number.isSafeInteger) ||
+    major > MAX_VERSION_COMPONENT - MARKETPLACE_EPOCH ||
+    minor > MAX_VERSION_COMPONENT ||
+    patch > maxProductPatch ||
+    (beta !== null && (!Number.isSafeInteger(beta) || beta > VERSION_SLOT_COUNT - 2))
+  ) {
+    throw new Error(`Tag "${tag}" (from ${tagSource}) is outside the supported Marketplace version range.`);
   }
 
-  return { version: `${major}.${minor}.${patch}`, preRelease: false, tag };
+  const marketplacePatch = patch * VERSION_SLOT_COUNT + (beta === null ? VERSION_SLOT_COUNT : beta + 1);
+  return {
+    version: `${major + MARKETPLACE_EPOCH}.${minor}.${marketplacePatch}`,
+    preRelease: beta !== null,
+    tag,
+  };
 }
 
 function vsceArgsFor(target, outFile, preRelease) {
@@ -427,4 +436,6 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

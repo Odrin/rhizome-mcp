@@ -47,10 +47,28 @@ One Go binary is built per `GOOS`/`GOARCH` pair and packaged into a VSIX per Mar
 
 The Marketplace requires a plain `major.minor.patch` version with no semver prerelease suffix, but this project's tags look like `v1.0.1-beta.3`. The packaging pipeline (`editors/vscode/scripts/package-platforms.mjs`) maps a tag to a Marketplace version:
 
-- **Beta tag** `vMAJOR.MINOR.PATCH-beta.N` → Marketplace version `MAJOR.(MINOR*2+1).(PATCH*1000+N)`, published with `vsce package --pre-release` (the Marketplace's own documented convention: an odd minor version keeps pre-release builds on a separate update channel from stable).
-- **Stable tag** `vMAJOR.MINOR.PATCH` (no `-beta.N`) → Marketplace version `MAJOR.MINOR.PATCH`, published without `--pre-release`. Once a stable version ships, the extension's version locks to the server's own version verbatim.
+- **Beta tag** `vMAJOR.MINOR.PATCH-beta.N`, with `N` from `0` through `998` → Marketplace version `(MAJOR+2).MINOR.(PATCH*1000+N+1)`, published with `vsce package --pre-release`.
+- **Stable tag** `vMAJOR.MINOR.PATCH` → Marketplace version `(MAJOR+2).MINOR.((PATCH+1)*1000)`, published without `--pre-release`.
+
+The fixed epoch offset `2` migrates all new tagged versions above the already-published legacy `1.x` history. The public Marketplace history for `odrin.rhizome-mcp`, checked on 2026-09-30, tops out at `1.5.2` and also includes legacy beta versions `1.1.1003`, `1.1.1004`, and `1.1.1005`. New mapped versions never reuse those identifiers. The extension version intentionally differs from the bundled server's product version; the server binary still matches the release tag.
+
+Within a product patch, beta slots `1..999` precede stable. The next patch's `beta.0` is one version higher than the previous stable, and minor/major product increments retain numeric ordering. For example:
+
+| Product tag | Extension version | Channel |
+| --- | --- | --- |
+| `v1.0.1-beta.2` | `3.0.1003` | Pre-release |
+| `v1.0.1-beta.998` | `3.0.1999` | Pre-release |
+| `v1.0.1` | `3.0.2000` | Stable |
+| `v1.0.2-beta.0` | `3.0.2001` | Pre-release |
+| `v1.0.2` | `3.0.3000` | Stable |
+| `v1.1.0-beta.0` | `3.1.1` | Pre-release |
+| `v1.1.0` | `3.1.1000` | Stable |
+
+The `--pre-release` flag selects the channel; odd/even minor numbering is no longer used. Only canonical decimal tag components are accepted, with no leading zeroes. Numeric components are capped conservatively at `2147483647`, so product major must be at most `2147483645`, minor at most `2147483647`, and patch at most `2147482`; beta ordinals above `998` are rejected. These bounds guarantee that every accepted beta has an in-range stable successor. Invalid or out-of-range tags fail rather than wrap, clamp, or collide. Untagged local packaging retains the manifest version fallback and is not a release-distribution version.
 
 Every tagged release publishes/updates all 8 targets automatically via the `publish-vscode-extension` job in `.github/workflows/release.yml`, which is idempotent (`vsce publish --skip-duplicate`) and also exposed as a `workflow_dispatch` fallback (tag input) for a manual re-publish. The dispatch path is version-safe: it checks out the tagged source code (not `main`), ensuring the extension's TypeScript and the tag's server binary always ship in lockstep.
+
+Historical tags still contain their historical packaging script, so dispatching an old tag does not migrate its mapping. Ship a forward product release containing this policy to move installed extensions to the new epoch. Repeating that same new-policy tag intentionally reuses its own deterministic version; distinct accepted tags map to distinct new identifiers.
 
 ## Open VSX
 
