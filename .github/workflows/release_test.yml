@@ -1,0 +1,88 @@
+name: Release publication gate tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release_test.yml
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release_test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-publication-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check publication dependencies and conditions
+        shell: bash
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          jobs = YAML.load_file(".github/workflows/release.yml").fetch("jobs")
+          check = ->(name, passed) { raise "Publication gate assertion failed: #{name}" unless passed }
+          needs = ->(name) { Array(jobs.fetch(name).fetch("needs")) }
+          condition = ->(name) { jobs.fetch(name).fetch("if", "success()").delete(" \t\r\n") }
+          successful_dependencies = ->(name, results) { needs.call(name).all? { |dependency| results.fetch(dependency) == "success" } }
+
+          check.call("npm explicitly depends on verify", needs.call("publish-npm").include?("verify"))
+          check.call("npm retains implicit success gating", condition.call("publish-npm") == "success()")
+          check.call("asset upload depends on verify", needs.call("upload-release-assets").include?("verify"))
+          check.call("asset upload retains implicit success gating", condition.call("upload-release-assets") == "success()")
+          check.call("registry depends on npm publication", needs.call("publish-mcp-registry") == ["publish-npm"])
+          registry_condition = "always()&&((github.event_name=='release'&&needs.publish-npm.result=='success')||(github.event_name=='workflow_dispatch'&&inputs.target=='mcp-registry'))"
+          check.call("registry release and dispatch safety condition", condition.call("publish-mcp-registry") == registry_condition)
+          registry_allowed = ->(event, target, npm_result) {
+            (event == "release" && npm_result == "success") || (event == "workflow_dispatch" && target == "mcp-registry")
+          }
+
+          extension_jobs = ["publish-vscode-extension", "publish-open-vsx"]
+          extension_condition = "always()&&(needs.upload-release-assets.result=='success'||(github.event_name=='workflow_dispatch'&&needs.upload-release-assets.result=='skipped'))&&(github.event_name=='release'||inputs.target=='vscode')"
+          extension_jobs.each do |name|
+            check.call("#{name} depends on verified uploaded assets", needs.call(name) == ["upload-release-assets"])
+            check.call("#{name} skipped assets are dispatch-only", condition.call(name) == extension_condition)
+          end
+          extension_allowed = ->(event, target, upload_result) {
+            (upload_result == "success" || (event == "workflow_dispatch" && upload_result == "skipped")) &&
+              (event == "release" || target == "vscode")
+          }
+
+          results = { "build-release-assets" => "success", "npm-launcher" => "success", "verify" => "success" }
+          %w[success failure cancelled skipped].each do |verify_result|
+            current = results.merge("verify" => verify_result)
+            npm_allowed = successful_dependencies.call("publish-npm", current)
+            upload_allowed = successful_dependencies.call("upload-release-assets", current)
+            expected = verify_result == "success"
+            check.call("npm with #{verify_result} verify", npm_allowed == expected)
+            check.call("registry with #{verify_result} verify", registry_allowed.call("release", "", npm_allowed ? "success" : "skipped") == expected)
+            check.call("extension publishers with #{verify_result} verify", extension_allowed.call("release", "", upload_allowed ? "success" : "skipped") == expected)
+          end
+
+          %w[build-release-assets npm-launcher].each do |dependency|
+            %w[failure cancelled skipped].each do |result|
+              npm_allowed = successful_dependencies.call("publish-npm", results.merge(dependency => result))
+              check.call("npm with #{result} #{dependency}", !npm_allowed)
+              check.call("registry with #{result} #{dependency}", !registry_allowed.call("release", "", npm_allowed ? "success" : "skipped"))
+            end
+          end
+          %w[failure cancelled skipped].each do |result|
+            check.call("registry with #{result} npm publication", !registry_allowed.call("release", "", result))
+            check.call("extensions with #{result} asset upload", !extension_allowed.call("release", "", result))
+          end
+
+          dispatch_results = results.transform_values { "skipped" }
+          check.call("dispatch does not publish npm", !successful_dependencies.call("publish-npm", dispatch_results))
+          check.call("dispatch does not upload release assets", !successful_dependencies.call("upload-release-assets", dispatch_results))
+          %w[vscode mcp-registry unknown].each do |target|
+            check.call("registry dispatch target #{target}", registry_allowed.call("workflow_dispatch", target, "skipped") == (target == "mcp-registry"))
+            check.call("extension dispatch target #{target}", extension_allowed.call("workflow_dispatch", target, "skipped") == (target == "vscode"))
+          end
+          puts "Release publication gate assertions passed"
+          RUBY

@@ -215,6 +215,7 @@ jobs:
     needs:
       - build-release-assets
       - npm-launcher
+      - verify
     runs-on: ubuntu-latest
     # This job's success/failure does not affect upload-release-assets (it has
     # no publish-npm dependency), but release-status reports partial releases.
@@ -453,7 +454,8 @@ jobs:
       - upload-release-assets
     if: >-
       always() &&
-      (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
+      (needs.upload-release-assets.result == 'success' ||
+      (github.event_name == 'workflow_dispatch' && needs.upload-release-assets.result == 'skipped')) &&
       (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
     # Marketplace failures remain isolated from release assets, while
@@ -600,7 +602,8 @@ jobs:
       - upload-release-assets
     if: >-
       always() &&
-      (needs.upload-release-assets.result == 'success' || needs.upload-release-assets.result == 'skipped') &&
+      (needs.upload-release-assets.result == 'success' ||
+      (github.event_name == 'workflow_dispatch' && needs.upload-release-assets.result == 'skipped')) &&
       (github.event_name == 'release' || inputs.target == 'vscode')
     runs-on: ubuntu-latest
     # Open VSX failures remain isolated from release assets, while
