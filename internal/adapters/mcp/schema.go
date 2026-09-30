@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -187,6 +188,37 @@ func enumSchema(values ...string) *jsonschema.Schema {
 
 func schemaGetProject() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"include_instructions": booleanSchema()}))
+}
+
+func validateCredentialArguments(toolName string, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &arguments); err != nil {
+		return domain.NewError(domain.CodeInvalidArgument, "tool arguments must be an object", false,
+			domain.Detail{Field: "arguments", Code: "INVALID"})
+	}
+	for _, credential := range []struct {
+		field    string
+		max      int
+		nullable bool
+		code     string
+	}{
+		{"agent_session_handle", 256, toolName != "end_agent_session", "INVALID_HANDLE"},
+		{"lease_token", 512, false, "INVALID"},
+	} {
+		rawValue, present := arguments[credential.field]
+		if !present || (credential.nullable && string(rawValue) == "null") {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(rawValue, &value); err != nil || string(rawValue) == "null" || utf8.RuneCountInString(value) > credential.max {
+			return domain.NewError(domain.CodeInvalidArgument, credential.field+" is invalid", false,
+				domain.Detail{Field: credential.field, Code: credential.code})
+		}
+	}
+	return nil
 }
 
 func withAgentSessionHandle(schema *jsonschema.Schema) *jsonschema.Schema {

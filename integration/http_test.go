@@ -21,9 +21,144 @@ import (
 	"testing"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"rhizome-mcp/internal/adapters/sqlite"
 	projectruntime "rhizome-mcp/internal/runtime"
 )
+
+func TestIntegrationCredentialSchemaErrorsAreValueFree(t *testing.T) {
+	for _, transport := range []string{"stdio", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			env := newIntegrationEnvironment(t)
+			var invoke func(string, map[string]any) ([]byte, error)
+			var httpServer *integrationHTTPServer
+			if transport == "stdio" {
+				session := env.connect(t)
+				invoke = func(name string, arguments map[string]any) ([]byte, error) {
+					result, err := session.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: name, Arguments: arguments})
+					if err != nil {
+						return []byte(err.Error()), err
+					}
+					return json.Marshal(result)
+				}
+			} else {
+				httpServer = launchIntegrationHTTPServer(t, env, "127.0.0.1:0")
+				t.Cleanup(func() { stopIntegrationHTTPServer(t, httpServer) })
+				endpoint := "http://" + httpServer.waitForEndpoint(t) + "/mcp"
+				invoke = func(name string, arguments map[string]any) ([]byte, error) {
+					_, _, body, err := postJSONRPCRequest(t, endpoint, "2026-07-28", "", "credential-test", "tools/call", map[string]any{"name": name, "arguments": arguments})
+					return body, err
+				}
+			}
+			credentials := []string{}
+			assertSecretFree := func(raw []byte) {
+				t.Helper()
+				for _, credential := range credentials {
+					for start := 0; start+8 <= len(credential); start++ {
+						if bytes.Contains(raw, []byte(credential[start:start+8])) {
+							t.Fatal("transport response or server log contains an issued credential fragment")
+						}
+					}
+				}
+			}
+			type toolResult struct {
+				IsError           bool            `json:"isError"`
+				StructuredContent json.RawMessage `json:"structuredContent"`
+			}
+			request := func(name string, arguments map[string]any) toolResult {
+				t.Helper()
+				raw, err := invoke(name, arguments)
+				assertSecretFree(raw)
+				if err != nil {
+					t.Fatal("credential test transport request failed")
+				}
+				if transport == "http" {
+					var envelope jsonRPCEnvelope
+					if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error != nil || len(envelope.Result) == 0 {
+						t.Fatal("expected structured tool result, not a protocol error")
+					}
+					raw = envelope.Result
+				}
+				var result toolResult
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal("could not decode credential test tool result")
+				}
+				return result
+			}
+			decode := func(result toolResult, output any) {
+				t.Helper()
+				if result.IsError || json.Unmarshal(result.StructuredContent, output) != nil {
+					t.Fatal("credential test fixture request failed")
+				}
+			}
+			var issued struct {
+				Handle string `json:"agent_session_handle"`
+			}
+			decode(request("create_agent_session", map[string]any{"client_name": "credential-transport-test"}), &issued)
+			if issued.Handle == "" {
+				t.Fatal("fixture did not issue a session handle")
+			}
+			credentials = append(credentials, issued.Handle)
+			var issue struct {
+				ID string `json:"id"`
+			}
+			decode(request("create_issue", map[string]any{"type": "task", "title": "credential transport regression", "status": "ready", "agent_session_handle": issued.Handle}), &issue)
+			var claim struct {
+				LeaseToken string `json:"lease_token"`
+				Attempt    struct {
+					ID string `json:"id"`
+				} `json:"attempt"`
+			}
+			decode(request("claim_issue", map[string]any{"issue_id": issue.ID}), &claim)
+			if claim.LeaseToken == "" {
+				t.Fatal("fixture did not issue a lease token")
+			}
+			credentials = append(credentials, claim.LeaseToken)
+			for _, credential := range []struct {
+				field  string
+				tool   string
+				secret string
+				limit  int
+				code   string
+			}{
+				{"agent_session_handle", "get_project", issued.Handle, 256, "INVALID_HANDLE"},
+				{"agent_session_handle", "end_agent_session", issued.Handle, 256, "INVALID_HANDLE"},
+				{"lease_token", "renew_attempt", claim.LeaseToken, 512, "INVALID"},
+				{"lease_token", "save_attempt_note", claim.LeaseToken, 512, "INVALID"},
+				{"lease_token", "finish_attempt", claim.LeaseToken, 512, "INVALID"},
+			} {
+				for _, malformed := range []any{[]any{credential.secret}, map[string]any{"value": credential.secret}, strings.Repeat("x", credential.limit+1) + credential.secret, nil} {
+					if malformed == nil && credential.tool == "get_project" {
+						continue
+					}
+					args := map[string]any{credential.field: malformed}
+					if credential.field == "lease_token" {
+						args["attempt_id"] = claim.Attempt.ID
+					}
+					result := request(credential.tool, args)
+					var failure struct {
+						Code      string `json:"code"`
+						Retryable bool   `json:"retryable"`
+						Details   []struct {
+							Field string `json:"field"`
+							Code  string `json:"code"`
+						} `json:"details"`
+					}
+					if json.Unmarshal(result.StructuredContent, &failure) != nil || !result.IsError || failure.Code != "INVALID_ARGUMENT" || failure.Retryable || len(failure.Details) != 1 || failure.Details[0].Field != credential.field || failure.Details[0].Code != credential.code {
+						t.Fatalf("%s malformed credential did not yield the expected value-free validation result", credential.tool)
+					}
+				}
+			}
+			if request("get_project", map[string]any{"agent_session_handle": issued.Handle}).IsError || request("get_project", map[string]any{"agent_session_handle": nil}).IsError || request("renew_attempt", map[string]any{"attempt_id": claim.Attempt.ID, "lease_token": claim.LeaseToken}).IsError {
+				t.Fatal("valid credential request failed after malformed requests")
+			}
+			if httpServer != nil {
+				assertSecretFree([]byte(httpServer.output.String()))
+			}
+		})
+	}
+}
 
 func TestIntegrationHTTPAdversarialRequestsAreRejected(t *testing.T) {
 	t.Parallel()

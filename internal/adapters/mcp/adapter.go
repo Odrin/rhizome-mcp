@@ -136,9 +136,24 @@ func NewServer(options Options) (*Server, error) {
 			Instructions: initializeInstructions,
 		},
 	)
+	server.AddReceivingMiddleware(adapter.credentialValidationMiddleware)
 	adapter.register(server)
 	registerGuides(server)
 	return &Server{server: server, adapter: adapter}, nil
+}
+
+func (adapter *adapter) credentialValidationMiddleware(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+	return func(ctx context.Context, method string, request sdkmcp.Request) (sdkmcp.Result, error) {
+		if method == "tools/call" {
+			if call, ok := request.(*sdkmcp.CallToolRequest); ok && call.Params != nil {
+				if err := validateCredentialArguments(call.Params.Name, call.Params.Arguments); err != nil {
+					result, _, failureErr := adapter.failure(err)
+					return result, failureErr
+				}
+			}
+		}
+		return next(ctx, method, request)
+	}
 }
 
 // SDKServer exposes the underlying SDK server for transports that manage their own lifecycle.
