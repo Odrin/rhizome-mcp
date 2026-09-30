@@ -1310,6 +1310,16 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now); err != nil {
 						return err
 					}
+					terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatusCancelled,
+						terminateAttemptReason{ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, now)
+					if err != nil {
+						return err
+					}
+					if terminated {
+						if err := appendAttemptCancelledEvent(ctx, tx, issue.ID, command.AttemptID, timestamp); err != nil {
+							return err
+						}
+					}
 					staleReviewTargetErr = domain.NewError(domain.CodeReviewTargetStale, "review target is stale", false)
 					return nil
 				}

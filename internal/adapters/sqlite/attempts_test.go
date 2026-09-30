@@ -621,21 +621,72 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The reviewed work changes while the review is in flight -- the only
-	// way a claimed request can still go stale now that create and claim
-	// reject a target that is already stale (ISSUE-188).
-	recordImplementationChange(t, fixture, issue.ID)
+	comments, err := sqlite.NewCommentRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := comments.AddComment(fixture.ctx, ports.AddCommentCommand{
+		ID: fixture.newID(t), Input: domain.AddCommentInput{IssueID: issue.ID, Content: "Implementation changed during review"},
+		OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	idempotencyKey := "stale-review-finish"
+	input.IdempotencyKey = &idempotencyKey
 	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER reject_stale_cancellation BEFORE INSERT ON issue_events
+			WHEN NEW.event_type = 'attempt_cancelled' BEGIN SELECT RAISE(ABORT, 'injected cancellation failure'); END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err == nil || errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
+		t.Fatalf("injected cancellation failure = %v", err)
+	}
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		var requestStatus, attemptStatus string
+		var activeAttemptID sql.NullString
+		if err := query.QueryRowContext(ctx, `SELECT status, active_attempt_id FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus, &activeAttemptID); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&attemptStatus); err != nil {
+			return err
+		}
+		if requestStatus != string(domain.ReviewRequestStatusClaimed) || !activeAttemptID.Valid || activeAttemptID.String != claim.Attempt.ID || attemptStatus != string(domain.AttemptStatusActive) {
+			t.Fatalf("failed cancellation was not atomic = request %q binding %#v attempt %q", requestStatus, activeAttemptID, attemptStatus)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `DROP TRIGGER reject_stale_cancellation`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeReviewTargetStale}) {
 		t.Fatalf("stale review completion error = %v", err)
 	}
 
-	var requestStatus string
-	var outcomeCount int
+	var requestStatus, attemptStatus, issueStatus string
+	var activeAttemptID, finishedAt sql.NullString
+	var outcomeCount, cancelledEvents int
+	var issueVersion int64
 	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus); err != nil {
+		if err := query.QueryRowContext(ctx, `SELECT status, active_attempt_id FROM review_requests WHERE id = ?`, created.Request.ID).Scan(&requestStatus, &activeAttemptID); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, finished_at FROM work_attempts WHERE id = ?`, claim.Attempt.ID).Scan(&attemptStatus, &finishedAt); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT status, version FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus, &issueVersion); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM issue_events WHERE attempt_id = ? AND event_type = 'attempt_cancelled'`, claim.Attempt.ID).Scan(&cancelledEvents); err != nil {
 			return err
 		}
 		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_outcomes WHERE request_id = ?`, created.Request.ID).Scan(&outcomeCount)
@@ -644,6 +695,59 @@ func TestReviewAttemptStaleTargetSupersedesRequest(t *testing.T) {
 	}
 	if requestStatus != string(domain.ReviewRequestStatusSuperseded) || outcomeCount != 0 {
 		t.Fatalf("stale review request state = status %q outcomes %d", requestStatus, outcomeCount)
+	}
+	if activeAttemptID.Valid || attemptStatus != string(domain.AttemptStatusCancelled) || !finishedAt.Valid || cancelledEvents != 1 {
+		t.Fatalf("revoked review state = binding %#v attempt %q finished %#v cancellation events %d", activeAttemptID, attemptStatus, finishedAt, cancelledEvents)
+	}
+	if issueStatus != string(domain.StatusReview) || issueVersion != issue.Issue.Version {
+		t.Fatalf("event-only change mutated issue = status %q version %d", issueStatus, issueVersion)
+	}
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("replayed stale review completion error = %v", err)
+	}
+	input.IdempotencyKey = nil
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("unkeyed stale review completion error = %v", err)
+	}
+	if _, err := fixture.attempts.RenewAttempt(fixture.ctx, domain.RenewAttemptInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken,
+	}); !errors.Is(err, &domain.Error{Code: domain.CodeAttemptNotActive}) {
+		t.Fatalf("revoked stale review renewal error = %v", err)
+	}
+	updated, err := fixture.issues.UpdateIssue(fixture.ctx, domain.UpdateIssueInput{
+		IssueID: issue.ID, ExpectedVersion: issueVersion,
+		Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "review corrected implementation"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := reviewRepository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes: []string{"implementation"}, RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: updated.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture), OccurredAt: fixture.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshClaim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshInput := finishInput(freshClaim, domain.AttemptOutcomeCompleted)
+	freshInput.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, freshInput); err != nil {
+		t.Fatalf("fresh review completion: %v", err)
+	}
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT status FROM review_requests WHERE id = ?`, fresh.Request.ID).Scan(&requestStatus); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = ?`, issue.ID).Scan(&issueStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != string(domain.ReviewRequestStatusApproved) || issueStatus != string(domain.StatusDone) {
+		t.Fatalf("fresh review state = request %q issue %q", requestStatus, issueStatus)
 	}
 }
 
