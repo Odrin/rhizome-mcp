@@ -103,6 +103,53 @@ func TestReplaceReviewRequestRejectsStaleSuccessorTarget(t *testing.T) {
 	assertReviewRequestCount(t, fixture.ctx, fixture.db, issueID, 1)
 }
 
+func TestReplaceReviewRequestAfterCommentGetsFreshTarget(t *testing.T) {
+	fixture := newReviewFixture(t, "review-comment-replace")
+	defer fixture.close()
+	issueID := fixture.insertIssue(t, "comment changes review target")
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	created, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
+		Purposes: []string{"implementation"}, RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issueID, TargetIssueVersion: 1, TargetEventID: currentEventPosition(t, fixture.ctx, fixture.db), OccurredAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := sqlite.NewCommentRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := comments.AddComment(fixture.ctx, ports.AddCommentCommand{
+		ID: fixture.newID(t), Input: domain.AddCommentInput{IssueID: issueID, Content: "Updated implementation evidence"}, OccurredAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	position := currentEventPosition(t, fixture.ctx, fixture.db)
+	replaced, err := fixture.repository.ReplaceReviewRequest(fixture.ctx, ports.ReplaceReviewRequestCommand{
+		PredecessorRequestID: created.Request.ID, PredecessorExpectedVersion: created.Request.Version,
+		SuccessorID: fixture.newID(t), SuccessorTargetID: fixture.newID(t),
+		TargetIssueVersion: 1, TargetEventID: position, OccurredAt: now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("replace event-only stale review: %v", err)
+	}
+	if replaced.Successor.TargetID == created.Target.ID || replaced.Successor.TargetIssueVersion != 1 || replaced.Successor.TargetEventID != position {
+		t.Fatalf("successor did not capture a fresh same-version target: %#v", replaced)
+	}
+	var originalPosition, issueVersion int64
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT latest_event_id FROM review_targets WHERE id = ?`, created.Target.ID).Scan(&originalPosition); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT version FROM issues WHERE id = ?`, issueID).Scan(&issueVersion)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if originalPosition != created.Target.LatestEventID || issueVersion != 1 {
+		t.Fatalf("historical target or issue mutated: position %d version %d", originalPosition, issueVersion)
+	}
+}
+
 func TestClaimReviewRequestSupersedesStaleTarget(t *testing.T) {
 	fixture := newReviewFixture(t, "review-claim-stale")
 	defer fixture.close()

@@ -289,6 +289,94 @@ func TestReviewRepositoryCreateIsIdempotentForConcurrentDuplicates(t *testing.T)
 	}
 }
 
+func TestReviewRepositoryRecreateSnapshotsCurrentPolicy(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "review-recreate-policy")
+	defer fixture.close()
+	issue := createAttemptIssue(t, fixture, "review current policy", domain.StatusReview)
+	repository, err := sqlite.NewReviewRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ports.CreateReviewRequestCommand{
+		Purposes: []string{"implementation"}, RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+		IssueID: issue.ID, TargetIssueVersion: issue.Issue.Version,
+		TargetEventID: captureClientVisibleEventPosition(t, fixture), OccurredAt: fixture.clock.Now(),
+	}
+	original, err := repository.CreateReviewRequest(fixture.ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var originalSnapshot string
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT requirements_json FROM review_target_gate_snapshots WHERE target_id = ?`, original.Target.ID).Scan(&originalSnapshot)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID: original.Request.ID, ExpectedVersion: original.Request.Version, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createWorkflowPolicy(t, fixture, allTasksSelector(), []domain.PolicyRequirementInput{
+		{Key: "security", Kind: domain.RequirementKindReviewApproval, Purpose: "security"},
+	})
+	command.RequestID, command.TargetID = fixture.newID(t), fixture.newID(t)
+	if _, err := repository.CreateReviewRequest(fixture.ctx, command); !errors.Is(err, &domain.Error{Code: domain.CodeReviewPurposeRequired}) {
+		t.Fatalf("recreate missing current policy purpose = %v", err)
+	}
+	var targetCount, snapshotCount int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM review_targets WHERE issue_id = ?`, issue.ID).Scan(&targetCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_target_gate_snapshots WHERE target_id IN (SELECT id FROM review_targets WHERE issue_id = ?)`, issue.ID).Scan(&snapshotCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if targetCount != 1 || snapshotCount != 1 {
+		t.Fatalf("rejected create leaked target/snapshot = %d/%d", targetCount, snapshotCount)
+	}
+	command.Purposes = []string{"implementation", "security"}
+	fresh, err := repository.CreateReviewRequest(fixture.ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Target.ID == original.Target.ID || fresh.Target.LatestEventID != original.Target.LatestEventID || fresh.Target.IssueVersion != original.Target.IssueVersion {
+		t.Fatalf("new same-position request reused historical target: %#v", fresh.Target)
+	}
+	var historicalSnapshot string
+	var securityRequirements int
+	if err := fixture.db.Read(fixture.ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, `SELECT requirements_json FROM review_target_gate_snapshots WHERE target_id = ?`, original.Target.ID).Scan(&historicalSnapshot); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, `SELECT count(*) FROM review_target_gate_snapshots, json_each(requirements_json)
+			WHERE target_id = ? AND json_extract(json_each.value, '$.purpose') = 'security'`, fresh.Target.ID).Scan(&securityRequirements)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if historicalSnapshot != originalSnapshot || securityRequirements != 1 {
+		t.Fatalf("snapshot preservation/current coverage = %q/%d", historicalSnapshot, securityRequirements)
+	}
+	command.RequestID, command.TargetID = fixture.newID(t), fixture.newID(t)
+	replayed, err := repository.CreateReviewRequest(fixture.ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Request.ID != fresh.Request.ID || replayed.Target.ID != fresh.Target.ID {
+		t.Fatalf("identical active create did not replay: %#v", replayed)
+	}
+	claim, err := fixture.attempts.ClaimIssue(fixture.ctx, domain.ClaimIssueInput{IssueID: issue.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := finishInput(claim, domain.AttemptOutcomeCompleted)
+	input.ReviewOutcome = reviewPointer(domain.ReviewOutcomeApproved)
+	if _, err := fixture.attempts.FinishAttempt(fixture.ctx, input); err != nil {
+		t.Fatalf("approve current policy snapshot: %v", err)
+	}
+}
+
 func TestReviewRepositoryConcurrentClaimsHaveOneWinner(t *testing.T) {
 	fixture := newReviewFixture(t, "review-claim-concurrency")
 	defer fixture.close()

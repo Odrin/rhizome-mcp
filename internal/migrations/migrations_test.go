@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 15}) {
-		t.Fatalf("Migrate() result = %+v, want current version with fifteen applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 16}) {
+		t.Fatalf("Migrate() result = %+v, want current version with sixteen applied migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -69,7 +69,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_labels_name_nocase", "idx_one_active_attempt_per_issue", "idx_relations_source", "idx_relations_target",
 		"idx_reservations_active", "idx_reservations_active_identity", "idx_reservations_attempt", "idx_reservations_issue",
 		"idx_review_approvals_issue_purpose", "idx_review_approvals_request_purpose",
-		"idx_review_requests_active_attempt", "idx_review_requests_active_target", "idx_review_targets_issue_version",
+		"idx_review_requests_active_attempt", "idx_review_requests_active_issue_version", "idx_review_requests_active_target", "idx_review_targets_issue_version",
 		"idx_workflow_policies_status_created", "idx_workflow_policy_events_policy",
 	}
 	rows, err := inspect.Query("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name")
@@ -100,10 +100,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "project_origin" || checksum != projectOriginChecksum {
+	if version != CurrentVersion() || name != "review_target_snapshot" || checksum != reviewTargetSnapshotChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(projectOriginSQL))
+	actualChecksum := sha256.Sum256([]byte(reviewTargetSnapshotSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -125,7 +125,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Applied != 15 || second != (Result{Version: CurrentVersion(), Applied: 0}) {
+	if first.Applied != CurrentVersion() || second != (Result{Version: CurrentVersion(), Applied: 0}) {
 		t.Fatalf("results = %+v then %+v", first, second)
 	}
 	inspect := openInspectionDB(t, path)
@@ -188,8 +188,8 @@ func TestMigrateUpgradesExistingRowsIntoSearchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade migration: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 14}) {
-		t.Fatalf("upgrade result = %+v, want fourteen applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: CurrentVersion() - 1}) {
+		t.Fatalf("upgrade result = %+v, want migrations after schema 1", result)
 	}
 
 	var count int
@@ -266,8 +266,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 12}) {
-		t.Fatalf("upgrade result = %+v, want twelve applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: 13}) {
+		t.Fatalf("upgrade result = %+v, want thirteen applied migrations", result)
 	}
 
 	var after []struct {
@@ -296,16 +296,16 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+12 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+12)
+	if len(after) != len(before)+13 {
+		t.Fatalf("history rows = %d, want %d", len(after), len(before)+13)
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "project_origin" || after[len(after)-1].checksum != projectOriginChecksum {
-		t.Fatalf("new history row = %+v, want project_origin migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_target_snapshot" || after[len(after)-1].checksum != reviewTargetSnapshotChecksum {
+		t.Fatalf("new history row = %+v, want review_target_snapshot migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -749,6 +749,95 @@ func TestFixedWidthTimestampMigrationRewritesPopulatedEventTables(t *testing.T) 
 	// The append-only guard must be back in place after the rewrite.
 	if _, err := inspect.Exec(`UPDATE issue_events SET payload = '{"tampered":true}'`); err == nil {
 		t.Fatal("issue_events UPDATE succeeded; append-only trigger was not restored")
+	}
+}
+
+func TestMigrateReviewTargetSnapshotPreservesHistoryAndActiveUniqueness(t *testing.T) {
+	t.Parallel()
+	path, db := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:15]); err != nil {
+		t.Fatal(err)
+	}
+	issueID, targetID, requestID := testID(80), testID(81), testID(82)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+			VALUES (?, 1, 'task', 'snapshot history', 'review', 'medium', 1, ?, ?)`, issueID, nowText(), nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+			VALUES (?, ?, 1, 0, '[]', '["implementation"]', 1, ?)`, targetID, issueID, nowText()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_target_gate_snapshots(target_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at)
+			VALUES (?, '[]', '[]', ?, 1, ?)`, targetID, strings.Repeat("0", 64), nowText()); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at)
+			VALUES (?, ?, ?, 1, 0, '[]', '["implementation"]', 'open', 1, ?)`, requestID, targetID, issueID, nowText())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inspect := openInspectionDB(t, path)
+	var priorChecksums string
+	if err := inspect.QueryRow(`SELECT group_concat(checksum, ',') FROM (SELECT checksum FROM schema_migrations ORDER BY version)`).Scan(&priorChecksums); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+	if err != nil || result != (Result{Version: 16, Applied: 1}) {
+		t.Fatalf("upgrade = %+v, %v", result, err)
+	}
+	var checksums, status, fingerprint, purposes, requirements string
+	var position int64
+	if err := inspect.QueryRow(`SELECT group_concat(checksum, ',') FROM (SELECT checksum FROM schema_migrations WHERE version <= 15 ORDER BY version)`).Scan(&checksums); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow(`SELECT request.status, target.latest_event_id, target.purposes_json, snapshot.requirements_json, snapshot.fingerprint
+		FROM review_requests AS request JOIN review_targets AS target ON target.id = request.target_id
+		JOIN review_target_gate_snapshots AS snapshot ON snapshot.target_id = target.id WHERE request.id = ?`, requestID).
+		Scan(&status, &position, &purposes, &requirements, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if checksums != priorChecksums || status != "open" || position != 0 || purposes != `["implementation"]` || requirements != "[]" || fingerprint != strings.Repeat("0", 64) {
+		t.Fatalf("migration changed history: %q %q %d %q %q %q", checksums, status, position, purposes, requirements, fingerprint)
+	}
+	var targetIndexUnique, requestIndexUnique, requestIndexPartial int
+	if err := inspect.QueryRow(`SELECT "unique" FROM pragma_index_list('review_targets') WHERE name = 'idx_review_targets_issue_version'`).Scan(&targetIndexUnique); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow(`SELECT "unique", partial FROM pragma_index_list('review_requests') WHERE name = 'idx_review_requests_active_issue_version'`).Scan(&requestIndexUnique, &requestIndexPartial); err != nil {
+		t.Fatal(err)
+	}
+	if targetIndexUnique != 0 || requestIndexUnique != 1 || requestIndexPartial != 1 {
+		t.Fatalf("index uniqueness/partial = %d/%d/%d", targetIndexUnique, requestIndexUnique, requestIndexPartial)
+	}
+	secondTargetID, secondRequestID := testID(83), testID(84)
+	if _, err := inspect.Exec(`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+		VALUES (?, ?, 1, 1, '[]', '["implementation"]', 1, ?)`, secondTargetID, issueID, nowText()); err != nil {
+		t.Fatalf("fresh same-version target rejected: %v", err)
+	}
+	assertSQLFails(t, inspect, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at)
+		VALUES (?, ?, ?, 1, 1, '[]', '["implementation"]', 'open', 1, ?)`, secondRequestID, secondTargetID, issueID, nowText())
+	if _, err := inspect.Exec(`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at, resolved_at)
+		VALUES (?, ?, ?, 1, 1, '[]', '["implementation"]', 'cancelled', 1, ?, ?)`, secondRequestID, secondTargetID, issueID, nowText(), nowText()); err != nil {
+		t.Fatalf("resolved same-version request rejected: %v", err)
+	}
+	assertSQLFails(t, inspect, `UPDATE review_requests SET status = 'open', resolved_at = NULL WHERE id = ?`, secondRequestID)
+	assertSQLFails(t, inspect, `UPDATE review_target_gate_snapshots SET fingerprint = ? WHERE target_id = ?`, strings.Repeat("1", 64), targetID)
+	var integrity string
+	var foreignKeyViolations int
+	if err := inspect.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&foreignKeyViolations); err != nil {
+		t.Fatal(err)
+	}
+	if integrity != "ok" || foreignKeyViolations != 0 {
+		t.Fatalf("upgraded integrity = %q, FK violations = %d", integrity, foreignKeyViolations)
+	}
+	if result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil || result.Applied != 0 {
+		t.Fatalf("migration replay = %+v, %v", result, err)
 	}
 }
 
