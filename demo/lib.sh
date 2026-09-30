@@ -15,9 +15,46 @@ run()  { printf '\033[2m→\033[0m \033[1m%s\033[0m \033[2m%s\033[0m\n' "$1" "${
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 bad()  { printf '\033[31m✗\033[0m %s\n' "$*"; }
 
+rz_prepare_state() {
+  local state_path repo_path home_path marker
+  state_path="$STATE"
+  while [ "$state_path" != / ] && [ "${state_path%/}" != "$state_path" ]; do
+    state_path="${state_path%/}"
+  done
+  if [ -L "$state_path" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
+    bad "unsafe demo state: $STATE" >&2
+    return 1
+  fi
+  if [ -d "$STATE" ]; then
+    state_path="$(cd "$STATE" && pwd -P)" || return 1
+    repo_path="$(cd "$REPO_ROOT" && pwd -P)" || return 1
+    home_path="$(cd "${HOME:?HOME must be set}" && pwd -P)" || return 1
+    case "$state_path" in
+      /|"$repo_path"|"$home_path")
+        bad "unsafe demo state: $STATE" >&2
+        return 1
+        ;;
+    esac
+    case "$repo_path/" in
+      "$state_path/"*) bad "unsafe demo state: $STATE" >&2; return 1 ;;
+    esac
+    case "$home_path/" in
+      "$state_path/"*) bad "unsafe demo state: $STATE" >&2; return 1 ;;
+    esac
+    marker="$state_path/.rhizome-demo-state"
+    if [ -L "$marker" ] || [ ! -f "$marker" ] ||
+       [ "$(cat "$marker")" != "rhizome-demo-state-v1" ]; then
+      bad "unsafe demo state: existing directory is not demo-owned: $STATE" >&2
+      return 1
+    fi
+    rm -rf -- "$state_path" || return 1
+  fi
+  mkdir -p "$STATE/project" "$STATE/data" || return 1
+  printf '%s\n' 'rhizome-demo-state-v1' >"$STATE/.rhizome-demo-state"
+}
+
 rz_start() {
-  rm -rf "$STATE"
-  mkdir -p "$STATE/project" "$STATE/data"
+  rz_prepare_state || return 1
   (cd "$STATE/project" && "$BIN" init --data-root "$STATE/data" >/dev/null 2>&1)
   "$BIN" serve --http-address 127.0.0.1:0 \
     --project-root "$STATE/project" --data-root "$STATE/data" \

@@ -18,6 +18,13 @@ process over the stateless HTTP transport (docs/08) with curl + jq, against a
 fresh temporary project. The drivers double as smoke tests of that transport
 contract.
 
+Setup creates a `.rhizome-demo-state` ownership marker in its state directory.
+Later setups reset only directories carrying that marker. Repository and home
+directories, their ancestors, symlink overrides, and existing unmarked
+directories are rejected before cleanup. If a previous recording left an
+unmarked directory, use `RZ_DEMO_STATE` to select a new, non-existing path;
+inspect the old directory before removing it yourself.
+
 ## Re-recording
 
 ```bash
