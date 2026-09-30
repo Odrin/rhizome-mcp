@@ -393,6 +393,67 @@ func TestParseLogicalProjectImportPlanRejectsBlockCyclesAndActiveAttempts(t *tes
 	})
 }
 
+func TestParseLogicalProjectImportPlanStructuredArtifactReferences(t *testing.T) {
+	for _, holder := range []string{"review_targets", "review_requests", "gate_evidence"} {
+		for _, scenario := range []string{"same issue", "empty", "unknown", "wrong issue"} {
+			t.Run(holder+"/"+scenario, func(t *testing.T) {
+				plan, err := domain.ParseLogicalProjectImportPlan(buildGatesDocument(nil))
+				if err != nil {
+					t.Fatal(err)
+				}
+				document := plan.Document
+				artifactID := ulid.Make().String()
+				foreignArtifactID := ulid.Make().String()
+				document.Artifacts = []domain.LogicalArtifact{
+					{ID: artifactID, IssueID: document.Issues[0].ID, Type: "file", URI: "evidence.txt", CreatedAt: document.ExportedAt},
+					{ID: foreignArtifactID, IssueID: document.Issues[1].ID, Type: "file", URI: "other.txt", CreatedAt: document.ExportedAt},
+				}
+				references := []string{artifactID, artifactID}
+				wantCode := ""
+				switch scenario {
+				case "empty":
+					references = []string{}
+				case "unknown":
+					references[1] = ulid.Make().String()
+					wantCode = "INVALID_REFERENCE"
+				case "wrong issue":
+					references[1] = foreignArtifactID
+					wantCode = "INCONSISTENT_REFERENCE"
+				}
+				path := "$." + holder + "[0].artifact_ids[1]"
+				switch holder {
+				case "review_targets":
+					document.ReviewTargets[0].ArtifactIDs = references
+				case "review_requests":
+					document.ReviewRequests[0].ArtifactIDs = references
+				case "gate_evidence":
+					gates, err := document.DecodeGatesExtension()
+					if err != nil {
+						t.Fatal(err)
+					}
+					gates.Evidence[0].ArtifactIDs = references
+					encoded, err := json.Marshal(gates)
+					if err != nil {
+						t.Fatal(err)
+					}
+					document.Extensions[domain.LogicalGatesExtensionKey] = encoded
+					path = "$.extensions.gates.evidence[0].artifact_ids[1]"
+				}
+				encoded, err := domain.MarshalLogicalProjectDocument(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = domain.ParseLogicalProjectImportPlan(encoded)
+				if wantCode != "" {
+					assertDetail(t, err, wantCode, path)
+				} else if err != nil {
+					t.Fatalf("valid references rejected: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func buildLogicalProjectDocument(mutator func(map[string]any)) []byte {
 	projectID := ulid.Make().String()
 	epicID := ulid.Make().String()

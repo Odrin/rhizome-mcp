@@ -889,6 +889,32 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 	if sourceVersion < 3 {
 		t.Fatalf("source issue version = %d, want 3 after two updates", sourceVersion)
 	}
+	artifactIDs := []string{newIntegrationULID(t), newIntegrationULID(t)}
+	attemptID := newIntegrationULID(t)
+	evidenceID := newIntegrationULID(t)
+	artifactRefs, err := json.Marshal(artifactIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opaquePayload := `{"artifact_ids":` + string(artifactRefs) + `}`
+	stamp := sqlite.FormatStorageTime(time.Now().UTC())
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at) VALUES (?, ?, 'work', 'completed', ?, 0, X'03', ?, ?, ?, ?)`, attemptID, issue.ID, sourceVersion, stamp, stamp, stamp, stamp); err != nil {
+			return err
+		}
+		for index, artifactID := range artifactIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, created_at) VALUES (?, ?, ?, 'file', ?, ?)`, artifactID, issue.ID, attemptID, fmt.Sprintf("evidence-%d.txt", index), stamp); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, artifact_ids_json, version, created_at, updated_at) VALUES (?, ?, ?, 'impl', 'satisfied', 'Implemented', ?, 1, ?, ?)`, evidenceID, attemptID, issue.ID, string(artifactRefs), stamp, stamp); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO gate_evidence_events(evidence_id, attempt_id, issue_id, key, event_type, version, payload, created_at) VALUES (?, ?, ?, 'impl', 'evidence_submitted', 1, ?, ?)`, evidenceID, attemptID, issue.ID, opaquePayload, stamp)
+		return err
+	}); err != nil {
+		t.Fatalf("seed structured artifact references: %v", err)
+	}
 	reviewRepository, err := sqlite.NewReviewRepository(db)
 	if err != nil {
 		t.Fatalf("new review repository: %v", err)
@@ -899,7 +925,7 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 		IssueID:            issue.ID,
 		TargetIssueVersion: sourceVersion,
 		TargetEventID:      sourceEventID,
-		ArtifactIDs:        []string{},
+		ArtifactIDs:        artifactIDs,
 		OccurredAt:         time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("create review request: %v", err)
@@ -918,6 +944,54 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 	if exportedVersion == nil || *exportedVersion != sourceVersion {
 		t.Fatalf("exported issue version = %v, want %d", exportedVersion, sourceVersion)
 	}
+	destImportSession := destEnv.connectWithServeArgs(t, "--profile", "migration")
+	before := mustExportLogicalProjectDocument(t, destEnv)
+	for _, holder := range []string{"review_targets", "review_requests", "gate_evidence"} {
+		for _, scenario := range []string{"unknown", "wrong issue"} {
+			var invalid domain.LogicalProjectDocument
+			if err := json.Unmarshal([]byte(mustMarshalDocument(t, document)), &invalid); err != nil {
+				t.Fatal(err)
+			}
+			badReference := newIntegrationULID(t)
+			if scenario == "wrong issue" {
+				foreignIssue := invalid.Issues[0]
+				foreignIssue.ID = newIntegrationULID(t)
+				foreignIssue.Title = "Foreign artifact owner"
+				invalid.Issues = append(invalid.Issues, foreignIssue)
+				foreignArtifact := invalid.Artifacts[0]
+				foreignArtifact.ID = badReference
+				foreignArtifact.IssueID = foreignIssue.ID
+				foreignArtifact.AttemptID = nil
+				invalid.Artifacts = append(invalid.Artifacts, foreignArtifact)
+			}
+			switch holder {
+			case "review_targets":
+				invalid.ReviewTargets[0].ArtifactIDs[0] = badReference
+			case "review_requests":
+				invalid.ReviewRequests[0].ArtifactIDs[0] = badReference
+			case "gate_evidence":
+				gates, err := invalid.DecodeGatesExtension()
+				if err != nil {
+					t.Fatal(err)
+				}
+				gates.Evidence[0].ArtifactIDs[0] = badReference
+				encoded, err := json.Marshal(gates)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invalid.Extensions[domain.LogicalGatesExtensionKey] = encoded
+			}
+			result := callIntegrationTool(t, destImportSession, "apply_import", map[string]any{"document": mustMarshalDocument(t, invalid)})
+			if !result.IsError {
+				t.Fatalf("%s/%s reference was accepted", holder, scenario)
+			}
+			after := mustExportLogicalProjectDocument(t, destEnv)
+			after.ExportedAt = before.ExportedAt
+			if mustMarshalDocument(t, after) != mustMarshalDocument(t, before) {
+				t.Fatalf("%s/%s rejected import changed destination", holder, scenario)
+			}
+		}
+	}
 	mustApplyLogicalProjectDocument(t, destEnv, document)
 
 	destDB, err := sqlite.Open(context.Background(), mustProjectDatabasePath(t, destEnv), sqlite.Options{})
@@ -929,6 +1003,50 @@ func TestIntegrationLogicalProjectRestoresIssueVersionForReviews(t *testing.T) {
 	if err := destDB.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
 		if err := query.QueryRowContext(ctx, `SELECT id, version FROM issues`).Scan(&destIssueID, &destVersion); err != nil {
 			return err
+		}
+		for _, table := range []string{"review_targets", "review_requests", "gate_evidence"} {
+			var encoded string
+			if err := query.QueryRowContext(ctx, "SELECT artifact_ids_json FROM "+table).Scan(&encoded); err != nil {
+				return err
+			}
+			var references []string
+			if err := json.Unmarshal([]byte(encoded), &references); err != nil {
+				return err
+			}
+			if len(references) != len(artifactIDs) {
+				t.Fatalf("%s references = %v", table, references)
+			}
+			for index, artifactID := range references {
+				var owner, uri string
+				if err := query.QueryRowContext(ctx, `SELECT issue_id, uri FROM artifacts WHERE id = ?`, artifactID).Scan(&owner, &uri); err != nil {
+					return err
+				}
+				if artifactID == artifactIDs[index] || owner != destIssueID || uri != fmt.Sprintf("evidence-%d.txt", index) {
+					t.Fatalf("%s reference %d = %q, owner=%q uri=%q; want a restored same-issue artifact in source order", table, index, artifactID, owner, uri)
+				}
+			}
+		}
+		var restoredPayload string
+		if err := query.QueryRowContext(ctx, `SELECT payload FROM gate_evidence_events`).Scan(&restoredPayload); err != nil {
+			return err
+		}
+		var restoredJSON, sourceJSON any
+		if err := json.Unmarshal([]byte(restoredPayload), &restoredJSON); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(opaquePayload), &sourceJSON); err != nil {
+			return err
+		}
+		restoredBytes, err := json.Marshal(restoredJSON)
+		if err != nil {
+			return err
+		}
+		sourceBytes, err := json.Marshal(sourceJSON)
+		if err != nil {
+			return err
+		}
+		if string(restoredBytes) != string(sourceBytes) {
+			t.Fatalf("opaque historical artifact references changed: %s", restoredPayload)
 		}
 		return query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&destRequestID)
 	}); err != nil {

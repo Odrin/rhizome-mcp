@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,9 @@ func TestProjectRepositoryRoundTripsGateStateThroughExtensionsNamespace(t *testi
 		requestID  = "01ARZ3NDEKTSV4RRFFQ69G5GA5"
 		evidenceID = "01ARZ3NDEKTSV4RRFFQ69G5GA6"
 		approvalID = "01ARZ3NDEKTSV4RRFFQ69G5GA7"
+		artifactID = "01ARZ3NDEKTSV4RRFFQ69G5GA8"
 	)
+	artifactRefs := `["` + artifactID + `"]`
 	fingerprint := strings.Repeat("ab", 32)
 	requirementsBlob := `[{"policy_id":"` + policyID + `","key":"impl","kind":"attempt_evidence","evidence_key":"impl"}]`
 	sourcePoliciesBlob := `[{"policy_id":"` + policyID + `","version":1}]`
@@ -43,6 +46,8 @@ func TestProjectRepositoryRoundTripsGateStateThroughExtensionsNamespace(t *testi
 				[]any{issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now)}},
 			{`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json) VALUES (?, ?, 'work', 'completed', 1, 0, X'03', ?, ?, ?, ?, 'done', '[]', '[]')`,
 				[]any{attemptID, issueID, sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO artifacts(id, issue_id, attempt_id, type, uri, created_at) VALUES (?, ?, ?, 'file', 'evidence.txt', ?)`,
+				[]any{artifactID, issueID, attemptID, sqlite.FormatStorageTime(now)}},
 			{`INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at) VALUES (?, '{"issue_types":["task"]}', '[{"key":"impl","kind":"attempt_evidence","evidence_key":"impl"}]', 'active', 2, ?, ?)`,
 				[]any{policyID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
 			{`INSERT INTO workflow_policy_events(policy_id, event_type, session_id, prior_version, new_version, payload, created_at) VALUES (?, 'policy_created', NULL, NULL, 1, '{}', ?)`,
@@ -51,16 +56,16 @@ func TestProjectRepositoryRoundTripsGateStateThroughExtensionsNamespace(t *testi
 				[]any{policyID, sqlite.FormatStorageTime(later)}},
 			{`INSERT INTO attempt_gate_snapshots(attempt_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
 				[]any{attemptID, requirementsBlob, sourcePoliciesBlob, fingerprint, sqlite.FormatStorageTime(now)}},
-			{`INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, details, artifact_ids_json, version, created_at, updated_at) VALUES (?, ?, ?, 'impl', 'satisfied', 'Implemented', 'details text', '[]', 1, ?, ?)`,
-				[]any{evidenceID, attemptID, issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, details, artifact_ids_json, version, created_at, updated_at) VALUES (?, ?, ?, 'impl', 'satisfied', 'Implemented', 'details text', ?, 1, ?, ?)`,
+				[]any{evidenceID, attemptID, issueID, artifactRefs, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
 			{`INSERT INTO gate_evidence_events(evidence_id, attempt_id, issue_id, key, event_type, version, payload, created_at) VALUES (?, ?, ?, 'impl', 'evidence_submitted', 1, '{}', ?)`,
 				[]any{evidenceID, attemptID, issueID, sqlite.FormatStorageTime(now)}},
-			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, 1, 0, '[]', '["implementation","security"]', 1, ?)`,
-				[]any{targetID, issueID, sqlite.FormatStorageTime(now)}},
+			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at) VALUES (?, ?, 1, 0, ?, '["implementation","security"]', 1, ?)`,
+				[]any{targetID, issueID, artifactRefs, sqlite.FormatStorageTime(now)}},
 			{`INSERT INTO review_target_gate_snapshots(target_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
 				[]any{targetID, requirementsBlob, sourcePoliciesBlob, fingerprint, sqlite.FormatStorageTime(now)}},
-			{`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, 1, 0, '[]', '["implementation","security"]', 'approved', NULL, NULL, 1, ?, ?)`,
-				[]any{requestID, targetID, issueID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
+			{`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at) VALUES (?, ?, ?, 1, 0, ?, '["implementation","security"]', 'approved', NULL, NULL, 1, ?, ?)`,
+				[]any{requestID, targetID, issueID, artifactRefs, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(later)}},
 			{`INSERT INTO review_approvals(id, issue_id, target_id, request_id, attempt_id, purpose, target_issue_version, target_event_id, version, created_at) VALUES (?, ?, ?, ?, ?, 'security', 1, 0, 1, ?)`,
 				[]any{approvalID, issueID, targetID, requestID, attemptID, sqlite.FormatStorageTime(later)}},
 		}
@@ -138,8 +143,65 @@ func TestProjectRepositoryRoundTripsGateStateThroughExtensionsNamespace(t *testi
 	if err != nil {
 		t.Fatalf("NewProjectRepository() error = %v", err)
 	}
+	before, err := destRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidPlan := plan
+	invalidPlan.Document.ReviewTargets = append([]domain.LogicalReviewTarget(nil), plan.Document.ReviewTargets...)
+	invalidPlan.Document.ReviewTargets[0].ArtifactIDs = []string{"01ARZ3NDEKTSV4RRFFQ69G5GA9"}
+	_, err = destRepository.ApplyLogicalProjectImport(ctx, invalidPlan)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStorageCorrupt {
+		t.Fatalf("missing destination artifact mapping error = %v", err)
+	}
+	after, err := destRepository.ExportLogicalProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.ExportedAt = before.ExportedAt
+	beforeJSON, err := domain.MarshalLogicalProjectDocument(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterJSON, err := domain.MarshalLogicalProjectDocument(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterJSON) != string(beforeJSON) {
+		t.Fatal("missing destination artifact mapping left partial writes")
+	}
 	if _, err := destRepository.ApplyLogicalProjectImport(ctx, plan); err != nil {
 		t.Fatalf("ApplyLogicalProjectImport() error = %v", err)
+	}
+	destArtifactID := plan.DestinationIDs.ArtifactIDs[artifactID]
+	if destArtifactID == "" || destArtifactID == artifactID {
+		t.Fatalf("artifact ID not remapped: %q", destArtifactID)
+	}
+	if err := destDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		for _, table := range []string{"review_targets", "review_requests", "gate_evidence"} {
+			var encoded string
+			if err := query.QueryRowContext(ctx, "SELECT artifact_ids_json FROM "+table).Scan(&encoded); err != nil {
+				return err
+			}
+			var references []string
+			if err := json.Unmarshal([]byte(encoded), &references); err != nil {
+				return err
+			}
+			if len(references) != 1 || references[0] != destArtifactID {
+				t.Fatalf("%s artifact refs = %v, want restored artifact %q", table, references, destArtifactID)
+			}
+			var owner string
+			if err := query.QueryRowContext(ctx, `SELECT issue_id FROM artifacts WHERE id = ?`, references[0]).Scan(&owner); err != nil {
+				return err
+			}
+			if owner != plan.DestinationIDs.IssueIDs[issueID] {
+				t.Fatalf("%s artifact belongs to %q", table, owner)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	destPolicyID := plan.DestinationIDs.WorkflowPolicyIDs[policyID]

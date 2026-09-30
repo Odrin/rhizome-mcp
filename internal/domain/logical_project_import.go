@@ -875,6 +875,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 	attemptIssueIDs := make(map[string]string)
 	attemptNoteIDs := make(map[string]struct{})
 	artifactIDs := make(map[string]struct{})
+	artifactIssueIDs := make(map[string]string)
 	for index, issue := range document.Issues {
 		path := fmt.Sprintf("$.issues[%d]", index)
 		if err := requireNonEmptyString(path+".id", issue.ID); err != nil {
@@ -1226,6 +1227,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 		}
 		seenIDs[artifact.ID] = "artifact"
 		artifactIDs[artifact.ID] = struct{}{}
+		artifactIssueIDs[artifact.ID] = artifact.IssueID
 		if err := validateReference(path+".issue_id", artifact.IssueID, issueIDs, "issue"); err != nil {
 			return err
 		}
@@ -1323,6 +1325,9 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			if err := validateReference(path+".issue_id", target.IssueID, issueIDs, "issue"); err != nil {
 				return err
 			}
+			if err := validateLogicalArtifactReferences(path+".artifact_ids", target.IssueID, target.ArtifactIDs, artifactIDs, artifactIssueIDs); err != nil {
+				return err
+			}
 			if target.IssueVersion < 1 {
 				return invalidArgumentPath(path+".issue_version", "INVALID", "must be >= 1")
 			}
@@ -1360,6 +1365,9 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 				return err
 			}
 			if err := validateReference(path+".issue_id", request.IssueID, issueIDs, "issue"); err != nil {
+				return err
+			}
+			if err := validateLogicalArtifactReferences(path+".artifact_ids", request.IssueID, request.ArtifactIDs, artifactIDs, artifactIssueIDs); err != nil {
 				return err
 			}
 			if request.TargetIssueVersion < 1 {
@@ -1471,7 +1479,7 @@ func validateLogicalProjectDocumentSemantics(document *LogicalProjectDocument) e
 			return err
 		}
 
-		if err := validateLogicalGates(document, seenIDs, issueIDs, issueVersions, attemptIDs, attemptIssueIDs); err != nil {
+		if err := validateLogicalGates(document, seenIDs, issueIDs, issueVersions, attemptIDs, attemptIssueIDs, artifactIDs, artifactIssueIDs); err != nil {
 			return err
 		}
 	}
@@ -1583,6 +1591,8 @@ func validateLogicalGates(
 	issueVersions map[string]int64,
 	attemptIDs map[string]struct{},
 	attemptIssueIDs map[string]string,
+	artifactIDs map[string]struct{},
+	artifactIssueIDs map[string]string,
 ) error {
 	gates, err := document.DecodeGatesExtension()
 	if err != nil {
@@ -1731,6 +1741,9 @@ func validateLogicalGates(
 		}
 		if owner := attemptIssueIDs[evidence.AttemptID]; owner != evidence.IssueID {
 			return invalidArgumentPath(path+".issue_id", "INCONSISTENT_REFERENCE", "must match the owning attempt's issue")
+		}
+		if err := validateLogicalArtifactReferences(path+".artifact_ids", evidence.IssueID, evidence.ArtifactIDs, artifactIDs, artifactIssueIDs); err != nil {
+			return err
 		}
 		if err := requireNonEmptyString(path+".key", evidence.Key); err != nil {
 			return err
@@ -1936,6 +1949,19 @@ func validateBlocksAcyclicity(relations []LogicalRelation) error {
 	for node := range adjacency {
 		if BlocksPathExists(node, node, func(n string) []string { return adjacency[n] }) {
 			return invalidArgumentPath("$.relations", "BLOCKS_CYCLE", "blocks relation graph must be acyclic")
+		}
+	}
+	return nil
+}
+
+func validateLogicalArtifactReferences(path, issueID string, references []string, artifactIDs map[string]struct{}, artifactIssueIDs map[string]string) error {
+	for index, artifactID := range references {
+		itemPath := fmt.Sprintf("%s[%d]", path, index)
+		if err := validateReference(itemPath, artifactID, artifactIDs, "artifact"); err != nil {
+			return err
+		}
+		if artifactIssueIDs[artifactID] != issueID {
+			return invalidArgumentPath(itemPath, "INCONSISTENT_REFERENCE", "must reference an artifact on the same issue")
 		}
 	}
 	return nil
