@@ -325,13 +325,36 @@ function readPackageName(npmRoot, pkgDir) {
   return JSON.parse(readFileSync(pkgPath, 'utf8')).name;
 }
 
+function readRegistryJSON(name, field, capture) {
+  const { ok, stdout } = capture('npm', ['view', name, field, '--json']);
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(`npm view returned invalid JSON for ${name}`);
+  }
+  if (!ok) {
+    if (parsed?.error?.code === 'E404') {
+      return undefined;
+    }
+    throw new Error(`npm view failed for ${name}`);
+  }
+  return parsed;
+}
+
 /**
  * True if `<name>@<version>` already exists on the registry (idempotency
  * check — read-only, always run for real regardless of --dry-run).
  */
-function isAlreadyPublished(name, version) {
-  const { ok } = runCapture('npm', ['view', `${name}@${version}`, 'version']);
-  return ok;
+function isAlreadyPublished(name, version, capture = runCapture) {
+  const publishedVersion = readRegistryJSON(`${name}@${version}`, 'version', capture);
+  if (publishedVersion === undefined) {
+    return false;
+  }
+  if (publishedVersion !== version) {
+    throw new Error(`npm view returned an invalid version for ${name}@${version}`);
+  }
+  return true;
 }
 
 /**
@@ -339,22 +362,18 @@ function isAlreadyPublished(name, version) {
  * (not the bootstrap placeholder, not a -beta.N prerelease). Read-only —
  * always run for real regardless of --dry-run. See DIST-TAG POLICY above.
  */
-function hasRealStableVersionShipped(name) {
-  const { ok, stdout } = runCapture('npm', ['view', name, 'versions', '--json']);
-  if (!ok || !stdout) {
-    // Package has no published versions at all (or doesn't exist yet) ->
-    // no stable version has shipped.
+function hasRealStableVersionShipped(name, capture = runCapture) {
+  const parsed = readRegistryJSON(name, 'versions', capture);
+  if (parsed === undefined) {
     return false;
   }
-  let versions;
-  try {
-    const parsed = JSON.parse(stdout);
-    versions = Array.isArray(parsed) ? parsed : [parsed];
-  } catch {
-    return false;
+  const versions = Array.isArray(parsed) ? parsed : [parsed];
+  const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+  if (!versions.every((version) => typeof version === 'string' && versionPattern.test(version))) {
+    throw new Error(`npm view returned an invalid version list for ${name}`);
   }
   return versions.some(
-    (v) => v !== BOOTSTRAP_PLACEHOLDER_VERSION && !/-beta\.\d+$/.test(v),
+    (version) => version !== BOOTSTRAP_PLACEHOLDER_VERSION && !/-beta\.\d+$/.test(version),
   );
 }
 
@@ -370,34 +389,34 @@ function hasRealStableVersionShipped(name) {
  * "should this land on `latest`" decision has to be folded into the one
  * authenticated call this script ever makes.
  */
-function decidePublishTag(name, isBeta, opts) {
+function decidePublishTag(name, isBeta, opts, capture = runCapture) {
   if (!isBeta) {
     return 'latest';
   }
   if (opts.noLatestFollow) {
     return 'beta';
   }
-  const stableShipped = hasRealStableVersionShipped(name);
+  const stableShipped = hasRealStableVersionShipped(name, capture);
   return stableShipped ? 'beta' : 'latest';
 }
 
-function publishPackage(npmRoot, pkgDir, version, isBeta, opts) {
+export function publishPackage(npmRoot, pkgDir, version, isBeta, opts, { capture = runCapture, publish = run } = {}) {
   const cwd = path.join(npmRoot, pkgDir);
   const name = readPackageName(npmRoot, pkgDir);
   const fullRef = `${name}@${version}`;
 
-  if (isAlreadyPublished(name, version)) {
+  if (isAlreadyPublished(name, version, capture)) {
     console.log(`[publish] SKIP ${fullRef} - already published`);
     return;
   }
 
-  const distTag = decidePublishTag(name, isBeta, opts);
+  const distTag = decidePublishTag(name, isBeta, opts, capture);
   const publishArgs = ['publish', '--provenance', '--tag', distTag];
   if (opts.dryRun) {
     publishArgs.push('--dry-run');
   }
 
-  const published = run('npm', publishArgs, cwd);
+  const published = publish('npm', publishArgs, cwd);
   if (!published) {
     throw new Error(`npm publish failed for ${fullRef}`);
   }
@@ -433,4 +452,6 @@ function main() {
   console.log('[publish] done');
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
