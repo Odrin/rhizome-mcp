@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) {
@@ -1483,6 +1485,124 @@ func assignImportDestinationIDs(t *testing.T, plan domain.LogicalProjectImportPl
 	}
 	plan.DestinationIDs = destinationIDs
 	return plan
+}
+
+func TestLogicalProjectImportPreservesStaleReviewWithInvertedEventTimestamps(t *testing.T) {
+	for _, cursor := range []int64{0, 10, 15} {
+		t.Run(fmt.Sprintf("cursor_%d", cursor), func(t *testing.T) {
+			fixture := newReviewFixture(t, "inverted-event-source")
+			defer fixture.close()
+			ctx := fixture.ctx
+			issueID := fixture.insertIssue(t, "review with reversed event timestamps")
+			now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+			const historicalPayload = `{"historical":"opaque source evidence"}`
+			if err := fixture.db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
+					VALUES (?, 2, ?, ?)`, sqliteTestProjectID, sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now)); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(id, issue_id, event_type, payload, created_at)
+					VALUES (10, ?, 'issue_updated', ?, ?)`, issueID, historicalPayload, sqlite.FormatStorageTime(now))
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			created, err := fixture.repository.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+				Purposes: []string{"implementation"}, RequestID: fixture.newID(t), TargetID: fixture.newID(t),
+				IssueID: issueID, TargetIssueVersion: 1, TargetEventID: 10, OccurredAt: now.Add(time.Minute),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+				_, err := tx.ExecContext(ctx, `UPDATE sqlite_sequence SET seq = 19 WHERE name = 'issue_events'`)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			comments, err := sqlite.NewCommentRepository(fixture.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := comments.AddComment(ctx, ports.AddCommentCommand{
+				ID: fixture.newID(t), Input: domain.AddCommentInput{IssueID: issueID, Content: "Changed after review pinning"},
+				OccurredAt: now.Add(-time.Minute),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			sourceReview, err := fixture.repository.GetReviewRequest(ctx, created.Request.ID)
+			if err != nil || !sourceReview.TargetStale {
+				t.Fatalf("source review must be stale: %#v, %v", sourceReview, err)
+			}
+			source, err := sqlite.NewProjectRepository(fixture.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document, err := source.ExportLogicalProject(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(document.Events) != 3 || document.Events[0].SourceID != 20 {
+				t.Fatalf("fixture did not invert source/timestamp order: %#v", document.Events)
+			}
+			document.ReviewTargets[0].LatestEventID = cursor
+			document.ReviewRequests[0].TargetEventID = cursor
+			data, err := domain.MarshalLogicalProjectDocument(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := domain.ParseLogicalProjectImportPlan(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan = assignImportDestinationIDs(t, plan)
+			order := make([]int64, len(plan.Document.Events))
+			var importedPayload string
+			for index, event := range plan.Document.Events {
+				order[index] = event.SourceID
+				if event.SourceID == 10 {
+					importedPayload = string(event.Payload)
+				}
+			}
+			destinationDB, _ := openProjectDatabase(t, "inverted-event-destination", "")
+			destination, err := sqlite.NewProjectRepository(destinationDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := destination.ApplyLogicalProjectImport(ctx, plan); err != nil {
+				t.Fatal(err)
+			}
+			for index, event := range plan.Document.Events {
+				if event.SourceID != order[index] {
+					t.Fatal("import mutated the caller's serialized event order")
+				}
+			}
+			reviews, err := sqlite.NewReviewRepository(destinationDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := reviews.GetReviewRequest(ctx, plan.DestinationIDs.ReviewRequestIDs[created.Request.ID])
+			if err != nil || !restored.TargetStale {
+				t.Fatalf("import hid the later source comment: %#v, %v", restored, err)
+			}
+			var commentPosition int64
+			var payload string
+			if err := destinationDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+				if err := query.QueryRowContext(ctx, `SELECT id FROM issue_events WHERE event_type = 'comment_added'`).Scan(&commentPosition); err != nil {
+					return err
+				}
+				return query.QueryRowContext(ctx, `SELECT payload FROM issue_events WHERE event_type = 'issue_updated'`).Scan(&payload)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if commentPosition <= restored.Request.TargetEventID || payload != importedPayload {
+				t.Fatalf("cursor/payload changed semantics: comment %d cursor %d payload %q", commentPosition, restored.Request.TargetEventID, payload)
+			}
+			if cursor == 0 && restored.Request.TargetEventID != 0 {
+				t.Fatalf("zero cursor remapped to %d", restored.Request.TargetEventID)
+			}
+		})
+	}
 }
 
 // TestProjectRepositoryRestoresIssueVersionSoImportedReviewsStayFresh is

@@ -16,6 +16,79 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+func TestIntegrationLogicalProjectPreservesStaleReviewWithInvertedTimestamps(t *testing.T) {
+	t.Parallel()
+	sourceEnv := newIntegrationEnvironment(t)
+	destEnv := newIntegrationEnvironment(t)
+	session := sourceEnv.connect(t)
+	created := callIntegrationTool(t, session, "create_issue", map[string]any{
+		"type": "task", "title": "Reversed timestamp review", "status": "review",
+	})
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeIntegrationResult(t, created, &issue)
+	if created.IsError || issue.ID == "" {
+		t.Fatalf("create_issue result = %#v, decoded = %#v", created, issue)
+	}
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, mustProjectDatabasePath(t, sourceEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceVersion, sourceCursor := currentReviewTarget(t, db, issue.ID)
+	reviews, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviews.CreateReviewRequest(ctx, ports.CreateReviewRequestCommand{
+		Purposes: []string{"implementation"}, RequestID: newIntegrationULID(t), TargetID: newIntegrationULID(t),
+		IssueID: issue.ID, TargetIssueVersion: sourceVersion, TargetEventID: sourceCursor, OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	comments, err := sqlite.NewCommentRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := comments.AddComment(ctx, ports.AddCommentCommand{
+		ID: newIntegrationULID(t), Input: domain.AddCommentInput{IssueID: issue.ID, Content: "Later source event with an earlier timestamp"},
+		OccurredAt: time.Now().UTC().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	document := mustExportLogicalProjectDocument(t, sourceEnv)
+	if len(document.Events) < 3 || document.Events[0].EventType != "comment_added" || document.Events[0].SourceID <= sourceCursor {
+		t.Fatalf("export did not reverse timestamp/source order: %#v", document.Events)
+	}
+	mustApplyLogicalProjectDocument(t, destEnv, document)
+	destDB, err := sqlite.Open(ctx, mustProjectDatabasePath(t, destEnv), sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requestID string
+	if err := destDB.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		return query.QueryRowContext(ctx, `SELECT id FROM review_requests`).Scan(&requestID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := destDB.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := callIntegrationTool(t, destEnv.connect(t), "get_review_request", map[string]any{"review_request_id": requestID})
+	var restored struct {
+		Status    string `json:"status"`
+		Claimable bool   `json:"claimable"`
+	}
+	decodeIntegrationResult(t, got, &restored)
+	if got.IsError || restored.Status != "open" || restored.Claimable {
+		t.Fatalf("imported stale review became claimable: %#v, decoded = %#v", got, restored)
+	}
+}
+
 func TestIntegrationLogicalProjectRoundTrip(t *testing.T) {
 	t.Parallel()
 	sourceEnv := newIntegrationEnvironment(t)

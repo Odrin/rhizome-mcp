@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -600,8 +601,10 @@ func (repository *ProjectRepository) ApplyLogicalProjectImport(ctx context.Conte
 			}
 		}
 
-		eventCursorEntries := make([]domain.LogicalEventCursorEntry, 0, len(plan.Document.Events))
-		for _, event := range plan.Document.Events {
+		events := append([]domain.LogicalEvent(nil), plan.Document.Events...)
+		sort.Slice(events, func(left, right int) bool { return events[left].SourceID < events[right].SourceID })
+		eventCursorEntries := make([]domain.LogicalEventCursorEntry, 0, len(events))
+		for _, event := range events {
 			createdAt, err := parseLogicalProjectTimestamp("events.created_at", event.CreatedAt)
 			if err != nil {
 				return err

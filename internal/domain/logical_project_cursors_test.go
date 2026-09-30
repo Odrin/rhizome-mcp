@@ -38,6 +38,40 @@ func TestLogicalEventCursorMappingFloorsToTheDestinationLog(t *testing.T) {
 	}
 }
 
+func TestLogicalEventCursorMappingPreservesSourceOrderBoundaries(t *testing.T) {
+	entries := []domain.LogicalEventCursorEntry{
+		{SourceID: 20, DestinationID: 3},
+		{SourceID: 10, DestinationID: 1},
+		{SourceID: 11, DestinationID: 2},
+	}
+	mapping := domain.NewLogicalEventCursorMapping(entries)
+	for _, testCase := range []struct {
+		cursor int64
+		want   int64
+	}{
+		{cursor: 0, want: 0},
+		{cursor: 9, want: 0},
+		{cursor: 10, want: 1},
+		{cursor: 15, want: 2},
+		{cursor: 19, want: 2},
+		{cursor: 20, want: 3},
+		{cursor: 99, want: 3},
+	} {
+		got := mapping.Remap(testCase.cursor)
+		if got != testCase.want {
+			t.Fatalf("Remap(%d) = %d, want %d", testCase.cursor, got, testCase.want)
+		}
+		for _, entry := range entries {
+			if (entry.SourceID > testCase.cursor) != (entry.DestinationID > got) {
+				t.Fatalf("cursor %d -> %d moved source event %d -> %d across its boundary", testCase.cursor, got, entry.SourceID, entry.DestinationID)
+			}
+		}
+	}
+	if entries[0].SourceID != 20 {
+		t.Fatal("cursor mapping changed the caller's entry order")
+	}
+}
+
 // TestLogicalEventCursorMappingWithoutEventsCollapsesToZero is the empty-log
 // case: with nothing imported, no cursor can name a position that has already
 // been accounted for, so every one of them must admit any later destination
