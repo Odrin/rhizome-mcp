@@ -331,7 +331,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 			return fmt.Errorf("resolve binary path: %w", err)
 		}
 		npxLaunched := os.Getenv("RHIZOME_MCP_NPX") == "1"
-		return runConnect(ctx, startingPath, target, realPath, printOnly, bareCommand, npxLaunched, stdout, stderr)
+		return runConnectWithDataRoot(ctx, startingPath, target, realPath, dataRootOverride, printOnly, bareCommand, npxLaunched, stdout, stderr)
 	}
 
 	// Which commands need an open project is declared once, in the CLI
@@ -720,6 +720,10 @@ func resolveConnectServeInvocation(binaryPath, projectRoot string, bareCommand, 
 }
 
 func runConnect(ctx context.Context, startingPath string, target string, binaryPath string, printOnly, bareCommand, npxLaunched bool, stdout, stderr io.Writer) error {
+	return runConnectWithDataRoot(ctx, startingPath, target, binaryPath, "", printOnly, bareCommand, npxLaunched, stdout, stderr)
+}
+
+func runConnectWithDataRoot(ctx context.Context, startingPath string, target string, binaryPath string, dataRootOverride string, printOnly, bareCommand, npxLaunched bool, stdout, stderr io.Writer) error {
 	// Validate the target before touching the filesystem: the CLI layer
 	// already rejects an unsupported target before calling this handler,
 	// but keeping this a cheap, side-effect-free check first (rather than
@@ -741,6 +745,16 @@ func runConnect(ctx context.Context, startingPath string, target string, binaryP
 		return fmt.Errorf("discover project root: %w", err)
 	}
 	invocation := resolveConnectServeInvocation(binaryPath, discovered.Root, bareCommand, npxLaunched)
+	if dataRootOverride != "" {
+		if !filepath.IsAbs(dataRootOverride) {
+			dataRootOverride = filepath.Join(startingPath, dataRootOverride)
+		}
+		dataRoot, err := filepath.Abs(dataRootOverride)
+		if err != nil {
+			return fmt.Errorf("resolve data root: %w", err)
+		}
+		invocation.Args = append(invocation.Args, "--data-root", dataRoot)
+	}
 
 	switch target {
 	case "claude":

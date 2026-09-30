@@ -10,8 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestIntegrationConnectClaudeCreatesConfig(t *testing.T) {
@@ -59,8 +63,9 @@ func TestIntegrationConnectClaudeCreatesConfig(t *testing.T) {
 	}
 
 	args, ok := rhizome["args"].([]interface{})
-	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != env.repository {
-		t.Errorf("args = %v, want [serve --project-root %s]", rhizome["args"], env.repository)
+	wantArgs := []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+	if !ok || !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", rhizome["args"], wantArgs)
 	}
 
 	_ = output
@@ -189,8 +194,9 @@ func TestIntegrationConnectVSCodeCreatesConfig(t *testing.T) {
 	}
 
 	args, ok := rhizome["args"].([]interface{})
-	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != env.repository {
-		t.Errorf("args = %v, want [serve --project-root %s]", rhizome["args"], env.repository)
+	wantArgs := []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+	if !ok || !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", rhizome["args"], wantArgs)
 	}
 }
 
@@ -240,7 +246,7 @@ func TestIntegrationConnectCodexPrint(t *testing.T) {
 	if !strings.Contains(output, "command =") {
 		t.Errorf("output doesn't contain command assignment")
 	}
-	wantArgs := fmt.Sprintf("args = [%q, %q, %q]", "serve", "--project-root", env.repository)
+	wantArgs := fmt.Sprintf("args = [%q, %q, %q, %q, %q]", "serve", "--project-root", env.repository, "--data-root", env.dataRoot)
 	if !strings.Contains(output, wantArgs) {
 		t.Errorf("output = %s, want an args assignment containing %s (codex must agree with the other targets on pinning --project-root)", output, wantArgs)
 	}
@@ -275,8 +281,9 @@ func TestIntegrationConnectJSON(t *testing.T) {
 		t.Fatalf("rhizome-mcp entry is not a map")
 	}
 	args, ok := rhizome["args"].([]interface{})
-	if !ok || len(args) != 3 || args[0] != "serve" || args[1] != "--project-root" || args[2] != env.repository {
-		t.Errorf("args = %v, want [serve --project-root %s] (json must agree with the other targets on pinning --project-root)", rhizome["args"], env.repository)
+	wantArgs := []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+	if !ok || !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", rhizome["args"], wantArgs)
 	}
 }
 
@@ -339,7 +346,7 @@ func TestIntegrationConnectFromSubdirectoryUsesDiscoveredRoot(t *testing.T) {
 	servers := config["mcpServers"].(map[string]interface{})
 	rhizome := servers["rhizome-mcp"].(map[string]interface{})
 	args := rhizome["args"].([]interface{})
-	if len(args) != 3 || args[1] != "--project-root" || args[2] != env.repository {
+	if !reflect.DeepEqual(args, []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}) {
 		t.Fatalf("args = %v, want --project-root pinned to the discovered root %s, not the subdirectory", args, env.repository)
 	}
 }
@@ -388,11 +395,11 @@ func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
 		switch target {
 		case "codex":
 			output := stdout.String()
-			wantArgs := fmt.Sprintf("args = [%q, %q, %q]", "serve", "--project-root", env.repository)
+			wantArgs := fmt.Sprintf("args = [%q, %q, %q, %q, %q]", "serve", "--project-root", env.repository, "--data-root", env.dataRoot)
 			if !strings.Contains(output, wantArgs) {
 				t.Fatalf("codex output = %s, want %s", output, wantArgs)
 			}
-			return []interface{}{"serve", "--project-root", env.repository}
+			return []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
 		case "vscode":
 			var config map[string]interface{}
 			if err := json.Unmarshal(stdout.Bytes(), &config); err != nil {
@@ -412,10 +419,10 @@ func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
 		}
 	}
 
-	want := []interface{}{"serve", "--project-root", env.repository}
+	want := []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
 	for _, target := range []string{"claude", "vscode", "json"} {
 		got := extractArgs(t, target)
-		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("target %s args = %v, want %v", target, got, want)
 		}
 	}
@@ -453,13 +460,114 @@ func TestIntegrationConnectEmitsNpxFormUnderLauncherEnvVar(t *testing.T) {
 		t.Fatalf("command = %v, want npx", rhizome["command"])
 	}
 	args := rhizome["args"].([]interface{})
-	want := []interface{}{"-y", "rhizome-mcp", "serve", "--project-root", env.repository}
+	want := []interface{}{"-y", "rhizome-mcp", "serve", "--project-root", env.repository, "--data-root", env.dataRoot}
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}
 	for index := range want {
 		if args[index] != want[index] {
 			t.Fatalf("args = %v, want %v", args, want)
+		}
+	}
+}
+
+func TestIntegrationConnectCustomDataRootRegistrationsLaunch(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	resolvedDataRoot, err := filepath.EvalSymlinks(env.dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.dataRoot = resolvedDataRoot
+	seedSession := env.connect(t)
+	issue := mustCreateBoardIssue(t, seedSession, map[string]any{"type": "task", "title": "Custom-root sentinel"})
+	relativeRoot, err := filepath.Rel(env.repository, env.dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type registration struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	for _, rootCase := range []struct {
+		name string
+		root string
+	}{{name: "absolute", root: env.dataRoot}, {name: "relative", root: relativeRoot}} {
+		for _, target := range []string{"claude", "vscode", "json", "codex"} {
+			t.Run(rootCase.name+"/"+target, func(t *testing.T) {
+				output := runIntegrationCommand(t, env, "--data-root", rootCase.root, "connect", target, "--print")
+				var emitted registration
+				if target == "codex" {
+					for _, line := range strings.Split(string(output), "\n") {
+						key, value, found := strings.Cut(line, " = ")
+						if !found {
+							continue
+						}
+						switch key {
+						case "command":
+							if err := json.Unmarshal([]byte(value), &emitted.Command); err != nil {
+								t.Fatal(err)
+							}
+						case "args":
+							if err := json.Unmarshal([]byte(value), &emitted.Args); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				} else {
+					var config map[string]map[string]registration
+					if err := json.Unmarshal(output, &config); err != nil {
+						t.Fatal(err)
+					}
+					key := "mcpServers"
+					if target == "vscode" {
+						key = "servers"
+					}
+					emitted = config[key]["rhizome-mcp"]
+				}
+				wantArgs := []string{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+				if emitted.Command == "" || !slices.Equal(emitted.Args, wantArgs) {
+					t.Fatalf("registration = %#v, want args %q", emitted, wantArgs)
+				}
+				home := t.TempDir()
+				ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+				defer cancel()
+				command := exec.Command(emitted.Command, emitted.Args...)
+				command.Dir = t.TempDir()
+				command.Env = append(os.Environ(), "RHIZOME_MCP_NPX=0", "HOME="+home, "USERPROFILE="+home,
+					"XDG_DATA_HOME="+filepath.Join(home, "xdg"), "LOCALAPPDATA="+filepath.Join(home, "local"))
+				client := mcp.NewClient(&mcp.Implementation{Name: "connect-registration-test", Version: "test"}, nil)
+				session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command, TerminateDuration: integrationTimeout}, nil)
+				if err != nil {
+					t.Fatalf("launch emitted registration: %v", err)
+				}
+				t.Cleanup(func() {
+					if err := session.Close(); err != nil {
+						t.Errorf("close emitted registration: %v", err)
+					}
+				})
+				result := callIntegrationTool(t, session, "list_issues", map[string]any{})
+				if result.IsError {
+					t.Fatalf("list issues: %#v", result.StructuredContent)
+				}
+				var listed struct {
+					Items []struct {
+						ID string `json:"id"`
+					} `json:"items"`
+				}
+				decodeIntegrationResult(t, result, &listed)
+				if len(listed.Items) != 1 || listed.Items[0].ID != issue.ID {
+					t.Fatalf("custom-root issue not visible: %#v, want %s", listed.Items, issue.ID)
+				}
+				if err := filepath.Walk(home, func(path string, info os.FileInfo, err error) error {
+					if err == nil && !info.IsDir() && info.Name() == "tasks.db" {
+						return fmt.Errorf("unexpected default-root database: %s", path)
+					}
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			})
 		}
 	}
 }

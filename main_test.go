@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,73 @@ func TestBoardServeURLUsesListenerAddress(t *testing.T) {
 				t.Fatalf("boardServeURL() = %q, want %q", got, testCase.wantURL)
 			}
 		})
+	}
+}
+
+func TestConnectPreservesExplicitDataRoot(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	dataRoot := filepath.Join(tempDir, "custom data")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot = resolvedRoot
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, repoRoot, pathInputs); err != nil {
+		t.Fatal(err)
+	}
+	relativeRoot, err := filepath.Rel(repoRoot, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rootCase := range []struct {
+		name string
+		root string
+	}{{name: "default"}, {name: "absolute", root: dataRoot}, {name: "relative", root: relativeRoot}} {
+		for _, target := range []string{"claude", "vscode", "json", "codex"} {
+			t.Run(rootCase.name+"/"+target, func(t *testing.T) {
+				stdout.Reset()
+				stderr.Reset()
+				args := []string{"connect", target, "--print"}
+				want := []string{"serve", "--project-root", repoRoot}
+				if rootCase.root != "" {
+					args = append([]string{"--data-root", rootCase.root}, args...)
+					want = append(want, "--data-root", dataRoot)
+				}
+				if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, args, repoRoot, pathInputs); err != nil {
+					t.Fatal(err)
+				}
+				if target == "codex" {
+					quoted := make([]string, len(want))
+					for index, arg := range want {
+						quoted[index] = fmt.Sprintf("%q", arg)
+					}
+					if expected := "args = [" + strings.Join(quoted, ", ") + "]"; !strings.Contains(stdout.String(), expected) {
+						t.Fatalf("codex output = %s, want %s", stdout.String(), expected)
+					}
+					return
+				}
+				var registration map[string]map[string]struct {
+					Args []string `json:"args"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &registration); err != nil {
+					t.Fatal(err)
+				}
+				key := "mcpServers"
+				if target == "vscode" {
+					key = "servers"
+				}
+				if got := registration[key]["rhizome-mcp"].Args; !slices.Equal(got, want) {
+					t.Fatalf("registration args = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
 
