@@ -226,7 +226,7 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 		// executable", left no way to close a finished epic at all. `review`
 		// stays forbidden for every type: it means "inspect this attempt's
 		// result", and an epic has no attempt to inspect.
-		if patch.Status.Value == StatusReview || (patch.Status.Value == StatusDone && current.Type.Executable()) {
+		if patch.Status.Value == StatusReview || (patch.Status.Value == StatusDone && (current.Type.Executable() || result.Type.Executable())) {
 			return Issue{}, nil, directTransitionToGatedStatusForbidden(current.Status, patch.Status.Value)
 		}
 		if patch.Status.Value == StatusBlocked {
@@ -243,7 +243,7 @@ func ApplyIssuePatch(current Issue, patch IssuePatch) (Issue, []string, error) {
 			if patch.BlockedReason.Set && patch.BlockedReason.Value != nil {
 				return Issue{}, nil, blockedReasonForbidden()
 			}
-			reason, err := ApplyPatchStatusTransition(current.Type, current.Status, patch.Status.Value, "")
+			reason, err := ApplyPatchStatusTransition(result.Type, current.Status, patch.Status.Value, "")
 			if err != nil {
 				return Issue{}, nil, err
 			}

@@ -2,6 +2,7 @@ package domain_test
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"rhizome-mcp/internal/domain"
@@ -58,6 +59,30 @@ func TestApplyIssuePatchClosesNonExecutableTypesDirectly(t *testing.T) {
 	})
 }
 
+func TestApplyIssuePatchRejectsEpicRetypeAndDone(t *testing.T) {
+	for _, from := range []domain.Status{domain.StatusOpen, domain.StatusReady} {
+		for _, targetType := range []domain.Type{domain.TypeTask, domain.TypeBug} {
+			t.Run(string(from)+" to "+string(targetType), func(t *testing.T) {
+				current := epicPatchFixture(domain.TypeEpic, from)
+				before := current
+				patch := statusPatch(domain.StatusDone)
+				patch.Type = domain.OptionalValue[domain.Type]{Set: true, Value: targetType}
+				updated, changed, err := domain.ApplyIssuePatch(current, patch)
+				var domainErr *domain.Error
+				if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidTransition {
+					t.Fatalf("error = %v, want %s", err, domain.CodeInvalidTransition)
+				}
+				if !reflect.DeepEqual(updated, domain.Issue{}) || changed != nil {
+					t.Fatalf("rejected patch returned issue=%#v changed=%v", updated, changed)
+				}
+				if !reflect.DeepEqual(current, before) {
+					t.Fatalf("rejected patch mutated input: %#v", current)
+				}
+			})
+		}
+	}
+}
+
 // TestApplyIssuePatchStillGuardsExecutableTypes pins the half of the contract
 // that must NOT change: for task and bug, review and done stay reachable only
 // through claim_issue/finish_attempt (docs/02 section 17.1, locked by
@@ -77,6 +102,11 @@ func TestApplyIssuePatchStillGuardsExecutableTypes(t *testing.T) {
 				}
 				if domainErr.Code != domain.CodeInvalidTransition {
 					t.Fatalf("code = %q, want %q", domainErr.Code, domain.CodeInvalidTransition)
+				}
+				patch := statusPatch(target)
+				patch.Type = domain.OptionalValue[domain.Type]{Set: true, Value: domain.TypeEpic}
+				if _, _, err := domain.ApplyIssuePatch(current, patch); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidTransition}) {
+					t.Fatalf("retype executable to epic with %s error = %v, want %s", target, err, domain.CodeInvalidTransition)
 				}
 			})
 		}

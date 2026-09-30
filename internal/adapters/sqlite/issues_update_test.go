@@ -14,6 +14,7 @@ import (
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/ports"
 )
 
 func TestIssueUpdatePersistsPatchStatusEventAndCanonicalParent(t *testing.T) {
@@ -263,6 +264,111 @@ func TestIssueUpdateRejectsInvalidParentsWithoutMutation(t *testing.T) {
 	}
 	if version != 1 || events != 1 {
 		t.Fatalf("version=%d events=%d", version, events)
+	}
+}
+
+func TestUpdateIssueRejectsEpicRetypeAndDoneWithoutMutation(t *testing.T) {
+	type storedEvent struct {
+		ID      int64
+		Type    string
+		Payload string
+	}
+	type storedState struct {
+		Type      domain.Type
+		Status    domain.Status
+		Version   int64
+		UpdatedAt string
+		ClosedAt  string
+		Events    []storedEvent
+	}
+	for _, policyCase := range []struct {
+		name    string
+		enabled bool
+	}{{name: "without policy"}, {name: "with completion policy", enabled: true}} {
+		for _, from := range []domain.Status{domain.StatusOpen, domain.StatusReady} {
+			for _, targetType := range []domain.Type{domain.TypeTask, domain.TypeBug} {
+				t.Run(policyCase.name+"/"+string(from)+" to "+string(targetType), func(t *testing.T) {
+					service, db, now := openIssueService(t)
+					ctx := context.Background()
+					if policyCase.enabled {
+						repository, err := sqlite.NewWorkflowPolicyRepository(db)
+						if err != nil {
+							t.Fatal(err)
+						}
+						_, err = repository.CreatePolicy(ctx, ports.CreateWorkflowPolicyCommand{
+							ID: workflowPolicyTestID, CreatedAt: now,
+							Input: domain.WorkflowPolicyInput{
+								Selector: domain.PolicySelectorInput{IssueTypes: []domain.Type{domain.TypeTask, domain.TypeBug}},
+								Requirements: []domain.PolicyRequirementInput{
+									{Key: "implementation", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "implementation"},
+								},
+							},
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					epic, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeEpic, Title: "Childless epic"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					current := epic.Issue
+					if from == domain.StatusReady {
+						ready, err := service.UpdateIssue(ctx, updateStatus(epic.ID, current.Version, from, nil))
+						if err != nil {
+							t.Fatal(err)
+						}
+						current = ready.Issue
+					}
+					readState := func() storedState {
+						t.Helper()
+						var state storedState
+						if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+							if err := query.QueryRowContext(ctx, `SELECT type, status, version, updated_at, COALESCE(closed_at, '')
+								FROM issues WHERE id = ?`, epic.ID).Scan(&state.Type, &state.Status, &state.Version, &state.UpdatedAt, &state.ClosedAt); err != nil {
+								return err
+							}
+							rows, err := query.QueryContext(ctx, `SELECT id, event_type, payload FROM issue_events WHERE issue_id = ? ORDER BY id`, epic.ID)
+							if err != nil {
+								return err
+							}
+							defer rows.Close()
+							for rows.Next() {
+								var event storedEvent
+								if err := rows.Scan(&event.ID, &event.Type, &event.Payload); err != nil {
+									return err
+								}
+								state.Events = append(state.Events, event)
+							}
+							return rows.Err()
+						}); err != nil {
+							t.Fatal(err)
+						}
+						return state
+					}
+					before := readState()
+					_, err = service.UpdateIssue(ctx, domain.UpdateIssueInput{
+						IssueID: epic.ID, ExpectedVersion: current.Version,
+						Changes: domain.IssuePatch{
+							Type:   domain.OptionalValue[domain.Type]{Set: true, Value: targetType},
+							Status: domain.OptionalValue[domain.Status]{Set: true, Value: domain.StatusDone},
+						},
+					})
+					assertDomainCode(t, err, domain.CodeInvalidTransition)
+					if after := readState(); !reflect.DeepEqual(before, after) {
+						t.Fatalf("rejected update mutated persisted state: before=%#v after=%#v", before, after)
+					}
+					closed, err := service.UpdateIssue(ctx, updateStatus(epic.ID, current.Version, domain.StatusDone, nil))
+					if err != nil {
+						t.Fatalf("status-only epic closure failed: %v", err)
+					}
+					if closed.Issue.Type != domain.TypeEpic || closed.Issue.Status != domain.StatusDone ||
+						closed.Issue.Version != current.Version+1 || closed.Issue.ClosedAt == nil {
+						t.Fatalf("status-only epic closure = %#v", closed.Issue)
+					}
+				})
+			}
+		}
 	}
 }
 
