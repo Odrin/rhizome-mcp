@@ -26,6 +26,7 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 	return repository.db.Write(ctx, func(ctx context.Context, tx Executor) error {
 		for _, statement := range []string{
 			"DELETE FROM search_index",
+			"DELETE FROM search_index_identity",
 			`INSERT INTO search_index(entity_type, entity_id, issue_id, title, content)
 				SELECT 'issue', id, id, title, COALESCE(description, '')
 				FROM issues`,
@@ -73,6 +74,8 @@ func (repository *SearchIndexRepository) Rebuild(ctx context.Context) error {
 				SELECT 'gate_evidence', id, issue_id, key,
 					summary || char(10) || COALESCE(details, '') || char(10) || result
 				FROM gate_evidence`,
+			`INSERT INTO search_index_identity(fts_rowid, entity_type, entity_id, issue_id)
+				SELECT rowid, entity_type, entity_id, issue_id FROM search_index`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return err

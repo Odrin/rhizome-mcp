@@ -28,8 +28,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 16}) {
-		t.Fatalf("Migrate() result = %+v, want current version with sixteen applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: CurrentVersion()}) {
+		t.Fatalf("Migrate() result = %+v, want all embedded migrations", result)
 	}
 
 	inspect := openInspectionDB(t, path)
@@ -38,7 +38,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"issue_events", "issue_labels", "issue_relations", "issues", "labels", "projects",
 		"resource_reservations",
 		"review_approvals", "review_follow_ups", "review_outcomes", "review_requests", "review_targets",
-		"schema_migrations", "work_attempts",
+		"schema_migrations", "search_index_identity", "work_attempts",
 	}
 	for _, table := range ordinaryTables {
 		var tableType string
@@ -70,6 +70,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_reservations_active", "idx_reservations_active_identity", "idx_reservations_attempt", "idx_reservations_issue",
 		"idx_review_approvals_issue_purpose", "idx_review_approvals_request_purpose",
 		"idx_review_requests_active_attempt", "idx_review_requests_active_issue_version", "idx_review_requests_active_target", "idx_review_targets_issue_version",
+		"idx_search_index_identity_issue_type",
 		"idx_workflow_policies_status_created", "idx_workflow_policy_events_policy",
 	}
 	rows, err := inspect.Query("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name")
@@ -100,10 +101,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "review_target_snapshot" || checksum != reviewTargetSnapshotChecksum {
+	if version != CurrentVersion() || name != "fts_identity" || checksum != ftsIdentityChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(reviewTargetSnapshotSQL))
+	actualChecksum := sha256.Sum256([]byte(ftsIdentitySQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -266,8 +267,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade to review_context: %v", err)
 	}
-	if result != (Result{Version: CurrentVersion(), Applied: 13}) {
-		t.Fatalf("upgrade result = %+v, want thirteen applied migrations", result)
+	if result != (Result{Version: CurrentVersion(), Applied: CurrentVersion() - 3}) {
+		t.Fatalf("upgrade result = %+v, want remaining embedded migrations", result)
 	}
 
 	var after []struct {
@@ -296,16 +297,16 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close history after upgrade: %v", err)
 	}
-	if len(after) != len(before)+13 {
-		t.Fatalf("history rows = %d, want %d", len(after), len(before)+13)
+	if len(after) != CurrentVersion() {
+		t.Fatalf("history rows = %d, want %d", len(after), CurrentVersion())
 	}
 	for index, row := range before {
 		if after[index].version != row.version || after[index].name != row.name || after[index].checksum != row.checksum || after[index].appliedAt != row.appliedAt {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_target_snapshot" || after[len(after)-1].checksum != reviewTargetSnapshotChecksum {
-		t.Fatalf("new history row = %+v, want review_target_snapshot migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "fts_identity" || after[len(after)-1].checksum != ftsIdentityChecksum {
+		t.Fatalf("new history row = %+v, want fts_identity migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -606,6 +607,89 @@ func TestMigrationRunsAgainstSQLiteOpenBootstrap(t *testing.T) {
 	}
 }
 
+func TestMigrateFTSIdentityUpgradeAndIndexedLookups(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path, db := openMigrationDB(t)
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:16]); err != nil {
+		t.Fatal(err)
+	}
+	inspect := openInspectionDB(t, path)
+	issueID := testID(90)
+	insertIssue(t, inspect, issueID, 1, "ready", nil)
+	if _, err := inspect.Exec(`INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, 'upgrade comment', ?)`, testID(91), issueID, nowText()); err != nil {
+		t.Fatal(err)
+	}
+	var oldRowid int64
+	if err := inspect.QueryRow("SELECT rowid FROM search_index WHERE entity_type='issue' AND entity_id=?", issueID).Scan(&oldRowid); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+	if err != nil || result != (Result{Version: 17, Applied: 1}) {
+		t.Fatalf("upgrade = %+v, %v", result, err)
+	}
+	var count, mismatch int
+	var mappedRowid int64
+	if err := inspect.QueryRow("SELECT count(*) FROM search_index_identity").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow(`SELECT count(*) FROM search_index LEFT JOIN search_index_identity AS identity ON identity.fts_rowid=search_index.rowid
+		WHERE identity.fts_rowid IS NULL OR identity.entity_type IS NOT search_index.entity_type OR identity.entity_id IS NOT search_index.entity_id OR identity.issue_id IS NOT search_index.issue_id`).Scan(&mismatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow("SELECT fts_rowid FROM search_index_identity WHERE entity_type='issue' AND entity_id=?", issueID).Scan(&mappedRowid); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || mismatch != 0 || mappedRowid != oldRowid {
+		t.Fatalf("backfill count/mismatch/rowid = %d/%d/%d, want 2/0/%d", count, mismatch, mappedRowid, oldRowid)
+	}
+	if _, err := inspect.Exec(`INSERT INTO search_index_identity(entity_type, entity_id, issue_id) VALUES ('issue', ?, ?)`, issueID, issueID); err == nil {
+		t.Fatal("duplicate identity accepted")
+	}
+	for _, statement := range []string{
+		`SELECT fts_rowid FROM search_index_identity WHERE entity_type='issue' AND entity_id=?`,
+		`SELECT fts_rowid FROM search_index_identity WHERE issue_id=? AND entity_type='review'`,
+	} {
+		var selectID, parent, unused int
+		var detail string
+		if err := inspect.QueryRow("EXPLAIN QUERY PLAN "+statement, issueID).Scan(&selectID, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(detail, "SEARCH search_index_identity") || !strings.Contains(detail, "INDEX") {
+			t.Fatalf("identity lookup does not seek an index: %s", detail)
+		}
+	}
+	var integrity string
+	if err := inspect.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatalf("integrity = %q, %v", integrity, err)
+	}
+}
+
+func TestMigrateFTSIdentityFailureRollsBackSchemaAndHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path, db := openMigrationDB(t)
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:16]); err != nil {
+		t.Fatal(err)
+	}
+	catalog := append([]migration(nil), embeddedCatalog...)
+	catalog[16] = testMigration(17, "fts_identity", ftsIdentitySQL+"\nINSERT INTO missing_fts_migration_table VALUES (1);")
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), catalog); err == nil {
+		t.Fatal("invalid migration succeeded")
+	}
+	inspect := openInspectionDB(t, path)
+	var version, tables int
+	if err := inspect.QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.QueryRow("SELECT count(*) FROM sqlite_schema WHERE name='search_index_identity'").Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if version != 16 || tables != 0 {
+		t.Fatalf("failed upgrade left version/table = %d/%d, want 16/0", version, tables)
+	}
+}
+
 func openMigrationDB(t *testing.T) (string, *sqlite.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "tasks.db")
@@ -784,7 +868,7 @@ func TestMigrateReviewTargetSnapshotPreservesHistoryAndActiveUniqueness(t *testi
 	if err := inspect.QueryRow(`SELECT group_concat(checksum, ',') FROM (SELECT checksum FROM schema_migrations ORDER BY version)`).Scan(&priorChecksums); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+	result, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:16])
 	if err != nil || result != (Result{Version: 16, Applied: 1}) {
 		t.Fatalf("upgrade = %+v, %v", result, err)
 	}
@@ -836,7 +920,7 @@ func TestMigrateReviewTargetSnapshotPreservesHistoryAndActiveUniqueness(t *testi
 	if integrity != "ok" || foreignKeyViolations != 0 {
 		t.Fatalf("upgraded integrity = %q, FK violations = %d", integrity, foreignKeyViolations)
 	}
-	if result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil || result.Applied != 0 {
+	if result, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:16]); err != nil || result.Applied != 0 {
 		t.Fatalf("migration replay = %+v, %v", result, err)
 	}
 }

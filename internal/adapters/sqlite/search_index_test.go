@@ -15,6 +15,173 @@ import (
 
 var _ ports.SearchIndexRepository = (*sqlite.SearchIndexRepository)(nil)
 
+func TestSearchIndexNonTextIssueUpdateDoesNotReindex(t *testing.T) {
+	service, db, _ := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "unchanged searchable title", Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	var changes int64
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		var before, after int64
+		if err := tx.QueryRowContext(ctx, "SELECT total_changes()").Scan(&before); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET priority = 'high', title = title,
+			description = description WHERE id = ?`, issue.ID); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, "SELECT total_changes()").Scan(&after); err != nil {
+			return err
+		}
+		changes = after - before
+		return nil
+	}); err != nil {
+		t.Fatalf("update issue: %v", err)
+	}
+	if changes != 1 {
+		t.Fatalf("non-text update changed %d rows, want only the source row", changes)
+	}
+	searchIndexRows(t, db)
+}
+
+func TestSearchIndexMetadataGuardsAndLiveWritesAfterRebuild(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	issue, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "guarded title", Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		attemptID     = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+		reservationID = "01ARZ3NDEKTSV4RRFFQ69G5FAB"
+		evidenceID    = "01ARZ3NDEKTSV4RRFFQ69G5FAC"
+		policyID      = "01ARZ3NDEKTSV4RRFFQ69G5FAD"
+		targetID      = "01ARZ3NDEKTSV4RRFFQ69G5FAE"
+		requestID     = "01ARZ3NDEKTSV4RRFFQ69G5FAF"
+	)
+	timestamp := sqlite.FormatStorageTime(now)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		for _, fixture := range []struct {
+			statement string
+			arguments []any
+		}{
+			{`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start, lease_token_hash, lease_expires_at, started_at, last_heartbeat_at)
+			 VALUES (?, ?, 'work', 'active', 1, 0, X'01', ?, ?, ?)`, []any{attemptID, issue.ID, timestamp, timestamp, timestamp}},
+			{`INSERT INTO resource_reservations(id, issue_id, attempt_id, kind, display_value, comparison_value, normalized_json, status, version, created_at)
+			 VALUES (?, ?, ?, 'file', 'guarded file', 'guarded file', '{}', 'active', 1, ?)`, []any{reservationID, issue.ID, attemptID, timestamp}},
+			{`INSERT INTO gate_evidence(id, attempt_id, issue_id, key, result, summary, artifact_ids_json, version, created_at, updated_at)
+			 VALUES (?, ?, ?, 'guarded', 'satisfied', 'guarded summary', '[]', 1, ?, ?)`, []any{evidenceID, attemptID, issue.ID, timestamp, timestamp}},
+			{`INSERT INTO workflow_policies(id, selector_json, requirements_json, status, version, created_at, updated_at)
+			 VALUES (?, '{}', '[]', 'active', 1, ?, ?)`, []any{policyID, timestamp, timestamp}},
+			{`INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+			 VALUES (?, ?, 1, 0, '[]', '["implementation"]', 1, ?)`, []any{targetID, issue.ID, timestamp}},
+			{`INSERT INTO review_target_gate_snapshots(target_id, requirements_json, source_policies_json, fingerprint, issue_version, created_at)
+			 VALUES (?, '[]', '[]', ?, 1, ?)`, []any{targetID, strings.Repeat("0", 64), timestamp}},
+			{`INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at)
+			 VALUES (?, ?, ?, 1, 0, '[]', '["implementation"]', 'open', 1, ?)`, []any{requestID, targetID, issue.ID, timestamp}},
+		} {
+			if _, err := tx.ExecContext(ctx, fixture.statement, fixture.arguments...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE issues SET description=''`,
+		`UPDATE review_requests SET status=status, artifact_ids_json=artifact_ids_json, version=version+1`,
+		`UPDATE resource_reservations SET display_value=display_value, release_reason=release_reason, status=status, version=version+1`,
+		`UPDATE workflow_policies SET selector_json=selector_json, requirements_json=requirements_json, status=status, version=version+1`,
+		`UPDATE gate_evidence SET summary=summary, details=details, artifact_ids_json=artifact_ids_json, version=version+1`,
+	} {
+		var changes int64
+		if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+			var before, after int64
+			if err := tx.QueryRowContext(ctx, "SELECT total_changes()").Scan(&before); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(ctx, "SELECT total_changes()").Scan(&after); err != nil {
+				return err
+			}
+			changes = after - before
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if changes != 1 {
+			t.Fatalf("metadata update changed %d rows: %s", changes, statement)
+		}
+	}
+	before := searchIndexRows(t, db)
+	repository, err := sqlite.NewSearchIndexRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt := searchIndexRows(t, db); !reflect.DeepEqual(before, rebuilt) {
+		t.Fatal("rebuild differs from live projection")
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		for _, statement := range []string{
+			`UPDATE issues SET title='live title'`,
+			`UPDATE resource_reservations SET display_value='live file'`,
+			`UPDATE workflow_policies SET selector_json='{"issue_types":["task"]}'`,
+			`UPDATE gate_evidence SET summary='live summary'`,
+			`UPDATE review_requests SET status='superseded', resolved_at=created_at, version=version+1`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live := searchIndexRows(t, db)
+	if row := findSearchIndexRow(live, "review", requestID); row == nil || row.Title != "live title review" || row.Content != "superseded\n[]" {
+		t.Fatalf("post-rebuild review = %#v", row)
+	}
+	if row := findSearchIndexRow(live, "reservation", reservationID); row == nil || row.Title != "live file" {
+		t.Fatalf("post-rebuild reservation = %#v", row)
+	}
+	if row := findSearchIndexRow(live, "gate_evidence", evidenceID); row == nil || !strings.Contains(row.Content, "live summary") {
+		t.Fatalf("post-rebuild evidence = %#v", row)
+	}
+	if row := findSearchIndexRow(live, "workflow_policy", policyID); row == nil || !strings.Contains(row.Content, "task") {
+		t.Fatalf("post-rebuild policy = %#v", row)
+	}
+	rollback := errors.New("rollback indexed mutations")
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET title='rolled back title'`); err != nil {
+			return err
+		}
+		return rollback
+	}); !errors.Is(err, rollback) {
+		t.Fatalf("rollback error = %v", err)
+	}
+	if after := searchIndexRows(t, db); !reflect.DeepEqual(live, after) {
+		t.Fatal("rolled-back title changed issue/review projection")
+	}
+	if err := repository.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt := searchIndexRows(t, db); !reflect.DeepEqual(live, rebuilt) {
+		t.Fatal("post-write rebuild differs from live projection")
+	}
+}
+
 func TestSearchIndexTracksSourceMutationsTransactionallyAndRebuilds(t *testing.T) {
 	service, db, now := openIssueService(t)
 	ctx := context.Background()
@@ -369,6 +536,18 @@ func searchIndexRows(t *testing.T, db *sqlite.DB) []searchIndexRow {
 	t.Helper()
 	var result []searchIndexRow
 	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		var mismatch int
+		if err := query.QueryRowContext(ctx, `SELECT
+			(SELECT count(*) FROM search_index LEFT JOIN search_index_identity AS identity ON identity.fts_rowid=search_index.rowid
+			 WHERE identity.fts_rowid IS NULL OR identity.entity_type IS NOT search_index.entity_type
+			 OR identity.entity_id IS NOT search_index.entity_id OR identity.issue_id IS NOT search_index.issue_id)
+			+ (SELECT count(*) FROM search_index_identity AS identity LEFT JOIN search_index ON search_index.rowid=identity.fts_rowid
+			 WHERE search_index.rowid IS NULL)`).Scan(&mismatch); err != nil {
+			return err
+		}
+		if mismatch != 0 {
+			t.Errorf("search identity map has %d mismatches or dangling rows", mismatch)
+		}
 		// COALESCE: workflow policies are project-scoped and carry a NULL
 		// issue_id (migration 014).
 		rows, err := query.QueryContext(ctx, `SELECT entity_type, entity_id, COALESCE(issue_id, ''), title, content
