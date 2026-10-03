@@ -36,6 +36,38 @@ import (
 	projectruntime "rhizome-mcp/internal/runtime"
 )
 
+func TestConnectCodexPrintEscapesWindowsCommand(t *testing.T) {
+	invocation := connectServeInvocation{
+		Command: `C:\Users\runner\Program Files\rhizome-mcp.exe`,
+		Args:    []string{"serve", "--project-root", `D:\a\project`, "--data-root", `C:\Users\runner\custom data`},
+	}
+	var stdout, stderr bytes.Buffer
+	if err := connectCodex(context.Background(), invocation, true, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var command string
+	var args []string
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		key, value, found := strings.Cut(line, " = ")
+		if !found {
+			continue
+		}
+		switch key {
+		case "command":
+			if err := json.Unmarshal([]byte(value), &command); err != nil {
+				t.Fatalf("invalid quoted command %s: %v", value, err)
+			}
+		case "args":
+			if err := json.Unmarshal([]byte(value), &args); err != nil {
+				t.Fatalf("invalid quoted args %s: %v", value, err)
+			}
+		}
+	}
+	if command != invocation.Command || !slices.Equal(args, invocation.Args) {
+		t.Fatalf("printed invocation = %q %q, want %q %q", command, args, invocation.Command, invocation.Args)
+	}
+}
+
 type boardURLTestListener struct {
 	address net.Addr
 }

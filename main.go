@@ -829,7 +829,7 @@ func connectCodex(ctx context.Context, invocation connectServeInvocation, printO
 		quotedArgs[index] = fmt.Sprintf("%q", arg)
 	}
 	tomlSnippet := fmt.Sprintf(`[mcp_servers.rhizome-mcp]
-command = "%s"
+command = %q
 args = [%s]
 `, invocation.Command, strings.Join(quotedArgs, ", "))
 
