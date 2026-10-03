@@ -101,7 +101,10 @@ type globShape struct {
 }
 
 func shapeOf(segments []globSegment) globShape {
-	shape := globShape{}
+	shape := globShape{
+		prefix:     make([]string, 0, len(segments)),
+		starIsGlob: make([]bool, 0, len(segments)),
+	}
 	for _, segment := range segments {
 		switch segment.kind {
 		case globSegmentStarStar:

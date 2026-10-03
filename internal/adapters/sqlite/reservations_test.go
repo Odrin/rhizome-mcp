@@ -3,6 +3,8 @@ package sqlite_test
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -405,10 +407,93 @@ func assertReservationReleased(t *testing.T, fixture *attemptTestFixture, reposi
 	}
 }
 
-// TestReservationsConcurrentAcquireHaveOneWinner proves acquisition is
-// conflict-free even under concurrent processes sharing one database: two
-// attempts race to reserve the same file, exactly one must win, and an
-// independent read-back must agree.
+func TestReservationsAcquireAcrossProcesses(t *testing.T) {
+	if path := os.Getenv("RHIZOME_RESERVATION_RACE_DB"); path != "" {
+		ctx := context.Background()
+		db, err := sqlite.Open(ctx, path, sqlite.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close(ctx)
+		repository, err := sqlite.NewReservationRepository(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = repository.AcquireReservations(ctx, ports.AcquireReservationsCommand{
+			IssueID:    os.Getenv("RHIZOME_RESERVATION_RACE_ISSUE"),
+			AttemptID:  os.Getenv("RHIZOME_RESERVATION_RACE_ATTEMPT"),
+			OccurredAt: time.Now().UTC(),
+			Resources: []ports.ReservationResourceInput{{
+				ID:       os.Getenv("RHIZOME_RESERVATION_RACE_ID"),
+				Resource: domain.Resource{Kind: domain.ResourceKindGlob, Path: "race/**"},
+			}},
+		})
+		if err != nil && !errors.Is(err, &domain.Error{Code: domain.CodeResourceReservationConflict}) {
+			t.Fatal(err)
+		}
+		if err != nil {
+			t.Log("conflict")
+		} else {
+			t.Log("acquired")
+		}
+		return
+	}
+
+	fixture := newAttemptTestFixture(t, "reservation-process-race")
+	defer fixture.close()
+	claims := []application.ClaimIssueResult{
+		claimReservationFixture(t, fixture, "process a"),
+		claimReservationFixture(t, fixture, "process b"),
+	}
+	ids := []string{fixture.newID(t), fixture.newID(t)}
+	type processResult struct {
+		output string
+		err    error
+	}
+	outputs := make(chan processResult, 2)
+	for index, claim := range claims {
+		id := ids[index]
+		go func() {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestReservationsAcquireAcrossProcesses$", "-test.v")
+			cmd.Env = append(os.Environ(),
+				"RHIZOME_RESERVATION_RACE_DB="+fixture.path,
+				"RHIZOME_RESERVATION_RACE_ISSUE="+claim.Issue.ID,
+				"RHIZOME_RESERVATION_RACE_ATTEMPT="+claim.Attempt.ID,
+				"RHIZOME_RESERVATION_RACE_ID="+id)
+			result, err := cmd.CombinedOutput()
+			outputs <- processResult{output: string(result), err: err}
+		}()
+	}
+	var acquired, conflicted int
+	for range claims {
+		result := <-outputs
+		if result.err != nil {
+			t.Fatalf("subprocess failed: %s: %v", result.output, result.err)
+		}
+		switch {
+		case strings.Contains(result.output, "acquired"):
+			acquired++
+		case strings.Contains(result.output, "conflict"):
+			conflicted++
+		default:
+			t.Fatalf("subprocess did not report outcome: %s", result.output)
+		}
+	}
+	if acquired != 1 || conflicted != 1 {
+		t.Fatalf("process results: acquired=%d conflicted=%d", acquired, conflicted)
+	}
+	repository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := repository.ListActiveReservations(fixture.ctx, ports.ListActiveReservationsQuery{})
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active reservations = %v, error %v; want one", active, err)
+	}
+}
+
+// TestReservationsConcurrentAcquireHaveOneWinner proves two concurrent
+// callers sharing one database cannot both reserve the same file.
 func TestReservationsConcurrentAcquireHaveOneWinner(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "reservations-race")
 	defer fixture.close()
@@ -418,7 +503,6 @@ func TestReservationsConcurrentAcquireHaveOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	resource := domain.Resource{Kind: domain.ResourceKindFile, Path: "shared.go"}
 	commandA := acquireCommand(fixture, t, claimA.Issue.ID, claimA.Attempt.ID, resource)
 	commandB := acquireCommand(fixture, t, claimB.Issue.ID, claimB.Attempt.ID, resource)
@@ -489,11 +573,64 @@ func TestReservationsPersistAcrossReopen(t *testing.T) {
 	}
 }
 
-// TestReservationsListDetectsCorruption covers the two malformed-storage
-// shapes SQLite's own CHECK constraints cannot catch (every other column is
-// already CHECK-guarded): normalized_json that is valid JSON but whose path
-// fails re-normalization, and a comparison_value that no longer matches
-// what normalized_json recomputes.
+func TestReservationsOwnActiveResourceConflictsUntilRelease(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "reservation-own-conflict")
+	defer fixture.close()
+	claim := claimReservationFixture(t, fixture, "own reservation")
+	repository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, claim.Issue.ID, claim.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindDirectory, Path: "Own/Tree"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := acquireCommand(fixture, t, claim.Issue.ID, claim.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindFile, Path: "own/tree/file"})
+	if _, err := repository.AcquireReservations(fixture.ctx, command); !errors.Is(err, &domain.Error{Code: domain.CodeResourceReservationConflict}) {
+		t.Fatalf("overlap with own active reservation = %v, want conflict", err)
+	}
+	if _, err := repository.ReleaseReservation(fixture.ctx, ports.ReleaseReservationCommand{
+		ID: first[0].ID, ExpectedVersion: first[0].Version,
+		Reason: domain.ReservationReleaseReasonExplicit, OccurredAt: fixture.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.AcquireReservations(fixture.ctx, command); err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+}
+
+func TestReservationsAcquireDetectsMatchingCorruption(t *testing.T) {
+	fixture := newAttemptTestFixture(t, "reservation-matching-corrupt")
+	defer fixture.close()
+	owner := claimReservationFixture(t, fixture, "owner")
+	other := claimReservationFixture(t, fixture, "other")
+	repository, err := sqlite.NewReservationRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, owner.Issue.ID, owner.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindDirectory, Path: "Match/Sub"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE resource_reservations SET normalized_json = '{"path":"../bad"}' WHERE id = ?`, reserved[0].ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t, other.Issue.ID, other.Attempt.ID,
+		domain.Resource{Kind: domain.ResourceKindFile, Path: "match/sub/file"}))
+	if !errors.Is(err, &domain.Error{Code: domain.CodeStorageCorrupt}) {
+		t.Fatalf("acquire against corrupt matching row = %v, want storage corruption", err)
+	}
+}
+
+// TestReservationsListDetectsCorruption checks invalid normalized JSON and
+// comparison keys on the exhaustive read diagnostics path.
 func TestReservationsListDetectsCorruption(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "reservations-corrupt")
 	defer fixture.close()

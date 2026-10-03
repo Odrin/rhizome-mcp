@@ -72,9 +72,46 @@ func FuzzNormalizeLogicalIdempotent(f *testing.F) {
 	})
 }
 
+// FuzzPreparedOverlap checks cached comparisons and the SQL shortlist's
+// literal-anchor assumption for all valid path-kind pairs.
+func FuzzPreparedOverlap(f *testing.F) {
+	for _, pair := range [][2]string{
+		{"A/b", "a/**"}, {"a", "a/b"}, {"*/b", "a/b"}, {"**", "x/y"},
+		{"a/**", "b/**"}, {"a/*", "a/b"}, {"a", "ab"}, {"a:b/x", "A:B/**"},
+		{"ä/x", "Ä/x"}, {"*", "x"}, {"**", "**"},
+	} {
+		f.Add(pair[0], pair[1])
+	}
+	kinds := []domain.ResourceKind{domain.ResourceKindFile, domain.ResourceKindDirectory, domain.ResourceKindGlob}
+	f.Fuzz(func(t *testing.T, a, b string) {
+		for _, kindA := range kinds {
+			left, err := domain.Normalize(domain.Resource{Kind: kindA, Path: a})
+			if err != nil {
+				continue
+			}
+			for _, kindB := range kinds {
+				right, err := domain.Normalize(domain.Resource{Kind: kindB, Path: b})
+				if err != nil {
+					continue
+				}
+				first, second := domain.PrepareOverlap(left), domain.PrepareOverlap(right)
+				overlaps := first.Overlaps(second)
+				if overlaps != domain.Overlaps(left, right) || overlaps != second.Overlaps(first) {
+					t.Fatalf("prepared overlap differs or is asymmetric: %s %q / %s %q",
+						kindA, a, kindB, b)
+				}
+				if leftAnchor, ok := first.FirstLiteralSegment(); ok {
+					if rightAnchor, ok := second.FirstLiteralSegment(); ok && leftAnchor != rightAnchor && overlaps {
+						t.Fatalf("disjoint first literals overlap: %s / %s", leftAnchor, rightAnchor)
+					}
+				}
+			}
+		}
+	})
+}
+
 // FuzzOverlapsSymmetric proves Overlaps(a, b) == Overlaps(b, a) for every
-// pair of successfully normalized resources, across every path-kind
-// combination -- overlap must never depend on argument order.
+// pair of successfully normalized resources.
 func FuzzOverlapsSymmetric(f *testing.F) {
 	seeds := []struct{ a, b string }{
 		{"a/b", "a/b"}, {"a", "a/b"}, {"a/*", "a/b"}, {"a/**", "a/b/c"},

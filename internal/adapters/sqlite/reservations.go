@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,7 +115,7 @@ func (repository *ReservationRepository) LookupAcquireReservations(ctx context.C
 
 // AcquireReservations normalizes and validates command's resources, then --
 // inside one BEGIN IMMEDIATE write transaction -- checks every candidate
-// against every currently active reservation and, only if none overlap,
+// against conservatively selected active reservations and, only if none overlap,
 // inserts all of them and appends one issue event per reservation. All work
 // happens in one transaction, so acquisition is all-or-nothing even under
 // concurrent callers.
@@ -196,7 +197,7 @@ func (repository *ReservationRepository) AcquireReservations(ctx context.Context
 // acquireReservationsForAttempt performs the row-level acquisition work
 // shared by AcquireReservations and ClaimIssue's optional claim-time
 // resources (ISSUE-180): checks every prepared candidate against every
-// currently active reservation and, only if none overlap, inserts all of
+// potentially overlapping active reservation and, only if none overlap, inserts all of
 // them and appends one reservation_reserved event per reservation. Takes a
 // raw tx Executor (not a ports.UnitOfWork) so it is callable from within any
 // write transaction this package already owns, including attempts.go's
@@ -209,15 +210,22 @@ func acquireReservationsForAttempt(
 	prepared []domain.PreparedResource, resources []ports.ReservationResourceInput,
 	issueID, attemptID string, sessionID *string, now time.Time,
 ) ([]domain.Reservation, error) {
-	active, err := loadActiveReservations(ctx, tx)
+	candidates := make([]domain.PreparedOverlap, len(prepared))
+	for index, candidate := range prepared {
+		candidates[index] = domain.PrepareOverlap(candidate.Resource)
+	}
+	active, err := loadCandidateReservations(ctx, tx, prepared, candidates)
 	if err != nil {
 		return nil, err
 	}
-
+	existingShapes := make([]domain.PreparedOverlap, len(active))
+	for index, existing := range active {
+		existingShapes[index] = domain.PrepareOverlap(existing.normalized)
+	}
 	var conflicts []domain.Detail
-	for _, candidate := range prepared {
-		for _, existing := range active {
-			if domain.Overlaps(candidate.Resource, existing.normalized) {
+	for index, candidate := range prepared {
+		for rowIndex, existing := range active {
+			if candidates[index].Overlaps(existingShapes[rowIndex]) {
 				conflicts = append(conflicts, conflictDetail(ctx, tx, candidate, existing))
 				break
 			}
@@ -724,6 +732,85 @@ func (repository *ReservationRepository) GetReservation(ctx context.Context, id 
 		return domain.Reservation{}, err
 	}
 	return domain.CloneReservation(reservation), nil
+}
+
+// loadCandidateReservations uses exact indexed logical identity and the first
+// literal path segment. Distinct first literals cannot overlap, even for
+// ancestors and terminal **. Leading wildcard globs require a full path scan.
+// The id order preserves deterministic first-conflict selection.
+func loadCandidateReservations(ctx context.Context, query Queryer, prepared []domain.PreparedResource, candidates []domain.PreparedOverlap) ([]reservationRow, error) {
+	logical := make(map[string]struct{})
+	anchors := make(map[string]struct{})
+	pathRequested, allPaths := false, false
+	for index, candidate := range prepared {
+		if candidate.Resource.Kind() == domain.ResourceKindLogical {
+			logical[candidate.Resource.Key()] = struct{}{}
+			continue
+		}
+		pathRequested = true
+		first, ok := candidates[index].FirstLiteralSegment()
+		if !ok {
+			allPaths = true
+		} else {
+			anchors[first] = struct{}{}
+		}
+	}
+	var selections []string
+	var args []any
+	if len(logical) > 0 {
+		keys := make([]string, 0, len(logical))
+		for key := range logical {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		// State the partial-index predicate explicitly: SQLite does not
+		// infer kind IN (...) from kind = 'logical' for this index.
+		selections = append(selections, `SELECT `+reservationColumns+` FROM resource_reservations
+			WHERE status = 'active' AND kind IN ('file', 'logical') AND kind = 'logical'
+			AND comparison_value IN (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`)
+		for _, key := range keys {
+			args = append(args, key)
+		}
+	}
+	if pathRequested {
+		if allPaths {
+			selections = append(selections, `SELECT `+reservationColumns+` FROM resource_reservations
+				WHERE status = 'active' AND kind IN ('file', 'directory', 'glob')`)
+		} else {
+			keys := make([]string, 0, len(anchors))
+			for key := range anchors {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			// comparison_value is "kind:folded/path"; the appended slash
+			// also handles single-segment paths without a separate case.
+			path := `substr(comparison_value, instr(comparison_value, ':') + 1) || '/'`
+			first := `substr(` + path + `, 1, instr(` + path + `, '/') - 1)`
+			selections = append(selections, `SELECT `+reservationColumns+` FROM resource_reservations
+				WHERE status = 'active' AND kind IN ('file', 'directory', 'glob') AND `+first+
+				` IN (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`)
+			for _, key := range keys {
+				args = append(args, key)
+			}
+		}
+	}
+	rows, err := query.QueryContext(ctx, strings.Join(selections, " UNION ALL ")+` ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []reservationRow
+	for rows.Next() {
+		row, err := scanReservationRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func loadActiveReservations(ctx context.Context, query Queryer) ([]reservationRow, error) {
