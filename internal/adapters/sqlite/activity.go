@@ -106,13 +106,9 @@ func (repository *ActivityRepository) GetIssueActivity(ctx context.Context, comm
 			result.HasMore = true
 			descriptors = descriptors[:input.Limit]
 		}
-		items := make([]domain.ActivityItem, 0, len(descriptors))
-		for _, descriptor := range descriptors {
-			item, err := loadActivityItem(ctx, query, canonicalIssueID, descriptor)
-			if err != nil {
-				return err
-			}
-			items = append(items, item)
+		items, err := loadActivityItems(ctx, query, canonicalIssueID, descriptors)
+		if err != nil {
+			return err
 		}
 		if len(items) == 0 {
 			result.Items = []domain.ActivityItem{}
@@ -183,9 +179,9 @@ const (
 // activityEntitySpec is the single source of truth for one activity entity
 // kind: its filter category, discriminated payload type, stable rank
 // (persisted in opaque pagination cursors), SQL union arm, sort-id shape, and
-// loader. Every switch that used to enumerate entity kinds separately
+// batch loader. Every switch that used to enumerate entity kinds separately
 // (buildActivityUnionArms, activityCategoryRank, expectedActivityEntityType,
-// the cursor/scan rank bound, isValidActivityCursorSortID, loadActivityItem)
+// the cursor/scan rank bound, isValidActivityCursorSortID, loadActivityItems)
 // is now driven from activityRegistry below.
 //
 // Rank is append-only and must never be renumbered: it is embedded in the SQL
@@ -199,7 +195,7 @@ type activityEntitySpec struct {
 	Rank       int
 	Arm        string
 	SortIDKind activitySortIDKind
-	Load       func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error
+	Batch      func(context.Context, Queryer, []string) (map[string]activityPayloadResult, error)
 }
 
 var activityRegistry = []activityEntitySpec{
@@ -209,14 +205,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       1,
 		Arm:        `SELECT 'comment' AS entity_type, comments.id AS entity_id, comments.created_at AS occurred_at, 1 AS type_rank, comments.id AS sort_id FROM comments WHERE comments.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			comment, err := loadActivityComment(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Comment = &comment
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, issue_id, content, created_by_session_id, author_label, created_at, edited_at FROM comments WHERE id IN (%s)`,
+			scanActivityComment, func(item *domain.ActivityItem, value domain.Comment) { item.Comment = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryDecisions,
@@ -224,14 +214,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       2,
 		Arm:        `SELECT 'decision' AS entity_type, decisions.id AS entity_id, decisions.created_at AS occurred_at, 2 AS type_rank, decisions.id AS sort_id FROM decisions WHERE decisions.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			decision, err := loadActivityDecision(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Decision = &decision
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at FROM decisions WHERE id IN (%s)`,
+			scanActivityDecision, func(item *domain.ActivityItem, value domain.Decision) { item.Decision = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryReviews,
@@ -239,14 +223,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       3,
 		Arm:        `SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			review, err := loadActivityReview(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Review = &review
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at FROM review_requests WHERE id IN (%s)`,
+			scanActivityReview, func(item *domain.ActivityItem, value domain.ReviewRequest) { item.Review = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryAttempts,
@@ -254,14 +232,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       4,
 		Arm:        `SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 4 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			attempt, err := loadActivityAttempt(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Attempt = &attempt
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, issue_id, session_id, agent_label, kind, status, issue_version_at_start, context_event_id_at_start, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json, failure_reason_code, interruption_reason_code, reason_details FROM work_attempts WHERE id IN (%s)`,
+			scanActivityAttempt, func(item *domain.ActivityItem, value domain.WorkAttempt) { item.Attempt = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryAttemptNotes,
@@ -269,14 +241,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       5,
 		Arm:        `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			note, err := loadActivityAttemptNote(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.AttemptNote = &note
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, attempt_id, kind, content, next_steps_json, important, created_at FROM attempt_notes WHERE id IN (%s)`,
+			scanActivityAttemptNote, func(item *domain.ActivityItem, value domain.AttemptNote) { item.AttemptNote = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryEvents,
@@ -284,14 +250,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       6,
 		Arm:        `SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 6 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`,
 		SortIDKind: activitySortIDEventSequence,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			event, err := loadActivityEvent(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Event = &event
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT CAST(id AS TEXT), id, issue_id, event_type, session_id, attempt_id, payload, created_at FROM issue_events WHERE id IN (%s)`,
+			scanActivityEvent, func(item *domain.ActivityItem, value domain.IssueEvent) { item.Event = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryArtifacts,
@@ -299,14 +259,8 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       7,
 		Arm:        `SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 7 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			artifact, err := loadActivityArtifact(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.Artifact = &artifact
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, issue_id, attempt_id, type, uri, title, metadata, created_at FROM artifacts WHERE id IN (%s)`,
+			scanActivityArtifact, func(item *domain.ActivityItem, value domain.Artifact) { item.Artifact = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryGateEvidence,
@@ -316,14 +270,8 @@ var activityRegistry = []activityEntitySpec{
 		// is an upsert (ISSUE-171), and a replacement is itself new activity.
 		Arm:        `SELECT 'gate_evidence' AS entity_type, gate_evidence.id AS entity_id, gate_evidence.updated_at AS occurred_at, 8 AS type_rank, gate_evidence.id AS sort_id FROM gate_evidence WHERE gate_evidence.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			evidence, err := loadAttemptEvidenceByID(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			item.GateEvidence = &evidence
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, attempt_id, issue_id, key, result, summary, details, artifact_ids_json, version, created_at, updated_at FROM gate_evidence WHERE id IN (%s)`,
+			scanAttemptEvidence, func(item *domain.ActivityItem, value domain.AttemptEvidence) { item.GateEvidence = &value }),
 	},
 	{
 		Category:   domain.ActivityCategoryReservations,
@@ -334,30 +282,24 @@ var activityRegistry = []activityEntitySpec{
 		// gate_evidence uses updated_at.
 		Arm:        `SELECT 'reservation' AS entity_type, resource_reservations.id AS entity_id, COALESCE(resource_reservations.released_at, resource_reservations.created_at) AS occurred_at, 9 AS type_rank, resource_reservations.id AS sort_id FROM resource_reservations WHERE resource_reservations.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Load: func(ctx context.Context, query Queryer, item *domain.ActivityItem, entityID string) error {
-			reservation, err := loadActivityReservation(ctx, query, entityID)
-			if err != nil {
-				return err
-			}
-			summary := domain.SummarizeReservation(reservation)
-			item.Reservation = &summary
-			return nil
-		},
+		Batch: activityBatchLoader(`SELECT id, id, issue_id, attempt_id, kind, display_value, status, created_at, released_at, release_reason FROM resource_reservations WHERE id IN (%s)`,
+			scanActivityReservation, func(item *domain.ActivityItem, value domain.Reservation) {
+				summary := domain.SummarizeReservation(value)
+				item.Reservation = &summary
+			}),
 	},
 }
 
 var (
-	activityByCategory   = make(map[domain.ActivityCategory]activityEntitySpec, len(activityRegistry))
-	activityByRank       = make(map[int]activityEntitySpec, len(activityRegistry))
-	activityByEntityType = make(map[domain.ActivityEntityType]activityEntitySpec, len(activityRegistry))
-	activityMaxRank      int
+	activityByCategory = make(map[domain.ActivityCategory]activityEntitySpec, len(activityRegistry))
+	activityByRank     = make(map[int]activityEntitySpec, len(activityRegistry))
+	activityMaxRank    int
 )
 
 func init() {
 	for _, spec := range activityRegistry {
 		activityByCategory[spec.Category] = spec
 		activityByRank[spec.Rank] = spec
-		activityByEntityType[spec.EntityType] = spec
 		if spec.Rank > activityMaxRank {
 			activityMaxRank = spec.Rank
 		}
@@ -483,30 +425,100 @@ func isValidActivityCursorSortID(typeRank int, value string) bool {
 	return err == nil
 }
 
-func loadActivityItem(ctx context.Context, query Queryer, issueID string, descriptor activityDescriptor) (domain.ActivityItem, error) {
-	item := domain.ActivityItem{EntityType: descriptor.EntityType, EntityID: descriptor.EntityID, IssueID: issueID, OccurredAt: descriptor.OccurredAt}
-	spec, ok := activityByEntityType[descriptor.EntityType]
-	if !ok {
-		return domain.ActivityItem{}, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
-	}
-	if err := spec.Load(ctx, query, &item, descriptor.EntityID); err != nil {
-		return domain.ActivityItem{}, err
-	}
-	if err := domain.ValidateActivityItem(item); err != nil {
-		return domain.ActivityItem{}, activityCorrupt(err)
-	}
-	return item, nil
+type activityPayloadResult struct {
+	attach func(*domain.ActivityItem)
+	err    error
 }
 
-func loadActivityComment(ctx context.Context, query Queryer, id string) (domain.Comment, error) {
-	comment, err := scanActivityComment(query.QueryRowContext(ctx, `SELECT id, issue_id, content, created_by_session_id, author_label, created_at, edited_at FROM comments WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.Comment{}, activityCorrupt(err)
+type activityPrefixedScanner struct {
+	rows *sql.Rows
+	id   *string
+}
+
+func (scanner activityPrefixedScanner) Scan(dest ...any) error {
+	return scanner.rows.Scan(append([]any{scanner.id}, dest...)...)
+}
+
+func activityBatchLoader[T any](statement string, scan func(scanner) (T, error), attach func(*domain.ActivityItem, T)) func(context.Context, Queryer, []string) (map[string]activityPayloadResult, error) {
+	return func(ctx context.Context, query Queryer, ids []string) (map[string]activityPayloadResult, error) {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for index, id := range ids {
+			args[index] = id
 		}
-		return domain.Comment{}, err
+		rows, err := query.QueryContext(ctx, fmt.Sprintf(statement, placeholders), args...)
+		if err != nil {
+			return nil, err
+		}
+		payloads := make(map[string]activityPayloadResult, len(ids))
+		for rows.Next() {
+			var id string
+			value, err := scan(activityPrefixedScanner{rows: rows, id: &id})
+			if id == "" {
+				rows.Close()
+				if err == nil {
+					return nil, activityCorruptField(nil, "id", "REQUIRED")
+				}
+				return nil, activityCorrupt(err)
+			}
+			if err != nil {
+				payloads[id] = activityPayloadResult{err: err}
+			} else {
+				payloads[id] = activityPayloadResult{attach: func(item *domain.ActivityItem) { attach(item, value) }}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, activityCorrupt(err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, activityCorrupt(err)
+		}
+		return payloads, nil
 	}
-	return comment, nil
+}
+
+func loadActivityItems(ctx context.Context, query Queryer, issueID string, descriptors []activityDescriptor) ([]domain.ActivityItem, error) {
+	groups := make(map[domain.ActivityEntityType][]string)
+	for _, descriptor := range descriptors {
+		groups[descriptor.EntityType] = append(groups[descriptor.EntityType], descriptor.EntityID)
+	}
+	payloads := make(map[domain.ActivityEntityType]map[string]activityPayloadResult, len(groups))
+	for _, spec := range activityRegistry {
+		ids := groups[spec.EntityType]
+		if len(ids) == 0 {
+			continue
+		}
+		batch, err := spec.Batch(ctx, query, ids)
+		if err != nil {
+			return nil, err
+		}
+		payloads[spec.EntityType] = batch
+	}
+	items := make([]domain.ActivityItem, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		batch, ok := payloads[descriptor.EntityType]
+		if !ok {
+			return nil, activityCorruptField(nil, "entity_type", "INVALID_ENUM")
+		}
+		payload, ok := batch[descriptor.EntityID]
+		if !ok {
+			if descriptor.EntityType == domain.ActivityEntityTypeGateEvidence {
+				return nil, sql.ErrNoRows
+			}
+			return nil, activityCorrupt(sql.ErrNoRows)
+		}
+		if payload.err != nil {
+			return nil, payload.err
+		}
+		item := domain.ActivityItem{EntityType: descriptor.EntityType, EntityID: descriptor.EntityID, IssueID: issueID, OccurredAt: descriptor.OccurredAt}
+		payload.attach(&item)
+		if err := domain.ValidateActivityItem(item); err != nil {
+			return nil, activityCorrupt(err)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func scanActivityComment(scanner scanner) (domain.Comment, error) {
@@ -550,17 +562,6 @@ func scanActivityComment(scanner scanner) (domain.Comment, error) {
 		}
 	}
 	return domain.Comment{ID: id, IssueID: issueID, Content: content, CreatedBySessionID: createdBySessionID, AuthorLabel: nullableStringPointer(authorLabel), CreatedAt: created, EditedAt: edited}, nil
-}
-
-func loadActivityDecision(ctx context.Context, query Queryer, id string) (domain.Decision, error) {
-	decision, err := scanActivityDecision(query.QueryRowContext(ctx, `SELECT id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at FROM decisions WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.Decision{}, activityCorrupt(err)
-		}
-		return domain.Decision{}, err
-	}
-	return decision, nil
 }
 
 func scanActivityDecision(scanner scanner) (domain.Decision, error) {
@@ -613,17 +614,6 @@ func scanActivityDecision(scanner scanner) (domain.Decision, error) {
 		return domain.Decision{}, err
 	}
 	return domain.Decision{ID: id, IssueID: decisionIssueID, Title: title, Summary: summary, Content: content, Status: decisionStatus, SupersedesID: supersedes, CreatedBySessionID: session, CreatedAt: created}, nil
-}
-
-func loadActivityAttempt(ctx context.Context, query Queryer, id string) (domain.WorkAttempt, error) {
-	attempt, err := scanActivityAttempt(query.QueryRowContext(ctx, `SELECT id, issue_id, session_id, agent_label, kind, status, issue_version_at_start, context_event_id_at_start, lease_expires_at, started_at, last_heartbeat_at, finished_at, result_summary, next_steps_json, verification_json, failure_reason_code, interruption_reason_code, reason_details FROM work_attempts WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.WorkAttempt{}, activityCorrupt(err)
-		}
-		return domain.WorkAttempt{}, err
-	}
-	return attempt, nil
 }
 
 func scanActivityAttempt(scanner scanner) (domain.WorkAttempt, error) {
@@ -815,17 +805,6 @@ func parseActivityNullableULIDValue(field, value string) (*string, error) {
 	return &value, nil
 }
 
-func loadActivityAttemptNote(ctx context.Context, query Queryer, id string) (domain.AttemptNote, error) {
-	note, err := scanActivityAttemptNote(query.QueryRowContext(ctx, `SELECT id, attempt_id, kind, content, next_steps_json, important, created_at FROM attempt_notes WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.AttemptNote{}, activityCorrupt(err)
-		}
-		return domain.AttemptNote{}, err
-	}
-	return note, nil
-}
-
 func scanActivityAttemptNote(scanner scanner) (domain.AttemptNote, error) {
 	var (
 		id, attemptID, kindText, content, createdAt string
@@ -868,21 +847,6 @@ func scanActivityAttemptNote(scanner scanner) (domain.AttemptNote, error) {
 		}
 	}
 	return domain.AttemptNote{ID: id, AttemptID: attemptID, Kind: kind, Content: content, NextSteps: nextSteps, Important: important == 1, CreatedAt: created}, nil
-}
-
-func loadActivityEvent(ctx context.Context, query Queryer, entityID string) (domain.IssueEvent, error) {
-	id, err := strconv.ParseInt(entityID, 10, 64)
-	if err != nil || id <= 0 {
-		return domain.IssueEvent{}, activityCorruptField(nil, "entity_id", "INVALID_VALUE")
-	}
-	event, err := scanActivityEvent(query.QueryRowContext(ctx, `SELECT id, issue_id, event_type, session_id, attempt_id, payload, created_at FROM issue_events WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.IssueEvent{}, activityCorrupt(err)
-		}
-		return domain.IssueEvent{}, err
-	}
-	return event, nil
 }
 
 func scanActivityEvent(scanner scanner) (domain.IssueEvent, error) {
@@ -941,21 +905,6 @@ func scanActivityEvent(scanner scanner) (domain.IssueEvent, error) {
 		return domain.IssueEvent{}, err
 	}
 	return domain.IssueEvent{ID: id, IssueID: &issueID.String, EventType: eventType.String, SessionID: session, AttemptID: attempt, Payload: compactPayload, CreatedAt: created}, nil
-}
-
-func loadActivityArtifact(ctx context.Context, query Queryer, id string) (domain.Artifact, error) {
-	artifact, err := scanActivityArtifact(query.QueryRowContext(ctx, `SELECT id, issue_id, attempt_id, type, uri, title, metadata, created_at FROM artifacts WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.Artifact{}, activityCorrupt(err)
-		}
-		return domain.Artifact{}, err
-	}
-	return artifact, nil
-}
-
-func loadActivityReview(ctx context.Context, query Queryer, id string) (domain.ReviewRequest, error) {
-	return scanActivityReview(query.QueryRowContext(ctx, `SELECT id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at FROM review_requests WHERE id = ?`, id))
 }
 
 func scanActivityReview(scanner scanner) (domain.ReviewRequest, error) {
@@ -1064,23 +1013,11 @@ func scanActivityArtifact(scanner scanner) (domain.Artifact, error) {
 	return domain.Artifact{ID: id, IssueID: issueID, AttemptID: attemptIDValue, Type: artifactInput.Type, URI: artifactInput.URI, Title: artifactInput.Title, Metadata: artifactInput.Metadata, CreatedAt: created}, nil
 }
 
-// loadActivityReservation reads only the columns domain.SummarizeReservation
+// The reservation batch reads only the columns domain.SummarizeReservation
 // needs: comparison_value and normalized_json are intentionally excluded so
 // they never reach activity payloads (ISSUE-181/ISSUE-182). This is a
 // deliberately narrower scan than reservations.go's scanReservationRow,
 // which loads the full row including those internal-only columns.
-func loadActivityReservation(ctx context.Context, query Queryer, id string) (domain.Reservation, error) {
-	reservation, err := scanActivityReservation(query.QueryRowContext(ctx,
-		`SELECT id, issue_id, attempt_id, kind, display_value, status, created_at, released_at, release_reason FROM resource_reservations WHERE id = ?`, id))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.Reservation{}, activityCorrupt(err)
-		}
-		return domain.Reservation{}, err
-	}
-	return reservation, nil
-}
-
 func scanActivityReservation(scanner scanner) (domain.Reservation, error) {
 	var (
 		id, issueID, attemptID, kindText, displayValue, statusText, createdAt string

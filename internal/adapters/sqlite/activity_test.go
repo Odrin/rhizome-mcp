@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -318,6 +319,52 @@ func TestActivityRepositoryPaginationTraversesEveryItemOnce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(seenEntityTypes, wantEntityTypes) {
 		t.Fatalf("seen types = %v, want %v", seenEntityTypes, wantEntityTypes)
+	}
+}
+
+func TestActivityRepositoryBatchPreservesTiedCursorAndPayloadOrder(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	repository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		for i := 0; i < 25; i++ {
+			id := fmt.Sprintf("%026d", i+1)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, content, created_at) VALUES (?, ?, ?, ?)`,
+				id, issue.ID, fmt.Sprintf("payload %d", i), sqlite.FormatStorageTime(now)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var cursor string
+	for page, size := range []int{20, 5} {
+		result, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+			Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryComments}, Limit: 20, Cursor: cursor},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Items) != size {
+			t.Fatalf("page %d has %d items, want %d", page, len(result.Items), size)
+		}
+		for i, item := range result.Items {
+			index := page*20 + i
+			if item.EntityID != fmt.Sprintf("%026d", index+1) || item.Comment == nil || item.Comment.Content != fmt.Sprintf("payload %d", index) {
+				t.Fatalf("page %d item %d = %#v", page, i, item)
+			}
+		}
+		if page == 0 {
+			if !result.HasMore || result.NextCursor == nil {
+				t.Fatalf("first page cursor = %#v", result)
+			}
+			cursor = *result.NextCursor
+		} else if result.HasMore || result.NextCursor != nil {
+			t.Fatalf("last page cursor = %#v", result)
+		}
 	}
 }
 
