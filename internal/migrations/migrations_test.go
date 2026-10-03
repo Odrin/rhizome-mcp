@@ -21,6 +21,29 @@ import (
 
 var migrationTime = time.Date(2026, 7, 13, 10, 11, 12, 123456789, time.FixedZone("test", 2*60*60))
 
+func TestMigrateCurrentSchemaWithReversedUnorderedScans(t *testing.T) {
+	t.Parallel()
+	_, db := openMigrationDB(t)
+	ctx := context.Background()
+	fakeClock := clock.NewFakeClock(migrationTime)
+	if _, err := Migrate(ctx, db, fakeClock); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, "PRAGMA reverse_unordered_selects = ON")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Migrate(ctx, db, fakeClock)
+	if err != nil {
+		t.Fatalf("healthy schema rejected with reversed unordered scans: %v", err)
+	}
+	if result != (Result{Version: CurrentVersion()}) {
+		t.Fatalf("result = %+v, want unchanged current schema", result)
+	}
+}
+
 func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 	t.Parallel()
 	path, db := openMigrationDB(t)

@@ -344,6 +344,7 @@ func run(ctx context.Context, db *sqlite.DB, clock Clock, catalog []migration) (
 			if err := rows.Err(); err != nil {
 				return migrationError(err, "cannot verify migration history and foreign keys")
 			}
+			sort.Slice(history, func(i, j int) bool { return history[i].version < history[j].version })
 			if err := validateHistory(history, catalog); err != nil {
 				return err
 			}
