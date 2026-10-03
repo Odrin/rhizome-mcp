@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,13 @@ type retryPolicy struct {
 }
 
 type timerSleeper struct{}
+
+type writeContextKey struct{}
+
+type writeScope struct {
+	db     *DB
+	active atomic.Bool
+}
 
 func (timerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
@@ -60,8 +68,14 @@ func newRetryPolicy(policy *RetryPolicy) (retryPolicy, error) {
 // Write executes fn inside a short BEGIN IMMEDIATE transaction. The complete
 // transaction is retried only for SQLite BUSY or LOCKED results.
 func (db *DB) Write(ctx context.Context, fn func(context.Context, Executor) error) error {
+	if db == nil || db.pool == nil {
+		return errors.New("SQLite database must not be nil")
+	}
 	if fn == nil {
 		return errors.New("SQLite write callback must not be nil")
+	}
+	if scope, ok := ctx.Value(writeContextKey{}).(*writeScope); ok && scope.db == db && scope.active.Load() {
+		return errors.New("nested SQLite write on the same database is not supported")
 	}
 	for attempt := 0; ; attempt++ {
 		err := db.writeOnce(ctx, fn)
@@ -132,6 +146,15 @@ func (db *DB) writeOnce(ctx context.Context, fn func(context.Context, Executor) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-db.writerAdmission:
+	}
+	defer func() { db.writerAdmission <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	conn, err := db.pool.Conn(ctx)
 	if err != nil {
 		return err
@@ -141,8 +164,14 @@ func (db *DB) writeOnce(ctx context.Context, fn func(context.Context, Executor) 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
-	if err := fn(ctx, conn); err != nil {
-		return errors.Join(err, rollback(ctx, conn))
+	scope := &writeScope{db: db}
+	scope.active.Store(true)
+	callbackErr := func() error {
+		defer scope.active.Store(false)
+		return fn(context.WithValue(ctx, writeContextKey{}, scope), conn)
+	}()
+	if callbackErr != nil {
+		return errors.Join(callbackErr, rollback(ctx, conn))
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return errors.Join(err, rollback(ctx, conn))

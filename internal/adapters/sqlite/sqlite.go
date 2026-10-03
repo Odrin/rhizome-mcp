@@ -53,11 +53,12 @@ type Options struct {
 // DB is a configured SQLite connection pool. Its parent directory must exist
 // before Open is called; Open creates neither directories nor schema objects.
 type DB struct {
-	pool   *sql.DB
-	retry  retryPolicy
-	path   string
-	mu     sync.RWMutex
-	closed bool
+	pool            *sql.DB
+	retry           retryPolicy
+	path            string
+	writerAdmission chan struct{}
+	mu              sync.RWMutex
+	closed          bool
 }
 
 // Open opens path, configures every pooled connection, and verifies the
@@ -98,7 +99,8 @@ func Open(ctx context.Context, path string, options Options) (*DB, error) {
 	pool.SetConnMaxLifetime(0)
 	pool.SetConnMaxIdleTime(0)
 
-	db := &DB{pool: pool, retry: retry, path: absPath}
+	db := &DB{pool: pool, retry: retry, path: absPath, writerAdmission: make(chan struct{}, 1)}
+	db.writerAdmission <- struct{}{}
 	if err := db.verify(ctx); err != nil {
 		closeErr := pool.Close()
 		return nil, TranslateError(errors.Join(err, closeErr))
@@ -306,6 +308,9 @@ func prepareBackupTemp(output string) (string, error) {
 func (db *DB) Close(ctx context.Context) error {
 	if db == nil {
 		return nil
+	}
+	if scope, ok := ctx.Value(writeContextKey{}).(*writeScope); ok && scope.db == db && scope.active.Load() {
+		return errors.New("cannot close SQLite database inside its write callback")
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()

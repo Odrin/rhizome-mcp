@@ -1,11 +1,15 @@
 package sqlite
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -169,6 +173,287 @@ func TestWriteCommitsAndRollsBack(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
+	}
+}
+
+func TestWriteQueuedWritersLeaveReadConnectionsAvailable(t *testing.T) {
+	db := openTestDB(t, noRetryOptions())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseActive := sync.OnceFunc(func() { close(release) })
+	defer releaseActive()
+	active := make(chan error, 1)
+	go func() {
+		active <- db.Write(context.Background(), func(context.Context, Executor) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	const queued = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, queued)
+	for range queued {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- db.Write(context.Background(), func(context.Context, Executor) error { return nil })
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	before := db.pool.Stats().WaitCount
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := db.Read(ctx, func(ctx context.Context, q Queryer) error {
+		var value int
+		return q.QueryRowContext(ctx, "SELECT 1").Scan(&value)
+	}); err != nil {
+		t.Fatalf("Read() behind queued writers: %v", err)
+	}
+	if got := db.pool.Stats().WaitCount; got != before || got != 0 {
+		t.Fatalf("pool WaitCount = %d (was %d), queued writers borrowed connections", got, before)
+	}
+	releaseActive()
+	if err := <-active; err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestWriteCancellationWaitingForAdmission(t *testing.T) {
+	db := openTestDB(t, noRetryOptions())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseActive := sync.OnceFunc(func() { close(release) })
+	defer releaseActive()
+	active := make(chan error, 1)
+	go func() {
+		active <- db.Write(context.Background(), func(context.Context, Executor) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waiting := make(chan error, 1)
+	waitingStarted := make(chan struct{})
+	go func() {
+		close(waitingStarted)
+		waiting <- db.Write(ctx, func(context.Context, Executor) error {
+			return errors.New("canceled callback ran")
+		})
+	}()
+	<-waitingStarted
+	select {
+	case err := <-waiting:
+		t.Fatalf("writer unexpectedly left admission queue: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-waiting:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiting Write() = %v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled writer did not leave admission queue")
+	}
+	releaseActive()
+	if err := <-active; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(context.Context, Executor) error { return nil }); err != nil {
+		t.Fatalf("Write() after cancellation: %v", err)
+	}
+}
+
+func TestWriteQueuedWriterDoesNotDeadlockClose(t *testing.T) {
+	db := openTestDB(t, noRetryOptions())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseActive := sync.OnceFunc(func() { close(release) })
+	defer releaseActive()
+	active := make(chan error, 1)
+	go func() {
+		active <- db.Write(context.Background(), func(context.Context, Executor) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	waitCtx, cancel := context.WithCancel(context.Background())
+	waiting := make(chan error, 1)
+	go func() {
+		waiting <- db.Write(waitCtx, func(context.Context, Executor) error { return nil })
+	}()
+	closed := make(chan error, 1)
+	go func() { closed <- db.Close(context.Background()) }()
+	cancel()
+	releaseActive()
+	for name, result := range map[string]<-chan error{"active": active, "waiting": waiting, "Close": closed} {
+		select {
+		case err := <-result:
+			if name != "waiting" && err != nil {
+				t.Errorf("%s error: %v", name, err)
+			}
+			if name == "waiting" && err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, sql.ErrConnDone) && !strings.Contains(err.Error(), "database is closed") {
+				t.Errorf("waiting writer error: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Close or writer remained blocked")
+		}
+	}
+}
+
+func TestWriteRollbackAndRetryReleaseAdmission(t *testing.T) {
+	var db *DB
+	db = openTestDB(t, Options{RetryPolicy: &RetryPolicy{
+		Delays: []time.Duration{0},
+		Sleeper: SleepFunc(func(ctx context.Context, _ time.Duration) error {
+			return db.Write(ctx, func(context.Context, Executor) error { return nil })
+		}),
+	}})
+	busyErr := obtainBusyError(t, filepath.Join(t.TempDir(), "retry-admission.db"))
+	attempts := 0
+	if err := db.Write(context.Background(), func(context.Context, Executor) error {
+		attempts++
+		if attempts == 1 {
+			return busyErr
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("retry Write(): %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if err := db.Write(context.Background(), func(context.Context, Executor) error {
+		return errors.New("rollback")
+	}); err == nil {
+		t.Fatal("rollback unexpectedly succeeded")
+	}
+	if err := db.Write(context.Background(), func(context.Context, Executor) error { return nil }); err != nil {
+		t.Fatalf("Write() after rollback: %v", err)
+	}
+}
+
+func TestWriteNestedSameDatabaseFailsWithoutDeadlock(t *testing.T) {
+	db := openTestDB(t, noRetryOptions())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := db.Write(ctx, func(ctx context.Context, _ Executor) error {
+		nestedErr := db.Write(ctx, func(context.Context, Executor) error { return nil })
+		if nestedErr == nil || !strings.Contains(nestedErr.Error(), "nested SQLite write") {
+			return fmt.Errorf("nested Write() error = %v", nestedErr)
+		}
+		return db.Close(ctx)
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot close SQLite database inside") {
+		t.Fatalf("Close() during Write() error = %v", err)
+	}
+	if err := db.Write(context.Background(), func(context.Context, Executor) error { return nil }); err != nil {
+		t.Fatalf("Write() after nested rollback: %v", err)
+	}
+}
+
+func TestWriteCrossProcessLockAuthority(t *testing.T) {
+	if path := os.Getenv("RHIZOME_SQLITE_LOCK_TEST_PATH"); path != "" {
+		pool, err := sql.Open(driverName, dataSourceName(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+		conn, err := pool.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println("LOCKED")
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	db := openTestDB(t, noRetryOptions())
+	ctx := context.Background()
+	if _, err := db.pool.ExecContext(ctx, "CREATE TABLE cross_process_lock (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	processCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(processCtx, os.Args[0], "-test.run=^TestWriteCrossProcessLockAuthority$")
+	cmd.Env = append(os.Environ(), "RHIZOME_SQLITE_LOCK_TEST_PATH="+db.path)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("external writer: %v", err)
+		}
+	}()
+	if line := bufio.NewScanner(stdout); !line.Scan() || line.Text() != "LOCKED" {
+		t.Fatalf("external writer did not acquire lock: %q, %v", line.Text(), line.Err())
+	}
+
+	entered := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- db.Write(ctx, func(ctx context.Context, tx Executor) error {
+			close(entered)
+			_, err := tx.ExecContext(ctx, "INSERT INTO cross_process_lock DEFAULT VALUES")
+			return err
+		})
+	}()
+	readCtx, stopRead := context.WithTimeout(ctx, time.Second)
+	defer stopRead()
+	if err := db.Read(readCtx, func(ctx context.Context, q Queryer) error {
+		var count int
+		return q.QueryRowContext(ctx, "SELECT count(*) FROM cross_process_lock").Scan(&count)
+	}); err != nil {
+		t.Fatalf("read while external writer holds lock: %v", err)
+	}
+	select {
+	case <-entered:
+		t.Fatal("local writer entered before external lock was released")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("local Write() after external release: %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("local writer did not acquire external lock after release")
 	}
 }
 
