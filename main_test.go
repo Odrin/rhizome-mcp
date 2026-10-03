@@ -275,8 +275,10 @@ func TestProjectsMigrateCommandMigratesStaleProject(t *testing.T) {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion()); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE projects DROP COLUMN origin"); err != nil {
-			return err
+		for _, index := range []string{"idx_artifacts_issue_created_id", "idx_attempt_notes_attempt_created_id"} {
+			if _, err := tx.ExecContext(ctx, "DROP INDEX "+index); err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {
