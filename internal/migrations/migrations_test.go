@@ -397,6 +397,82 @@ func TestConcurrentRunnersHaveOneMigrationOwner(t *testing.T) {
 	}
 }
 
+func TestMigrateCurrentSchemaReadsWhileWriterOwnsLock(t *testing.T) {
+	path, db := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil {
+		t.Fatal(err)
+	}
+	writer := openInspectionDB(t, path)
+	conn, err := writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+	// A current-schema open must finish its complete FK check while another
+	// connection holds the writer lock, rather than waiting for it.
+	deadline, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	result, err := Migrate(deadline, db, clock.NewFakeClock(migrationTime))
+	if err != nil {
+		t.Fatalf("current-schema migration blocked by writer: %v", err)
+	}
+	if result != (Result{Version: CurrentVersion()}) {
+		t.Fatalf("current-schema result = %+v", result)
+	}
+}
+
+func TestConcurrentUpgradesRecheckHistoryUnderWriterLock(t *testing.T) {
+	path, firstDB := openMigrationDB(t)
+	ctx := context.Background()
+	if _, err := run(ctx, firstDB, clock.NewFakeClock(migrationTime), embeddedCatalog[:16]); err != nil {
+		t.Fatal(err)
+	}
+	secondDB, err := sqlite.Open(ctx, path, sqlite.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = secondDB.Close(context.Background()) })
+
+	start := make(chan struct{})
+	results := make(chan Result, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, db := range []*sqlite.DB{firstDB, secondDB} {
+		wg.Add(1)
+		go func(db *sqlite.DB) {
+			defer wg.Done()
+			<-start
+			result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+			results <- result
+			errs <- err
+		}(db)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent upgrade: %v", err)
+		}
+	}
+	var applied int
+	for result := range results {
+		if result.Version != CurrentVersion() {
+			t.Fatalf("upgrade version = %d", result.Version)
+		}
+		applied += result.Applied
+	}
+	if applied != 1 {
+		t.Fatalf("applied migrations = %d, want one owner", applied)
+	}
+}
+
 func TestMigrateRejectsTamperedAndMalformedHistory(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

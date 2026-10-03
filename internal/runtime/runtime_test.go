@@ -1,13 +1,19 @@
 package runtime_test
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +36,160 @@ var testTime = time.Date(2026, 7, 13, 12, 30, 45, 123456789, time.FixedZone("tes
 type fixedGenerator string
 
 func (generator fixedGenerator) New() (string, error) { return string(generator), nil }
+
+// BenchmarkOpenProjectDoctor exercises the CLI's project open and health
+// composition against the same history sizes as BenchmarkMigrateOpen.
+func BenchmarkOpenProjectDoctor(b *testing.B) {
+	for _, size := range []int{10_000, 100_000, 1_000_000} {
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			b.StopTimer()
+			root := filepath.Join(b.TempDir(), "repository")
+			dataRoot := filepath.Join(b.TempDir(), "data")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				b.Fatal(err)
+			}
+			if err := os.Mkdir(dataRoot, 0o700); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := projectconfig.Initialize(root, fixedGenerator(projectID), dataRoot); err != nil {
+				b.Fatal(err)
+			}
+			options := projectruntime.Options{StartingPath: root, DataRoot: dataRoot, Clock: clock.NewFakeClock(testTime)}
+			project, err := projectruntime.OpenProject(context.Background(), options)
+			if err != nil {
+				b.Fatal(err)
+			}
+			path := project.DatabasePath
+			if err := project.Database.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+				for start := 1; start <= size; start += 10_000 {
+					if _, err := tx.ExecContext(ctx, `WITH RECURSIVE n(x) AS (
+						SELECT ? UNION ALL SELECT x+1 FROM n WHERE x < ?
+					) INSERT INTO issue_events(event_type, payload, created_at)
+					SELECT 'fixture', '{}', '2026-01-01T00:00:00Z' FROM n`, start, min(start+9_999, size)); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+			if err := project.Close(context.Background()); err != nil {
+				b.Fatal(err)
+			}
+
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeBenchmarkWriter$")
+			cmd.Env = append(os.Environ(), "RHIZOME_RUNTIME_BENCH_WRITER="+path)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				b.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				b.Fatal(err)
+			}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				b.Fatal(err)
+			}
+			reader := bufio.NewReader(stdout)
+			if ready, err := reader.ReadString('\n'); err != nil || ready != "READY\n" {
+				b.Fatalf("writer readiness = %q, %v; stderr: %s", ready, err, stderr.String())
+			}
+			b.Cleanup(func() {
+				_ = stdin.Close()
+				if cmd.ProcessState == nil {
+					_ = cmd.Wait()
+				}
+			})
+
+			b.ReportAllocs()
+			var openDuration, doctorDuration time.Duration
+			b.StartTimer()
+			for i := 0; i < b.N; i++ {
+				start := time.Now()
+				project, err := projectruntime.OpenProject(context.Background(), options)
+				if err != nil {
+					b.Fatal(err)
+				}
+				openDuration += time.Since(start)
+				start = time.Now()
+				report, err := project.Health(context.Background())
+				doctorDuration += time.Since(start)
+				if err != nil || !report.Healthy() {
+					b.Fatalf("doctor report = %+v, error = %v", report, err)
+				}
+				if err := project.Close(context.Background()); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if err := stdin.Close(); err != nil {
+				b.Fatal(err)
+			}
+			var samples []int64
+			if err := json.NewDecoder(reader).Decode(&samples); err != nil {
+				b.Fatalf("decode writer samples: %v; stderr: %s", err, stderr.String())
+			}
+			if err := cmd.Wait(); err != nil {
+				b.Fatalf("writer exited: %v; stderr: %s", err, stderr.String())
+			}
+			if len(samples) == 0 {
+				b.Fatal("writer did not complete any writes")
+			}
+			sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+			b.ReportMetric(float64(openDuration.Nanoseconds())/float64(b.N), "open_ns")
+			b.ReportMetric(float64(doctorDuration.Nanoseconds())/float64(b.N), "doctor_ns")
+			b.ReportMetric(float64(samples[(99*len(samples)-1)/100]), "writer_p99_ns")
+			b.ReportMetric(float64(len(samples)), "writer_samples")
+		})
+	}
+}
+
+func TestRuntimeBenchmarkWriter(t *testing.T) {
+	path := os.Getenv("RHIZOME_RUNTIME_BENCH_WRITER")
+	if path == "" {
+		t.Skip("benchmark subprocess only")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("READY")
+	stop := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, os.Stdin)
+		stop <- err
+		close(stop)
+	}()
+	samples := make([]int64, 0, 1024)
+	for {
+		select {
+		case err := <-stop:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.NewEncoder(os.Stdout).Encode(samples); err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+		start := time.Now()
+		if _, err := db.Exec(`UPDATE projects SET updated_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), projectID); err != nil {
+			t.Fatal(err)
+		}
+		samples = append(samples, time.Since(start).Nanoseconds())
+		select {
+		case <-stop:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
 
 func TestOpenProjectEndToEndFromNestedPathAndReopen(t *testing.T) {
 	repository, dataRoot := initializeProject(t)
@@ -345,10 +505,14 @@ func TestMigrateExistingProjectMigratesStaleProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		// Recreate the schema boundary for 017, not just an older history row.
 		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion()); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE projects DROP COLUMN origin"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DROP TABLE search_index_identity"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DROP TRIGGER search_index_issues_review_title_update"); err != nil {
 			return err
 		}
 		return nil
@@ -581,6 +745,46 @@ func TestOpenProjectDetectsTamperedMigrationAndCleansUp(t *testing.T) {
 	}
 	if err := reopened.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenProjectDetectsForeignKeyCorruptionOnCurrentSchema(t *testing.T) {
+	repository, dataRoot := initializeProject(t)
+	options := projectruntime.Options{
+		StartingPath: repository,
+		DataRoot:     dataRoot,
+		Clock:        clock.NewFakeClock(testTime),
+	}
+	project, err := projectruntime.OpenProject(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := project.DatabasePath
+	if err := project.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	inspect, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspect.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspect.Exec(`INSERT INTO comments(id, issue_id, content, created_at)
+		VALUES ('00000000000000000000000001', '99999999999999999999999999', 'orphan', ?)`,
+		testTime.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspect.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = projectruntime.OpenProject(context.Background(), options)
+	assertDomainCode(t, err, domain.CodeStorageMigration)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || len(domainErr.Details) != 1 ||
+		domainErr.Details[0].Code != "FOREIGN_KEY_VIOLATION" {
+		t.Fatalf("current-schema corruption error = %v, want FK violation detail", err)
 	}
 }
 

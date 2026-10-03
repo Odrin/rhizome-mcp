@@ -258,9 +258,9 @@ func VerifyHistory(ctx context.Context, query sqlite.Queryer) (int, error) {
 	return history[len(history)-1].version, nil
 }
 
-// Migrate validates the embedded catalog, acquires SQLite's writer lock early,
-// validates migration history, applies all pending scripts atomically, and
-// checks referential integrity. It never downgrades a database.
+// Migrate verifies an unchanged schema from a consistent read snapshot.
+// Pending migrations acquire the writer lock and revalidate before applying
+// scripts atomically. It never downgrades a database.
 func Migrate(ctx context.Context, db *sqlite.DB, clock Clock) (Result, error) {
 	return run(ctx, db, clock, embeddedCatalog)
 }
@@ -276,8 +276,97 @@ func run(ctx context.Context, db *sqlite.DB, clock Clock, catalog []migration) (
 		return Result{}, migrationError(errors.New("nil migration clock"), "migration clock is required")
 	}
 
+	var pending bool
+	err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		var exists int
+		if err := query.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema
+			WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&exists); err != nil {
+			return migrationError(err, "cannot inspect migration history")
+		}
+		if exists == 0 {
+			pending = true
+			return nil
+		}
+		history, err := readHistory(ctx, query)
+		if err != nil {
+			return err
+		}
+		if err := validateHistory(history, catalog); err != nil {
+			return err
+		}
+		pending = len(history) < len(catalog)
+		return nil
+	})
+	if err != nil {
+		return Result{}, normalizeRunError(err)
+	}
+	if !pending {
+		var result Result
+		err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+			// One SELECT keeps history and the complete FK scan in the same
+			// SQLite snapshot without acquiring BEGIN IMMEDIATE.
+			rows, err := query.QueryContext(ctx, `SELECT 0, version, name, checksum, applied_at,
+				NULL, NULL, NULL, NULL FROM schema_migrations
+				UNION ALL
+				SELECT 1, NULL, NULL, NULL, NULL, "table", rowid, parent, fkid
+				FROM pragma_foreign_key_check`)
+			if err != nil {
+				return migrationError(err, "cannot verify migration history and foreign keys")
+			}
+			defer rows.Close()
+
+			var history []historyRow
+			var violations []foreignKeyViolation
+			for rows.Next() {
+				var kind int
+				var version sql.NullInt64
+				var name, checksum, appliedAt, table, parent sql.NullString
+				var rowID, fkID sql.NullInt64
+				if err := rows.Scan(&kind, &version, &name, &checksum, &appliedAt,
+					&table, &rowID, &parent, &fkID); err != nil {
+					return migrationError(err, "cannot verify migration history and foreign keys")
+				}
+				switch kind {
+				case 0:
+					if !version.Valid || !name.Valid || !checksum.Valid || !appliedAt.Valid {
+						return migrationError(errors.New("null migration history field"), "migration history is malformed")
+					}
+					history = append(history, historyRow{int(version.Int64), name.String, checksum.String, appliedAt.String})
+				case 1:
+					if !table.Valid || !parent.Valid || !fkID.Valid {
+						return migrationError(errors.New("null foreign key violation field"), "cannot validate database foreign keys")
+					}
+					violations = append(violations, foreignKeyViolation{table.String, rowID, parent.String, int(fkID.Int64)})
+				default:
+					return migrationError(fmt.Errorf("unknown verification row %d", kind), "cannot verify migration history and foreign keys")
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return migrationError(err, "cannot verify migration history and foreign keys")
+			}
+			if err := validateHistory(history, catalog); err != nil {
+				return err
+			}
+			if len(history) < len(catalog) {
+				pending = true
+				return nil
+			}
+			if err := foreignKeyError(violations); err != nil {
+				return err
+			}
+			result.Version = catalog[len(catalog)-1].version
+			return nil
+		})
+		if err != nil {
+			return Result{}, normalizeRunError(err)
+		}
+		if !pending {
+			return result, nil
+		}
+	}
+
 	result := Result{}
-	err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+	err = db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
 		result = Result{}
 		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY,
@@ -419,6 +508,10 @@ func checkForeignKeys(ctx context.Context, tx sqlite.Executor) error {
 	if err := rows.Err(); err != nil {
 		return migrationError(err, "cannot validate database foreign keys")
 	}
+	return foreignKeyError(violations)
+}
+
+func foreignKeyError(violations []foreignKeyViolation) error {
 	if len(violations) == 0 {
 		return nil
 	}
