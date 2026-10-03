@@ -207,36 +207,52 @@ func TestSearchPageRenderingMatchesLegacyRankingAndSnippets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, query := range []string{"needle", `"needle detail"`, "needle*", "title:needle", "content:needle", "\u79df\u7ea6", "needle OR \u79df\u7ea6", "NEAR(needle detail, 3)"} {
+	queries := []string{"needle", `"needle detail"`, "needle*", "title:needle", "content:needle", "\u79df\u7ea6", "needle OR \u79df\u7ea6", "NEAR(needle detail, 3)"}
+	for _, query := range queries {
 		for _, length := range []int{1, 12, 300, 1000} {
-			for _, limit := range []int{1, 7, 20, 100} {
-				for _, includeArchived := range []bool{false, true} {
-					for _, types := range [][]domain.SearchEntityType{nil, {domain.SearchEntityTypeComment}, {domain.SearchEntityTypeDecision}} {
-						input := domain.SearchInput{Query: query, Limit: limit, SnippetLength: length, IncludeArchived: includeArchived, EntityTypes: types}
-						seen := make(map[string]bool)
-						for page := 0; page < 50; page++ {
-							want := legacySearchPage(t, db, input)
-							got, err := repository.Search(ctx, portsSearch(input))
-							if err != nil {
-								t.Fatalf("input=%#v: %v", input, err)
+			for _, includeArchived := range []bool{false, true} {
+				for _, types := range [][]domain.SearchEntityType{nil, {domain.SearchEntityTypeComment}, {domain.SearchEntityTypeDecision}} {
+					input := domain.SearchInput{Query: query, Limit: 100, SnippetLength: length, IncludeArchived: includeArchived, EntityTypes: types}
+					want := legacySearchPage(t, db, input)
+					got, err := repository.Search(ctx, portsSearch(input))
+					if err != nil {
+						t.Fatalf("input=%#v: %v", input, err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("input=%#v\ngot=%#v\nwant=%#v", input, got, want)
+					}
+				}
+			}
+		}
+		// Snippet length cannot affect rank or continuation. Sweep cursor
+		// boundaries once per filter/query rather than once per length.
+		for _, limit := range []int{1, 7, 20, 100} {
+			for _, includeArchived := range []bool{false, true} {
+				for _, types := range [][]domain.SearchEntityType{nil, {domain.SearchEntityTypeComment}, {domain.SearchEntityTypeDecision}} {
+					input := domain.SearchInput{Query: query, Limit: limit, SnippetLength: 300, IncludeArchived: includeArchived, EntityTypes: types}
+					seen := make(map[string]bool)
+					for page := 0; page < 50; page++ {
+						want := legacySearchPage(t, db, input)
+						got, err := repository.Search(ctx, portsSearch(input))
+						if err != nil {
+							t.Fatalf("input=%#v: %v", input, err)
+						}
+						if !reflect.DeepEqual(got, want) {
+							t.Fatalf("input=%#v page=%d\ngot=%#v\nwant=%#v", input, page, got, want)
+						}
+						for _, item := range got.Results {
+							key := string(item.EntityType) + ":" + item.EntityID
+							if seen[key] {
+								t.Fatalf("repeated result: %s", key)
 							}
-							if !reflect.DeepEqual(got, want) {
-								t.Fatalf("input=%#v page=%d\ngot=%#v\nwant=%#v", input, page, got, want)
-							}
-							for _, item := range got.Results {
-								key := string(item.EntityType) + ":" + item.EntityID
-								if seen[key] {
-									t.Fatalf("repeated result: %s", key)
-								}
-								seen[key] = true
-							}
-							if got.NextCursor == nil {
-								break
-							}
-							input.Cursor = *got.NextCursor
-							if page == 49 {
-								t.Fatal("cursor did not terminate")
-							}
+							seen[key] = true
+						}
+						if got.NextCursor == nil {
+							break
+						}
+						input.Cursor = *got.NextCursor
+						if page == 49 {
+							t.Fatal("cursor did not terminate")
 						}
 					}
 				}

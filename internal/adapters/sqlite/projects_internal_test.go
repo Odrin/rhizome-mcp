@@ -14,11 +14,12 @@ import (
 // rather than implied means adding a table to the schema forces an explicit
 // decision about which side it belongs on.
 var destinationContentExemptTables = map[string]string{
-	"projects":            "the destination project row always exists; import updates it rather than inserting one",
-	"agent_sessions":      "sessions are excluded from interchange (docs/07 §5); counting them would make any connected project look occupied",
-	"idempotency_records": "runtime replay bookkeeping, explicitly excluded (docs/07 §5)",
-	"schema_migrations":   "migration state, explicitly excluded (docs/07 §5)",
-	"search_index":        "a derived FTS index rebuilt from the content tables, explicitly excluded (docs/07 §5)",
+	"projects":              "the destination project row always exists; import updates it rather than inserting one",
+	"agent_sessions":        "sessions are excluded from interchange (docs/07 §5); counting them would make any connected project look occupied",
+	"idempotency_records":   "runtime replay bookkeeping, explicitly excluded (docs/07 §5)",
+	"schema_migrations":     "migration state, explicitly excluded (docs/07 §5)",
+	"search_index":          "a derived FTS index rebuilt from the content tables, explicitly excluded (docs/07 §5)",
+	"search_index_identity": "derived FTS row identities rebuilt alongside search_index, explicitly excluded (docs/07 §5)",
 }
 
 var (

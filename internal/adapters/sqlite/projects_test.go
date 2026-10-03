@@ -22,6 +22,45 @@ import (
 	"rhizome-mcp/internal/ports"
 )
 
+func TestLogicalProjectImportIgnoresDerivedSearchIdentity(t *testing.T) {
+	db, _ := openProjectDatabase(t, "", "")
+	ctx := context.Background()
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO search_index_identity(entity_type, entity_id)
+			VALUES ('issue', '00000000000000000000000001')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewProjectRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasContent, err := repository.HasLogicalProjectImportDestinationContent(ctx)
+	if err != nil || hasContent {
+		t.Fatalf("derived-only destination has content = %t, error = %v", hasContent, err)
+	}
+	index, err := sqlite.NewSearchIndexRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		var count int
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM search_index_identity").Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			t.Fatalf("rebuild retained %d non-authoritative search identities", count)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectRepositoryReturnsMetadataAndDeterministicMaximums(t *testing.T) {
 	db, now := openProjectDatabase(t, "Project name", "Project instructions")
 	ctx := context.Background()

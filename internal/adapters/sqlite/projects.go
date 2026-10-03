@@ -1020,7 +1020,7 @@ func hasLogicalProjectImportDestinationContentInTransaction(ctx context.Context,
 // agent_sessions (a connected client would make every project look occupied,
 // and sessions are excluded from interchange entirely -- docs/07 §5),
 // idempotency_records, schema_migrations, and the derived search_index FTS
-// tables.
+// tables and search_index_identity row mapping.
 var logicalProjectImportDestinationContentTables = []string{
 	"issues",
 	"labels",

@@ -30,6 +30,63 @@ import (
 
 const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
+func TestWorkflowPolicyToolsUpdateArchiveAndRequiredFields(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	for _, action := range []string{"update", "archive"} {
+		result := call(t, client, "manage_workflow_policy", map[string]any{"action": action})
+		assertDomainError(t, result, domain.CodeInvalidArgument, false)
+		var validation struct {
+			Details []struct {
+				Field string `json:"field"`
+				Code  string `json:"code"`
+			} `json:"details"`
+		}
+		decodeStructured(t, result, &validation)
+		if len(validation.Details) != 2 ||
+			validation.Details[0].Field != "expected_version" || validation.Details[0].Code != "REQUIRED" ||
+			validation.Details[1].Field != "policy_id" || validation.Details[1].Code != "REQUIRED" {
+			t.Fatalf("%s required fields = %#v", action, validation.Details)
+		}
+	}
+	requirements := []map[string]any{{"key": "acceptance", "kind": "issue_field_nonblank", "field": "acceptance_criteria"}}
+	created := call(t, client, "manage_workflow_policy", map[string]any{
+		"action": "create", "requirements": requirements,
+	})
+	var policy struct {
+		ID      string `json:"id"`
+		Version int64  `json:"version"`
+		Status  string `json:"status"`
+	}
+	decodeStructured(t, created, &policy)
+	if created.IsError || policy.ID == "" || policy.Version != 1 || policy.Status != "active" {
+		t.Fatalf("created policy = %#v, result = %#v", policy, created)
+	}
+	updated := call(t, client, "manage_workflow_policy", map[string]any{
+		"action": "update", "policy_id": policy.ID, "expected_version": policy.Version,
+		"selector": map[string]any{"issue_types": []string{"task"}}, "requirements": requirements,
+	})
+	decodeStructured(t, updated, &policy)
+	if updated.IsError || policy.Version != 2 || policy.Status != "active" {
+		t.Fatalf("updated policy = %#v, result = %#v", policy, updated)
+	}
+	stale := call(t, client, "manage_workflow_policy", map[string]any{
+		"action": "archive", "policy_id": policy.ID, "expected_version": 1,
+	})
+	assertDomainError(t, stale, domain.CodeVersionConflict, true)
+	archived := call(t, client, "manage_workflow_policy", map[string]any{
+		"action": "archive", "policy_id": policy.ID, "expected_version": policy.Version,
+	})
+	decodeStructured(t, archived, &policy)
+	if archived.IsError || policy.Version != 3 || policy.Status != "archived" {
+		t.Fatalf("archived policy = %#v, result = %#v", policy, archived)
+	}
+}
+
 func TestServerPublishesWorkflowGuidance(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))

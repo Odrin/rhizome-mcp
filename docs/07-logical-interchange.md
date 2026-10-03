@@ -367,7 +367,8 @@ has been accounted for, so any later destination activity counts.
 The following are intentionally excluded:
 
 - `.agent-tracker.json`, the destination SQLite database, migration state,
-  FTS indexes, idempotency records, and runtime configuration;
+  FTS indexes and their derived row-identity mappings, idempotency records,
+  and runtime configuration;
 - session records and session lifecycle state;
 - archived issues and their owned data;
 - active attempts, their leases, raw tokens, token hashes, heartbeat
@@ -411,7 +412,7 @@ shared definition of that set, so they cannot disagree about it, and a project
 holding only extension-owned state (workflow policies, say) is correctly
 refused rather than merged into (ISSUE-233). The destination project row
 itself, sessions, idempotency records, migration state, and the derived search
-index are excluded, matching §5.
+index (including `search_index_identity`) are excluded, matching §5.
 
 References must target records of the correct included type. The importer
 rejects dangling references, invalid ULIDs, duplicate logical IDs,
