@@ -204,9 +204,19 @@ func validatePlanAgainstStore(ctx context.Context, query Queryer, plan domain.Is
 		}
 	}
 
-	blocks, err := loadBlocksEdges(ctx, query)
-	if err != nil {
-		return nil, err
+	var adjacency map[string][]string
+	for _, relation := range plan.Relations {
+		if relation.Type == domain.RelationTypeBlocks {
+			edges, err := loadBlocksEdges(ctx, query)
+			if err != nil {
+				return nil, err
+			}
+			adjacency = make(map[string][]string, len(edges))
+			for _, edge := range edges {
+				adjacency[edge.source] = append(adjacency[edge.source], edge.target)
+			}
+			break
+		}
 	}
 	proposed := make(map[string]bool)
 	for i, relation := range plan.Relations {
@@ -244,11 +254,11 @@ func validatePlanAgainstStore(ctx context.Context, query Queryer, plan domain.Is
 			continue
 		}
 		if relation.Type == domain.RelationTypeBlocks {
-			if planPathExists(blocks, target, source) {
+			if domain.BlocksPathExists(target, source, func(node string) []string { return adjacency[node] }) {
 				details = append(details, planStoreDetail(i, fmt.Sprintf("relations[%d].type", i), domain.CodeBlocksCycle, "blocks relation would create a cycle"))
 				continue
 			}
-			blocks = append(blocks, struct{ source, target string }{source, target})
+			adjacency[source] = append(adjacency[source], target)
 		}
 	}
 	for i, decision := range plan.Decisions {
@@ -283,14 +293,6 @@ func loadBlocksEdges(ctx context.Context, query Queryer) ([]struct{ source, targ
 		edges = append(edges, edge)
 	}
 	return edges, rows.Err()
-}
-
-func planPathExists(edges []struct{ source, target string }, start, sought string) bool {
-	adjacency := make(map[string][]string, len(edges))
-	for _, edge := range edges {
-		adjacency[edge.source] = append(adjacency[edge.source], edge.target)
-	}
-	return domain.BlocksPathExists(start, sought, func(node string) []string { return adjacency[node] })
 }
 
 func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCommand) (ports.ApplyIssuePlanResult, error) {

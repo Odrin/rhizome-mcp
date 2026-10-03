@@ -245,6 +245,96 @@ func TestApplyIssuePlanRejectsCycleAcrossExistingAndBatchEdges(t *testing.T) {
 	if len(validation.Errors) != 1 || validation.Errors[0].Code != domain.CodeBlocksCycle {
 		t.Fatalf("errors = %#v", validation.Errors)
 	}
+	_, err = service.ApplyIssuePlan(ctx, plan, "existing-cycle")
+	if !errors.Is(err, &domain.Error{Code: domain.CodeValidationError}) {
+		t.Fatalf("apply cycle error = %v", err)
+	}
+	var issueCount, relationCount, recordCount int
+	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issues").Scan(&issueCount); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "SELECT count(*) FROM issue_relations").Scan(&relationCount); err != nil {
+			return err
+		}
+		return query.QueryRowContext(ctx, "SELECT count(*) FROM idempotency_records").Scan(&recordCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if issueCount != 2 || relationCount != 1 || recordCount != 0 {
+		t.Fatalf("failed apply wrote issues=%d relations=%d records=%d", issueCount, relationCount, recordCount)
+	}
+	plan.Relations = plan.Relations[:1]
+	first, err := service.ApplyIssuePlan(ctx, plan, "existing-cycle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ApplyIssuePlan(ctx, plan, "existing-cycle")
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("replay = %#v, error = %v, want %#v", second, err, first)
+	}
+}
+
+func TestApplyIssuePlanNoBlocksSkipsGraphLoad(t *testing.T) {
+	_, db, now := openIssueService(t)
+	ctx := context.Background()
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, "DROP TABLE issue_relations")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := clock.NewFakeClock(now)
+	repository, _ := sqlite.NewPlanningRepository(db)
+	generator, _ := ids.NewGenerator(source, rand.Reader)
+	service, _ := application.NewPlanningService(repository, source, generator)
+	plan := domain.IssuePlan{Issues: []domain.PlannedIssue{{Ref: "new", Type: domain.TypeTask, Title: "New"}}}
+	validation, err := service.ValidateIssuePlan(ctx, plan)
+	if err != nil || !validation.Valid {
+		t.Fatalf("zero-block validation = %#v, error = %v", validation, err)
+	}
+}
+
+func TestApplyIssuePlanPreservesBlockDiagnosticOrder(t *testing.T) {
+	_, db, now := openIssueService(t)
+	source := clock.NewFakeClock(now)
+	repository, _ := sqlite.NewPlanningRepository(db)
+	generator, _ := ids.NewGenerator(source, rand.Reader)
+	service, _ := application.NewPlanningService(repository, source, generator)
+	plan := domain.IssuePlan{
+		Issues: []domain.PlannedIssue{
+			{Ref: "a", Type: domain.TypeTask, Title: "A"},
+			{Ref: "b", Type: domain.TypeTask, Title: "B"},
+			{Ref: "c", Type: domain.TypeTask, Title: "C"},
+		},
+		Relations: []domain.PlannedRelation{
+			{SourceRef: "a", TargetRef: "b", Type: domain.RelationTypeBlocks},
+			{SourceRef: "b", TargetRef: "c", Type: domain.RelationTypeBlocks},
+			{SourceRef: "c", TargetRef: "a", Type: domain.RelationTypeBlocks},
+			{SourceRef: "a", TargetRef: "b", Type: domain.RelationTypeBlocks},
+			{SourceRef: "c", TargetRef: "b", Type: domain.RelationTypeBlocks},
+		},
+	}
+	validation, err := service.ValidateIssuePlan(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation.Valid || len(validation.Errors) != 3 {
+		t.Fatalf("diagnostics = %#v", validation.Errors)
+	}
+	for i, want := range []struct {
+		index int
+		code  string
+	}{
+		{2, domain.CodeBlocksCycle},
+		{3, "DUPLICATE_RELATION"},
+		{4, domain.CodeBlocksCycle},
+	} {
+		detail := validation.Errors[i]
+		if detail.EntityIndex == nil || *detail.EntityIndex != want.index || detail.Code != want.code {
+			t.Fatalf("diagnostics[%d] = %#v, want index=%d code=%s", i, detail, want.index, want.code)
+		}
+	}
 }
 
 // TestBlocksPathExistsAgainstDomainFunction is a regression check for
