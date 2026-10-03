@@ -118,6 +118,31 @@ func TestReservationsAcquireRejectsExternalConflict(t *testing.T) {
 	}
 }
 
+func TestReservationsActiveLeadingWildcardConflictsWithLiteralCandidate(t *testing.T) {
+	for _, pattern := range []string{"*/file.go", "**", "*/**"} {
+		t.Run(pattern, func(t *testing.T) {
+			fixture := newAttemptTestFixture(t, "leading-wildcard")
+			defer fixture.close()
+			owner := claimReservationFixture(t, fixture, "wildcard owner")
+			requester := claimReservationFixture(t, fixture, "literal requester")
+			repository, err := sqlite.NewReservationRepository(fixture.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t,
+				owner.Issue.ID, owner.Attempt.ID, domain.Resource{Kind: domain.ResourceKindGlob, Path: pattern})); err != nil {
+				t.Fatal(err)
+			}
+			_, err = repository.AcquireReservations(fixture.ctx, acquireCommand(fixture, t,
+				requester.Issue.ID, requester.Attempt.ID, domain.Resource{Kind: domain.ResourceKindFile, Path: "src/file.go"}))
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeResourceReservationConflict {
+				t.Fatalf("literal request under active %q = %v, want reservation conflict", pattern, err)
+			}
+		})
+	}
+}
+
 func TestReservationsAcquireCollapsesDuplicatesAndRejectsInternalOverlap(t *testing.T) {
 	fixture := newAttemptTestFixture(t, "reservations-internal")
 	defer fixture.close()

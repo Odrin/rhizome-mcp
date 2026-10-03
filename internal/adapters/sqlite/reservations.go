@@ -787,8 +787,9 @@ func loadCandidateReservations(ctx context.Context, query Queryer, prepared []do
 			path := `substr(comparison_value, instr(comparison_value, ':') + 1) || '/'`
 			first := `substr(` + path + `, 1, instr(` + path + `, '/') - 1)`
 			selections = append(selections, `SELECT `+reservationColumns+` FROM resource_reservations
-				WHERE status = 'active' AND kind IN ('file', 'directory', 'glob') AND `+first+
-				` IN (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`)
+				WHERE status = 'active' AND kind IN ('file', 'directory', 'glob') AND (`+first+
+				` IN (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)
+				OR (kind = 'glob' AND `+first+` IN ('*', '**')))`)
 			for _, key := range keys {
 				args = append(args, key)
 			}
