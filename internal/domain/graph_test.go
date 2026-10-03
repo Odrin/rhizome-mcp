@@ -33,6 +33,45 @@ func TestGetIssueGraphInputValidationDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestBuildGraphDeduplicatesExactEdgeIdentityAcrossBothPasses(t *testing.T) {
+	want := []GraphEdge{
+		{SourceIssueID: "b", TargetIssueID: "a", Type: "blocks"},
+		{SourceIssueID: "a", TargetIssueID: "b", Type: "blocks"},
+		{SourceIssueID: "a", TargetIssueID: "b", Type: "duplicates"},
+		{SourceIssueID: "b", TargetIssueID: "b", Type: "related_to"},
+		{SourceIssueID: "b", TargetIssueID: "a", Type: "related_to"},
+		{SourceIssueID: "a", TargetIssueID: "b", Type: "related_to"},
+	}
+	for _, preferNonTerminal := range []bool{false, true} {
+		for _, status := range []Status{StatusReady, StatusDone} {
+			mode := "rooted/"
+			if preferNonTerminal {
+				mode = "planning/"
+			}
+			t.Run(mode+string(status), func(t *testing.T) {
+				snapshot := GraphSnapshot{
+					Nodes: []IssueProjection{graphTestNode("a", 2, StatusReady), graphTestNode("b", 1, status)},
+				}
+				for index := len(want) - 1; index >= 0; index-- {
+					snapshot.Edges = append(snapshot.Edges, want[index], want[index])
+				}
+				result := BuildGraph(snapshot, GraphTraversal{
+					RootIssueIDs: []string{"a"}, ExplicitRootID: "a", Depth: 2, MaxNodes: 2,
+					Direction:       GraphDirectionBoth,
+					RelationTypes:   []RelationType{RelationTypeBlocks, RelationTypeDuplicates, RelationTypeRelatedTo},
+					IncludeTerminal: true, PreferNonTerminal: preferNonTerminal,
+				})
+				if !reflect.DeepEqual(result.Edges, want) {
+					t.Fatalf("edges = %#v, want %#v", result.Edges, want)
+				}
+				if len(result.Nodes) != 2 || result.Truncated {
+					t.Fatalf("nodes/truncated = %d/%v, want 2/false", len(result.Nodes), result.Truncated)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildGraphBFSOrderingDirectionsCyclesAndNodeLimit(t *testing.T) {
 	snapshot := GraphSnapshot{
 		RootIssueID: graphTestString("a"),

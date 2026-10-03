@@ -243,6 +243,7 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 
 	result := GraphResult{RootIssueID: snapshot.RootIssueID, Nodes: []IssueProjection{}, Edges: []GraphEdge{},
 		EntryPoints: []string{}, BlockingNodes: []string{}, Warnings: []string{}}
+	seenEdges := make(map[GraphEdge]struct{})
 	visited := make(map[string]bool, len(nodesByID))
 	type queued struct {
 		id    string
@@ -352,7 +353,7 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 				// Both endpoints must be emitted nodes; edges touching a
 				// deferred node are added in the second pass if it is admitted.
 				if visited[current.id] && visited[candidate.neighborID] {
-					result.Edges = appendGraphEdge(result.Edges, candidate.edge)
+					result.Edges = appendGraphEdge(result.Edges, candidate.edge, seenEdges)
 				}
 			}
 		}
@@ -400,7 +401,7 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 				other = edge.TargetIssueID
 			}
 			if visited[other] {
-				result.Edges = appendGraphEdge(result.Edges, edge)
+				result.Edges = appendGraphEdge(result.Edges, edge, seenEdges)
 			}
 		}
 	}
@@ -517,12 +518,11 @@ func graphNeighbors(current string, edges []GraphEdge, nodes map[string]IssuePro
 	return result
 }
 
-func appendGraphEdge(edges []GraphEdge, edge GraphEdge) []GraphEdge {
-	for _, existing := range edges {
-		if existing == edge {
-			return edges
-		}
+func appendGraphEdge(edges []GraphEdge, edge GraphEdge, seen map[GraphEdge]struct{}) []GraphEdge {
+	if _, exists := seen[edge]; exists {
+		return edges
 	}
+	seen[edge] = struct{}{}
 	return append(edges, edge)
 }
 
