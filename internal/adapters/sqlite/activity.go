@@ -239,7 +239,9 @@ var activityRegistry = []activityEntitySpec{
 		Category:   domain.ActivityCategoryAttemptNotes,
 		EntityType: domain.ActivityEntityTypeAttemptNote,
 		Rank:       5,
-		Arm:        `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM attempt_notes JOIN work_attempts ON work_attempts.id = attempt_notes.attempt_id WHERE work_attempts.issue_id = ?`,
+		// Pin the issue-scoped attempts as the outer loop so notes from other
+		// issues cannot drive a project-wide scan before the join predicate.
+		Arm:        `SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM work_attempts CROSS JOIN attempt_notes ON attempt_notes.attempt_id = work_attempts.id WHERE work_attempts.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
 		Batch: activityBatchLoader(`SELECT id, id, attempt_id, kind, content, next_steps_json, important, created_at FROM attempt_notes WHERE id IN (%s)`,
 			scanActivityAttemptNote, func(item *domain.ActivityItem, value domain.AttemptNote) { item.AttemptNote = &value }),

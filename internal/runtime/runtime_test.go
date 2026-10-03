@@ -509,7 +509,10 @@ func TestMigrateExistingProjectMigratesStaleProject(t *testing.T) {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= 17"); err != nil {
 			return err
 		}
-		for _, index := range []string{"idx_review_requests_created_id", "idx_review_requests_status_created_id", "idx_review_requests_open_issue_created_id"} {
+		for _, index := range []string{
+			"idx_review_requests_created_id", "idx_review_requests_status_created_id", "idx_review_requests_open_issue_created_id",
+			"idx_artifacts_issue_created_id", "idx_attempt_notes_attempt_created_id",
+		} {
 			if _, err := tx.ExecContext(ctx, "DROP INDEX "+index); err != nil {
 				return err
 			}

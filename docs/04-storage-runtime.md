@@ -283,9 +283,20 @@ ON review_requests(status, created_at DESC, id DESC);
 CREATE INDEX idx_review_requests_open_issue_created_id
 ON review_requests(issue_id, created_at DESC, id DESC)
 WHERE status = 'open';
+
+CREATE INDEX idx_artifacts_issue_created_id
+ON artifacts(issue_id, created_at DESC, id ASC);
+
+CREATE INDEX idx_attempt_notes_attempt_created_id
+ON attempt_notes(attempt_id, created_at DESC, id ASC);
 ```
 
-Exact index selection should be verified with real query plans.
+Migration 019 adds the activity indexes. The activity feed selects notes by
+issue-scoped work attempts before probing the per-attempt note index; ordering
+across multiple attempts can still sort the bounded issue rows. Artifacts use
+the issue/time/ID index directly. Both avoid scanning or sorting all notes or
+artifacts from unrelated issues. Exact index selection should be verified with
+real query plans.
 
 ## 10. Migrations
 

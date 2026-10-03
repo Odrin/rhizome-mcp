@@ -85,6 +85,7 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 
 	wantIndexes := []string{
 		"agent_sessions_handle_hash_idx",
+		"idx_artifacts_issue_created_id", "idx_attempt_notes_attempt_created_id",
 		"idx_attempts_active_lease", "idx_attempts_issue_started", "idx_comments_issue_created",
 		"idx_decisions_issue_status", "idx_decisions_supersedes", "idx_events_issue_id",
 		"idx_gate_evidence_events_attempt", "idx_gate_evidence_issue",
@@ -125,10 +126,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "review_list_index" || checksum != reviewListIndexChecksum {
+	if version != CurrentVersion() || name != "activity_order" || checksum != activityOrderChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(reviewListIndexSQL))
+	actualChecksum := sha256.Sum256([]byte(activityOrderSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -172,7 +173,7 @@ func TestMigrateReviewIndexesUpgradeAndPlans(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
-	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 1}) {
+	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 2}) {
 		t.Fatalf("upgrade = %+v, %v", result, err)
 	}
 	inspect := openInspectionDB(t, path)
@@ -211,6 +212,121 @@ func TestMigrateReviewIndexesUpgradeAndPlans(t *testing.T) {
 		if !strings.Contains(plan.String(), test.index) || strings.Contains(plan.String(), "USE TEMP B-TREE") {
 			t.Fatalf("query plan = %s, want %s without sort", plan.String(), test.index)
 		}
+	}
+}
+
+func TestMigrateActivityOrderPopulatedUpgradeAndPlans(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path, db := openMigrationDB(t)
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:18]); err != nil {
+		t.Fatal(err)
+	}
+	issueID, attemptID := testID(1), testID(2)
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		for _, statement := range []string{
+			fmt.Sprintf(`INSERT INTO issues(id, sequence_no, type, title, status, priority, version, created_at, updated_at)
+				VALUES ('%s', 1, 'task', 'upgrade', 'ready', 'medium', 1, '%s', '%s')`, issueID, nowText(), nowText()),
+			fmt.Sprintf(`INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+				lease_token_hash, lease_expires_at, started_at, last_heartbeat_at)
+				VALUES ('%s', '%s', 'work', 'active', 1, 0, X'01', '%s', '%s', '%s')`, attemptID, issueID, nowText(), nowText(), nowText()),
+			fmt.Sprintf(`INSERT INTO artifacts(id, issue_id, type, uri, created_at)
+				VALUES ('%s', '%s', 'file', 'first', '%s'), ('%s', '%s', 'file', 'second', '%s')`,
+				testID(3), issueID, nowText(), testID(4), issueID, nowText()),
+			fmt.Sprintf(`INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at)
+				VALUES ('%s', '%s', 'progress', 'first', 0, '%s'), ('%s', '%s', 'progress', 'second', 0, '%s')`,
+				testID(5), attemptID, nowText(), testID(6), attemptID, nowText()),
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime)); err != nil || result != (Result{Version: 19, Applied: 1}) {
+		t.Fatalf("populated upgrade = %+v, %v", result, err)
+	}
+	inspect := openInspectionDB(t, path)
+	for _, test := range []struct {
+		statement string
+		args      []any
+		index     string
+	}{
+		{`SELECT id FROM artifacts WHERE issue_id=? ORDER BY created_at DESC, id ASC LIMIT 21`,
+			[]any{issueID}, "idx_artifacts_issue_created_id"},
+		{`SELECT attempt_notes.id FROM work_attempts CROSS JOIN attempt_notes
+			ON attempt_notes.attempt_id=work_attempts.id WHERE work_attempts.issue_id=?
+			ORDER BY attempt_notes.created_at DESC, attempt_notes.id ASC LIMIT 21`,
+			[]any{issueID}, "idx_attempt_notes_attempt_created_id"},
+	} {
+		rows, err := inspect.Query("EXPLAIN QUERY PLAN "+test.statement, test.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(plan.String(), test.index) ||
+			(test.index == "idx_attempt_notes_attempt_created_id" && !strings.Contains(plan.String(), "idx_attempts_issue_started")) ||
+			strings.Contains(plan.String(), "SCAN artifacts") || strings.Contains(plan.String(), "SCAN attempt_notes") {
+			t.Fatalf("unscoped query plan for %s: %s", test.index, plan.String())
+		}
+	}
+	for _, test := range []struct {
+		statement string
+		want      []string
+	}{
+		{`SELECT id FROM artifacts WHERE issue_id=? ORDER BY created_at DESC, id ASC`, []string{testID(3), testID(4)}},
+		{`SELECT attempt_notes.id FROM work_attempts CROSS JOIN attempt_notes ON attempt_notes.attempt_id=work_attempts.id
+			WHERE work_attempts.issue_id=? ORDER BY attempt_notes.created_at DESC, attempt_notes.id ASC`, []string{testID(5), testID(6)}},
+	} {
+		rows, err := inspect.Query(test.statement, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			got = append(got, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("rows = %v, want %v", got, test.want)
+		}
+	}
+	var integrity string
+	if err := inspect.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatalf("integrity_check = %q, %v", integrity, err)
+	}
+	var violation string
+	if err := inspect.QueryRow("SELECT `table` FROM pragma_foreign_key_check LIMIT 1").Scan(&violation); err != sql.ErrNoRows {
+		t.Fatalf("foreign_key_check = %q, %v", violation, err)
 	}
 }
 
@@ -379,8 +495,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_list_index" || after[len(after)-1].checksum != reviewListIndexChecksum {
-		t.Fatalf("new history row = %+v, want review_list_index migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "activity_order" || after[len(after)-1].checksum != activityOrderChecksum {
+		t.Fatalf("new history row = %+v, want activity_order migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -778,7 +894,7 @@ func TestMigrateFTSIdentityUpgradeAndIndexedLookups(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
-	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 2}) {
+	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 3}) {
 		t.Fatalf("upgrade = %+v, %v", result, err)
 	}
 	var count, mismatch int

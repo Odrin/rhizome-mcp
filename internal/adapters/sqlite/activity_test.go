@@ -686,6 +686,172 @@ func TestActivityRepositoryOrdersAndPaginatesAcrossFractionalBoundary(t *testing
 	}
 }
 
+func TestActivityFullUnionPlanScopesArtifactsAndNotes(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	if err := seedActivityFixture(t, db, issue.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	arms := []string{
+		`SELECT 'comment' AS entity_type, comments.id AS entity_id, comments.created_at AS occurred_at, 1 AS type_rank, comments.id AS sort_id FROM comments WHERE comments.issue_id = ?`,
+		`SELECT 'decision' AS entity_type, decisions.id AS entity_id, decisions.created_at AS occurred_at, 2 AS type_rank, decisions.id AS sort_id FROM decisions WHERE decisions.issue_id = ?`,
+		`SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`,
+		`SELECT 'attempt' AS entity_type, work_attempts.id AS entity_id, work_attempts.started_at AS occurred_at, 4 AS type_rank, work_attempts.id AS sort_id FROM work_attempts WHERE work_attempts.issue_id = ?`,
+		`SELECT 'attempt_note' AS entity_type, attempt_notes.id AS entity_id, attempt_notes.created_at AS occurred_at, 5 AS type_rank, attempt_notes.id AS sort_id FROM work_attempts CROSS JOIN attempt_notes ON attempt_notes.attempt_id = work_attempts.id WHERE work_attempts.issue_id = ?`,
+		`SELECT 'event' AS entity_type, CAST(issue_events.id AS TEXT) AS entity_id, issue_events.created_at AS occurred_at, 6 AS type_rank, printf('%020d', issue_events.id) AS sort_id FROM issue_events WHERE issue_events.issue_id = ?`,
+		`SELECT 'artifact' AS entity_type, artifacts.id AS entity_id, artifacts.created_at AS occurred_at, 7 AS type_rank, artifacts.id AS sort_id FROM artifacts WHERE artifacts.issue_id = ?`,
+		`SELECT 'gate_evidence' AS entity_type, gate_evidence.id AS entity_id, gate_evidence.updated_at AS occurred_at, 8 AS type_rank, gate_evidence.id AS sort_id FROM gate_evidence WHERE gate_evidence.issue_id = ?`,
+		`SELECT 'reservation' AS entity_type, resource_reservations.id AS entity_id, COALESCE(resource_reservations.released_at, resource_reservations.created_at) AS occurred_at, 9 AS type_rank, resource_reservations.id AS sort_id FROM resource_reservations WHERE resource_reservations.issue_id = ?`,
+	}
+	statement := "EXPLAIN QUERY PLAN SELECT entity_type, entity_id, occurred_at, type_rank, sort_id FROM (" +
+		strings.Join(arms, " UNION ALL ") + ") AS activity ORDER BY occurred_at DESC, type_rank ASC, sort_id ASC LIMIT ?"
+	args := make([]any, len(arms)+1)
+	for i := range arms {
+		args[i] = issue.ID
+	}
+	args[len(arms)] = 21
+	var plan strings.Builder
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		rows, err := query.QueryContext(ctx, statement, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				return err
+			}
+			plan.WriteString(detail)
+			plan.WriteByte('\n')
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []string{"idx_artifacts_issue_created_id", "idx_attempts_issue_started", "idx_attempt_notes_attempt_created_id"} {
+		if !strings.Contains(plan.String(), index) {
+			t.Errorf("full UNION plan missing %s:\n%s", index, plan.String())
+		}
+	}
+	for _, scan := range []string{"SCAN artifacts", "SCAN attempt_notes"} {
+		if strings.Contains(plan.String(), scan) {
+			t.Errorf("full UNION plan contains unscoped %s:\n%s", scan, plan.String())
+		}
+	}
+}
+
+func TestActivityIndexedNotesAcrossAttemptsAndArtifactTieCursors(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	repository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := sqlite.FormatStorageTime(now)
+	attempts := []string{"01ARZ3NDEKTSV4RRFFQ69G5FD1", "01ARZ3NDEKTSV4RRFFQ69G5FD2"}
+	notes := []string{"01ARZ3NDEKTSV4RRFFQ69G5FD3", "01ARZ3NDEKTSV4RRFFQ69G5FD4"}
+	artifacts := []string{"01ARZ3NDEKTSV4RRFFQ69G5FD5", "01ARZ3NDEKTSV4RRFFQ69G5FD6"}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		for i := range attempts {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+				lease_token_hash, lease_expires_at, started_at, last_heartbeat_at, finished_at)
+				VALUES (?, ?, 'work', 'completed', 1, 0, X'01', ?, ?, ?, ?)`, attempts[i], issue.ID, stamp, stamp, stamp, stamp); err != nil {
+				return err
+			}
+			// Reverse note-to-attempt identity order to exercise sorting across attempts.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_notes(id, attempt_id, kind, content, important, created_at)
+				VALUES (?, ?, 'progress', 'note', 0, ?)`, notes[1-i], attempts[i], stamp); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts(id, issue_id, type, uri, created_at)
+				VALUES (?, ?, 'file', 'uri', ?)`, artifacts[i], issue.ID, stamp); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var cursor string
+	var got []string
+	for i := 0; i < 4; i++ {
+		page, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+			Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{
+				domain.ActivityCategoryAttemptNotes, domain.ActivityCategoryArtifacts,
+			}, Limit: 1, Cursor: cursor},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != 1 {
+			t.Fatalf("page %d = %+v", i, page)
+		}
+		got = append(got, page.Items[0].EntityID)
+		if i < 3 {
+			if !page.HasMore || page.NextCursor == nil {
+				t.Fatalf("page %d missing continuation: %+v", i, page)
+			}
+			cursor = *page.NextCursor
+		} else if page.HasMore || page.NextCursor != nil {
+			t.Fatalf("final page has continuation: %+v", page)
+		}
+	}
+	if want := []string{notes[0], notes[1], artifacts[0], artifacts[1]}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tied activity ids = %v, want %v", got, want)
+	}
+}
+
+func TestActivityEventCursorUsesNumericSequenceAtEqualTime(t *testing.T) {
+	db, _, issue, now := newActivityTestFixture(t)
+	repository, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
+		for i := 0; i < 10; i++ {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, payload, created_at)
+				VALUES (?, 'activity_event', '{}', ?)`, issue.ID, sqlite.FormatStorageTime(now)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var cursor string
+	var ids []int
+	for {
+		page, err := repository.GetIssueActivity(context.Background(), ports.GetIssueActivityCommand{
+			Input: domain.GetIssueActivityInput{IssueID: issue.ID, Types: []domain.ActivityCategory{domain.ActivityCategoryEvents}, Limit: 1, Cursor: cursor},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != 1 || page.Items[0].Event == nil {
+			t.Fatalf("event page = %+v", page)
+		}
+		ids = append(ids, int(page.Items[0].Event.ID))
+		if !page.HasMore {
+			if page.NextCursor != nil {
+				t.Fatalf("terminal event page has cursor: %+v", page)
+			}
+			break
+		}
+		if page.NextCursor == nil {
+			t.Fatalf("event page missing cursor: %+v", page)
+		}
+		cursor = *page.NextCursor
+	}
+	if len(ids) < 10 {
+		t.Fatalf("event ids = %v, want at least 10", ids)
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] != ids[i-1]+1 {
+			t.Fatalf("event ids = %v, want numeric ascending order", ids)
+		}
+	}
+}
+
 func seedActivityFixture(t *testing.T, db *sqlite.DB, issueID string, now time.Time) error {
 	t.Helper()
 	timestamp := sqlite.FormatStorageTime(now)
