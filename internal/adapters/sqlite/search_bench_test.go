@@ -13,8 +13,145 @@ import (
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/migrations"
+	"rhizome-mcp/internal/pagination"
 )
+
+type searchPageBenchmarkCursor struct {
+	Score      float64 `json:"score"`
+	EntityType string  `json:"entity_type"`
+	EntityID   string  `json:"entity_id"`
+}
+
+func BenchmarkSearchPage(b *testing.B) {
+	for _, documents := range []int{1000, 100000} {
+		for _, padding := range []int{16, 512} {
+			b.Run(fmt.Sprintf("documents=%d/padding=%d", documents, padding), func(b *testing.B) {
+				ctx := context.Background()
+				path := filepath.Join(b.TempDir(), "pages.db")
+				db, err := sqlite.Open(ctx, path, sqlite.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.Cleanup(func() { _ = db.Close(context.Background()) })
+				if _, err := migrations.Migrate(ctx, db, clock.NewFakeClock(time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC))); err != nil {
+					b.Fatal(err)
+				}
+				if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+					if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id,sequence_no,type,title,status,priority,version,created_at,updated_at)
+					 VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,'task','search benchmark source','ready','medium',1,'2026-10-03T00:00:00.000000000Z','2026-10-03T00:00:00.000000000Z')`); err != nil {
+						return err
+					}
+					_, err := tx.ExecContext(ctx, fmt.Sprintf(`WITH RECURSIVE documents(number) AS (VALUES(1) UNION ALL SELECT number+1 FROM documents WHERE number < %d)
+					 INSERT INTO comments(id,issue_id,content,created_at)
+					 SELECT printf('%%026d',number),'01ARZ3NDEKTSV4RRFFQ69G5FAV','commonneedle ' || CASE WHEN number <= 100 THEN 'rareneedle ' ELSE '' END || ?,'2026-10-03T00:00:00.000000000Z' FROM documents`, documents), strings.Repeat("padding ", padding))
+					return err
+				}); err != nil {
+					b.Fatal(err)
+				}
+				repository, err := sqlite.NewSearchRepository(db)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for _, term := range []string{"commonneedle", "rareneedle"} {
+					for _, deep := range []bool{false, true} {
+						b.Run(fmt.Sprintf("%s/deep=%t", term, deep), func(b *testing.B) {
+							input := domain.SearchInput{Query: term, Limit: 20, SnippetLength: 300}
+							var matches int
+							var after *searchPageBenchmarkCursor
+							if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
+								if err := query.QueryRowContext(ctx, `SELECT count(*) FROM search_index WHERE search_index MATCH ?`, term).Scan(&matches); err != nil {
+									return err
+								}
+								if deep {
+									cursor := searchPageBenchmarkCursor{}
+									if err := query.QueryRowContext(ctx, `SELECT bm25(search_index) AS score,entity_type,entity_id FROM search_index WHERE search_index MATCH ? ORDER BY score,entity_type,entity_id LIMIT 1 OFFSET ?`, term, matches*9/10-1).Scan(&cursor.Score, &cursor.EntityType, &cursor.EntityID); err != nil {
+										return err
+									}
+									encoded, err := pagination.NewCodec[searchPageBenchmarkCursor](0).Encode(cursor)
+									if err != nil {
+										return err
+									}
+									input.Cursor = encoded
+									after = &cursor
+								}
+								return nil
+							}); err != nil {
+								b.Fatal(err)
+							}
+							var page domain.SearchPage
+							b.ReportAllocs()
+							b.ResetTimer()
+							for iteration := 0; iteration < b.N; iteration++ {
+								page, err = repository.Search(ctx, portsSearch(input))
+								if err != nil {
+									b.Fatal(err)
+								}
+							}
+							b.StopTimer()
+							want := 20
+							if deep && matches/10 < want {
+								want = matches / 10
+							}
+							if len(page.Results) != want || page.HasMore != (!deep || matches/10 > 20) {
+								b.Fatalf("unexpected page: %#v", page)
+							}
+							for _, item := range page.Results {
+								if !strings.Contains(item.Snippet, "["+term+"]") || len([]rune(item.Snippet)) > 300 {
+									b.Fatalf("unexpected snippet: %q", item.Snippet)
+								}
+							}
+							b.ReportMetric(float64(matches), "matches/query")
+							searchPageBenchmarkDiagnostics(b, path, term, after)
+						})
+					}
+				}
+			})
+		}
+	}
+}
+
+func searchPageBenchmarkStatement(term string, after *searchPageBenchmarkCursor, optimized bool) string {
+	where := ""
+	if after != nil {
+		where = fmt.Sprintf(` WHERE score > %.17g OR (score = %.17g AND (entity_type > '%s' OR (entity_type = '%s' AND entity_id > '%s')))`, after.Score, after.Score, after.EntityType, after.EntityType, after.EntityID)
+	}
+	filter := fmt.Sprintf(` FROM search_index LEFT JOIN issues ON issues.id = search_index.issue_id WHERE search_index MATCH '%s' AND (search_index.issue_id IS NULL OR issues.archived_at IS NULL)`, term)
+	if !optimized {
+		return `WITH matches AS MATERIALIZED (SELECT search_index.entity_type,search_index.entity_id,search_index.issue_id,search_index.title,substr(snippet(search_index,-1,'[',']','...',64),1,300) AS snippet,bm25(search_index) AS score` + filter + `) SELECT entity_type,entity_id,issue_id,title,snippet,score FROM matches` + where + ` ORDER BY score,entity_type,entity_id LIMIT 21;`
+	}
+	return `WITH matches AS MATERIALIZED (SELECT search_index.rowid AS fts_rowid,search_index.entity_type,search_index.entity_id,bm25(search_index) AS score` + filter + `), page AS MATERIALIZED (SELECT * FROM matches` + where + ` ORDER BY score,entity_type,entity_id LIMIT 21)
+	 SELECT page.entity_type,page.entity_id,search_index.issue_id,search_index.title,substr(snippet(search_index,-1,'[',']','...',64),1,300),page.score FROM page CROSS JOIN search_index
+	 WHERE search_index.rowid = page.fts_rowid AND search_index MATCH '` + term + `' ORDER BY page.score,page.entity_type,page.entity_id;`
+}
+
+func searchPageBenchmarkDiagnostics(b *testing.B, path, term string, after *searchPageBenchmarkCursor) {
+	b.Helper()
+	statement := searchPageBenchmarkStatement(term, after, os.Getenv("RHIZOME_SEARCH_BENCH_PLAN") != "legacy")
+	output, err := exec.Command("sqlite3", "-batch", path, "PRAGMA temp_store=MEMORY;", ".eqp on", ".stats on", statement).CombinedOutput()
+	if err != nil {
+		b.Fatalf("search plan/heap probe: %v: %s", err, output)
+	}
+	var current, peak int
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "Memory Used:") {
+			_, err = fmt.Sscanf(line, "Memory Used: %d (max %d) bytes", &current, &peak)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		if strings.Contains(line, "MATERIALIZE") || strings.Contains(line, "VIRTUAL TABLE INDEX") || strings.Contains(line, "TEMP B-TREE") {
+			b.Log(line)
+		}
+	}
+	if peak == 0 {
+		b.Fatal("SQLite CLI did not report peak memory")
+	}
+	b.ReportMetric(float64(peak), "cli-heap-peak-B")
+	b.ReportMetric(float64(peak-current), "cli-transient-peak-B")
+	b.Log("CLI heap/transient high-water measurements include in-memory temporary results and other transient SQLite allocations; not temp-only or modernc driver counters")
+}
 
 func BenchmarkSearchUpdate(b *testing.B) {
 	for _, documents := range []int{1000, 100000} {

@@ -2,13 +2,18 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/pagination"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -166,6 +171,148 @@ func TestSearchClassifiesParserNoSuchColumnAsInvalidQuery(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSearchPageRenderingMatchesLegacyRankingAndSnippets(t *testing.T) {
+	service, db, now := openIssueService(t)
+	ctx := context.Background()
+	active, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "needle source", Status: domain.StatusReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := service.CreateIssue(ctx, domain.CreateIssueInput{Type: domain.TypeTask, Title: "needle archived"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET archived_at = ? WHERE id = ?`, sqlite.FormatStorageTime(now), archived.ID); err != nil {
+			return err
+		}
+		for index := 1; index <= 45; index++ {
+			owner := active.ID
+			if index%5 == 0 {
+				owner = archived.ID
+			}
+			content := strings.Repeat("needle detail ", index%3+1) + "\u79df\u7ea6 \u03bb\u03cd\u03c3\u03b7 " + strings.Repeat("padding ", index%4*128)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id,issue_id,content,created_at) VALUES(?,?,?,?)`, fmt.Sprintf("%026d", index), owner, content, sqlite.FormatStorageTime(now)); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO search_index(entity_type,entity_id,issue_id,title,content) VALUES('decision','00000000000000000000000046',NULL,'needle decision',?)`, "needle detail \u79df\u7ea6")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"needle", `"needle detail"`, "needle*", "title:needle", "content:needle", "\u79df\u7ea6", "needle OR \u79df\u7ea6", "NEAR(needle detail, 3)"} {
+		for _, length := range []int{1, 12, 300, 1000} {
+			for _, limit := range []int{1, 7, 20, 100} {
+				for _, includeArchived := range []bool{false, true} {
+					for _, types := range [][]domain.SearchEntityType{nil, {domain.SearchEntityTypeComment}, {domain.SearchEntityTypeDecision}} {
+						input := domain.SearchInput{Query: query, Limit: limit, SnippetLength: length, IncludeArchived: includeArchived, EntityTypes: types}
+						seen := make(map[string]bool)
+						for page := 0; page < 50; page++ {
+							want := legacySearchPage(t, db, input)
+							got, err := repository.Search(ctx, portsSearch(input))
+							if err != nil {
+								t.Fatalf("input=%#v: %v", input, err)
+							}
+							if !reflect.DeepEqual(got, want) {
+								t.Fatalf("input=%#v page=%d\ngot=%#v\nwant=%#v", input, page, got, want)
+							}
+							for _, item := range got.Results {
+								key := string(item.EntityType) + ":" + item.EntityID
+								if seen[key] {
+									t.Fatalf("repeated result: %s", key)
+								}
+								seen[key] = true
+							}
+							if got.NextCursor == nil {
+								break
+							}
+							input.Cursor = *got.NextCursor
+							if page == 49 {
+								t.Fatal("cursor did not terminate")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func legacySearchPage(t *testing.T, db *sqlite.DB, input domain.SearchInput) domain.SearchPage {
+	t.Helper()
+	input, err := input.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	where := []string{"search_index MATCH ?"}
+	args := []any{input.SnippetLength, input.Query}
+	if !input.IncludeArchived {
+		where = append(where, "(search_index.issue_id IS NULL OR issues.archived_at IS NULL)")
+	}
+	if len(input.EntityTypes) > 0 {
+		placeholders := []string{}
+		for _, kind := range input.EntityTypes {
+			placeholders = append(placeholders, "?")
+			args = append(args, string(kind))
+		}
+		where = append(where, "search_index.entity_type IN ("+strings.Join(placeholders, ",")+")")
+	}
+	statement := `WITH matches AS MATERIALIZED (
+	 SELECT search_index.entity_type,search_index.entity_id,search_index.issue_id,search_index.title,
+	 substr(snippet(search_index,-1,'[',']','...',64),1,?) AS snippet,bm25(search_index) AS score
+	 FROM search_index LEFT JOIN issues ON issues.id = search_index.issue_id WHERE ` + strings.Join(where, " AND ") + `)
+	 SELECT entity_type,entity_id,issue_id,title,snippet,score FROM matches`
+	codec := pagination.NewCodec[searchPageBenchmarkCursor](0)
+	if input.Cursor != "" {
+		after, err := codec.Decode(input.Cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		statement += ` WHERE score > ? OR (score = ? AND (entity_type > ? OR (entity_type = ? AND entity_id > ?)))`
+		args = append(args, after.Score, after.Score, after.EntityType, after.EntityType, after.EntityID)
+	}
+	statement += ` ORDER BY score,entity_type,entity_id LIMIT ?`
+	args = append(args, input.Limit+1)
+	result := domain.SearchPage{Results: []domain.SearchResult{}}
+	if err := db.Read(context.Background(), func(ctx context.Context, query sqlite.Queryer) error {
+		rows, err := query.QueryContext(ctx, statement, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item domain.SearchResult
+			var issueID sql.NullString
+			if err := rows.Scan(&item.EntityType, &item.EntityID, &issueID, &item.Title, &item.Snippet, &item.Score); err != nil {
+				return err
+			}
+			if issueID.Valid {
+				item.IssueID = &issueID.String
+			}
+			result.Results = append(result.Results, item)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) > input.Limit {
+		result.HasMore = true
+		result.Results = result.Results[:input.Limit]
+		last := result.Results[len(result.Results)-1]
+		cursor, err := codec.Encode(searchPageBenchmarkCursor{Score: last.Score, EntityType: string(last.EntityType), EntityID: last.EntityID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.NextCursor = &cursor
+	}
+	return domain.CloneSearchPage(result)
 }
 
 func TestGetChangesReturnsOrderedFilteredIncrementalPages(t *testing.T) {

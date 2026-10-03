@@ -91,26 +91,29 @@ func (repository *SearchRepository) Search(ctx context.Context, command ports.Se
 		}
 
 		statement := `WITH matches AS MATERIALIZED (
-			SELECT search_index.entity_type, search_index.entity_id, search_index.issue_id,
-				search_index.title,
-				substr(snippet(search_index, -1, '[', ']', '...', 64), 1, ?) AS snippet,
+			SELECT search_index.rowid AS fts_rowid, search_index.entity_type, search_index.entity_id,
 				bm25(search_index) AS score
 			FROM search_index
 			LEFT JOIN issues ON issues.id = search_index.issue_id
 			WHERE ` + strings.Join(where, " AND ") + `
-		)
-		SELECT entity_type, entity_id, issue_id, title, snippet, score
+		), page AS MATERIALIZED (
+		SELECT fts_rowid, entity_type, entity_id, score
 		FROM matches`
 		queryArgs := make([]any, 0, len(args)+6)
-		queryArgs = append(queryArgs, input.SnippetLength)
 		queryArgs = append(queryArgs, args...)
 		if after != nil {
 			statement += ` WHERE score > ? OR (score = ? AND
 				(entity_type > ? OR (entity_type = ? AND entity_id > ?)))`
 			queryArgs = append(queryArgs, after.Score, after.Score, after.EntityType, after.EntityType, after.EntityID)
 		}
-		statement += " ORDER BY score ASC, entity_type ASC, entity_id ASC LIMIT ?"
-		queryArgs = append(queryArgs, input.Limit+1)
+		statement += ` ORDER BY score ASC, entity_type ASC, entity_id ASC LIMIT ?
+		)
+		SELECT page.entity_type, page.entity_id, search_index.issue_id, search_index.title,
+			substr(snippet(search_index, -1, '[', ']', '...', 64), 1, ?) AS snippet, page.score
+		FROM page CROSS JOIN search_index
+		WHERE search_index.rowid = page.fts_rowid AND search_index MATCH ?
+		ORDER BY page.score ASC, page.entity_type ASC, page.entity_id ASC`
+		queryArgs = append(queryArgs, input.Limit+1, input.SnippetLength, input.Query)
 
 		rows, err := query.QueryContext(ctx, statement, queryArgs...)
 		if err != nil {
