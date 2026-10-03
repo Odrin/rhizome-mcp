@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-03
+
+### Fixed
+
+- **Review decisions stay bound to a fresh target** — Review requests now freeze their exact target when opened, and a bound review attempt loses authority when the issue changes and makes that target stale. Review listings use the same freshness rules, preventing stale requests or attempts from being presented as actionable or approving changed work.
+
+- **Logical project imports preserve linked data and event history** — Import now replays source events in source-ID order and remaps structured artifact references in review targets, requests, and gate evidence to their destination IDs. Invalid cross-issue artifact references are rejected during validation instead of producing broken links after import.
+
+- **Malformed MCP credentials are rejected without reflecting secrets** — Invalid `agent_session_handle` and `lease_token` arguments receive structured, value-free validation errors across stdio and HTTP, so malformed credentials cannot leak back through schema diagnostics.
+
+- **Issue and connection edge cases are handled consistently** — Combined epic retyping and completion is validated as one transition; `connect` preserves an explicitly configured data root in generated client registrations; and npm publication fails closed when registry lookups fail rather than treating an unavailable registry as evidence that a package is absent.
+
+- **Reservation conflicts retain wildcard matches** — The optimized conflict lookup no longer drops active wildcard reservation candidates, preserving correct conflict detection for overlapping resources.
+
+- **Demo cleanup only removes owned state** — Demo scripts verify their state directory is owned by the demo before recursive cleanup, preventing cleanup from deleting unrelated paths.
+
+### Changed
+
+- **Large-project search, graph, planning, review, and activity queries do less repeated work** — Search updates avoid full-corpus scans and snippets are rendered only after pagination; rooted graph queries load candidates by frontier and deduplicate edges locally; planning reuses blocker adjacency; review listing uses keyset indexes and batched freshness checks; activity payload hydration is batched and scoped activity rows are indexed. Reservation overlap checks are also optimized while retaining wildcard correctness.
+
+- **SQLite startup and write contention scale more predictably** — Opening a database at the current schema verifies migrations without taking a writer lock, migration read-snapshot history is deterministic, and local writers are admitted before borrowing pooled connections to avoid connection-pool deadlocks under concurrent writes.
+
+- **VS Code Marketplace versions remain monotonic across release tags** — Extension packaging now maps stable and beta tags to ordered, unique Marketplace versions and rejects unsupported or overflowing tags, preventing a newly published extension from colliding with or sorting below an earlier release.
+
+- **Codex connection output escapes executable paths** — Generated TOML correctly quotes paths containing special characters so registrations remain valid and preserve the intended command.
+
+### Internal
+
+- **Release publishing is gated on successful verification** — npm publication and GitHub release asset upload now require the release verification job to pass. A dedicated workflow test checks dependency and event conditions so a failed, cancelled, or skipped verification cannot publish artifacts.
+
 ## [1.5.2] - 2026-09-28
 
 ### Fixed
