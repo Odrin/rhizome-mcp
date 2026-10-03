@@ -11,12 +11,95 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
 )
+
+func TestReviewListKeysetKeepsTimestampTiesAndAcceptsLegacyOffsets(t *testing.T) {
+	fixture := newReviewFixture(t, "review-keyset")
+	defer fixture.close()
+	issueID := fixture.insertIssue(t, "review pagination")
+	created := sqlite.FormatStorageTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET version=6 WHERE id=?`, issueID); err != nil {
+			return err
+		}
+		for i := 1; i <= 6; i++ {
+			targetID, requestID := fmt.Sprintf("%026d", i+10), fmt.Sprintf("%026d", i+20)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+				VALUES (?, ?, ?, 0, '[]', '["implementation"]', 1, ?)`, targetID, issueID, i, created); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at, resolved_at)
+				VALUES (?, ?, ?, ?, 0, '[]', '["implementation"]', 'approved', 1, ?, ?)`, requestID, targetID, issueID, i, created, created); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := sqlite.NewIssueRepository(fixture.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewReviewService(fixture.repository, issues,
+		clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)), fixture.generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2})
+	if err != nil || first.NextCursor == nil || len(first.Items) != 2 ||
+		first.Items[0].Request.ID != fmt.Sprintf("%026d", 26) || first.Items[1].Request.ID != fmt.Sprintf("%026d", 25) {
+		t.Fatalf("first page: %+v, %v", first, err)
+	}
+	legacy := "2"
+	oldPage, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Cursor: &legacy})
+	if err != nil || len(oldPage.Items) != 2 || oldPage.Items[0].Request.ID != fmt.Sprintf("%026d", 24) {
+		t.Fatalf("legacy offset page: %+v, %v", oldPage, err)
+	}
+	second, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Cursor: first.NextCursor})
+	if err != nil || len(second.Items) != 2 || second.Items[0].Request.ID != oldPage.Items[0].Request.ID {
+		t.Fatalf("keyset page: %+v, %v", second, err)
+	}
+	// A new head row must not shift an already-issued keyset cursor.
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		targetID, requestID := fmt.Sprintf("%026d", 100), fmt.Sprintf("%026d", 101)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+			VALUES (?, ?, 7, 0, '[]', '["implementation"]', 1, ?)`, targetID, issueID, created); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at, resolved_at)
+			VALUES (?, ?, ?, 7, 0, '[]', '["implementation"]', 'open', 1, ?, NULL)`, requestID, targetID, issueID, created)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Cursor: first.NextCursor})
+	if err != nil || len(again.Items) != 2 || again.Items[0].Request.ID != second.Items[0].Request.ID {
+		t.Fatalf("keyset shifted after insertion: %+v, %v", again, err)
+	}
+	open := "open"
+	claimable := true
+	filtered, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Status: &open, Claimable: &claimable})
+	if err != nil || len(filtered.Items) != 0 || filtered.HasMore {
+		t.Fatalf("stale open request was claimable: %+v, %v", filtered, err)
+	}
+	claimable = false
+	filtered, err = service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Status: &open, Claimable: &claimable})
+	if err != nil || len(filtered.Items) != 1 || filtered.Items[0].Request.ID != fmt.Sprintf("%026d", 101) {
+		t.Fatalf("status/claimability filter: %+v, %v", filtered, err)
+	}
+	for _, invalid := range []string{"k1:", "k1:e30", "k1:%%%%", "-1", "not-a-cursor"} {
+		if _, err := service.ListReviewRequests(fixture.ctx, application.ListReviewRequestsInput{Limit: 2, Cursor: &invalid}); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+			t.Fatalf("cursor %q error = %v", invalid, err)
+		}
+	}
+}
 
 func TestReviewRepositoryLifecycleCreatesEventsAndOutcome(t *testing.T) {
 	fixture := newReviewFixture(t, "review-lifecycle")

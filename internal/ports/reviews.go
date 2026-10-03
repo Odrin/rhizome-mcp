@@ -57,19 +57,23 @@ type GetReviewRequestResult struct {
 
 // ListReviewRequestsQuery carries filtering and pagination for review requests.
 type ListReviewRequestsQuery struct {
-	Status *domain.ReviewRequestStatus
-	Limit  int
-	Offset int
+	Status         *domain.ReviewRequestStatus
+	Limit          int
+	Offset         int
+	AfterCreatedAt string
+	AfterID        string
 }
 
 // ListReviewRequestsResult is a deterministic page of review requests.
 // StaleTargets holds the IDs of the page's requests whose frozen target no
 // longer matches the issue; those are not claimable regardless of status.
 type ListReviewRequestsResult struct {
-	Items        []domain.ReviewRequest
-	HasMore      bool
-	NextOffset   int
-	StaleTargets map[string]bool
+	Items         []domain.ReviewRequest
+	HasMore       bool
+	NextOffset    int
+	LastCreatedAt time.Time
+	LastID        string
+	StaleTargets  map[string]bool
 }
 
 // ResolveReviewRequestCommand carries the outcome for a reviewed request.

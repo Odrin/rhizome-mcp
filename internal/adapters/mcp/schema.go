@@ -457,7 +457,7 @@ func schemaListReviewRequests() *jsonschema.Schema {
 		"status":    &jsonschema.Schema{Type: "string", Enum: []any{"open", "claimed", "approved", "changes_requested", "blocked", "cancelled", "superseded"}},
 		"claimable": &jsonschema.Schema{Type: "boolean"},
 		"limit":     limit,
-		"cursor":    nullableBoundedStringSchema(64),
+		"cursor":    nullableBoundedStringSchema(256),
 	}))
 }
 

@@ -241,7 +241,8 @@ func (repository *ReviewRepository) GetReviewRequest(ctx context.Context, reques
 	return ports.GetReviewRequestResult{Request: request, Target: target, TargetStale: stale}, nil
 }
 
-// ListReviewRequests loads review requests with optional status filtering and offset pagination.
+// ListReviewRequests loads a deterministic page, accepting legacy offsets and
+// continuing with an ordering-key cursor.
 func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, query ports.ListReviewRequestsQuery) (ports.ListReviewRequestsResult, error) {
 	if repository == nil || repository.db == nil {
 		return ports.ListReviewRequestsResult{}, domain.NewError(domain.CodeStorageConfiguration, "SQLite database is required", false)
@@ -255,13 +256,25 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 		where = "WHERE review_requests.status = ?"
 		args = append(args, string(*query.Status))
 	}
+	if query.AfterID != "" {
+		if where == "" {
+			where = "WHERE "
+		} else {
+			where += " AND "
+		}
+		where += "(review_requests.created_at, review_requests.id) < (?, ?)"
+		args = append(args, query.AfterCreatedAt, query.AfterID)
+	}
 	var items []domain.ReviewRequest
 	staleTargets := map[string]bool{}
-	err := repository.db.Read(ctx, func(ctx context.Context, queryer Queryer) error {
+	err := repository.db.readSnapshot(ctx, func(ctx context.Context, queryer Queryer) error {
+		offset := query.Offset
+		if query.AfterID != "" {
+			offset = 0
+		}
 		rows, err := queryer.QueryContext(ctx, `SELECT `+reviewRequestColumnsQualified+`
             FROM review_requests
-            LEFT JOIN review_targets ON review_targets.id = review_requests.target_id
-            `+where+` ORDER BY review_requests.created_at DESC, review_requests.id DESC LIMIT ? OFFSET ?`, append(args, query.Limit+1, query.Offset)...)
+            `+where+` ORDER BY review_requests.created_at DESC, review_requests.id DESC LIMIT ? OFFSET ?`, append(args, query.Limit+1, offset)...)
 		if err != nil {
 			return err
 		}
@@ -276,22 +289,12 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		// The cursor is closed before the per-request staleness queries run:
-		// they reuse this same connection, and issuing them while the page's
-		// own rows are still open would contend with it.
+		// Release the page cursor before the batch freshness query reuses
+		// this connection within the same read snapshot.
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		for _, request := range items {
-			stale, err := reviewTargetStale(ctx, queryer, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
-			if err != nil {
-				return err
-			}
-			if stale {
-				staleTargets[request.ID] = true
-			}
-		}
-		return nil
+		return batchReviewTargetStaleness(ctx, queryer, items[:min(len(items), query.Limit)], staleTargets)
 	})
 	if err != nil {
 		return ports.ListReviewRequestsResult{}, err
@@ -300,7 +303,52 @@ func (repository *ReviewRepository) ListReviewRequests(ctx context.Context, quer
 	if hasMore {
 		items = items[:query.Limit]
 	}
-	return ports.ListReviewRequestsResult{Items: items, HasMore: hasMore, NextOffset: query.Offset + len(items), StaleTargets: staleTargets}, nil
+	result := ports.ListReviewRequestsResult{Items: items, HasMore: hasMore, NextOffset: query.Offset + len(items), StaleTargets: staleTargets}
+	if len(items) > 0 {
+		result.LastCreatedAt, result.LastID = items[len(items)-1].CreatedAt, items[len(items)-1].ID
+	}
+	return result, nil
+}
+
+func batchReviewTargetStaleness(ctx context.Context, queryer Queryer, items []domain.ReviewRequest, staleTargets map[string]bool) error {
+	if len(items) == 0 {
+		return nil
+	}
+	values := make([]string, len(items))
+	args := make([]any, 0, len(items)*4)
+	for index, request := range items {
+		values[index] = "(?, ?, ?, ?)"
+		args = append(args, request.ID, request.IssueID, request.TargetIssueVersion, request.TargetEventID)
+	}
+	rows, err := queryer.QueryContext(ctx, `WITH page(id, issue_id, target_version, event_id) AS (VALUES `+strings.Join(values, ",")+`)
+		SELECT page.id, issues.id IS NULL, CASE
+			WHEN EXISTS (SELECT 1 FROM issue_events AS event WHERE event.issue_id = page.issue_id
+				AND event.id > page.event_id AND `+reviewedWorkEventScopeSQL+`
+				AND NOT (`+priorityOnlyIssueUpdateSQL+`)) THEN 1
+			WHEN issues.version = page.target_version THEN 0
+			ELSE issues.version != page.target_version + (SELECT COUNT(*) FROM issue_events AS event
+				WHERE event.issue_id = page.issue_id AND event.id > page.event_id
+				AND `+reviewedWorkEventScopeSQL+` AND `+priorityOnlyIssueUpdateSQL+`)
+			END
+		FROM page LEFT JOIN issues ON issues.id = page.issue_id`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var missing, stale bool
+		if err := rows.Scan(&id, &missing, &stale); err != nil {
+			return err
+		}
+		if missing {
+			return domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+		}
+		if stale {
+			staleTargets[id] = true
+		}
+	}
+	return rows.Err()
 }
 
 // CancelReviewRequest transitions an open or claimed request to cancelled.

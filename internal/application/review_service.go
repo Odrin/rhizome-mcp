@@ -4,11 +4,15 @@ package application
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -193,15 +197,35 @@ func (service *ReviewService) ListReviewRequests(ctx context.Context, input List
 	}
 	input = normalized
 	limit := input.Limit
-	offset := 0
+	page := ports.ListReviewRequestsQuery{Limit: limit}
 	if input.Cursor != nil {
 		cursorValue := strings.TrimSpace(*input.Cursor)
 		if cursorValue != "" {
-			parsed, err := strconv.Atoi(cursorValue)
-			if err != nil || parsed < 0 {
-				return ListReviewRequestsResult{}, domain.NewError(domain.CodeInvalidArgument, "cursor must be a non-negative integer", false)
+			if strings.HasPrefix(cursorValue, "k1:") {
+				var position struct {
+					CreatedAt string `json:"t"`
+					ID        string `json:"i"`
+					Offset    int    `json:"o"`
+				}
+				data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(cursorValue, "k1:"))
+				if err != nil || json.Unmarshal(data, &position) != nil {
+					return ListReviewRequestsResult{}, domain.NewError(domain.CodeInvalidArgument, "invalid review cursor", false)
+				}
+				createdAt, err := time.Parse(time.RFC3339Nano, position.CreatedAt)
+				if err != nil || createdAt.Location() != time.UTC || position.CreatedAt != createdAt.UTC().Format("2006-01-02T15:04:05.000000000Z") || position.Offset < 0 {
+					return ListReviewRequestsResult{}, domain.NewError(domain.CodeInvalidArgument, "invalid review cursor", false)
+				}
+				if _, err := ids.ParseStrict(position.ID); err != nil {
+					return ListReviewRequestsResult{}, domain.NewError(domain.CodeInvalidArgument, "invalid review cursor", false)
+				}
+				page.AfterCreatedAt, page.AfterID, page.Offset = position.CreatedAt, position.ID, position.Offset
+			} else {
+				parsed, err := strconv.Atoi(cursorValue)
+				if err != nil || parsed < 0 {
+					return ListReviewRequestsResult{}, domain.NewError(domain.CodeInvalidArgument, "cursor must be a non-negative integer or a review keyset cursor", false)
+				}
+				page.Offset = parsed
 			}
-			offset = parsed
 		}
 	}
 	var status *domain.ReviewRequestStatus
@@ -212,7 +236,8 @@ func (service *ReviewService) ListReviewRequests(ctx context.Context, input List
 		}
 		status = &parsed
 	}
-	result, err := service.repository.ListReviewRequests(ctx, ports.ListReviewRequestsQuery{Status: status, Limit: limit, Offset: offset})
+	page.Status = status
+	result, err := service.repository.ListReviewRequests(ctx, page)
 	if err != nil {
 		return ListReviewRequestsResult{}, err
 	}
@@ -226,7 +251,18 @@ func (service *ReviewService) ListReviewRequests(ctx context.Context, input List
 	}
 	nextCursor := (*string)(nil)
 	if result.HasMore {
-		value := strconv.Itoa(result.NextOffset)
+		if result.LastID == "" {
+			return ListReviewRequestsResult{}, domain.NewError(domain.CodeStorageCorrupt, "review page has no continuation key", false)
+		}
+		payload, err := json.Marshal(struct {
+			CreatedAt string `json:"t"`
+			ID        string `json:"i"`
+			Offset    int    `json:"o"`
+		}{result.LastCreatedAt.UTC().Format("2006-01-02T15:04:05.000000000Z"), result.LastID, result.NextOffset})
+		if err != nil {
+			return ListReviewRequestsResult{}, err
+		}
+		value := "k1:" + base64.RawURLEncoding.EncodeToString(payload)
 		nextCursor = &value
 	}
 	return ListReviewRequestsResult{Items: items, NextCursor: nextCursor, HasMore: result.HasMore}, nil

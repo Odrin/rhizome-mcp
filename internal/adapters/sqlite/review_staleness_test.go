@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -43,6 +44,7 @@ func TestCreateReviewRequestRejectsTargetThatDoesNotMatchTheIssue(t *testing.T) 
 			if testCase.mutate != nil {
 				testCase.mutate()
 			}
+
 			_, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 				Purposes:           []string{"implementation"},
 				RequestID:          fixture.newID(t),
@@ -57,6 +59,51 @@ func TestCreateReviewRequestRejectsTargetThatDoesNotMatchTheIssue(t *testing.T) 
 			}
 			assertReviewRequestCount(t, fixture.ctx, fixture.db, issueID, 0)
 		})
+	}
+}
+
+func TestReviewListBatchesPriorityOnlyAndSubstantiveFreshness(t *testing.T) {
+	fixture := newReviewFixture(t, "review-batch-freshness")
+	defer fixture.close()
+	issueID := fixture.insertIssue(t, "batch freshness")
+	created := sqlite.FormatStorageTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		for i := 1; i <= 3; i++ {
+			targetID, requestID := fmt.Sprintf("%026d", i+10), fmt.Sprintf("%026d", i+20)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(id, issue_id, issue_version, latest_event_id, artifact_ids_json, purposes_json, version, created_at)
+				VALUES (?, ?, ?, ?, '[]', '["implementation"]', 1, ?)`, targetID, issueID, i, i-1, created); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_requests(id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, purposes_json, status, version, created_at, resolved_at)
+				VALUES (?, ?, ?, ?, ?, '[]', '["implementation"]', 'approved', 1, ?, ?)`,
+				requestID, targetID, issueID, i, i-1, created, created); err != nil {
+				return err
+			}
+		}
+		for _, payload := range []string{`{"changed_fields":["priority"]}`, `{"changed_fields":["title"]}`} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, source, payload, created_at)
+				VALUES (?, 'issue_updated', 'issue', ?, ?)`, issueID, payload, created); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET version=3 WHERE id=?`, issueID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := fixture.repository.ListReviewRequests(fixture.ctx, ports.ListReviewRequestsQuery{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 2 || list.StaleTargets[fmt.Sprintf("%026d", 23)] ||
+		!list.StaleTargets[fmt.Sprintf("%026d", 22)] || len(list.StaleTargets) != 1 {
+		t.Fatalf("first batch stale targets = %+v", list.StaleTargets)
+	}
+	remaining, err := fixture.repository.ListReviewRequests(fixture.ctx, ports.ListReviewRequestsQuery{
+		Limit: 2, AfterCreatedAt: created, AfterID: fmt.Sprintf("%026d", 22),
+	})
+	if err != nil || len(remaining.Items) != 1 || !remaining.StaleTargets[fmt.Sprintf("%026d", 21)] {
+		t.Fatalf("remaining batch: %+v, %v", remaining, err)
 	}
 }
 

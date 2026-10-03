@@ -658,9 +658,12 @@ func TestBoardServiceGetBoardReportsPerCollectionTruncation(t *testing.T) {
 			reservationRepo := &boardRecordingReservationRepository{
 				listResult: domain.ReservationList{Items: []domain.Reservation{}, HasMore: tt.reservationsHasMore},
 			}
-			reviewRepo := &boardRecordingReviewRepository{
-				listResult: ports.ListReviewRequestsResult{Items: []domain.ReviewRequest{}, HasMore: tt.reviewsHasMore},
+			reviewPage := ports.ListReviewRequestsResult{HasMore: tt.reviewsHasMore}
+			if tt.reviewsHasMore {
+				reviewPage.Items = []domain.ReviewRequest{{ID: "00000000000000000000000001", CreatedAt: now}}
+				reviewPage.LastID, reviewPage.LastCreatedAt = reviewPage.Items[0].ID, now
 			}
+			reviewRepo := &boardRecordingReviewRepository{listResult: reviewPage}
 			graphRepo := &boardRecordingGraphRepository{}
 
 			issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, now)

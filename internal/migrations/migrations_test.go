@@ -92,7 +92,8 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		"idx_labels_name_nocase", "idx_one_active_attempt_per_issue", "idx_relations_source", "idx_relations_target",
 		"idx_reservations_active", "idx_reservations_active_identity", "idx_reservations_attempt", "idx_reservations_issue",
 		"idx_review_approvals_issue_purpose", "idx_review_approvals_request_purpose",
-		"idx_review_requests_active_attempt", "idx_review_requests_active_issue_version", "idx_review_requests_active_target", "idx_review_targets_issue_version",
+		"idx_review_requests_active_attempt", "idx_review_requests_active_issue_version", "idx_review_requests_active_target",
+		"idx_review_requests_created_id", "idx_review_requests_open_issue_created_id", "idx_review_requests_status_created_id", "idx_review_targets_issue_version",
 		"idx_search_index_identity_issue_type",
 		"idx_workflow_policies_status_created", "idx_workflow_policy_events_policy",
 	}
@@ -124,10 +125,10 @@ func TestMigrateEmptyDatabaseCreatesCompleteSchema(t *testing.T) {
 		FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != CurrentVersion() || name != "fts_identity" || checksum != ftsIdentityChecksum {
+	if version != CurrentVersion() || name != "review_list_index" || checksum != reviewListIndexChecksum {
 		t.Fatalf("history = (%d, %q, %q), want current embedded migration", version, name, checksum)
 	}
-	actualChecksum := sha256.Sum256([]byte(ftsIdentitySQL))
+	actualChecksum := sha256.Sum256([]byte(reviewListIndexSQL))
 	if checksum != hex.EncodeToString(actualChecksum[:]) {
 		t.Fatalf("stored checksum = %s, want SHA-256 of embedded bytes", checksum)
 	}
@@ -160,6 +161,56 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 	if count != CurrentVersion() || appliedAt != migrationTime.UTC().Format(time.RFC3339Nano) {
 		t.Fatalf("history count/applied_at = %d/%q", count, appliedAt)
+	}
+}
+
+func TestMigrateReviewIndexesUpgradeAndPlans(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path, db := openMigrationDB(t)
+	if _, err := run(ctx, db, clock.NewFakeClock(migrationTime), embeddedCatalog[:17]); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
+	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 1}) {
+		t.Fatalf("upgrade = %+v, %v", result, err)
+	}
+	inspect := openInspectionDB(t, path)
+	for _, test := range []struct {
+		query, index string
+	}{
+		{`SELECT id FROM review_requests ORDER BY created_at DESC, id DESC LIMIT 21`, "idx_review_requests_created_id"},
+		{`SELECT id FROM review_requests WHERE status=? AND (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT 21`, "idx_review_requests_status_created_id"},
+		{`SELECT id FROM review_requests WHERE issue_id=? AND status='open' ORDER BY created_at DESC, id DESC LIMIT 1`, "idx_review_requests_open_issue_created_id"},
+	} {
+		args := []any{}
+		if strings.Contains(test.query, "status=?") {
+			args = []any{"open", nowText(), testID(1)}
+		} else if strings.Contains(test.query, "issue_id=?") {
+			args = []any{testID(1)}
+		}
+		rows, err := inspect.Query("EXPLAIN QUERY PLAN "+test.query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(plan.String(), test.index) || strings.Contains(plan.String(), "USE TEMP B-TREE") {
+			t.Fatalf("query plan = %s, want %s without sort", plan.String(), test.index)
+		}
 	}
 }
 
@@ -328,8 +379,8 @@ func TestMigrateReviewContextUpgradePreservesHistory(t *testing.T) {
 			t.Fatalf("history row %d changed: before %+v after %+v", index, row, after[index])
 		}
 	}
-	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "fts_identity" || after[len(after)-1].checksum != ftsIdentityChecksum {
-		t.Fatalf("new history row = %+v, want fts_identity migration", after[len(after)-1])
+	if after[len(after)-1].version != CurrentVersion() || after[len(after)-1].name != "review_list_index" || after[len(after)-1].checksum != reviewListIndexChecksum {
+		t.Fatalf("new history row = %+v, want review_list_index migration", after[len(after)-1])
 	}
 	var count int
 	if err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
@@ -484,15 +535,18 @@ func TestConcurrentUpgradesRecheckHistoryUnderWriterLock(t *testing.T) {
 			t.Fatalf("concurrent upgrade: %v", err)
 		}
 	}
-	var applied int
+	var applied, winners int
 	for result := range results {
 		if result.Version != CurrentVersion() {
 			t.Fatalf("upgrade version = %d", result.Version)
 		}
 		applied += result.Applied
+		if result.Applied > 0 {
+			winners++
+		}
 	}
-	if applied != 1 {
-		t.Fatalf("applied migrations = %d, want one owner", applied)
+	if applied != CurrentVersion()-16 || winners != 1 {
+		t.Fatalf("applied migrations = %d across %d owners, want %d across one owner", applied, winners, CurrentVersion()-16)
 	}
 }
 
@@ -724,7 +778,7 @@ func TestMigrateFTSIdentityUpgradeAndIndexedLookups(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Migrate(ctx, db, clock.NewFakeClock(migrationTime))
-	if err != nil || result != (Result{Version: 17, Applied: 1}) {
+	if err != nil || result != (Result{Version: CurrentVersion(), Applied: 2}) {
 		t.Fatalf("upgrade = %+v, %v", result, err)
 	}
 	var count, mismatch int

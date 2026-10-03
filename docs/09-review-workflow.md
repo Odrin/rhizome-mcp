@@ -192,6 +192,17 @@ append-only: `review_requested`, `review_claimed`, `review_approved`,
 `review_changes_requested`, `review_blocked`, `review_cancelled`, and
 `review_superseded`.
 
+Review listing orders by `(created_at DESC, id DESC)` and returns an opaque
+`k1:` continuation cursor carrying both ordering keys and the consumed count.
+The cursor seeks strictly after the last returned request, including when
+timestamps tie, so newly inserted head rows cannot shift subsequent pages.
+Previously issued non-negative decimal offset cursors remain accepted; their
+first continuation uses the keyset form. Status and claimability filtering
+retain their existing semantics: claimability is derived after the bounded
+status-filtered page, not used to refill a page. Page selection and its
+batched, issue-scoped freshness projection run in one read snapshot. A claim
+still checks freshness inside its authoritative writer transaction.
+
 ## Follow-up and re-review
 
 Changes requested creates an explicit implementation follow-up linked to the

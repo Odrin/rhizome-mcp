@@ -505,9 +505,14 @@ func TestMigrateExistingProjectMigratesStaleProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Write(context.Background(), func(ctx context.Context, tx sqlite.Executor) error {
-		// Recreate the schema boundary for 017, not just an older history row.
-		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", migrations.CurrentVersion()); err != nil {
+		// Recreate the schema boundary before 017, not just an older history row.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= 17"); err != nil {
 			return err
+		}
+		for _, index := range []string{"idx_review_requests_created_id", "idx_review_requests_status_created_id", "idx_review_requests_open_issue_created_id"} {
+			if _, err := tx.ExecContext(ctx, "DROP INDEX "+index); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, "DROP TABLE search_index_identity"); err != nil {
 			return err

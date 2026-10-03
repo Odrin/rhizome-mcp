@@ -88,6 +88,13 @@ func TestSchemaConstructorsProduceMarshalableSchemas(t *testing.T) {
 	}
 }
 
+func TestReviewListCursorSchemaAcceptsKeysetLength(t *testing.T) {
+	cursor := schemaListReviewRequests().Properties["cursor"]
+	if cursor == nil || cursor.MaxLength == nil || *cursor.MaxLength != 256 {
+		t.Fatalf("review cursor maxLength = %v, want 256", cursor)
+	}
+}
+
 func TestOutputSchemaConstructorsProduceTopLevelObjects(t *testing.T) {
 	constructors := map[string]func() *jsonschema.Schema{
 		"export project": schemaExportProjectOutput,

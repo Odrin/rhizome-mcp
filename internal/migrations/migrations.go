@@ -69,6 +69,9 @@ var reviewTargetSnapshotSQL string
 //go:embed sql/017_fts_identity.sql
 var ftsIdentitySQL string
 
+//go:embed sql/018_review_list_index.sql
+var reviewListIndexSQL string
+
 // Tests verify this checksum against the exact embedded SQL bytes. After an
 // intentional edit, regenerate it with: shasum -a 256 internal/migrations/sql/001_initial_schema.sql
 const initialSchemaChecksum = "2a072c9af462f54b08026d68108b5c0f2c17e7a0eec1ff9366b9824a63ef80ef"
@@ -88,6 +91,7 @@ const searchIndexGatesChecksum = "cd1437f0d9013f554074aa68f3e1a11a20f7556ea5082f
 const projectOriginChecksum = "27b1a4282449ad54071bd5ace3735430a5e54c0f04aac43b9870ea1d103497bb"
 const reviewTargetSnapshotChecksum = "8f25f49de2ac6faac481702c13501b87c77c75eb59b7674ba48a5ad5bd074c18"
 const ftsIdentityChecksum = "be12e3016458dc12785707556491bdf8f82dcbb7e84acd4cd56310e5218b720c"
+const reviewListIndexChecksum = "5312406d1de72fcda7286d7fd7090470a37f177f4e0602c04dab3fadd8fb3ec5"
 
 var (
 	migrationNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$`)
@@ -193,6 +197,12 @@ var (
 			name:     "fts_identity",
 			checksum: ftsIdentityChecksum,
 			sql:      ftsIdentitySQL,
+		},
+		{
+			version:  18,
+			name:     "review_list_index",
+			checksum: reviewListIndexChecksum,
+			sql:      reviewListIndexSQL,
 		},
 	}
 )

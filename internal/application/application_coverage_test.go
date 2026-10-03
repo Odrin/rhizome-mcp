@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,8 +235,17 @@ func TestReviewServiceValidationAndDelegation(t *testing.T) {
 		if len(result.Items) != 1 || result.Items[0].Request.ID != "req-open" || !result.Items[0].Claimable {
 			t.Fatalf("filtered items = %#v", result.Items)
 		}
-		if result.NextCursor == nil || *result.NextCursor != "7" || !result.HasMore {
+		if result.NextCursor == nil || !strings.HasPrefix(*result.NextCursor, "k1:") || !result.HasMore {
 			t.Fatalf("next cursor = %#v, has more = %v", result.NextCursor, result.HasMore)
+		}
+		if len(*result.NextCursor) <= 64 || len(*result.NextCursor) > 256 {
+			t.Fatalf("keyset cursor length = %d, want schema-compatible length 65..256", len(*result.NextCursor))
+		}
+		if _, err := service.ListReviewRequests(context.Background(), ListReviewRequestsInput{Limit: 20, Cursor: result.NextCursor}); err != nil {
+			t.Fatalf("keyset continuation: %v", err)
+		}
+		if reviewRepo.lastListQuery.AfterID != "00000000000000000000000001" || reviewRepo.lastListQuery.Offset != 7 {
+			t.Fatalf("decoded keyset = %+v", reviewRepo.lastListQuery)
 		}
 	})
 
@@ -522,7 +532,8 @@ func (r *recordingReviewRepository) GetReviewRequest(context.Context, string) (p
 func (r *recordingReviewRepository) ListReviewRequests(_ context.Context, query ports.ListReviewRequestsQuery) (ports.ListReviewRequestsResult, error) {
 	r.listCalls++
 	r.lastListQuery = query
-	return ports.ListReviewRequestsResult{Items: r.listItems, HasMore: r.listHasMore, NextOffset: r.nextOffset}, nil
+	return ports.ListReviewRequestsResult{Items: r.listItems, HasMore: r.listHasMore, NextOffset: r.nextOffset,
+		LastCreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), LastID: "00000000000000000000000001"}, nil
 }
 
 func (r *recordingReviewRepository) CancelReviewRequest(_ context.Context, command ports.ReviewMutationCommand) (ports.ReviewMutationResult, error) {
