@@ -33,16 +33,21 @@ func (service *GraphService) GetIssueGraph(ctx context.Context, input domain.Get
 	if err != nil {
 		return domain.GraphResult{}, err
 	}
-	snapshot, err := service.repository.LoadGraph(ctx, ports.LoadGraphCommand{RootIdentifier: &identifier, Now: service.clock.Now().UTC()})
-	if err != nil {
-		return domain.GraphResult{}, err
-	}
-	return domain.BuildGraph(snapshot, domain.GraphTraversal{
-		RootIssueIDs: normalizedRootIDs(snapshot), ExplicitRootID: dereference(snapshot.RootIssueID),
+	traversal := domain.GraphTraversal{
 		Depth: *normalized.Depth, MaxNodes: *normalized.MaxNodes, Direction: normalized.Direction,
 		RelationTypes: normalized.RelationTypes, IncludeHierarchy: *normalized.IncludeHierarchy,
 		IncludeTerminal: *normalized.IncludeTerminal,
-	}), nil
+	}
+	snapshot, err := service.repository.LoadGraph(ctx, ports.LoadGraphCommand{RootIdentifier: &identifier, Now: service.clock.Now().UTC(), Traversal: &traversal})
+	if err != nil {
+		return domain.GraphResult{}, err
+	}
+	if snapshot.SelectedResult != nil {
+		return *snapshot.SelectedResult, nil
+	}
+	traversal.RootIssueIDs = normalizedRootIDs(snapshot)
+	traversal.ExplicitRootID = dereference(snapshot.RootIssueID)
+	return domain.BuildGraph(snapshot, traversal), nil
 }
 
 // GetPlanningGraph returns the planning projection through the same traversal
@@ -60,24 +65,29 @@ func (service *GraphService) GetPlanningGraph(ctx context.Context, input domain.
 		}
 		command.RootIdentifier = &identifier
 	}
-	snapshot, err := service.repository.LoadGraph(ctx, command)
-	if err != nil {
-		return domain.GraphResult{}, err
-	}
-	roots := snapshot.TopLevelIssueIDs
-	if snapshot.RootIssueID != nil {
-		roots = normalizedRootIDs(snapshot)
-	}
 	relationTypes := []domain.RelationType{domain.RelationTypeBlocks}
 	if *normalized.IncludeRelated {
 		relationTypes = append(relationTypes, domain.RelationTypeRelatedTo)
 	}
-	return domain.BuildGraph(snapshot, domain.GraphTraversal{
-		RootIssueIDs: roots, ExplicitRootID: dereference(snapshot.RootIssueID),
+	traversal := domain.GraphTraversal{
 		Depth: *normalized.Depth, MaxNodes: *normalized.MaxNodes, Direction: domain.GraphDirectionBoth,
 		RelationTypes: relationTypes, IncludeHierarchy: true, IncludeTerminal: *normalized.IncludeTerminal,
 		ExcludeReview: !*normalized.IncludeReview, PreferNonTerminal: true,
-	}), nil
+	}
+	command.Traversal = &traversal
+	snapshot, err := service.repository.LoadGraph(ctx, command)
+	if err != nil {
+		return domain.GraphResult{}, err
+	}
+	if snapshot.SelectedResult != nil {
+		return *snapshot.SelectedResult, nil
+	}
+	traversal.RootIssueIDs = snapshot.TopLevelIssueIDs
+	if snapshot.RootIssueID != nil {
+		traversal.RootIssueIDs = normalizedRootIDs(snapshot)
+	}
+	traversal.ExplicitRootID = dereference(snapshot.RootIssueID)
+	return domain.BuildGraph(snapshot, traversal), nil
 }
 
 func normalizedRootIDs(snapshot domain.GraphSnapshot) []string {

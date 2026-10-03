@@ -163,10 +163,13 @@ type GraphEdge struct {
 
 // GraphSnapshot is the consistent candidate projection supplied by storage.
 type GraphSnapshot struct {
-	RootIssueID      *string
-	TopLevelIssueIDs []string
-	Nodes            []IssueProjection
-	Edges            []GraphEdge
+	RootIssueID             *string
+	TopLevelIssueIDs        []string
+	Nodes                   []IssueProjection
+	Edges                   []GraphEdge
+	SelectedResult          *GraphResult
+	PlanningEntryPoints     []string
+	PlanningEntryPointCount *int
 }
 
 // GraphSummary is the compact deterministic count summary shared by graph views.
@@ -407,7 +410,9 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	}
 
 	result.Edges = uniqueSortedGraphEdges(result.Edges, nodesByID)
-	if traversal.PreferNonTerminal {
+	if traversal.PreferNonTerminal && snapshot.PlanningEntryPointCount != nil {
+		result.EntryPoints = append(result.EntryPoints, snapshot.PlanningEntryPoints...)
+	} else if traversal.PreferNonTerminal {
 		// Entry points answer "what can I claim", so truncation must not shrink
 		// them: they are computed over the whole snapshot, which means a
 		// truncated graph can report an entry point that is not in Nodes. A
@@ -436,8 +441,11 @@ func BuildGraph(snapshot GraphSnapshot, traversal GraphTraversal) GraphResult {
 	// exactly what happened. The rooted graph derives entry points from
 	// Nodes, which is already within budget, so the cap is a no-op there.
 	entryPointCount := len(result.EntryPoints)
+	if traversal.PreferNonTerminal && snapshot.PlanningEntryPointCount != nil {
+		entryPointCount = *snapshot.PlanningEntryPointCount
+	}
 	entryPointsCapped := false
-	if traversal.MaxNodes > 0 && len(result.EntryPoints) > traversal.MaxNodes {
+	if traversal.MaxNodes > 0 && entryPointCount > traversal.MaxNodes {
 		result.EntryPoints = result.EntryPoints[:traversal.MaxNodes]
 		entryPointsCapped = true
 	}

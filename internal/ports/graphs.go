@@ -12,6 +12,16 @@ import (
 type LoadGraphCommand struct {
 	RootIdentifier *domain.IssueIdentifier
 	Now            time.Time
+	Stats          *GraphLoadStats
+	Traversal      *domain.GraphTraversal
+}
+
+type GraphLoadStats struct {
+	Queries          int
+	RowsRead         int
+	CandidateNodes   int
+	HydratedNodes    int
+	SnapshotDuration time.Duration
 }
 
 // GraphRepository reads one consistent, fully batched graph candidate snapshot.
