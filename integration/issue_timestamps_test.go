@@ -5,6 +5,7 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,7 +170,7 @@ func TestIntegrationIssueTimestampRecoveryRefusesMalformedData(t *testing.T) {
 	backupPath := filepath.Join(t.TempDir(), "refused-repair.db")
 	stdout, stderr, _ := runIntegrationCommandExpectingFailure(t, env.repository,
 		"--data-root", env.dataRoot, "maintenance", "normalize-issue-timestamps", "--backup", backupPath, "--format", "json")
-	if stdout != "" || !strings.Contains(stderr, backupPath) || !strings.Contains(stderr, "invalid") {
+	if stdout != "" || !strings.Contains(stderr, fmt.Sprintf("%q", backupPath)) || !strings.Contains(stderr, "invalid") {
 		t.Fatalf("failure stdout=%s stderr=%s", stdout, stderr)
 	}
 	if _, err := os.Stat(backupPath); err != nil {

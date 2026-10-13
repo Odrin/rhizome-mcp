@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,7 +105,7 @@ func TestProjectIssueTimestampRecoveryRetainsBackupOnFailure(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "failed-recovery.db")
 	report, err := project.NormalizeIssueTimestamps(ctx, path)
-	if err == nil || report.NormalizedCount != 0 || report.BackupPath != path || !strings.Contains(err.Error(), path) {
+	if err == nil || report.NormalizedCount != 0 || report.BackupPath != path || !strings.Contains(err.Error(), fmt.Sprintf("%q", path)) {
 		t.Fatalf("normalize = %+v, %v", report, err)
 	}
 	backup, err := sqlite.Open(ctx, path, sqlite.Options{})
