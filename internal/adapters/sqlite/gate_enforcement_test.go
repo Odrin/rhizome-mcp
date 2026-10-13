@@ -39,12 +39,13 @@ func (site issueWriteSite) key() string { return site.File + ":" + site.Function
 // is the conscious act TestGateEnforcementNoStatusWriteOutsideTheChokePoint
 // exists to force.
 var allowedIssueWriteSites = map[string]string{
-	"attempts.go:FinishAttempt":              "gated: enforcementPointForFinish + evaluateGateAgainstAttemptSnapshot",
-	"issues.go:CreateIssue":                  "gated: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
-	"planning.go:applyPlan":                  "gated per entry: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
-	"issues.go:UpdateIssue":                  "ungated by design: domain.ApplyIssuePatch (internal/domain/issue_patch.go) rejects a status patch to review/done unconditionally, before this file runs, so no gated status can reach here (docs/02 §17.1)",
-	"projects.go:ApplyLogicalProjectImport":  "ungated by design: import is exempt from gate evaluation (docs/02 §17.1, ISSUE-201); it still runs domain.CreateIssueInput{}.Validate() on every imported issue",
-	"unit_of_work.go:ConditionalUpdateIssue": "generic caller-parameterized helper (ports.UnitOfWork) with a dynamic SET clause; it does not itself write status, and TestConditionalUpdateIssueHasNoUngatedCallers guards its callers",
+	"attempts.go:FinishAttempt":                               "gated: enforcementPointForFinish + evaluateGateAgainstAttemptSnapshot",
+	"issues.go:CreateIssue":                                   "gated: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
+	"planning.go:applyPlan":                                   "gated per entry: enforcementPointForCreateStatus + evaluateGateAgainstLivePolicies",
+	"issues.go:UpdateIssue":                                   "ungated by design: domain.ApplyIssuePatch (internal/domain/issue_patch.go) rejects a status patch to review/done unconditionally, before this file runs, so no gated status can reach here (docs/02 §17.1)",
+	"projects.go:ApplyLogicalProjectImport":                   "ungated by design: import is exempt from gate evaluation (docs/02 §17.1, ISSUE-201); it still runs domain.CreateIssueInput{}.Validate() on every imported issue",
+	"unit_of_work.go:ConditionalUpdateIssue":                  "generic caller-parameterized helper (ports.UnitOfWork) with a dynamic SET clause; it does not itself write status, and TestConditionalUpdateIssueHasNoUngatedCallers guards its callers",
+	"issue_timestamp_maintenance.go:NormalizeIssueTimestamps": "maintenance only: normalizes timestamp representations after a backup; never changes status or version",
 }
 
 // TestGateEnforcementNoStatusWriteOutsideTheChokePoint is ISSUE-172's

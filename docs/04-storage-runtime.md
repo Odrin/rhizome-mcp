@@ -436,6 +436,9 @@ Also verify:
 - expired attempts;
 - migration consistency;
 - one-active-attempt invariant;
+- canonical UTC format of `issues.created_at`, `updated_at`, `closed_at`,
+  and `archived_at` (including archived issues); problems include bounded
+  issue identifiers, offending values, and recovery guidance;
 - active reservations without a live attempt, and reservation
   release-state consistency (docs/02 §18);
 - workflow-gate invariants (docs/02 §17, ISSUE-175): policy selector and
@@ -523,6 +526,52 @@ already-fixed-width value is a no-op). `schema_migrations.applied_at` is
 deliberately left untouched: it is never compared with an inequality
 predicate in SQL, so rewriting the migration bookkeeping table's own
 historical rows was judged unnecessary risk for zero benefit.
+
+### 15.2. Issue timestamp recovery
+
+Issue readers remain strict: SQLite's `YYYY-MM-DD HH:MM:SS` text form is
+not a supported stored representation, even though SQLite itself accepts
+it. An invalid issue timestamp returns `STORAGE_CORRUPT` with an
+`INVALID_TIMESTAMP` detail naming the issue's ULID, `ISSUE-N`, field, a
+safely quoted value (limited to 160 bytes), and recovery guidance.
+`list_issues` fails if its fetched rows include a corrupt issue; it never
+silently omits that issue or returns an apparently complete partial page.
+
+Run `doctor` (or `doctor --full`) to detect non-canonical and invalid issue
+timestamp cells without modifying them. The `issue_timestamps` check
+counts all problems and shows at most ten details in sequence/column order.
+It also flags zero-offset RFC3339 values that readers can accept but whose
+text does not match the fixed-width storage format.
+
+To recover, stop mutating clients and run from the affected repository:
+
+```bash
+rhizome-mcp maintenance normalize-issue-timestamps --backup /path/to/new-backup.db --format json
+rhizome-mcp doctor --full
+```
+
+The CLI-only maintenance command first creates and validates a WAL-safe
+online backup using the same implementation as `backup`. The backup path
+must be new, its parent must exist, and it must not be the source database.
+No issue timestamps are changed if backup creation or validation fails.
+The backup is retained even when normalization fails.
+
+Normalization validates all four issue timestamp columns before updating
+any, then applies the repairs in a single write transaction. Supported
+inputs are zero-offset RFC3339 forms with at most nanosecond precision,
+and the exact whole-second SQLite form interpreted as UTC under the
+project's storage convention. Arbitrary malformed text, invalid dates,
+nonzero offsets, and excess precision are refused; no missing timestamp
+is invented. Nullable `closed_at` and `archived_at` remain null.
+
+Output reports `backup_path` and `normalized_count` (timestamp cells, not
+issues). Existing canonical values are unchanged. Repeating the operation
+with another new backup reports zero repairs. Issue versions and event
+history are preserved because only representations change, not the
+represented instants. Recovery is explicit rather than an automatic
+migration or a relaxed shared parser, preserving SQL ordering guarantees.
+For values that cannot be normalized, restore the correct UTC instant
+from a trusted backup instead of guessing.
 
 ## 16. Lease cleanup
 

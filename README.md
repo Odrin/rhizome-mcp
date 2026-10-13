@@ -252,7 +252,7 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 | `project info` / `project export` / `project import` | Project metadata; logical JSON export; logical JSON import (`--input PATH|-` with `--dry-run` or `--apply`) |
 | `backup --output PATH` | WAL-safe online backup |
 | `doctor [--full]` | Integrity, schema, and invariant checks |
-| `maintenance release-attempt` / `rebuild-search-index` | Administrative recovery |
+| `maintenance release-attempt` / `rebuild-search-index` / `normalize-issue-timestamps --backup PATH` | Administrative recovery; timestamp normalization requires a new validated backup |
 
 Run `rhizome-mcp` without arguments for complete usage, `rhizome-mcp version` for build information.
 

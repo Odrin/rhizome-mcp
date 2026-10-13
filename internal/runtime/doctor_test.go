@@ -30,7 +30,7 @@ func TestProjectDoctorHealthyNormalAndFull(t *testing.T) {
 	if !report.Healthy() {
 		t.Fatalf("Doctor() unhealthy report = %+v", report)
 	}
-	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts", "active_reservations_without_live_attempt", "reservation_release_state_consistency", "http_address", "workflow_policy_payload_shape", "review_targets_without_gate_snapshot", "gate_evidence_attempt_issue_consistency"}
+	wantChecks := []string{"ping", "journal_mode_wal", "foreign_keys_enabled", "schema_version", "migration_history", "fts5", "quick_check", "foreign_key_check", "one_active_attempt_per_issue", "database_writable", "data_directory_writable", "free_disk_space", "wal_size", "expired_active_attempts", "active_reservations_without_live_attempt", "reservation_release_state_consistency", "http_address", "workflow_policy_payload_shape", "review_targets_without_gate_snapshot", "gate_evidence_attempt_issue_consistency", "issue_timestamps"}
 	if len(report.Checks) != len(wantChecks) {
 		t.Fatalf("doctor checks = %+v", report.Checks)
 	}

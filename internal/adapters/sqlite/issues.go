@@ -814,19 +814,19 @@ func parseIssueProjectionColumns(id string, sequenceNo int64, issueType, title s
 	if err != nil {
 		return domain.Issue{}, corruptIssueProjection(err)
 	}
-	created, err := parseIssueTimestamp("created_at", createdAt)
+	created, err := parseIssueProjectionTimestamp(id, sequenceNo, "created_at", createdAt)
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	updated, err := parseIssueTimestamp("updated_at", updatedAt)
+	updated, err := parseIssueProjectionTimestamp(id, sequenceNo, "updated_at", updatedAt)
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	closed, err := parseNullableIssueTimestamp("closed_at", closedAt)
+	closed, err := parseNullableIssueProjectionTimestamp(id, sequenceNo, "closed_at", closedAt)
 	if err != nil {
 		return domain.Issue{}, err
 	}
-	archived, err := parseNullableIssueTimestamp("archived_at", archivedAt)
+	archived, err := parseNullableIssueProjectionTimestamp(id, sequenceNo, "archived_at", archivedAt)
 	if err != nil {
 		return domain.Issue{}, err
 	}
@@ -932,11 +932,31 @@ func parseIssueTimestamp(field, value string) (time.Time, error) {
 	return parsed, nil
 }
 
+func parseIssueProjectionTimestamp(issueID string, sequenceNo int64, field, value string) (time.Time, error) {
+	parsed, err := parseIssueTimestamp(field, value)
+	if err != nil {
+		return time.Time{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false,
+			issueTimestampDetail(issueID, sequenceNo, field, value, "INVALID_TIMESTAMP"))
+	}
+	return parsed, nil
+}
+
 func parseNullableIssueTimestamp(field string, value sql.NullString) (*time.Time, error) {
 	if !value.Valid {
 		return nil, nil
 	}
 	parsed, err := parseIssueTimestamp(field, value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func parseNullableIssueProjectionTimestamp(issueID string, sequenceNo int64, field string, value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	parsed, err := parseIssueProjectionTimestamp(issueID, sequenceNo, field, value.String)
 	if err != nil {
 		return nil, err
 	}

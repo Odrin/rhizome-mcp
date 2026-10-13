@@ -100,6 +100,13 @@ type BackupReport struct {
 // BackupHandler runs a project backup after the adapter parses the command.
 type BackupHandler func(context.Context, string) (BackupReport, error)
 
+type IssueTimestampNormalizationReport struct {
+	BackupPath      string `json:"backup_path"`
+	NormalizedCount int    `json:"normalized_count"`
+}
+
+type IssueTimestampNormalizationHandler func(context.Context, string) (IssueTimestampNormalizationReport, error)
+
 // DoctorReport summarizes a runtime doctor report for CLI output.
 type DoctorReport struct {
 	Full       bool          `json:"full"`
@@ -146,18 +153,19 @@ type ConnectHandler func(context.Context, string, bool, bool) error
 
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
-	services            Services
-	stdout              io.Writer
-	stderr              io.Writer
-	initHandler         InitHandler
-	serveHandler        ServeHandler
-	boardServeHandler   BoardServeHandler
-	backupHandler       BackupHandler
-	doctorHandler       DoctorHandler
-	connectHandler      ConnectHandler
-	projectsListHandler  ProjectsListHandler
-	projectsMigrateHandler ProjectsMigrateHandler
-	appVersion           string
+	services                           Services
+	stdout                             io.Writer
+	stderr                             io.Writer
+	initHandler                        InitHandler
+	serveHandler                       ServeHandler
+	boardServeHandler                  BoardServeHandler
+	backupHandler                      BackupHandler
+	issueTimestampNormalizationHandler IssueTimestampNormalizationHandler
+	doctorHandler                      DoctorHandler
+	connectHandler                     ConnectHandler
+	projectsListHandler                ProjectsListHandler
+	projectsMigrateHandler             ProjectsMigrateHandler
+	appVersion                         string
 }
 
 // New constructs a CLI adapter around application services and output writers.
@@ -173,6 +181,10 @@ func (c *CLI) SetBoardServeHandler(handler BoardServeHandler) {
 // SetBackupHandler installs a handler for the backup command.
 func (c *CLI) SetBackupHandler(handler BackupHandler) {
 	c.backupHandler = handler
+}
+
+func (c *CLI) SetIssueTimestampNormalizationHandler(handler IssueTimestampNormalizationHandler) {
+	c.issueTimestampNormalizationHandler = handler
 }
 
 // SetDoctorHandler installs a handler for the doctor command.
@@ -210,7 +222,20 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	if !ok {
 		return c.usageError()
 	}
-	return found.run(c, ctx, args[1:])
+	err := found.run(c, ctx, args[1:])
+	var domainErr *domain.Error
+	if errors.As(err, &domainErr) && domainErr.Code == domain.CodeStorageCorrupt {
+		var messages []string
+		for _, detail := range domainErr.Details {
+			if detail.Code == "INVALID_TIMESTAMP" && detail.Message != "" {
+				messages = append(messages, detail.Message)
+			}
+		}
+		if len(messages) > 0 {
+			return fmt.Errorf("%w: %s", err, strings.Join(messages, "; "))
+		}
+	}
+	return err
 }
 
 func (c *CLI) runInit(ctx context.Context, args []string) error {
@@ -940,6 +965,9 @@ func (c *CLI) runMaintenance(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return c.usageError()
 	}
+	if args[0] == "normalize-issue-timestamps" {
+		return c.runMaintenanceNormalizeIssueTimestamps(ctx, args[1:])
+	}
 	if c.services.MaintenanceService == nil {
 		return fmt.Errorf("maintenance service is not configured")
 	}
@@ -952,6 +980,34 @@ func (c *CLI) runMaintenance(ctx context.Context, args []string) error {
 	default:
 		return c.usageError()
 	}
+}
+
+func (c *CLI) runMaintenanceNormalizeIssueTimestamps(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("maintenance normalize-issue-timestamps", flag.ContinueOnError)
+	backup := fs.String("backup", "", "new backup database path (required)")
+	format := fs.String("format", "table", "output format")
+	positionals, err := c.parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) != 0 || strings.TrimSpace(*backup) == "" {
+		return c.usageError()
+	}
+	if *format != "table" && *format != "json" {
+		return NewUsageError(fmt.Sprintf("unsupported format %q", *format))
+	}
+	if c.issueTimestampNormalizationHandler == nil {
+		return fmt.Errorf("issue timestamp normalization handler is not configured")
+	}
+	report, err := c.issueTimestampNormalizationHandler(ctx, *backup)
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		return writeJSON(c.stdoutWriter(), report)
+	}
+	_, err = fmt.Fprintf(c.stdoutWriter(), "backup_path\tnormalized_count\n%s\t%d\n", report.BackupPath, report.NormalizedCount)
+	return err
 }
 
 func (c *CLI) runMaintenanceReleaseAttempt(ctx context.Context, args []string) error {
