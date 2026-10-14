@@ -107,6 +107,7 @@ func commands() []command {
 			usageLines: []string{
 				"maintenance release-attempt ATTEMPT-ID [--format table|json]",
 				"maintenance rebuild-search-index [--format table|json]",
+				"maintenance normalize-issue-timestamps --backup PATH [--format table|json]",
 			},
 			run: func(c *CLI, ctx context.Context, args []string) error { return c.runMaintenance(ctx, args) },
 		},

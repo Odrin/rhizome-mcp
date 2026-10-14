@@ -107,6 +107,10 @@ Supported flags:
 - `--full`
 - `--format table|json`
 
+Both modes check the format of issue timestamps, including archived issues.
+An unhealthy `issue_timestamps` result identifies problematic cells and
+links recovery to `maintenance normalize-issue-timestamps`.
+
 ### `projects migrate`
 
 Apply supported forward migrations to an already stored project database selected by canonical ID.
@@ -250,6 +254,35 @@ rhizome-mcp maintenance rebuild-search-index --format json
 Supported flags:
 
 - `--format table|json`
+
+### `maintenance normalize-issue-timestamps`
+
+Repair recognizable legacy UTC issue timestamps without losing their
+original values. Stop mutating clients first, then run:
+
+```bash
+rhizome-mcp maintenance normalize-issue-timestamps --backup /path/to/new-backup.db --format json
+rhizome-mcp doctor --full
+```
+
+Supported flags:
+
+- `--backup PATH` (required; a new database file in an existing directory)
+- `--format table|json`
+
+The command creates a validated WAL-safe backup before any repair. It
+normalizes `created_at`, `updated_at`, `closed_at`, and `archived_at` on
+issues, including archived ones, to fixed-width UTC. Recognized formats
+are zero-offset RFC3339 with at most nanosecond precision and the exact
+SQLite `YYYY-MM-DD HH:MM:SS` UTC form. Null optional timestamps stay null.
+
+Malformed values and nonzero offsets cause the entire normalization to
+fail without partial repairs; the backup is retained. Restore those values
+from a trusted backup rather than inventing an instant. Output reports
+`backup_path` and `normalized_count` (cells, not issues). A repeat run with
+another new backup reports zero repairs. No issue versions or audit events
+are changed. See the [storage recovery contract](../docs/04-storage-runtime.md#152-issue-timestamp-recovery)
+for details.
 
 ## CLI usage summary
 

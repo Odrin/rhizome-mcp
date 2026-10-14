@@ -27,6 +27,7 @@ const (
 	checkPolicyPayloadShape      = "workflow_policy_payload_shape"
 	checkTargetGateSnapshots     = "review_targets_without_gate_snapshot"
 	checkGateEvidenceConsistency = "gate_evidence_attempt_issue_consistency"
+	checkIssueTimestamps         = "issue_timestamps"
 	checkIntegrity               = "integrity_check"
 )
 
@@ -123,7 +124,7 @@ func makeDoctorDetails(checks []DoctorCheck) []domain.Detail {
 		if check.Healthy {
 			continue
 		}
-		details = append(details, domain.Detail{Field: check.Name, Code: "CHECK_FAILED", Message: "failed"})
+		details = append(details, domain.Detail{Field: check.Name, Code: "CHECK_FAILED", Message: check.Message})
 	}
 	return details
 }
@@ -172,6 +173,7 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 		{checkGateEvidenceConsistency, func(ctx context.Context, query sqlite.Queryer) (string, error) {
 			return checkGateEvidenceConsistencyQuery(ctx, query)
 		}},
+		{checkIssueTimestamps, checkIssueTimestampsQuery},
 	}
 	if report.Full {
 		checks = append(checks, struct {
@@ -189,7 +191,10 @@ func (project *Project) collectOperationalChecks(ctx context.Context, report *Do
 				report.Checks = append(report.Checks, DoctorCheck{Name: item.name, Healthy: true, Message: message})
 				continue
 			}
-			report.Checks = append(report.Checks, DoctorCheck{Name: item.name, Healthy: false, Message: "failed"})
+			if message == "" {
+				message = "failed"
+			}
+			report.Checks = append(report.Checks, DoctorCheck{Name: item.name, Healthy: false, Message: message})
 			if errors.Is(checkErr, context.Canceled) || errors.Is(checkErr, context.DeadlineExceeded) {
 				return checkErr
 			}

@@ -369,6 +369,13 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 	adapter := cliadapter.New(services, stdout, stderr, initHandler, serveHandler)
 	adapter.SetBoardServeHandler(boardServeHandler)
 	adapter.SetBackupHandler(backupHandler)
+	adapter.SetIssueTimestampNormalizationHandler(func(ctx context.Context, backupPath string) (cliadapter.IssueTimestampNormalizationReport, error) {
+		if project == nil {
+			return cliadapter.IssueTimestampNormalizationReport{}, errors.New("project is not open")
+		}
+		report, err := project.NormalizeIssueTimestamps(ctx, backupPath)
+		return cliadapter.IssueTimestampNormalizationReport{BackupPath: report.BackupPath, NormalizedCount: report.NormalizedCount}, err
+	})
 	adapter.SetDoctorHandler(doctorHandler)
 	adapter.SetConnectHandler(connectHandler)
 	adapter.SetProjectsListHandler(func(ctx context.Context, _ string) (inventory.Result, error) {
