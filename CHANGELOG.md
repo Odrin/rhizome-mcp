@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-14
+
+### Added
+
+- **Explicit recovery for non-canonical issue timestamps** — New `rhizome-mcp maintenance normalize-issue-timestamps --backup PATH` command repairs issue `created_at`, `updated_at`, `closed_at`, and `archived_at` values stored in a recognizable legacy form: zero-offset RFC3339 with at most nanosecond precision, or SQLite's whole-second `YYYY-MM-DD HH:MM:SS` text interpreted as UTC. It first creates and validates a WAL-safe backup (the path must be new, and the backup is retained even if normalization fails), validates all four columns before changing any, then applies every repair in one write transaction. Malformed text, invalid dates, nonzero offsets, and excess precision are refused rather than guessed; issue versions, event history, and the represented instants are unchanged, and a repeat run reports zero repairs. Output (`table` or `--format json`) reports `backup_path` and `normalized_count`.
+
+- **`doctor` detects invalid and non-canonical issue timestamps** — A new `issue_timestamps` check inspects all four issue timestamp columns, including archived issues, without modifying them. It counts every problem and lists at most ten with issue identifiers, offending values, and recovery guidance, and it flags zero-offset RFC3339 values that readers accept but whose text differs from the fixed-width storage format.
+
+### Fixed
+
+- **Corrupt issue timestamps fail with an actionable error instead of an opaque one** — Readers stay strict, but an invalid issue timestamp now returns `STORAGE_CORRUPT` with an `INVALID_TIMESTAMP` detail naming the issue's ULID and `ISSUE-N`, the field, a safely quoted value (capped at 160 bytes), and the recovery steps; the CLI prints the same message. `list_issues` fails when a fetched row is corrupt rather than silently omitting the issue or returning an apparently complete partial page.
+
+### Internal
+
+- **Full race checks run nightly instead of on every pull request** — PRs keep a focused concurrency race gate and the complete non-race platform suites, while the full race unit and integration suites run nightly and on demand with isolated caches and retained logs. A Windows assertion for quoted backup paths was corrected.
+
+- **Release creation is documented as a workspace skill** — The maintainer-only `rhizome-release` skill describes the release process. It lives under `.github/skills` but is excluded from the Claude Code plugin copy by `scripts/sync-plugin-skills.sh` and `plugin_skills_sync_test.go`.
+
 ## [1.6.0] - 2026-10-03
 
 ### Fixed
