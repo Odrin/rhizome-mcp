@@ -16,7 +16,8 @@ Each repository you want tracked still needs a one-time
 The `skills/` directory here is a synchronized copy of the canonical
 [`.github/skills/`](../../.github/skills) (kept identical by
 `plugin_skills_sync_test.go`; refresh with
-`bash scripts/sync-plugin-skills.sh`). The canonical location stays where the
+`bash scripts/sync-plugin-skills.sh`), except the maintainer-only
+`rhizome-release` skill. The canonical location stays where the
 [`skills` CLI](https://skills.sh/) expects it, so
 `npx skills add Odrin/rhizome-mcp` keeps working for non-plugin agents.
 

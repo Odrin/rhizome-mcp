@@ -10,7 +10,8 @@ DST="plugins/rhizome-mcp/skills"
 
 rm -rf "$DST"
 mkdir -p "$DST"
-(cd "$SRC" && find . -type f ! -name '.DS_Store' -print0) |
+# rhizome-release is maintainer-only and must not ship in the plugin; keep in sync with plugin_skills_sync_test.go.
+(cd "$SRC" && find . -type f ! -name '.DS_Store' ! -path './rhizome-release/*' -print0) |
   while IFS= read -r -d '' f; do
     mkdir -p "$DST/$(dirname "$f")"
     cp "$SRC/$f" "$DST/$f"

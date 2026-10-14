@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +69,9 @@ func TestPluginManifestsParse(t *testing.T) {
 	}
 }
 
+// Maintainer-only skills live in .github/skills but are not shipped in the plugin; keep in sync with scripts/sync-plugin-skills.sh.
+var pluginExcludedSkills = map[string]bool{"rhizome-release": true}
+
 func collectSkillFiles(t *testing.T, root string) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
@@ -81,6 +85,9 @@ func collectSkillFiles(t *testing.T, root string) map[string][]byte {
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
+		}
+		if pluginExcludedSkills[strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]] {
+			return nil
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
