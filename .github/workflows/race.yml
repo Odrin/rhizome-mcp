@@ -1,0 +1,54 @@
+name: Full race checks
+run-name: Full race checks (${{ github.ref_name }} @ ${{ github.sha }})
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  race:
+    name: Full race suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            .github/workflows/race.yml
+
+      - name: Record tested commit
+        run: |
+          git log -1 --format='Tested commit: %H%n%s'
+
+      - name: Run all unit tests with the race detector
+        id: unit
+        run: go test -race -count=1 -json ./... | tee race-unit.jsonl
+
+      # The harness also builds the real server with -race.
+      - name: Run all integration tests with the race detector
+        id: integration
+        if: ${{ !cancelled() }}
+        run: go test -race -count=1 -json -tags=integration -run '^TestIntegration' ./... | tee race-integration.jsonl
+
+      - name: Upload race test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: race-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            race-unit.jsonl
+            race-integration.jsonl
+          retention-days: 14
+          if-no-files-found: warn

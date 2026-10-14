@@ -18,16 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The race detector runs on Linux only: it is the cheapest runner and
-        # already exercises every concurrency test, while -race roughly triples
-        # macOS and Windows job time for no additional signal.
-        include:
-          - os: ubuntu-latest
-            race: "-race"
-          - os: macos-latest
-            race: ""
-          - os: windows-latest
-            race: ""
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -44,15 +35,13 @@ jobs:
         run: go vet ./...
 
       - name: Run unit tests
-        run: go test ${{ matrix.race }} ./...
+        run: go test ./...
 
-      # A race-instrumented harness builds a race-instrumented server; see
-      # integrationBuildArgs in integration/environment_test.go.
       # -run '^TestIntegration' stops this step from re-running every unit test
       # the previous step just ran (the integration build tag only adds files,
       # so ./... alone would), the same way the coverage job filters.
       - name: Run integration tests
-        run: go test ${{ matrix.race }} -tags=integration -run '^TestIntegration' ./...
+        run: go test -tags=integration -run '^TestIntegration' ./...
 
       - name: Stage binary for npm launcher tests
         shell: bash
@@ -90,6 +79,60 @@ jobs:
           go test ./internal/pagination/ -run='^$' -fuzz=FuzzCodecDecode -fuzztime=30s
           go test ./internal/normalization/ -run='^$' -fuzz=FuzzCanonicalizer -fuzztime=30s
           go test ./internal/domain/ -run='^$' -fuzz=FuzzParseLogicalProjectImportPlan -fuzztime=30s
+
+  race-smoke:
+    name: Race smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          # Keep race builds separate from the ordinary and coverage caches.
+          cache-dependency-path: |
+            go.sum
+            .github/workflows/ci.yml
+
+      - name: Run critical concurrency tests with the race detector
+        shell: bash
+        run: |
+          tests=(
+            TestAttemptSimultaneousClaimsHaveOneWinner
+            TestFinishAttemptConcurrentSameKeyReplay
+            TestClaimIssueAcquiresReservationsAtomically
+            TestClaimIssueReservationConflictAbortsClaimEntirely
+            TestReservationsConcurrentAcquireHaveOneWinner
+            TestReservationsAcquireAcrossProcesses
+            TestWriteQueuedWritersLeaveReadConnectionsAvailable
+            TestWriteCancellationWaitingForAdmission
+            TestWriteQueuedWriterDoesNotDeadlockClose
+            TestWriteRollbackAndRetryReleaseAdmission
+            TestProjectRouterCoalescesConcurrentOpens
+            TestProjectRouterReleaseIsIdempotentAndCloseDrains
+            TestProjectRouterCancelingInitiatingWaiterReleasesReservation
+            TestProjectRouterCancelingCoalescedWaiterLeavesHealthyWaiterWorking
+            TestProjectRouterCloseWaitsForInitiatingLeaseRelease
+            TestProjectRouterCloseTimeoutDoesNotConsumeCleanupCapability
+            TestProjectRouterCloseWithCanceledContextClosesAdmissionImmediately
+            TestProjectRouterConcurrentCloseCallsShareCleanup
+            TestServeHTTPServerUsesEphemeralListenerAndShutdowns
+            TestServeHTTPServerCancelsInFlightRequestContextOnShutdown
+          )
+          printf -v pattern '%s|' "${tests[@]}"
+          go test -race -count=1 -v -run "^(${pattern%|})$" \
+            ./internal/adapters/sqlite ./internal/compose ./internal/runtime \
+            | tee race-smoke.log
+
+          # A renamed or skipped test must not silently weaken this gate.
+          for test in "${tests[@]}"; do
+            if ! grep -Fq -- "--- PASS: $test (" race-smoke.log; then
+              echo "::error::Race smoke test did not pass: $test" >&2
+              exit 1
+            fi
+          done
 
   coverage:
     name: Coverage

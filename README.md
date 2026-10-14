@@ -294,7 +294,20 @@ go test -tags=integration ./...
 
 The integration tag runs real-process MCP smoke and workflow tests: they build a temporary server binary, initialize a fresh repository and SQLite data root per test, and speak to `serve` over stdio or HTTP. Beyond single-process smoke coverage, the suite also exercises cross-process scenarios on one shared SQLite data root — concurrent claim and update-version races, an ungraceful process kill and restart, and a backup taken while a server is writing — to catch defects a single-process test structurally cannot see. Most live in the dedicated `integration` package; tests that need unexported package-main internals stay at the repository root.
 
-CI runs `go vet`, unit, and integration tests on Ubuntu, macOS, and Windows for every push and pull request targeting `main`. Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
+CI runs `go vet`, all non-race unit and integration tests, and npm launcher tests on Ubuntu, macOS, and Windows for every push and pull request targeting `main`. Linux also runs the existing fuzzing budgets, while a separate coverage job enforces unit and integration coverage thresholds. A parallel Linux **Race smoke** job runs an explicit selection of claim, reservation, transaction-admission, project-router, and HTTP-lifecycle tests with the race detector; its selection is maintained in [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+[Full race checks](.github/workflows/race.yml) runs the complete unit and integration race suites against the latest `main` daily at **02:17 UTC**. GitHub may delay scheduled runs. It can also be started from the Actions tab using **Run workflow** and selecting a branch, including a feature branch before merging. The workflow records the tested commit, retains JSON test logs for 14 days, and uses a cache separate from ordinary CI and race smoke. Nightly and smoke tests use `-count=1` so successful cached test results cannot bypass execution.
+
+Full race checks are not a PR gate: a green PR confirms the selected race checks, not the full race suite. Race regressions outside that selection may be discovered after merge, at the next scheduled run; monitor nightly failures and fix or revert them promptly. For local full-race verification (requires CGO and a C compiler):
+
+```bash
+go test -race -count=1 ./...
+go test -race -count=1 -tags=integration -run '^TestIntegration' ./...
+```
+
+The integration harness builds the real server subprocess with `-race` whenever the harness is race-instrumented.
+
+Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
 
 Release verification steps are documented in [CONTRIBUTING.md](CONTRIBUTING.md#release-verification).
 
