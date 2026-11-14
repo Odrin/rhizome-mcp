@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   race:
@@ -18,9 +19,37 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Check if branch updated since last successful run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          CURRENT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" != "schedule" ]]; then
+            echo "Triggered by $EVENT_NAME; running full race suite."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last_sha=$(gh api \
+            "/repos/${REPO}/actions/workflows/race.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty' || true)
+          echo "Current ${BRANCH} SHA: ${CURRENT_SHA}"
+          echo "Last successful run SHA: ${last_sha:-<none>}"
+          if [[ -n "$last_sha" && "$last_sha" == "$CURRENT_SHA" ]]; then
+            echo "No new commits on ${BRANCH} since last successful run (${last_sha}); skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v5
+        if: steps.check.outputs.should_run == 'true'
 
       - uses: actions/setup-go@v7
+        if: steps.check.outputs.should_run == 'true'
         with:
           go-version-file: go.mod
           cache: true
@@ -29,21 +58,23 @@ jobs:
             .github/workflows/race.yml
 
       - name: Record tested commit
+        if: steps.check.outputs.should_run == 'true'
         run: |
           git log -1 --format='Tested commit: %H%n%s'
 
       - name: Run all unit tests with the race detector
         id: unit
+        if: steps.check.outputs.should_run == 'true'
         run: go test -race -count=1 -json ./... | tee race-unit.jsonl
 
       # The harness also builds the real server with -race.
       - name: Run all integration tests with the race detector
         id: integration
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.check.outputs.should_run == 'true' }}
         run: go test -race -count=1 -json -tags=integration -run '^TestIntegration' ./... | tee race-integration.jsonl
 
       - name: Upload race test logs
-        if: always()
+        if: ${{ always() && steps.check.outputs.should_run == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: race-${{ github.sha }}-${{ github.run_attempt }}
