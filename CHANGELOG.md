@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Configurable MCP tool result content mode (`serve --content-mode`, `RHIZOME_CONTENT_MODE`)** — New `--content-mode auto|structured|text` flag on `serve` (and `RHIZOME_CONTENT_MODE` environment variable) controls how tool results populate `content[0].text` and `structuredContent`. `auto` (the default) populates `structuredContent`, advertises `outputSchema` in `tools/list`, and includes the compact serialized JSON payload in `content[0].text` whenever it fits within `64 KiB` (falling back to an identifier-enriched summary for oversized opt-in payloads) so `content`-only MCP hosts work out of the box. `structured` emits only the enriched human-readable summary in `content[0].text` alongside `structuredContent` (zero JSON duplication on the wire; bearer secrets such as `lease_token` and `agent_session_handle` are never included in text summaries), and `text` emits compact serialized JSON in `content[0].text` while omitting `structuredContent` and `outputSchema`. Note that because `auto` is the default, responses up to `64 KiB` now carry serialized JSON in both `content[0].text` and `structuredContent`; deployments whose MCP client forwards both channels to the model should pass `--content-mode structured` or `--content-mode text` to avoid duplicate token consumption (docs/03 §1, docs/04 §17.1).
+
 ## [1.6.1] - 2026-10-14
 
 ### Added

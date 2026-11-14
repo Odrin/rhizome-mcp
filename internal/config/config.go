@@ -36,17 +36,23 @@ type Config struct {
 	// always included. Blank means unconfigured. Mutually exclusive with
 	// ToolProfile; the MCP adapter rejects startup when both are set.
 	Toolsets string
+	// ContentMode selects how MCP tool results populate Content and
+	// StructuredContent (auto, structured, text). Blank means unconfigured:
+	// downstream parsing defaults it to "auto".
+	ContentMode string
 
-	// HTTPAddressFromEnv, ToolProfileFromEnv, and ToolsetsFromEnv report
-	// whether the field was populated from an environment variable
-	// (namespaced or the deprecated legacy fallback), rather than left at
-	// its built-in default. A caller (serve) uses these to warn when
-	// transport selection or catalog narrowing was implicit rather than
-	// passed as an explicit flag -- the environment inputs capable of
-	// silently changing what a client sees.
+	// HTTPAddressFromEnv, ToolProfileFromEnv, ToolsetsFromEnv, and
+	// ContentModeFromEnv report whether the field was populated from an
+	// environment variable (namespaced or the deprecated legacy fallback),
+	// rather than left at its built-in default. A caller (serve) uses
+	// these to warn when transport selection, catalog narrowing, or
+	// content-mode selection was implicit rather than passed as an explicit
+	// flag -- the environment inputs capable of silently changing what a
+	// client sees.
 	HTTPAddressFromEnv bool
 	ToolProfileFromEnv bool
 	ToolsetsFromEnv    bool
+	ContentModeFromEnv bool
 
 	// XDGDataHome, LocalAppData, and ProjectRoot are read here so every
 	// external environment input has one source of truth, even though
@@ -103,9 +109,11 @@ func Load(getenv Getenv) (*Config, []string) {
 	logLevelText, _ := take(envFallback{"RHIZOME_LOG_LEVEL", "LOG_LEVEL"})
 	httpAddress, httpFromEnv := take(envFallback{"RHIZOME_HTTP_ADDRESS", "HTTP_ADDRESS"})
 	toolProfile, toolProfileFromEnv := take(envFallback{"RHIZOME_TOOL_PROFILE", "TOOL_PROFILE"})
-	// RHIZOME_TOOLSETS is newer than the namespacing migration, so it has
-	// no deprecated unprefixed fallback.
+	// RHIZOME_TOOLSETS and RHIZOME_CONTENT_MODE are newer than the
+	// namespacing migration, so they have no deprecated unprefixed
+	// fallback.
 	toolsets := getenv("RHIZOME_TOOLSETS")
+	contentMode := getenv("RHIZOME_CONTENT_MODE")
 
 	return &Config{
 		ServerName:         serverName,
@@ -116,6 +124,8 @@ func Load(getenv Getenv) (*Config, []string) {
 		ToolProfileFromEnv: toolProfileFromEnv,
 		Toolsets:           toolsets,
 		ToolsetsFromEnv:    toolsets != "",
+		ContentMode:        contentMode,
+		ContentModeFromEnv: contentMode != "",
 		XDGDataHome:        getenv("XDG_DATA_HOME"),
 		LocalAppData:       getenv("LOCALAPPDATA"),
 		ProjectRoot:        getenv("RHIZOME_PROJECT_ROOT"),

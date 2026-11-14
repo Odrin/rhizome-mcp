@@ -37,8 +37,27 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Toolsets != "" || cfg.ToolsetsFromEnv {
 		t.Errorf("Toolsets = %q fromEnv=%v, want blank/false", cfg.Toolsets, cfg.ToolsetsFromEnv)
 	}
+	if cfg.ContentMode != "" || cfg.ContentModeFromEnv {
+		t.Errorf("ContentMode = %q fromEnv=%v, want blank/false", cfg.ContentMode, cfg.ContentModeFromEnv)
+	}
 	if len(warnings) != 0 {
 		t.Errorf("warnings = %v, want none", warnings)
+	}
+}
+
+// TestLoadReadsContentMode covers the namespaced-only RHIZOME_CONTENT_MODE
+// input: newer than the namespacing migration, it has no deprecated
+// unprefixed fallback and therefore never produces a deprecation warning.
+func TestLoadReadsContentMode(t *testing.T) {
+	cfg, warnings := config.Load(fakeEnv(map[string]string{
+		"RHIZOME_CONTENT_MODE": "structured",
+		"CONTENT_MODE":         "text",
+	}))
+	if cfg.ContentMode != "structured" || !cfg.ContentModeFromEnv {
+		t.Errorf("ContentMode = %q fromEnv=%v, want the namespaced value/true", cfg.ContentMode, cfg.ContentModeFromEnv)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none (no legacy fallback exists for content mode)", warnings)
 	}
 }
 

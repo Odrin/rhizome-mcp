@@ -8,10 +8,13 @@ Tool inputs and outputs are JSON objects validated by JSON Schema.
 
 Tools return:
 
-- `structuredContent` as the authoritative result;
-- an optional short text summary;
+- `structuredContent` as the authoritative result (in `auto` and `structured` content modes);
+- `content[0].text` carrying either the compact serialized JSON payload or an enriched one-line summary with non-secret entity identifiers, depending on the configured content mode (`--content-mode` / `RHIZOME_CONTENT_MODE`):
+  - `auto` (default): populates `structuredContent`, advertises `outputSchema` in `tools/list`, and sets `content[0].text` to the compact serialized JSON payload whenever it fits within `64 KiB` (`65536` bytes), falling back to the enriched human-readable summary string when an explicit opt-in payload exceeds `64 KiB`. Because all default response budgets (section 3) are under `64 KiB`, `auto` sends the JSON payload in both channels on ordinary calls so `content`-only MCP hosts work without configuration; hosts that forward both `content[0].text` and `structuredContent` into the model context can pass `--content-mode structured` (or `--content-mode text`) to avoid duplicate token consumption;
+  - `structured`: populates `structuredContent`, advertises `outputSchema` in `tools/list`, and sets `content[0].text` to only the enriched human-readable summary string (zero JSON duplication on the wire; bearer credentials such as `lease_token` and `agent_session_handle` are never included in text summaries);
+  - `text`: sets `content[0].text` to the compact serialized JSON payload, omits `structuredContent`, and omits `outputSchema` from `tools/list` for `content`-only MCP hosts;
 - short `next_actions` on workflow-sensitive results;
-- no full duplication of large JSON results in text.
+- no full duplication of oversized (`> 64 KiB`) JSON results in text under `auto` or `structured` mode.
 
 The initialize response contains compact baseline workflow instructions. Full
 guidance is available through these static Markdown resources:

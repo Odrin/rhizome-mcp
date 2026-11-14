@@ -107,6 +107,11 @@ func (adapter *adapter) registerTool(server *sdkmcp.Server, group toolCapability
 	} else if !toolProfileIncludes(adapter.toolProfile, group, toolDef) {
 		return
 	}
+	if adapter.contentMode == domain.ContentModeText && toolDef != nil {
+		clone := *toolDef
+		clone.OutputSchema = nil
+		toolDef = &clone
+	}
 	addFn(toolDef)
 }
 

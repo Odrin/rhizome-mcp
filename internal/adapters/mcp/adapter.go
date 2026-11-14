@@ -47,6 +47,10 @@ type Options struct {
 	// the core group is always included. Blank means no selection.
 	// Mutually exclusive with ToolProfile.
 	Toolsets string
+	// ContentMode controls how tool results populate Content and
+	// StructuredContent (auto, structured, text). Blank defaults to
+	// domain.ContentModeAuto.
+	ContentMode string
 }
 
 type adapter struct {
@@ -57,8 +61,9 @@ type adapter struct {
 	toolProfile   domain.ToolProfile
 	// toolsets is the active free-form catalog selection; nil means the
 	// named toolProfile decides registration instead (profile.go).
-	toolsets map[domain.Toolset]bool
-	exports  *exportArtifactStore
+	toolsets    map[domain.Toolset]bool
+	contentMode domain.ContentMode
+	exports     *exportArtifactStore
 }
 
 // Server owns the MCP SDK server and its adapter lifecycle tracking.
@@ -89,6 +94,10 @@ func NewServer(options Options) (*Server, error) {
 		return nil, err
 	}
 	selectedToolsets, err := domain.ParseToolsets(options.Toolsets)
+	if err != nil {
+		return nil, err
+	}
+	contentMode, err := domain.ParseContentMode(options.ContentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +136,7 @@ func NewServer(options Options) (*Server, error) {
 		configVersion: options.ConfigVersion,
 		toolProfile:   toolProfile,
 		toolsets:      toolsets,
+		contentMode:   contentMode,
 		exports:       exports,
 	}
 	server := sdkmcp.NewServer(
@@ -410,7 +420,8 @@ func (adapter *adapter) createAgentSession(ctx context.Context, request *sdkmcp.
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(createAgentSessionOutput{Session: sessionDTOFromDomain(result.Session), AgentSessionHandle: result.Handle}, "agent session created")
+	summary := fmt.Sprintf("agent session created (session_id=%s)", result.Session.ID)
+	return adapter.success(createAgentSessionOutput{Session: sessionDTOFromDomain(result.Session), AgentSessionHandle: result.Handle}, summary)
 }
 
 func (adapter *adapter) endAgentSession(ctx context.Context, request *sdkmcp.CallToolRequest, input endAgentSessionInput) (*sdkmcp.CallToolResult, any, error) {
@@ -418,7 +429,8 @@ func (adapter *adapter) endAgentSession(ctx context.Context, request *sdkmcp.Cal
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(endAgentSessionOutput{Session: sessionDTOFromDomain(result)}, "agent session ended")
+	summary := fmt.Sprintf("agent session ended (session_id=%s)", result.ID)
+	return adapter.success(endAgentSessionOutput{Session: sessionDTOFromDomain(result)}, summary)
 }
 
 func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequest, input searchInput) (*sdkmcp.CallToolResult, any, error) {
@@ -434,7 +446,7 @@ func (adapter *adapter) search(ctx context.Context, request *sdkmcp.CallToolRequ
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(searchOutputFromDomain(result), "search results returned")
+	return adapter.success(searchOutputFromDomain(result), fmt.Sprintf("search results returned (count=%d, has_more=%t)", len(result.Results), result.HasMore))
 }
 
 func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallToolRequest, input getChangesInput) (*sdkmcp.CallToolResult, any, error) {
@@ -444,7 +456,7 @@ func (adapter *adapter) getChanges(ctx context.Context, request *sdkmcp.CallTool
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(changesOutputFromDomain(result), "changes returned")
+	return adapter.success(changesOutputFromDomain(result), fmt.Sprintf("changes returned (events=%d, latest_event_id=%d, has_more=%t)", len(result.Events), result.LatestEventID, result.HasMore))
 }
 
 func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.CallToolRequest, input getWorkContextInput) (*sdkmcp.CallToolResult, any, error) {
@@ -490,7 +502,9 @@ func (adapter *adapter) getWorkContext(ctx context.Context, request *sdkmcp.Call
 	}
 	output := workContextOutputFromDomain(result)
 	output.NextActions = []string{"Call claim_issue when the issue is claimable."}
-	return success(output, "work context returned")
+	summary := fmt.Sprintf("work context returned (display_id=%s, id=%s, effective_status=%s)",
+		output.Issue.DisplayID, output.Issue.ID, output.Issue.EffectiveStatus)
+	return adapter.success(output, summary)
 }
 
 func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input claimIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -506,13 +520,15 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue claimed (display_id=%s, id=%s, attempt_id=%s)",
+		result.Issue.DisplayID, result.Issue.ID, result.Attempt.ID)
 	if view == "full" {
 		attempt := attemptDTOFromDomain(result.Attempt)
 		var reservations []reservationDTO
 		if len(result.Reservations) > 0 {
 			reservations = reservationDTOsFromDomain(result.Reservations)
 		}
-		return success(claimIssueOutput{
+		return adapter.success(claimIssueOutput{
 			Issue: issueListItemDTO{
 				issueDTO:               issueDTOFromDomain(result.Projection.Issue),
 				EffectiveStatus:        string(result.Projection.EffectiveStatus),
@@ -524,9 +540,9 @@ func (adapter *adapter) claimIssue(ctx context.Context, request *sdkmcp.CallTool
 			Attempt: attempt, Reservations: reservations, LeaseToken: result.LeaseToken, LeaseExpiresAt: result.Attempt.LeaseExpiresAt,
 			MinimalWorkContext: emptyWorkContextDTO{}, Warnings: []string{},
 			NextActions: []string{"Renew before expiry; finish_attempt on every exit."},
-		}, "issue claimed")
+		}, summary)
 	}
-	return success(claimIssueCompactOutputFromDomain(result.Issue, result.Attempt, result.Reservations, result.LeaseToken), "issue claimed")
+	return adapter.success(claimIssueCompactOutputFromDomain(result.Issue, result.Attempt, result.Reservations, result.LeaseToken), summary)
 }
 
 func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input renewAttemptInput) (*sdkmcp.CallToolResult, any, error) {
@@ -537,10 +553,10 @@ func (adapter *adapter) renewAttempt(ctx context.Context, request *sdkmcp.CallTo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(renewAttemptOutput{
+	return adapter.success(renewAttemptOutput{
 		LeaseExpiresAt: result.LeaseExpiresAt, ServerTime: result.ServerTime,
 		NextActions: []string{"Continue work; checkpoint or finish before expiry."},
-	}, "attempt lease renewed")
+	}, fmt.Sprintf("attempt lease renewed (attempt_id=%s)", input.AttemptID))
 }
 
 func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.CallToolRequest, input saveAttemptNoteInput) (*sdkmcp.CallToolResult, any, error) {
@@ -564,10 +580,10 @@ func (adapter *adapter) saveAttemptNote(ctx context.Context, request *sdkmcp.Cal
 	for index, artifact := range result.Artifacts {
 		outputArtifacts[index] = artifactDTOFromDomain(artifact)
 	}
-	return success(saveAttemptNoteOutput{
+	return adapter.success(saveAttemptNoteOutput{
 		AttemptNote: attemptNoteDTOFromDomain(result.Note), Artifacts: outputArtifacts,
 		NextActions: []string{"Continue work or call finish_attempt."},
-	}, "attempt note saved")
+	}, fmt.Sprintf("attempt note saved (note_id=%s, kind=%s)", result.Note.ID, result.Note.Kind))
 }
 
 func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallToolRequest, input finishAttemptInput) (*sdkmcp.CallToolResult, any, error) {
@@ -598,16 +614,18 @@ func (adapter *adapter) finishAttempt(ctx context.Context, request *sdkmcp.CallT
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("attempt finished (attempt_id=%s, status=%s, display_id=%s, issue_status=%s, latest_event_id=%d)",
+		result.Attempt.ID, result.Attempt.Status, result.Issue.DisplayID, result.Issue.Status, result.LatestEventID)
 	if view == "full" {
 		outputArtifacts := make([]artifactDTO, len(result.Artifacts))
 		for index, artifact := range result.Artifacts {
 			outputArtifacts[index] = artifactDTOFromDomain(artifact)
 		}
-		return success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
+		return adapter.success(finishAttemptOutput{Attempt: attemptDTOFromDomain(result.Attempt), Issue: issueDTOFromDomain(result.Issue),
 			Warnings: append([]string{}, result.Warnings...), LatestEventID: result.LatestEventID, Artifacts: outputArtifacts,
-			NextActions: []string{"Select new work from get_planning_graph."}}, "attempt finished")
+			NextActions: []string{"Select new work from get_planning_graph."}}, summary)
 	}
-	return success(finishAttemptCompactOutputFromDomain(result.Attempt, result.Issue, result.Warnings, result.LatestEventID, result.Artifacts, []string{"Select new work from get_planning_graph."}), "attempt finished")
+	return adapter.success(finishAttemptCompactOutputFromDomain(result.Attempt, result.Issue, result.Warnings, result.LatestEventID, result.Artifacts, []string{"Select new work from get_planning_graph."}), summary)
 }
 
 func (adapter *adapter) reserveResources(ctx context.Context, request *sdkmcp.CallToolRequest, input reserveResourcesInput) (*sdkmcp.CallToolResult, any, error) {
@@ -619,10 +637,10 @@ func (adapter *adapter) reserveResources(ctx context.Context, request *sdkmcp.Ca
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reserveResourcesOutput{
+	return adapter.success(reserveResourcesOutput{
 		Reservations: reservationDTOsFromDomain(result.Reservations),
 		NextActions:  []string{"Continue work; release_resources when the reservation is no longer needed."},
-	}, "resources reserved")
+	}, fmt.Sprintf("resources reserved (count=%d)", len(result.Reservations)))
 }
 
 func (adapter *adapter) releaseResources(ctx context.Context, request *sdkmcp.CallToolRequest, input releaseResourcesInput) (*sdkmcp.CallToolResult, any, error) {
@@ -634,10 +652,10 @@ func (adapter *adapter) releaseResources(ctx context.Context, request *sdkmcp.Ca
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(releaseResourcesOutput{
+	return adapter.success(releaseResourcesOutput{
 		Reservations: reservationDTOsFromDomain(result.Reservations),
 		NextActions:  []string{"Continue work or call finish_attempt."},
-	}, "resources released")
+	}, fmt.Sprintf("resources released (count=%d)", len(result.Reservations)))
 }
 
 func (adapter *adapter) listResourceReservations(ctx context.Context, request *sdkmcp.CallToolRequest, input listResourceReservationsInput) (*sdkmcp.CallToolResult, any, error) {
@@ -657,10 +675,10 @@ func (adapter *adapter) listResourceReservations(ctx context.Context, request *s
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reservationListOutput{
+	return adapter.success(reservationListOutput{
 		Items: reservationDTOsFromDomain(result.Items), NextCursor: result.NextCursor, HasMore: result.HasMore,
 		NextActions: []string{"Use next_cursor for more results, if present."},
-	}, "reservations listed")
+	}, fmt.Sprintf("reservations listed (count=%d, has_more=%t)", len(result.Items), result.HasMore))
 }
 
 func (adapter *adapter) getResourceReservation(ctx context.Context, request *sdkmcp.CallToolRequest, input getResourceReservationInput) (*sdkmcp.CallToolResult, any, error) {
@@ -671,7 +689,7 @@ func (adapter *adapter) getResourceReservation(ctx context.Context, request *sdk
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reservationDTOFromDomain(reservation, input.View == "full"), "reservation retrieved")
+	return adapter.success(reservationDTOFromDomain(reservation, input.View == "full"), fmt.Sprintf("reservation retrieved (reservation_id=%s)", reservation.ID))
 }
 
 func (adapter *adapter) sessionIDForRequest(ctx context.Context, request *sdkmcp.CallToolRequest) *string {
@@ -734,7 +752,7 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.C
 	} else {
 		output.NextActions = []string{"Correct errors and validate again."}
 	}
-	return success(output, "issue plan validated")
+	return adapter.success(output, fmt.Sprintf("issue plan validated (valid=%t, plan_fingerprint=%s)", output.Valid, output.PlanFingerprint))
 }
 
 func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
@@ -744,7 +762,7 @@ func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.Call
 	}
 	output := applyIssuePlanOutputFromApplication(result)
 	output.NextActions = []string{"Use get_planning_graph to select executable work."}
-	return success(output, "issue plan applied")
+	return adapter.success(output, fmt.Sprintf("issue plan applied (created_issues=%d, latest_event_id=%d)", len(output.CreatedIssues), output.LatestEventID))
 }
 
 func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallToolRequest, input addCommentInput) (*sdkmcp.CallToolResult, any, error) {
@@ -755,7 +773,7 @@ func (adapter *adapter) addComment(ctx context.Context, request *sdkmcp.CallTool
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(addCommentOutput{Comment: commentDTOFromDomain(comment)}, "comment added")
+	return adapter.success(addCommentOutput{Comment: commentDTOFromDomain(comment)}, fmt.Sprintf("comment added (comment_id=%s)", comment.ID))
 }
 
 func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.CallToolRequest, input recordDecisionInput) (*sdkmcp.CallToolResult, any, error) {
@@ -767,10 +785,10 @@ func (adapter *adapter) recordDecision(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(recordDecisionOutput{
+	return adapter.success(recordDecisionOutput{
 		Decision:             recordDecisionDTOFromDomain(result.Decision),
 		SupersededDecisionID: copyString(result.SupersededDecisionID),
-	}, "decision recorded")
+	}, fmt.Sprintf("decision recorded (decision_id=%s, status=%s)", result.Decision.ID, result.Decision.Status))
 }
 
 func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallToolRequest, input listDecisionsInput) (*sdkmcp.CallToolResult, any, error) {
@@ -780,7 +798,7 @@ func (adapter *adapter) listDecisions(ctx context.Context, request *sdkmcp.CallT
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(decisionListOutputFromDomain(result), "decisions listed")
+	return adapter.success(decisionListOutputFromDomain(result), fmt.Sprintf("decisions listed (count=%d, has_more=%t)", len(result.Items), result.HasMore))
 }
 
 func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueActivityInput) (*sdkmcp.CallToolResult, any, error) {
@@ -788,7 +806,7 @@ func (adapter *adapter) getIssueActivity(ctx context.Context, request *sdkmcp.Ca
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(issueActivityOutputFromDomain(activity), "issue activity returned")
+	return adapter.success(issueActivityOutputFromDomain(activity), fmt.Sprintf("issue activity returned (items=%d, has_more=%t)", len(activity.Items), activity.HasMore))
 }
 
 func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueGraphInput) (*sdkmcp.CallToolResult, any, error) {
@@ -806,7 +824,7 @@ func (adapter *adapter) getIssueGraph(ctx context.Context, request *sdkmcp.CallT
 	}
 	output := graphOutputFromDomain(graph)
 	output.NextActions = []string{"Inspect a node with get_work_context."}
-	return success(output, "issue graph returned")
+	return adapter.success(output, fmt.Sprintf("issue graph returned (nodes=%d, edges=%d, truncated=%t)", len(graph.Nodes), len(graph.Edges), graph.Truncated))
 }
 
 func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.CallToolRequest, input getPlanningGraphInput) (*sdkmcp.CallToolResult, any, error) {
@@ -820,7 +838,7 @@ func (adapter *adapter) getPlanningGraph(ctx context.Context, request *sdkmcp.Ca
 	}
 	output := graphOutputFromDomain(graph)
 	output.NextActions = []string{"Inspect an entry point with get_work_context."}
-	return success(output, "planning graph returned")
+	return adapter.success(output, fmt.Sprintf("planning graph returned (nodes=%d, entry_points=%d, truncated=%t)", len(graph.Nodes), len(graph.EntryPoints), graph.Truncated))
 }
 
 func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallToolRequest, input exportProjectInput) (*sdkmcp.CallToolResult, any, error) {
@@ -839,7 +857,7 @@ func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallT
 		if err := json.Unmarshal(data, &document); err != nil {
 			return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
 		}
-		return success(document, "project export returned")
+		return adapter.success(document, "project export returned")
 	}
 	artifact, err := adapter.exports.write(data)
 	if err != nil {
@@ -850,7 +868,7 @@ func (adapter *adapter) exportProject(ctx context.Context, request *sdkmcp.CallT
 		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "logical project export could not be decoded", false))
 	}
 	artifact.Format, artifact.Version, artifact.ExportedAt = document.Format, document.Version, document.ExportedAt
-	return success(artifact, "project export artifact returned")
+	return adapter.success(artifact, fmt.Sprintf("project export artifact returned (artifact_uri=%s, byte_count=%d)", artifact.ArtifactURI, artifact.ByteCount))
 }
 
 func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.CallToolRequest, input validateImportInput) (*sdkmcp.CallToolResult, any, error) {
@@ -862,7 +880,7 @@ func (adapter *adapter) validateImport(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(dryRun, "import validation dry run returned")
+	return adapter.success(dryRun, "import validation dry run returned")
 }
 
 func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToolRequest, input applyImportInput) (*sdkmcp.CallToolResult, any, error) {
@@ -874,7 +892,7 @@ func (adapter *adapter) applyImport(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(result, "import apply result returned")
+	return adapter.success(result, "import apply result returned")
 }
 
 func (adapter *adapter) importDocument(document *string, sourceURI *string) ([]byte, error) {
@@ -931,7 +949,7 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 		toolsets,
 		project.LatestEventID,
 	)
-	return success(output, "project metadata returned")
+	return adapter.success(output, fmt.Sprintf("project metadata returned (project_ref=%s, latest_event_id=%d)", output.ProjectRef, project.LatestEventID))
 }
 
 func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
@@ -961,7 +979,7 @@ func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToo
 		toolsets,
 		project.LatestEventID,
 	)
-	return success(output, "project opened")
+	return adapter.success(output, fmt.Sprintf("project opened (project_ref=%s, latest_event_id=%d)", output.ProjectRef, project.LatestEventID))
 }
 
 func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp.CallToolRequest, input manageIssueRelationInput) (*sdkmcp.CallToolResult, any, error) {
@@ -989,7 +1007,7 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp
 			summary = "relation removed"
 		}
 	}
-	return success(manageIssueRelationOutput{
+	return adapter.success(manageIssueRelationOutput{
 		Relation: relationDTOFromDomain(result.Relation), AffectedIssues: affected, Changed: result.Changed,
 	}, summary)
 }
@@ -1007,7 +1025,7 @@ func (adapter *adapter) listLabels(ctx context.Context, request *sdkmcp.CallTool
 	for i, item := range result.Items {
 		items[i] = labelDTOFromDomain(item)
 	}
-	return success(labelListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, "labels listed")
+	return adapter.success(labelListOutput{Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore}, fmt.Sprintf("labels listed (count=%d, has_more=%t)", len(items), result.HasMore))
 }
 
 func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input createIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1031,10 +1049,12 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue created (display_id=%s, id=%s, status=%s, version=%d)",
+		result.Issue.DisplayID, result.Issue.ID, result.Issue.Status, result.Issue.Version)
 	if view == "full" {
-		return success(issueDTOFromDomain(result.Issue), "issue created")
+		return adapter.success(issueDTOFromDomain(result.Issue), summary)
 	}
-	return success(createIssueCompactOutputFromDomain(result.Issue), "issue created")
+	return adapter.success(createIssueCompactOutputFromDomain(result.Issue), summary)
 }
 
 func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input updateIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1052,10 +1072,12 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue updated (display_id=%s, id=%s, status=%s, version=%d)",
+		result.Issue.DisplayID, result.Issue.ID, result.Issue.Status, result.Issue.Version)
 	if view == "full" {
-		return success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, "issue updated")
+		return adapter.success(updateIssueOutput{Issue: issueDTOFromDomain(result.Issue), ChangedFields: result.ChangedFields}, summary)
 	}
-	return success(updateIssueCompactOutputFromDomain(result.Issue, result.ChangedFields), "issue updated")
+	return adapter.success(updateIssueCompactOutputFromDomain(result.Issue, result.ChangedFields), summary)
 }
 
 func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input getIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1073,13 +1095,15 @@ func (adapter *adapter) getIssue(ctx context.Context, request *sdkmcp.CallToolRe
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue returned (display_id=%s, id=%s, status=%s, version=%d)",
+		issue.DisplayID, issue.ID, issue.Status, issue.Version)
 	switch view {
 	case "compact":
-		return success(issueCompactProjectionDTOFromDomain(issue), "issue returned")
+		return adapter.success(issueCompactProjectionDTOFromDomain(issue), summary)
 	case "standard":
-		return success(issueStandardProjectionDTOFromDomain(issue), "issue returned")
+		return adapter.success(issueStandardProjectionDTOFromDomain(issue), summary)
 	case "full":
-		return success(issueDTOFromDomain(issue), "issue returned")
+		return adapter.success(issueDTOFromDomain(issue), summary)
 	default:
 		return adapter.failure(unsupportedField("view"))
 	}
@@ -1110,6 +1134,7 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 	if result.HasMore {
 		nextActions = append(nextActions, "Continue with next_cursor.")
 	}
+	summary := fmt.Sprintf("issues listed (count=%d, has_more=%t)", len(result.Items), result.HasMore)
 	if view == "full" {
 		items := make([]issueListItemDTO, len(result.Items))
 		for i, item := range result.Items {
@@ -1122,17 +1147,17 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 				ActiveAttemptID:        item.ActiveAttemptID,
 			}
 		}
-		return success(issueListOutput{
+		return adapter.success(issueListOutput{
 			Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore, NextActions: nextActions,
-		}, "issues listed")
+		}, summary)
 	}
 	items := make([]issueListItemCompactDTO, len(result.Items))
 	for i, item := range result.Items {
 		items[i] = issueListItemCompactDTOFromDomain(item)
 	}
-	return success(issueListCompactOutput{
+	return adapter.success(issueListCompactOutput{
 		Items: items, NextCursor: result.NextCursor, HasMore: result.HasMore, NextActions: nextActions,
-	}, "issues listed")
+	}, summary)
 }
 
 func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input archiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1148,10 +1173,12 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue archived (display_id=%s, id=%s, status=%s, version=%d)",
+		result.Issue.DisplayID, result.Issue.ID, result.Issue.Status, result.Issue.Version)
 	if view == "full" {
-		return success(issueDTOFromDomain(result.Issue), "issue archived")
+		return adapter.success(issueDTOFromDomain(result.Issue), summary)
 	}
-	return success(archiveIssueCompactOutputFromDomain(result.Issue), "issue archived")
+	return adapter.success(archiveIssueCompactOutputFromDomain(result.Issue), summary)
 }
 
 func (adapter *adapter) unarchiveIssue(ctx context.Context, request *sdkmcp.CallToolRequest, input unarchiveIssueInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1168,10 +1195,12 @@ func (adapter *adapter) unarchiveIssue(ctx context.Context, request *sdkmcp.Call
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("issue unarchived (display_id=%s, id=%s, status=%s, version=%d)",
+		result.Issue.DisplayID, result.Issue.ID, result.Issue.Status, result.Issue.Version)
 	if view == "full" {
-		return success(issueDTOFromDomain(result.Issue), "issue unarchived")
+		return adapter.success(issueDTOFromDomain(result.Issue), summary)
 	}
-	return success(unarchiveIssueCompactOutputFromDomain(result.Issue), "issue unarchived")
+	return adapter.success(unarchiveIssueCompactOutputFromDomain(result.Issue), summary)
 }
 
 func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input createReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1185,7 +1214,8 @@ func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request created")
+	return adapter.success(reviewRequestDTOFromDomain(result.Request, result.Claimable),
+		fmt.Sprintf("review request created (review_request_id=%s, version=%d)", result.Request.ID, result.Request.Version))
 }
 
 func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input getReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1193,7 +1223,8 @@ func (adapter *adapter) getReviewRequest(ctx context.Context, request *sdkmcp.Ca
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request read")
+	return adapter.success(reviewRequestDTOFromDomain(result.Request, result.Claimable),
+		fmt.Sprintf("review request read (review_request_id=%s, status=%s, version=%d)", result.Request.ID, result.Request.Status, result.Request.Version))
 }
 
 func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.CallToolRequest, input listReviewRequestsInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1214,7 +1245,7 @@ func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.
 	if result.NextCursor != nil {
 		output.NextCursor = result.NextCursor
 	}
-	return success(output, "review requests listed")
+	return adapter.success(output, fmt.Sprintf("review requests listed (count=%d, has_more=%t)", len(items), result.HasMore))
 }
 
 func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1222,7 +1253,8 @@ func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(reviewRequestDTOFromDomain(result.Request, result.Claimable), "review request cancelled")
+	return adapter.success(reviewRequestDTOFromDomain(result.Request, result.Claimable),
+		fmt.Sprintf("review request cancelled (review_request_id=%s, version=%d)", result.Request.ID, result.Request.Version))
 }
 
 func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input replaceReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1243,11 +1275,24 @@ func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmc
 		Successor:     reviewRequestDTOFromDomain(result.Successor, true),
 		LatestEventID: result.LatestEventID,
 	}
-	return success(output, "review request replaced")
+	return adapter.success(output, fmt.Sprintf("review request replaced (predecessor_id=%s, successor_id=%s, latest_event_id=%d)",
+		result.Predecessor.ID, result.Successor.ID, result.LatestEventID))
 }
 
-func success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {
-	return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: summary}}, StructuredContent: output}, nil, nil
+// maxAutoTextContentBytes caps inline JSON duplication in Content[0].Text
+// under ContentModeAuto: every default response budget in docs/03 §3 is
+// well under 64 KiB, while oversized explicit opt-in payloads (e.g.
+// get_issue view:"full" on a multi-hundred-KiB body) fall back to the
+// enriched summary string in Content[0].Text and keep the full payload in
+// StructuredContent.
+const maxAutoTextContentBytes = 64 * 1024
+
+func (adapter *adapter) success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {
+	result, err := adapter.renderResult(output, summary, false)
+	if err != nil {
+		return adapter.failure(domain.WrapError(err, domain.CodeStorageFailure, "tool output could not be encoded", false))
+	}
+	return result, nil, nil
 }
 
 func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) {
@@ -1264,11 +1309,49 @@ func (adapter *adapter) failure(err error) (*sdkmcp.CallToolResult, any, error) 
 		Details:   domainErr.Details,
 		Retryable: domainErr.Retryable,
 	}
-	return &sdkmcp.CallToolResult{
-		Content:           []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("%s: %s", output.Code, output.Message)}},
-		StructuredContent: output,
-		IsError:           true,
-	}, nil, nil
+	summary := fmt.Sprintf("%s: %s", output.Code, output.Message)
+	result, marshalErr := adapter.renderResult(output, summary, true)
+	if marshalErr != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: summary}},
+			IsError: true,
+		}, nil, nil
+	}
+	return result, nil, nil
+}
+
+func (adapter *adapter) renderResult(output any, summary string, isError bool) (*sdkmcp.CallToolResult, error) {
+	switch adapter.contentMode {
+	case domain.ContentModeStructured:
+		return &sdkmcp.CallToolResult{
+			Content:           []sdkmcp.Content{&sdkmcp.TextContent{Text: summary}},
+			StructuredContent: output,
+			IsError:           isError,
+		}, nil
+	case domain.ContentModeText:
+		data, err := json.Marshal(output)
+		if err != nil {
+			return nil, err
+		}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(data)}},
+			IsError: isError,
+		}, nil
+	default:
+		data, err := json.Marshal(output)
+		if err != nil {
+			return nil, err
+		}
+		text := summary
+		if len(data) <= maxAutoTextContentBytes {
+			text = string(data)
+		}
+		return &sdkmcp.CallToolResult{
+			Content:           []sdkmcp.Content{&sdkmcp.TextContent{Text: text}},
+			StructuredContent: output,
+			IsError:           isError,
+		}, nil
+	}
 }
 
 func unsupportedField(field string) *domain.Error {
@@ -1360,7 +1443,7 @@ func (adapter *adapter) manageWorkflowPolicy(ctx context.Context, request *sdkmc
 		if err != nil {
 			return adapter.failure(err)
 		}
-		return success(workflowPolicyDTOFromDomain(policy), "workflow policy created")
+		return adapter.success(workflowPolicyDTOFromDomain(policy), fmt.Sprintf("workflow policy created (policy_id=%s, version=%d)", policy.ID, policy.Version))
 	case "update":
 		if input.PolicyID == nil || input.ExpectedVersion == nil {
 			return adapter.failure(requiredForAction("update", "policy_id", "expected_version"))
@@ -1370,7 +1453,7 @@ func (adapter *adapter) manageWorkflowPolicy(ctx context.Context, request *sdkmc
 		if err != nil {
 			return adapter.failure(err)
 		}
-		return success(workflowPolicyDTOFromDomain(policy), "workflow policy updated")
+		return adapter.success(workflowPolicyDTOFromDomain(policy), fmt.Sprintf("workflow policy updated (policy_id=%s, version=%d)", policy.ID, policy.Version))
 	case "archive":
 		if input.PolicyID == nil || input.ExpectedVersion == nil {
 			return adapter.failure(requiredForAction("archive", "policy_id", "expected_version"))
@@ -1379,7 +1462,7 @@ func (adapter *adapter) manageWorkflowPolicy(ctx context.Context, request *sdkmc
 		if err != nil {
 			return adapter.failure(err)
 		}
-		return success(workflowPolicyDTOFromDomain(policy), "workflow policy archived")
+		return adapter.success(workflowPolicyDTOFromDomain(policy), fmt.Sprintf("workflow policy archived (policy_id=%s, version=%d)", policy.ID, policy.Version))
 	default:
 		return adapter.failure(unsupportedField("action"))
 	}
@@ -1394,10 +1477,11 @@ func (adapter *adapter) getWorkflowPolicy(ctx context.Context, request *sdkmcp.C
 	if err != nil {
 		return adapter.failure(err)
 	}
+	summary := fmt.Sprintf("workflow policy read (policy_id=%s, status=%s, version=%d)", policy.ID, policy.Status, policy.Version)
 	if view == "compact" {
-		return success(workflowPolicySummaryDTOFromDomain(policy), "workflow policy read")
+		return adapter.success(workflowPolicySummaryDTOFromDomain(policy), summary)
 	}
-	return success(workflowPolicyDTOFromDomain(policy), "workflow policy read")
+	return adapter.success(workflowPolicyDTOFromDomain(policy), summary)
 }
 
 func (adapter *adapter) listWorkflowPolicies(ctx context.Context, request *sdkmcp.CallToolRequest, input listWorkflowPoliciesInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1412,7 +1496,7 @@ func (adapter *adapter) listWorkflowPolicies(ctx context.Context, request *sdkmc
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(workflowPolicyListOutputFromDomain(list), "workflow policies listed")
+	return adapter.success(workflowPolicyListOutputFromDomain(list), fmt.Sprintf("workflow policies listed (count=%d, has_more=%t)", len(list.Items), list.HasMore))
 }
 
 func (adapter *adapter) evaluateGates(ctx context.Context, request *sdkmcp.CallToolRequest, input evaluateGatesInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1425,7 +1509,8 @@ func (adapter *adapter) evaluateGates(ctx context.Context, request *sdkmcp.CallT
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(evaluateGatesOutputFromApplication(result), "workflow gates evaluated")
+	output := evaluateGatesOutputFromApplication(result)
+	return adapter.success(output, fmt.Sprintf("workflow gates evaluated (passed=%t)", output.Passed))
 }
 
 func (adapter *adapter) submitGateEvidence(ctx context.Context, request *sdkmcp.CallToolRequest, input submitGateEvidenceInput) (*sdkmcp.CallToolResult, any, error) {
@@ -1437,5 +1522,6 @@ func (adapter *adapter) submitGateEvidence(ctx context.Context, request *sdkmcp.
 	if err != nil {
 		return adapter.failure(err)
 	}
-	return success(submitGateEvidenceOutput{Evidence: attemptEvidenceDTOFromDomain(result.Evidence)}, "gate evidence submitted")
+	return adapter.success(submitGateEvidenceOutput{Evidence: attemptEvidenceDTOFromDomain(result.Evidence)},
+		fmt.Sprintf("gate evidence submitted (evidence_id=%s, key=%s, result=%s)", result.Evidence.ID, result.Evidence.Key, result.Evidence.Result))
 }

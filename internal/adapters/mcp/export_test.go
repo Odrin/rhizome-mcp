@@ -36,3 +36,10 @@ func ToolProfileIncludesCoreToolForTest(profile string, readOnlyHint bool) bool 
 	toolDef := &sdkmcp.Tool{Annotations: &sdkmcp.ToolAnnotations{ReadOnlyHint: readOnlyHint}}
 	return toolProfileIncludes(domain.ToolProfile(profile), groupCore, toolDef)
 }
+
+// RenderSuccessForTest exercises adapter.success with the given content mode
+// and output value, so mcp_test can verify marshal-error handling directly.
+func RenderSuccessForTest(mode domain.ContentMode, output any, summary string) (*sdkmcp.CallToolResult, any, error) {
+	a := &adapter{contentMode: mode}
+	return a.success(output, summary)
+}

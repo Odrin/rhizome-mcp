@@ -243,21 +243,26 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		}
 	}
 
-	serveHandler := func(ctx context.Context, httpAddress string, toolProfile string, toolsets string) (err error) {
-		if httpAddress != "" {
-			cfg.HTTPAddress = httpAddress
+	serveHandler := func(ctx context.Context, opts cliadapter.ServeOptions) (err error) {
+		if opts.HTTPAddress != "" {
+			cfg.HTTPAddress = opts.HTTPAddress
 		} else if cfg.HTTPAddressFromEnv {
 			fmt.Fprintf(stderr, "warning: HTTP transport selected via environment variable (address %q); pass --http-address explicitly to make this intentional\n", cfg.HTTPAddress)
 		}
-		if toolProfile != "" {
-			cfg.ToolProfile = toolProfile
+		if opts.ToolProfile != "" {
+			cfg.ToolProfile = opts.ToolProfile
 		} else if cfg.ToolProfileFromEnv {
 			fmt.Fprintf(stderr, "warning: tool profile %q selected via environment variable; pass --profile explicitly to make this intentional\n", cfg.ToolProfile)
 		}
-		if toolsets != "" {
-			cfg.Toolsets = toolsets
+		if opts.Toolsets != "" {
+			cfg.Toolsets = opts.Toolsets
 		} else if cfg.ToolsetsFromEnv {
 			fmt.Fprintf(stderr, "warning: toolsets %q selected via environment variable; pass --toolsets explicitly to make this intentional\n", cfg.Toolsets)
+		}
+		if opts.ContentMode != "" {
+			cfg.ContentMode = opts.ContentMode
+		} else if cfg.ContentModeFromEnv {
+			fmt.Fprintf(stderr, "warning: content mode %q selected via environment variable; pass --content-mode explicitly to make this intentional\n", cfg.ContentMode)
 		}
 		if router == nil {
 			dataRoot, dataRootErr := resolveDataRoot(pathInputs, dataRootOverride)
@@ -589,6 +594,7 @@ func newMCPServer(cfg *config.Config, router projectrouting.ProjectRouter) (*mcp
 		ConfigVersion:   projectconfig.CurrentIdentityVersion,
 		ToolProfile:     cfg.ToolProfile,
 		Toolsets:        cfg.Toolsets,
+		ContentMode:     cfg.ContentMode,
 		ExportDirectory: exportDirectory,
 	})
 }

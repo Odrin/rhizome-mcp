@@ -1442,6 +1442,46 @@ func TestServeWarnsWhenToolsetsSelectedFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestServeWarnsWhenContentModeSelectedFromEnvironment(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("create repo root: %v", err)
+	}
+	pathInputs := projectconfig.PathInputs{GOOS: "linux", HomeDir: tempDir, XDGDataHome: tempDir}
+	dataRoot := filepath.Join(tempDir, "data")
+	var stdout, stderr bytes.Buffer
+	if err := runCLI(ctx, &config.Config{}, &stdout, &stderr, []string{"--data-root", dataRoot, "init"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+
+	originalServeRunner := serveRunner
+	serveRunner = func(context.Context, *config.Config, io.Writer, projectrouting.ProjectRouter) error { return nil }
+	defer func() { serveRunner = originalServeRunner }()
+
+	stderr.Reset()
+	envConfig := &config.Config{ContentMode: "structured", ContentModeFromEnv: true}
+	if err := runCLI(ctx, envConfig, &stdout, &stderr, []string{"serve"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "content mode \"structured\" selected via environment variable") {
+		t.Fatalf("stderr = %q, want a content mode environment-selection warning", stderr.String())
+	}
+
+	stderr.Reset()
+	flagConfig := &config.Config{ContentMode: "structured", ContentModeFromEnv: true}
+	if err := runCLI(ctx, flagConfig, &stdout, &stderr, []string{"serve", "--content-mode", "text"}, projectRoot, pathInputs); err != nil {
+		t.Fatalf("serve command failed: %v", err)
+	}
+	if strings.Contains(stderr.String(), "selected via environment variable") {
+		t.Fatalf("stderr = %q, want no environment-selection warning when --content-mode is explicit", stderr.String())
+	}
+	if flagConfig.ContentMode != "text" {
+		t.Fatalf("ContentMode = %q, want %q", flagConfig.ContentMode, "text")
+	}
+}
+
 // TestServeFailsWhenEnvironmentProfileMeetsToolsetsFlag drives the real,
 // unstubbed serve path: an environment-selected tool profile combined with
 // an explicit --toolsets flag has no defined precedence and must fail

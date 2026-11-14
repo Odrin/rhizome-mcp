@@ -214,20 +214,19 @@ func TestProjectsMigrateCommandParsesProjectID(t *testing.T) {
 
 func TestServeCommandParsesHTTPAddress(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	var capturedAddress, capturedProfile string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, httpAddress string, profile string, _ string) error {
-		capturedAddress = httpAddress
-		capturedProfile = profile
+	var captured ServeOptions
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, opts ServeOptions) error {
+		captured = opts
 		return nil
 	})
 	if err := cli.Run(context.Background(), []string{"serve", "--http-address", "127.0.0.1:0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedAddress != "127.0.0.1:0" {
-		t.Fatalf("captured HTTP address = %q, want %q", capturedAddress, "127.0.0.1:0")
+	if captured.HTTPAddress != "127.0.0.1:0" {
+		t.Fatalf("captured HTTP address = %q, want %q", captured.HTTPAddress, "127.0.0.1:0")
 	}
-	if capturedProfile != "" {
-		t.Fatalf("captured profile = %q, want blank when --profile is not passed", capturedProfile)
+	if captured.ToolProfile != "" {
+		t.Fatalf("captured profile = %q, want blank when --profile is not passed", captured.ToolProfile)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no stderr output, got %q", stderr.String())
@@ -236,22 +235,22 @@ func TestServeCommandParsesHTTPAddress(t *testing.T) {
 
 func TestServeCommandParsesToolProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	var capturedProfile string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string, _ string) error {
-		capturedProfile = profile
+	var captured ServeOptions
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, opts ServeOptions) error {
+		captured = opts
 		return nil
 	})
 	if err := cli.Run(context.Background(), []string{"serve", "--profile", "agent"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedProfile != "agent" {
-		t.Fatalf("captured profile = %q, want %q", capturedProfile, "agent")
+	if captured.ToolProfile != "agent" {
+		t.Fatalf("captured profile = %q, want %q", captured.ToolProfile, "agent")
 	}
 }
 
 func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, ServeOptions) error {
 		t.Fatal("serve handler unexpectedly invoked for an unsupported profile")
 		return nil
 	})
@@ -266,26 +265,25 @@ func TestServeCommandRejectsUnknownToolProfile(t *testing.T) {
 
 func TestServeCommandParsesToolsets(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	var capturedProfile, capturedToolsets string
-	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, _ string, profile string, toolsets string) error {
-		capturedProfile = profile
-		capturedToolsets = toolsets
+	var captured ServeOptions
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, opts ServeOptions) error {
+		captured = opts
 		return nil
 	})
 	if err := cli.Run(context.Background(), []string{"serve", "--toolsets", "issues,planning"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedToolsets != "issues,planning" {
-		t.Fatalf("captured toolsets = %q, want %q", capturedToolsets, "issues,planning")
+	if captured.Toolsets != "issues,planning" {
+		t.Fatalf("captured toolsets = %q, want %q", captured.Toolsets, "issues,planning")
 	}
-	if capturedProfile != "" {
-		t.Fatalf("captured profile = %q, want blank when --toolsets is passed", capturedProfile)
+	if captured.ToolProfile != "" {
+		t.Fatalf("captured profile = %q, want blank when --toolsets is passed", captured.ToolProfile)
 	}
 }
 
 func TestServeCommandRejectsUnknownToolset(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, ServeOptions) error {
 		t.Fatal("serve handler unexpectedly invoked for an unsupported toolset")
 		return nil
 	})
@@ -303,7 +301,7 @@ func TestServeCommandRejectsUnknownToolset(t *testing.T) {
 // code 2) before the serve handler runs.
 func TestServeCommandRejectsProfileWithToolsets(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, string, string, string) error {
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, ServeOptions) error {
 		t.Fatal("serve handler unexpectedly invoked with both --profile and --toolsets")
 		return nil
 	})
@@ -316,6 +314,36 @@ func TestServeCommandRejectsProfileWithToolsets(t *testing.T) {
 	}
 	if ExitCodeFor(err) != ExitUsage {
 		t.Fatalf("ExitCodeFor(%v) = %d, want %d (usage error)", err, ExitCodeFor(err), ExitUsage)
+	}
+}
+
+func TestServeCommandParsesContentMode(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var captured ServeOptions
+	cli := New(Services{}, &stdout, &stderr, nil, func(_ context.Context, opts ServeOptions) error {
+		captured = opts
+		return nil
+	})
+	if err := cli.Run(context.Background(), []string{"serve", "--content-mode", "structured"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.ContentMode != "structured" {
+		t.Fatalf("captured content mode = %q, want %q", captured.ContentMode, "structured")
+	}
+}
+
+func TestServeCommandRejectsUnknownContentMode(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, func(context.Context, ServeOptions) error {
+		t.Fatal("serve handler unexpectedly invoked for an unsupported content mode")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"serve", "--content-mode", "hybrid"})
+	if err == nil {
+		t.Fatal("expected an error for an unsupported content mode")
+	}
+	if !strings.Contains(err.Error(), "hybrid") || !strings.Contains(err.Error(), "valid modes") {
+		t.Fatalf("error = %v, want an actionable message naming the value and valid modes", err)
 	}
 }
 

@@ -75,12 +75,18 @@ type Services struct {
 // InitHandler runs CLI init logic after the adapter parses the command.
 type InitHandler func(context.Context, string) error
 
+// ServeOptions carries the parsed command-line options for `serve`.
+// Blank fields keep the caller's configured default; runServe guarantees
+// at most one of ToolProfile and Toolsets is non-blank.
+type ServeOptions struct {
+	HTTPAddress string
+	ToolProfile string
+	Toolsets    string
+	ContentMode string
+}
+
 // ServeHandler runs CLI serve logic after the adapter parses the command.
-// The second parameter is the requested HTTP address (blank for stdio); the
-// third is the requested tool exposure profile and the fourth the requested
-// free-form toolset selection (blank keeps the caller's configured default;
-// runServe guarantees at most one of the two is non-blank).
-type ServeHandler func(context.Context, string, string, string) error
+type ServeHandler func(context.Context, ServeOptions) error
 
 // BoardServeHandler runs CLI board serve logic after the adapter parses the command.
 type BoardServeHandler func(context.Context, string, io.Writer) error
@@ -262,6 +268,7 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	httpAddress := fs.String("http-address", "", "serve over loopback HTTP instead of stdio")
 	profile := fs.String("profile", "", "tool exposure profile: full, agent, read-only, or migration (default full)")
 	toolsets := fs.String("toolsets", "", "comma-separated tool capability groups to advertise instead of a profile (core is always included): issues, planning, review, knowledge, lifecycle, governance, migration, sync")
+	contentMode := fs.String("content-mode", "", "tool result content mode: auto, structured, or text (default auto)")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -278,7 +285,15 @@ func (c *CLI) runServe(ctx context.Context, args []string) error {
 	if _, err := domain.ParseToolsets(*toolsets); err != nil {
 		return err
 	}
-	return c.serveHandler(ctx, *httpAddress, *profile, *toolsets)
+	if _, err := domain.ParseContentMode(*contentMode); err != nil {
+		return err
+	}
+	return c.serveHandler(ctx, ServeOptions{
+		HTTPAddress: *httpAddress,
+		ToolProfile: *profile,
+		Toolsets:    *toolsets,
+		ContentMode: *contentMode,
+	})
 }
 
 func (c *CLI) runBackup(ctx context.Context, args []string) error {
