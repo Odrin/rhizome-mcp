@@ -254,9 +254,10 @@ Use `--data-root PATH` to select an explicit data root for any command. Nothing 
 | --- | --- |
 | `init` | Create `.agent-tracker.json` and the project database |
 | `serve [--http-address ADDR] [--profile full\|agent\|read-only\|migration] [--toolsets GROUP[,GROUP...]] [--content-mode auto\|structured\|text] [--project-root PATH]` | Run the MCP server (stdio; `--http-address` for local HTTP; `--profile` to narrow the advertised tool catalog to a named profile, or `--toolsets` to compose one from capability groups; `--content-mode` to select how tool results populate `content` and `structuredContent`; `--project-root` to serve a project other than the working directory) |
-| `connect TARGET [--print] [--command]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `json`) |
+| `connect TARGET [--print] [--command] [--global] [--project-root PATH] [--profile PROFILE] [--toolsets GROUP[,GROUP...]]` | Register the server with an MCP client (`claude`, `codex`, `vscode`, `cursor`, `windsurf`, `zed`, `gemini`, `json`) |
 | `board [--output PATH] [--serve [--http-address ADDR]]` | Status board: counts, leases, blockers, review queue; optional HTML snapshot; `--serve` runs a temporary HTTP server |
-| `issue list` / `issue show ISSUE-ID` | Inspect issues with filters |
+| `issue list [--sort priority\|created_desc\|updated_desc\|sequence_desc]` / `issue show ISSUE-ID` | Inspect issues with filters and sort modes |
+| `projects list [--format table\|json]` / `projects migrate --project-id ID` | List known projects; migrate a project's data to its marker `project_id` |
 | `search QUERY` | Full-text search across issues, comments, decisions, notes |
 | `graph ISSUE-ID` | Dependency graph as table, JSON, or Mermaid |
 | `project info` / `project export` / `project import` | Project metadata; logical JSON export; logical JSON import (`--input PATH|-` with `--dry-run` or `--apply`) |
@@ -317,7 +318,7 @@ go test -race -count=1 -tags=integration -run '^TestIntegration' ./...
 
 The integration harness builds the real server subprocess with `-race` whenever the harness is race-instrumented.
 
-Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
+Releases (`.github/workflows/release.yml`) publish CGO-free binaries with SHA-256 checksums for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, and windows/arm64; release binaries embed the version, commit, and build timestamp (local builds report git VCS info or `dev`, and the `VERSION` environment variable overrides both).
 
 Release verification steps are documented in [CONTRIBUTING.md](CONTRIBUTING.md#release-verification).
 
