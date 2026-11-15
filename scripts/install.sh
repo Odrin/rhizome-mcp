@@ -6,6 +6,25 @@ BIN_NAME="rhizome-mcp"
 INSTALL_DIR="${RHIZOME_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${RHIZOME_VERSION:-latest}"
 
+compute_sha256() {
+  target_path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256_output="$(sha256sum "$target_path")" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    sha256_output="$(shasum -a 256 "$target_path")" || return 1
+  else
+    echo "Neither sha256sum nor shasum is installed; cannot verify checksum." >&2
+    return 1
+  fi
+
+  sha256_digest="$(printf '%s\n' "$sha256_output" | tr -d '\r' | awk '{print $1}')"
+  if [ -z "$sha256_digest" ]; then
+    echo "Failed to compute SHA-256 checksum for ${target_path}." >&2
+    return 1
+  fi
+  printf '%s\n' "$sha256_digest"
+}
+
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
 case "$arch" in
@@ -49,9 +68,19 @@ checksum_path="${archive_path}.sha256"
 curl -fsSL "$archive_url" -o "$archive_path"
 curl -fsSL "$checksum_url" -o "$checksum_path"
 
-expected="$(cat "$checksum_path" | tr -d ' \n\r')"
-actual="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
-if [ "$expected" != "$actual" ]; then
+if [ ! -f "$checksum_path" ]; then
+  echo "Checksum verification failed for ${asset}: missing checksum file" >&2
+  exit 1
+fi
+
+expected="$(tr -d ' \n\r' < "$checksum_path")"
+if [ -z "$expected" ]; then
+  echo "Checksum verification failed for ${asset}: empty checksum" >&2
+  exit 1
+fi
+
+actual="$(compute_sha256 "$archive_path")"
+if [ -z "$actual" ] || [ "$expected" != "$actual" ]; then
   echo "Checksum verification failed for ${asset}" >&2
   exit 1
 fi
