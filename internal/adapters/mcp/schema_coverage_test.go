@@ -241,6 +241,7 @@ func TestNamedToolInputPropertiesAreDescribed(t *testing.T) {
 		"create_agent_session": {"client_name", "model", "agent_label", "instance_key", "client_version", "project_ref"},
 		"get_issue_graph":      {"root_issue_id", "depth", "direction", "relation_types", "include_hierarchy", "include_terminal", "max_nodes", "view", "project_ref", "agent_session_handle"},
 		"get_work_context":     {"issue_id", "include", "limits", "project_ref", "agent_session_handle"},
+		"list_issues":          {"sort", "limit", "parent_issue_id", "project_ref", "agent_session_handle"},
 	}
 	for toolName, propertyNames := range want {
 		schema := decodeInputSchema(t, toolMap[toolName])

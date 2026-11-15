@@ -174,10 +174,11 @@ Supported flags:
 
 ### `issue list`
 
-List issues with optional filters.
+List issues with optional filters and sort order.
 
 ```bash
 rhizome-mcp issue list --format json --limit 20
+rhizome-mcp issue list --sort updated_desc --limit 10
 ```
 
 Supported flags:
@@ -185,6 +186,7 @@ Supported flags:
 - `--format table|json`
 - `--limit N`
 - `--cursor CURSOR`
+- `--sort priority|created_desc|updated_desc|sequence_desc` (default `priority`)
 - `--type TYPE ...`
 - `--status STATUS ...`
 - `--effective-status STATUS ...`

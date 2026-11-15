@@ -186,6 +186,15 @@ func enumSchema(values ...string) *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "string", Enum: enum}
 }
 
+func nullableEnumSchema(values ...string) *jsonschema.Schema {
+	enum := make([]any, 0, len(values)+1)
+	for _, value := range values {
+		enum = append(enum, value)
+	}
+	enum = append(enum, nil)
+	return &jsonschema.Schema{Types: []string{"string", "null"}, Enum: enum}
+}
+
 func schemaGetProject() *jsonschema.Schema {
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{"include_instructions": booleanSchema()}))
 }
@@ -429,12 +438,17 @@ func schemaWorkContextLimits() *jsonschema.Schema {
 func schemaListIssues() *jsonschema.Schema {
 	limit := boundedIntegerSchema(0, 100)
 	limit.Description = "0 uses the default limit of 20; maximum is 100."
+	sortOrder := withDescription(
+		nullableEnumSchema(domain.IssueSortOrderNames()...),
+		"Sort order: priority (default), created_desc (newest created first), updated_desc (recently updated first), or sequence_desc (highest ISSUE-N first).",
+	)
 	return withAgentSessionHandle(object(map[string]*jsonschema.Schema{
 		"types": stringsSchema(), "statuses": stringsSchema(), "effective_statuses": stringsSchema(),
 		"priorities": stringsSchema(), "labels": stringsSchema(), "parent_issue_id": nullableIssueIdentifierSchema(),
 		"is_blocked":       &jsonschema.Schema{Types: []string{"boolean", "null"}},
 		"is_claimable":     &jsonschema.Schema{Types: []string{"boolean", "null"}},
-		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(), "view": enumSchema("compact", "full"),
+		"include_archived": booleanSchema(), "limit": limit, "cursor": nullableStringSchema(),
+		"sort": sortOrder, "view": enumSchema("compact", "full"),
 	}))
 }
 

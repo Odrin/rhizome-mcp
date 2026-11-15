@@ -6,15 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
 )
 
@@ -349,4 +352,286 @@ func unsupportedCursor() string {
 		"payload": map[string]any{"priority_rank": 1, "is_claimable": false, "sequence_no": 1},
 	})
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func encodeIssueTestCursor(payload map[string]any) string {
+	raw, _ := json.Marshal(map[string]any{
+		"version": 1,
+		"payload": payload,
+	})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func openIssueServiceWithClock(t *testing.T) (*application.IssueService, *sqlite.DB, *clock.FakeClock) {
+	t.Helper()
+	now := time.Date(2026, 7, 14, 10, 11, 12, 123_000_000, time.UTC)
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "issues-sort.db"), sqlite.Options{})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(context.Background()); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+	fakeClock := clock.NewFakeClock(now)
+	if _, err := migrations.Migrate(ctx, db, fakeClock); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		timestamp := sqlite.FormatStorageTime(now)
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at)
+			VALUES (?, 1, ?, ?)`, sqliteTestProjectID, timestamp, timestamp)
+		return err
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	repository, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatalf("NewIssueRepository() error = %v", err)
+	}
+	generator, err := ids.NewGenerator(fakeClock, rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("NewGenerator() error = %v", err)
+	}
+	service, err := application.NewIssueService(repository, fakeClock, generator)
+	if err != nil {
+		t.Fatalf("NewIssueService() error = %v", err)
+	}
+	return service, db, fakeClock
+}
+
+func collectAllPages(t *testing.T, service *application.IssueService, base domain.ListIssuesInput) []string {
+	t.Helper()
+	ctx := context.Background()
+	var ids []string
+	cursor := base.Cursor
+	for {
+		input := base
+		input.Cursor = cursor
+		page, err := service.ListIssues(ctx, input)
+		if err != nil {
+			t.Fatalf("ListIssues(%#v) error = %v", input, err)
+		}
+		for _, item := range page.Items {
+			ids = append(ids, item.ID)
+		}
+		if !page.HasMore {
+			if page.NextCursor != nil {
+				t.Fatalf("HasMore=false but NextCursor=%q", *page.NextCursor)
+			}
+			break
+		}
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			t.Fatalf("HasMore=true but NextCursor=%v", page.NextCursor)
+		}
+		cursor = *page.NextCursor
+	}
+	return ids
+}
+
+func TestListIssuesSortModesPaginationTieBreakersAndCursors(t *testing.T) {
+	service, db, fakeClock := openIssueServiceWithClock(t)
+	ctx := context.Background()
+
+	// Issue 1 (seq 1): low priority, created at T0.
+	first, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "first-low", Priority: domain.PriorityLow, Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Issue 2 & 3 (seq 2, 3): share exact same created_at (T0 + 1m) to test created_desc sequence_no DESC tie-breaker.
+	fakeClock.Advance(time.Minute)
+	second, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "second-critical", Priority: domain.PriorityCritical, Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "third-high-ready", Priority: domain.PriorityHigh, Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Issue 4 (seq 4): medium priority, created at T0 + 2m.
+	fakeClock.Advance(time.Minute)
+	fourth, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "fourth-medium", Priority: domain.PriorityMedium, Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Issue 5 (seq 5): low priority, created at T0 + 3m.
+	fakeClock.Advance(time.Minute)
+	fifth, err := service.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "fifth-low", Priority: domain.PriorityLow, Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Update first (seq 1) and fourth (seq 4) at the same timestamp (T0 + 4m) to test updated_desc ordering + tie-breaker,
+	// then update second (seq 2) at T0 + 5m so updated_desc puts seq 2 first, then seq 4 before seq 1 (same updated_at), then seq 5, then seq 3.
+	fakeClock.Advance(time.Minute)
+	if _, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID: first.ID, ExpectedVersion: 1, Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "first-low-updated"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID: fourth.ID, ExpectedVersion: 1, Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "fourth-medium-updated"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fakeClock.Advance(time.Minute)
+	if _, err := service.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID: second.ID, ExpectedVersion: 1, Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "second-critical-updated"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wantOrders := []struct {
+		sort domain.IssueSortOrder
+		want []string
+	}{
+		{
+			sort: domain.IssueSortPriority,
+			// critical(seq2), high(seq3), medium(seq4), low+claimable(seq1), low+not-claimable(seq5)
+			want: []string{second.ID, third.ID, fourth.ID, first.ID, fifth.ID},
+		},
+		{
+			sort: domain.IssueSortCreatedDesc,
+			// T0+3m(seq5), T0+2m(seq4), T0+1m tie broken by seq DESC (seq3, seq2), T0(seq1)
+			want: []string{fifth.ID, fourth.ID, third.ID, second.ID, first.ID},
+		},
+		{
+			sort: domain.IssueSortUpdatedDesc,
+			// T0+5m(seq2), T0+4m tie broken by seq DESC (seq4, seq1), T0+3m(seq5), T0+1m(seq3)
+			want: []string{second.ID, fourth.ID, first.ID, fifth.ID, third.ID},
+		},
+		{
+			sort: domain.IssueSortSequenceDesc,
+			want: []string{fifth.ID, fourth.ID, third.ID, second.ID, first.ID},
+		},
+	}
+
+	cursorsBySort := make(map[domain.IssueSortOrder]string, len(wantOrders))
+	for _, tc := range wantOrders {
+		t.Run(string(tc.sort), func(t *testing.T) {
+			got := collectAllPages(t, service, domain.ListIssuesInput{Limit: 2, Sort: tc.sort})
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sort %s paginated IDs = %v, want %v", tc.sort, got, tc.want)
+			}
+			// Also test Limit=1 to ensure boundary cursors across every single item (including exact timestamp ties).
+			gotSingle := collectAllPages(t, service, domain.ListIssuesInput{Limit: 1, Sort: tc.sort})
+			if !reflect.DeepEqual(gotSingle, tc.want) {
+				t.Fatalf("sort %s single-item paginated IDs = %v, want %v", tc.sort, gotSingle, tc.want)
+			}
+			firstPage, err := service.ListIssues(ctx, domain.ListIssuesInput{Limit: 2, Sort: tc.sort})
+			if err != nil || firstPage.NextCursor == nil {
+				t.Fatalf("first page for %s failed: page=%#v err=%v", tc.sort, firstPage, err)
+			}
+			cursorsBySort[tc.sort] = *firstPage.NextCursor
+		})
+	}
+
+	// Legacy priority cursor (without "sort" key) remains compatible with default/priority sort
+	// and is rejected with INVALID_CURSOR when supplied for any other sort mode.
+	legacyPriorityCursor := encodeIssueTestCursor(map[string]any{
+		"priority_rank": 4,
+		"is_claimable":  false,
+		"sequence_no":   second.SequenceNo,
+	})
+	legacyResumed, err := service.ListIssues(ctx, domain.ListIssuesInput{Limit: 10, Cursor: legacyPriorityCursor})
+	if err != nil {
+		t.Fatalf("legacy priority cursor failed: %v", err)
+	}
+	wantAfterSecond := []string{third.ID, fourth.ID, first.ID, fifth.ID}
+	gotAfterSecond := make([]string, len(legacyResumed.Items))
+	for index, item := range legacyResumed.Items {
+		gotAfterSecond[index] = item.ID
+	}
+	if !reflect.DeepEqual(gotAfterSecond, wantAfterSecond) {
+		t.Fatalf("legacy priority cursor items = %v, want %v", gotAfterSecond, wantAfterSecond)
+	}
+
+	// Mismatched cursor sort must fail with INVALID_ARGUMENT and detail code INVALID_CURSOR naming the mismatch.
+	mismatchCases := []struct {
+		name       string
+		cursor     string
+		targetSort domain.IssueSortOrder
+		wantFrom   string
+		wantTo     string
+	}{
+		{name: "legacy priority cursor with created_desc", cursor: legacyPriorityCursor, targetSort: domain.IssueSortCreatedDesc, wantFrom: "priority", wantTo: "created_desc"},
+		{name: "priority cursor with updated_desc", cursor: cursorsBySort[domain.IssueSortPriority], targetSort: domain.IssueSortUpdatedDesc, wantFrom: "priority", wantTo: "updated_desc"},
+		{name: "created_desc cursor with default priority", cursor: cursorsBySort[domain.IssueSortCreatedDesc], targetSort: "", wantFrom: "created_desc", wantTo: "priority"},
+		{name: "updated_desc cursor with sequence_desc", cursor: cursorsBySort[domain.IssueSortUpdatedDesc], targetSort: domain.IssueSortSequenceDesc, wantFrom: "updated_desc", wantTo: "sequence_desc"},
+		{name: "sequence_desc cursor with created_desc", cursor: cursorsBySort[domain.IssueSortSequenceDesc], targetSort: domain.IssueSortCreatedDesc, wantFrom: "sequence_desc", wantTo: "created_desc"},
+	}
+	for _, tc := range mismatchCases {
+		t.Run("mismatch_"+tc.name, func(t *testing.T) {
+			_, err := service.ListIssues(ctx, domain.ListIssuesInput{Sort: tc.targetSort, Cursor: tc.cursor})
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument ||
+				len(domainErr.Details) != 1 || domainErr.Details[0].Field != "cursor" ||
+				domainErr.Details[0].Code != "INVALID_CURSOR" ||
+				!strings.Contains(domainErr.Message, tc.wantFrom) || !strings.Contains(domainErr.Message, tc.wantTo) {
+				t.Fatalf("mismatch error = %#v, want INVALID_ARGUMENT/INVALID_CURSOR mentioning %q and %q", err, tc.wantFrom, tc.wantTo)
+			}
+		})
+	}
+
+	// Malformed payload validation per sort mode.
+	badPayloads := []struct {
+		sort    domain.IssueSortOrder
+		payload map[string]any
+	}{
+		{domain.IssueSortPriority, map[string]any{"sort": "bogus", "sequence_no": 1}},
+		{domain.IssueSortCreatedDesc, map[string]any{"sort": "created_desc", "sequence_no": 1}},
+		{domain.IssueSortCreatedDesc, map[string]any{"sort": "created_desc", "created_at": "not-a-time", "sequence_no": 1}},
+		{domain.IssueSortUpdatedDesc, map[string]any{"sort": "updated_desc", "sequence_no": 1}},
+		{domain.IssueSortUpdatedDesc, map[string]any{"sort": "updated_desc", "updated_at": "not-a-time", "sequence_no": 1}},
+		{domain.IssueSortSequenceDesc, map[string]any{"sort": "sequence_desc", "sequence_no": 0}},
+	}
+	for _, tc := range badPayloads {
+		_, err := service.ListIssues(ctx, domain.ListIssuesInput{Sort: tc.sort, Cursor: encodeIssueTestCursor(tc.payload)})
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument ||
+			len(domainErr.Details) != 1 || domainErr.Details[0].Field != "cursor" ||
+			domainErr.Details[0].Code != "MALFORMED_CURSOR" {
+			t.Fatalf("bad payload %v for %s error = %#v, want MALFORMED_CURSOR", tc.payload, tc.sort, err)
+		}
+	}
+
+	// Verify raw column timestamp strings are captured verbatim into cursors so un-normalized whole-second
+	// timestamps (e.g. legacy "...Z" strings) match SQL memcmp without reformatting mismatch.
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE issues SET created_at = ? WHERE id = ?`, "2026-07-14T10:12:12Z", third.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rawPage1, err := service.ListIssues(ctx, domain.ListIssuesInput{Limit: 3, Sort: domain.IssueSortCreatedDesc})
+	if err != nil || !rawPage1.HasMore || rawPage1.NextCursor == nil {
+		t.Fatalf("raw timestamp page 1 = %#v, err=%v", rawPage1, err)
+	}
+	rawPage2, err := service.ListIssues(ctx, domain.ListIssuesInput{Limit: 3, Sort: domain.IssueSortCreatedDesc, Cursor: *rawPage1.NextCursor})
+	if err != nil {
+		t.Fatalf("raw timestamp page 2 error = %v", err)
+	}
+	var rawAll []string
+	for _, item := range rawPage1.Items {
+		rawAll = append(rawAll, item.ID)
+	}
+	for _, item := range rawPage2.Items {
+		rawAll = append(rawAll, item.ID)
+	}
+	wantRawAll := []string{fifth.ID, fourth.ID, third.ID, second.ID, first.ID}
+	if !reflect.DeepEqual(rawAll, wantRawAll) {
+		t.Fatalf("raw timestamp pagination = %v, want %v", rawAll, wantRawAll)
+	}
 }

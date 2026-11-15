@@ -120,6 +120,7 @@ type listIssuesInput struct {
 	IncludeArchived   bool     `json:"include_archived,omitempty"`
 	Limit             int      `json:"limit,omitempty"`
 	Cursor            *string  `json:"cursor,omitempty"`
+	Sort              *string  `json:"sort,omitempty"`
 	View              string   `json:"view,omitempty"`
 }
 

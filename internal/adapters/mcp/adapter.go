@@ -1153,6 +1153,7 @@ func (adapter *adapter) listIssues(ctx context.Context, request *sdkmcp.CallTool
 		IncludeArchived:   input.IncludeArchived,
 		Limit:             input.Limit,
 		Cursor:            stringValue(input.Cursor),
+		Sort:              domain.IssueSortOrder(stringValue(input.Sort)),
 	})
 	if err != nil {
 		return adapter.failure(err)

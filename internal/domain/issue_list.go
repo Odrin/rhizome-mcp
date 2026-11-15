@@ -2,6 +2,48 @@ package domain
 
 import "sort"
 
+// IssueSortOrder controls the deterministic ordering of list_issues pages.
+type IssueSortOrder string
+
+const (
+	// IssueSortPriority orders by priority rank descending, claimability descending, then sequence_no ascending.
+	IssueSortPriority IssueSortOrder = "priority"
+	// IssueSortCreatedDesc orders by creation timestamp descending, then sequence_no descending.
+	IssueSortCreatedDesc IssueSortOrder = "created_desc"
+	// IssueSortUpdatedDesc orders by last-updated timestamp descending, then sequence_no descending.
+	IssueSortUpdatedDesc IssueSortOrder = "updated_desc"
+	// IssueSortSequenceDesc orders by sequence_no descending (highest ISSUE-N first).
+	IssueSortSequenceDesc IssueSortOrder = "sequence_desc"
+)
+
+// AllIssueSortOrders lists every supported issue sort order in deterministic order.
+var AllIssueSortOrders = []IssueSortOrder{
+	IssueSortPriority,
+	IssueSortCreatedDesc,
+	IssueSortUpdatedDesc,
+	IssueSortSequenceDesc,
+}
+
+// IssueSortOrderNames returns AllIssueSortOrders as strings, for schema enum construction.
+func IssueSortOrderNames() []string { return enumNames(AllIssueSortOrders) }
+
+// Valid reports whether s is a supported issue sort order.
+func (s IssueSortOrder) Valid() bool {
+	return enumValid(s, AllIssueSortOrders)
+}
+
+// ParseIssueSortOrder parses a supported issue sort order. Empty input defaults to priority.
+func ParseIssueSortOrder(value string) (IssueSortOrder, error) {
+	if value == "" {
+		return IssueSortPriority, nil
+	}
+	parsed := IssueSortOrder(value)
+	if !parsed.Valid() {
+		return "", invalidEnum("sort", value)
+	}
+	return parsed, nil
+}
+
 // ListIssuesInput requests one deterministic page of issue projections.
 // Labels use any-label semantics: an issue matches when it has at least one
 // of the supplied labels.
@@ -17,6 +59,7 @@ type ListIssuesInput struct {
 	IncludeArchived   bool
 	Limit             int
 	Cursor            string
+	Sort              IssueSortOrder
 }
 
 // IssueProjection is an issue projection enriched with the computed fields
@@ -72,6 +115,10 @@ func (input ListIssuesInput) Validate() (ListIssuesInput, error) {
 		}
 		parentID = &identifier.Value
 	}
+	sortOrder, err := ParseIssueSortOrder(string(input.Sort))
+	if err != nil {
+		return ListIssuesInput{}, err
+	}
 	limit := input.Limit
 	if limit == 0 {
 		limit = DefaultIssueListLimit
@@ -88,6 +135,7 @@ func (input ListIssuesInput) Validate() (ListIssuesInput, error) {
 		IncludeArchived:   input.IncludeArchived,
 		Limit:             limit,
 		Cursor:            input.Cursor,
+		Sort:              sortOrder,
 	}, nil
 }
 

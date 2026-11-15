@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,9 +14,18 @@ import (
 )
 
 type issueCursor struct {
-	PriorityRank int   `json:"priority_rank"`
-	IsClaimable  bool  `json:"is_claimable"`
-	SequenceNo   int64 `json:"sequence_no"`
+	Sort         string `json:"sort,omitempty"`
+	PriorityRank int    `json:"priority_rank,omitempty"`
+	IsClaimable  bool   `json:"is_claimable,omitempty"`
+	SequenceNo   int64  `json:"sequence_no"`
+	CreatedAt    string `json:"created_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+type issueListRow struct {
+	projection   domain.IssueProjection
+	rawCreatedAt string
+	rawUpdatedAt string
 }
 
 var issueCursorCodec = pagination.NewCodec[issueCursor](0)
@@ -137,15 +147,11 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	}
 	var after *issueCursor
 	if input.Cursor != "" {
-		decoded, err := issueCursorCodec.Decode(input.Cursor)
-		if err != nil || decoded.PriorityRank < 1 || decoded.PriorityRank > 4 ||
-			decoded.SequenceNo < 1 {
-			if err == nil {
-				err = errors.New("invalid issue cursor payload")
-			}
-			return domain.IssueList{}, issueCursorError(err)
+		decoded, err := decodeAndValidateIssueCursor(input.Cursor, input.Sort)
+		if err != nil {
+			return domain.IssueList{}, err
 		}
-		after = &decoded
+		after = decoded
 	}
 
 	var result domain.IssueList
@@ -192,29 +198,26 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 			where = append(where, "EXISTS (SELECT 1 FROM issue_labels JOIN labels ON labels.id = issue_labels.label_id "+
 				"WHERE issue_labels.issue_id = issues.id AND ("+strings.Join(conditions, " OR ")+"))")
 		}
-		if after != nil {
-			prioritySQL := issuePriorityRankSQL
-			where = append(where, "("+prioritySQL+" < ? OR ("+prioritySQL+" = ? AND ("+
-				claimableSQL+" < ? OR ("+claimableSQL+" = ? AND sequence_no > ?))))")
-			args = append(args, after.PriorityRank, after.PriorityRank, boolInt(after.IsClaimable),
-				boolInt(after.IsClaimable), after.SequenceNo)
+		orderBySQL, cursorPredicate, cursorArgs := issueListOrderAndCursorClause(input.Sort, claimableSQL, after)
+		if cursorPredicate != "" {
+			where = append(where, cursorPredicate)
+			args = append(args, cursorArgs...)
 		}
 
-		statement := issueListProjectionSelect(now) + ` WHERE ` + strings.Join(where, " AND ") +
-			` ORDER BY priority_rank DESC, is_claimable DESC, sequence_no ASC LIMIT ?`
+		statement := issueListProjectionSelect(now) + ` WHERE ` + strings.Join(where, " AND ") + orderBySQL
 		args = append(args, input.Limit+1)
 		rows, err := query.QueryContext(ctx, statement, args...)
 		if err != nil {
 			return err
 		}
-		items := make([]domain.IssueProjection, 0, input.Limit)
+		listedRows := make([]issueListRow, 0, input.Limit)
 		for rows.Next() {
-			item, err := scanIssueListProjection(rows)
+			row, err := scanIssueListProjectionRow(rows)
 			if err != nil {
 				rows.Close()
 				return err
 			}
-			items = append(items, item)
+			listedRows = append(listedRows, row)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -224,19 +227,27 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 			return err
 		}
 
-		if len(items) > input.Limit {
+		if len(listedRows) > input.Limit {
 			result.HasMore = true
-			items = items[:input.Limit]
-			last := items[len(items)-1]
+			listedRows = listedRows[:input.Limit]
+			lastRow := listedRows[len(listedRows)-1]
+			last := lastRow.projection
 			cursor, err := issueCursorCodec.Encode(issueCursor{
+				Sort:         string(input.Sort),
 				PriorityRank: issuePriorityRank(last.Priority),
 				IsClaimable:  last.IsClaimable,
 				SequenceNo:   last.SequenceNo,
+				CreatedAt:    lastRow.rawCreatedAt,
+				UpdatedAt:    lastRow.rawUpdatedAt,
 			})
 			if err != nil {
 				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode issue cursor", false)
 			}
 			result.NextCursor = &cursor
+		}
+		items := make([]domain.IssueProjection, len(listedRows))
+		for index, row := range listedRows {
+			items[index] = row.projection
 		}
 		if err := loadIssueListLabels(ctx, query, items); err != nil {
 			return err
@@ -314,6 +325,14 @@ func countIssuesByEffectiveStatus(ctx context.Context, query Queryer, now time.T
 }
 
 func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, error) {
+	row, err := scanIssueListProjectionRow(scanner)
+	if err != nil {
+		return domain.IssueProjection{}, err
+	}
+	return row.projection, nil
+}
+
+func scanIssueListProjectionRow(scanner labelScanner) (issueListRow, error) {
 	var (
 		id, issueType, title, status, priority, createdAt, updatedAt                      string
 		description, acceptanceCriteria, parentID, blockedReason                          sql.NullString
@@ -328,23 +347,27 @@ func scanIssueListProjection(scanner labelScanner) (domain.IssueProjection, erro
 		&unresolvedBlockerCount, &isBlocked, &isClaimable, &effectiveStatus, &activeAttemptID, &priorityRank,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return domain.IssueProjection{}, err
+			return issueListRow{}, err
 		}
-		return domain.IssueProjection{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
+		return issueListRow{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored issue projection is invalid", false)
 	}
 	issue, err := parseIssueProjectionColumns(id, sequenceNo, issueType, title, description, acceptanceCriteria,
 		parentID, blockedReason, status, priority, version, createdBySessionID, createdAt, updatedAt,
 		closedAt, archivedAt, archivedBySessionID)
 	if err != nil {
-		return domain.IssueProjection{}, err
+		return issueListRow{}, err
 	}
-	return domain.IssueProjection{
-		Issue:                  issue,
-		EffectiveStatus:        domain.EffectiveStatus(effectiveStatus),
-		UnresolvedBlockerCount: unresolvedBlockerCount,
-		IsBlocked:              isBlocked != 0,
-		IsClaimable:            isClaimable != 0,
-		ActiveAttemptID:        nullableStringPointer(activeAttemptID),
+	return issueListRow{
+		projection: domain.IssueProjection{
+			Issue:                  issue,
+			EffectiveStatus:        domain.EffectiveStatus(effectiveStatus),
+			UnresolvedBlockerCount: unresolvedBlockerCount,
+			IsBlocked:              isBlocked != 0,
+			IsClaimable:            isClaimable != 0,
+			ActiveAttemptID:        nullableStringPointer(activeAttemptID),
+		},
+		rawCreatedAt: createdAt,
+		rawUpdatedAt: updatedAt,
 	}, nil
 }
 
@@ -430,6 +453,82 @@ func issuePriorityRank(priority domain.Priority) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+func decodeAndValidateIssueCursor(encoded string, effectiveSort domain.IssueSortOrder) (*issueCursor, error) {
+	decoded, err := issueCursorCodec.Decode(encoded)
+	if err != nil {
+		return nil, issueCursorError(err)
+	}
+	cursorSort := domain.IssueSortOrder(decoded.Sort)
+	if cursorSort == "" {
+		cursorSort = domain.IssueSortPriority
+	}
+	if !cursorSort.Valid() {
+		return nil, issueCursorError(errors.New("invalid issue cursor sort"))
+	}
+	if cursorSort != effectiveSort {
+		message := fmt.Sprintf("issue cursor sort %q does not match requested sort %q", cursorSort, effectiveSort)
+		return nil, domain.NewError(domain.CodeInvalidArgument, message, false,
+			domain.Detail{Field: "cursor", Code: "INVALID_CURSOR", Message: message})
+	}
+	if decoded.SequenceNo < 1 {
+		return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+	}
+	switch effectiveSort {
+	case domain.IssueSortPriority:
+		if decoded.PriorityRank < 1 || decoded.PriorityRank > 4 {
+			return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+		}
+	case domain.IssueSortCreatedDesc:
+		if decoded.CreatedAt == "" {
+			return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+		}
+		if _, err := parseStorageTime(decoded.CreatedAt); err != nil {
+			return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+		}
+	case domain.IssueSortUpdatedDesc:
+		if decoded.UpdatedAt == "" {
+			return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+		}
+		if _, err := parseStorageTime(decoded.UpdatedAt); err != nil {
+			return nil, issueCursorError(errors.New("invalid issue cursor payload"))
+		}
+	case domain.IssueSortSequenceDesc:
+	}
+	return &decoded, nil
+}
+
+func issueListOrderAndCursorClause(sortOrder domain.IssueSortOrder, claimableSQL string, after *issueCursor) (orderBy string, predicate string, args []any) {
+	switch sortOrder {
+	case domain.IssueSortCreatedDesc:
+		if after != nil {
+			predicate = "(issues.created_at < ? OR (issues.created_at = ? AND issues.sequence_no < ?))"
+			args = []any{after.CreatedAt, after.CreatedAt, after.SequenceNo}
+		}
+		return " ORDER BY issues.created_at DESC, issues.sequence_no DESC LIMIT ?", predicate, args
+	case domain.IssueSortUpdatedDesc:
+		if after != nil {
+			predicate = "(issues.updated_at < ? OR (issues.updated_at = ? AND issues.sequence_no < ?))"
+			args = []any{after.UpdatedAt, after.UpdatedAt, after.SequenceNo}
+		}
+		return " ORDER BY issues.updated_at DESC, issues.sequence_no DESC LIMIT ?", predicate, args
+	case domain.IssueSortSequenceDesc:
+		if after != nil {
+			predicate = "issues.sequence_no < ?"
+			args = []any{after.SequenceNo}
+		}
+		return " ORDER BY issues.sequence_no DESC LIMIT ?", predicate, args
+	default:
+		if after != nil {
+			prioritySQL := issuePriorityRankSQL
+			predicate = "(" + prioritySQL + " < ? OR (" + prioritySQL + " = ? AND (" +
+				claimableSQL + " < ? OR (" + claimableSQL + " = ? AND sequence_no > ?))))"
+			args = []any{after.PriorityRank, after.PriorityRank, boolInt(after.IsClaimable),
+				boolInt(after.IsClaimable), after.SequenceNo}
+		}
+		return " ORDER BY priority_rank DESC, is_claimable DESC, sequence_no ASC LIMIT ?", predicate, args
 	}
 }
 

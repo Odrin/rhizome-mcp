@@ -437,6 +437,7 @@ func TestRelationToolsLifecycleAndContracts(t *testing.T) {
 	assertRequired(t, toolNamed(t, tools.Tools, "manage_issue_relation"), "action", "source_issue_id", "target_issue_id", "relation_type")
 	assertRequired(t, toolNamed(t, tools.Tools, "get_issue_graph"), "root_issue_id")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_issues"), "limit", 0, 100)
+	assertNullableStringPropertyEnum(t, toolNamed(t, tools.Tools, "list_issues"), "sort", "priority", "created_desc", "updated_desc", "sequence_desc")
 	assertStringPropertyEnum(t, toolNamed(t, tools.Tools, "list_issues"), "view", "compact", "full")
 	assertIntegerPropertyBounds(t, toolNamed(t, tools.Tools, "list_labels"), "limit", 0, 100)
 	assertRequired(t, toolNamed(t, tools.Tools, "save_attempt_note"), "attempt_id", "lease_token", "kind", "content")
@@ -1062,6 +1063,151 @@ func TestListIssuesViewProjections(t *testing.T) {
 	invalidView := call(t, client, "list_issues", map[string]any{"view": "detailed"})
 	if !invalidView.IsError || invalidView.StructuredContent != nil {
 		t.Fatalf("list_issues detailed view should be rejected by the advertised schema: %#v", invalidView)
+	}
+}
+
+func TestListIssuesSortModesAndCursorValidation(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "list-issues-sort.db"))
+	defer db.Close(ctx)
+	client, stop := newClient(t, composeServices(t, db, source))
+	defer stop()
+
+	createIssue := func(title, priority, status string) string {
+		res := call(t, client, "create_issue", map[string]any{
+			"type":     "task",
+			"title":    title,
+			"priority": priority,
+			"status":   status,
+		})
+		if res.IsError {
+			t.Fatalf("create_issue(%q) = %#v", title, res)
+		}
+		var out struct {
+			ID string `json:"id"`
+		}
+		decodeStructured(t, res, &out)
+		return out.ID
+	}
+
+	firstID := createIssue("first-low", "low", "ready")
+	source.Advance(time.Minute)
+	secondID := createIssue("second-critical", "critical", "open")
+	source.Advance(time.Minute)
+	thirdID := createIssue("third-high", "high", "ready")
+	source.Advance(time.Minute)
+	fourthID := createIssue("fourth-medium", "medium", "ready")
+
+	// Update firstID later so updated_desc diverges from created_desc / sequence_desc.
+	source.Advance(time.Minute)
+	updated := call(t, client, "update_issue", map[string]any{
+		"issue_id":         firstID,
+		"expected_version": 1,
+		"changes":          map[string]any{"title": "first-low-updated"},
+	})
+	if updated.IsError {
+		t.Fatalf("update_issue = %#v", updated)
+	}
+
+	collectMCPIDs := func(args map[string]any) ([]string, string) {
+		var all []string
+		var firstPageCursor string
+		cursor := ""
+		for {
+			req := make(map[string]any, len(args)+2)
+			for k, v := range args {
+				req[k] = v
+			}
+			req["limit"] = 2
+			if cursor != "" {
+				req["cursor"] = cursor
+			}
+			res := call(t, client, "list_issues", req)
+			if res.IsError {
+				t.Fatalf("list_issues(%v) = %#v", req, res)
+			}
+			var page struct {
+				Items []struct {
+					ID string `json:"id"`
+				} `json:"items"`
+				NextCursor *string `json:"next_cursor"`
+				HasMore    bool    `json:"has_more"`
+			}
+			decodeStructured(t, res, &page)
+			for _, item := range page.Items {
+				all = append(all, item.ID)
+			}
+			if !page.HasMore {
+				break
+			}
+			if page.NextCursor == nil {
+				t.Fatalf("has_more=true with nil next_cursor for %v", req)
+			}
+			if firstPageCursor == "" {
+				firstPageCursor = *page.NextCursor
+			}
+			cursor = *page.NextCursor
+		}
+		return all, firstPageCursor
+	}
+
+	wantPriority := []string{secondID, thirdID, fourthID, firstID}
+	wantCreatedDesc := []string{fourthID, thirdID, secondID, firstID}
+	wantUpdatedDesc := []string{firstID, fourthID, thirdID, secondID}
+	wantSequenceDesc := []string{fourthID, thirdID, secondID, firstID}
+
+	gotDefault, _ := collectMCPIDs(map[string]any{})
+	gotNull, _ := collectMCPIDs(map[string]any{"sort": nil})
+	gotExplicitPriority, priorityCursor := collectMCPIDs(map[string]any{"sort": "priority"})
+	if !reflect.DeepEqual(gotDefault, wantPriority) || !reflect.DeepEqual(gotNull, wantPriority) || !reflect.DeepEqual(gotExplicitPriority, wantPriority) {
+		t.Fatalf("priority sorts mismatch: default=%v null=%v explicit=%v want=%v", gotDefault, gotNull, gotExplicitPriority, wantPriority)
+	}
+
+	gotCreatedDesc, createdCursor := collectMCPIDs(map[string]any{"sort": "created_desc"})
+	if !reflect.DeepEqual(gotCreatedDesc, wantCreatedDesc) {
+		t.Fatalf("created_desc = %v, want %v", gotCreatedDesc, wantCreatedDesc)
+	}
+
+	gotUpdatedDesc, updatedCursor := collectMCPIDs(map[string]any{"sort": "updated_desc"})
+	if !reflect.DeepEqual(gotUpdatedDesc, wantUpdatedDesc) {
+		t.Fatalf("updated_desc = %v, want %v", gotUpdatedDesc, wantUpdatedDesc)
+	}
+
+	gotSequenceDesc, _ := collectMCPIDs(map[string]any{"sort": "sequence_desc"})
+	if !reflect.DeepEqual(gotSequenceDesc, wantSequenceDesc) {
+		t.Fatalf("sequence_desc = %v, want %v", gotSequenceDesc, wantSequenceDesc)
+	}
+
+	// Unknown sort value is rejected by the advertised schema.
+	invalidSort := call(t, client, "list_issues", map[string]any{"sort": "oldest"})
+	if !invalidSort.IsError || invalidSort.StructuredContent != nil {
+		t.Fatalf("list_issues invalid sort should be rejected by the advertised schema: %#v", invalidSort)
+	}
+
+	// Mismatched cursor sort returns structured INVALID_ARGUMENT / INVALID_CURSOR.
+	for _, mismatch := range []struct {
+		args   map[string]any
+		from   string
+		target string
+	}{
+		{map[string]any{"sort": "created_desc", "cursor": priorityCursor}, "priority", "created_desc"},
+		{map[string]any{"sort": "updated_desc", "cursor": createdCursor}, "created_desc", "updated_desc"},
+		{map[string]any{"cursor": updatedCursor}, "updated_desc", "priority"},
+	} {
+		res := call(t, client, "list_issues", mismatch.args)
+		assertDomainError(t, res, domain.CodeInvalidArgument, false)
+		var errOut struct {
+			Message string `json:"message"`
+			Details []struct {
+				Field string `json:"field"`
+				Code  string `json:"code"`
+			} `json:"details"`
+		}
+		decodeStructured(t, res, &errOut)
+		if len(errOut.Details) != 1 || errOut.Details[0].Field != "cursor" || errOut.Details[0].Code != "INVALID_CURSOR" ||
+			!strings.Contains(errOut.Message, mismatch.from) || !strings.Contains(errOut.Message, mismatch.target) {
+			t.Fatalf("mismatch error = %#v, want INVALID_CURSOR naming %q and %q", errOut, mismatch.from, mismatch.target)
+		}
 	}
 }
 
@@ -4058,6 +4204,39 @@ func assertStringPropertyEnum(t *testing.T, tool *sdkmcp.Tool, field string, val
 	}
 	if property.Type != "string" || !reflect.DeepEqual(property.Enum, values) {
 		t.Fatalf("%s %s schema = %#v, want string enum %v", tool.Name, field, property, values)
+	}
+}
+
+func assertNullableStringPropertyEnum(t *testing.T, tool *sdkmcp.Tool, field string, values ...string) {
+	t.Helper()
+	data, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	propertyRaw, ok := schema.Properties[field]
+	if !ok {
+		t.Fatalf("%s missing %s property", tool.Name, field)
+	}
+	var property struct {
+		Type []string `json:"type"`
+		Enum []any    `json:"enum"`
+	}
+	if err := json.Unmarshal(propertyRaw, &property); err != nil {
+		t.Fatal(err)
+	}
+	wantEnum := make([]any, 0, len(values)+1)
+	for _, value := range values {
+		wantEnum = append(wantEnum, value)
+	}
+	wantEnum = append(wantEnum, nil)
+	if !reflect.DeepEqual(property.Type, []string{"string", "null"}) || !reflect.DeepEqual(property.Enum, wantEnum) {
+		t.Fatalf("%s %s schema = %#v, want nullable string enum %v", tool.Name, field, property, wantEnum)
 	}
 }
 

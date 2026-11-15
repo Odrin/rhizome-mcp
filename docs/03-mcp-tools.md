@@ -1039,6 +1039,7 @@ Input filters:
   "include_archived": false,
   "limit": 20,
   "cursor": null,
+  "sort": "priority",
   "view": "compact"
 }
 ```
@@ -1051,13 +1052,23 @@ next_cursor
 has_more
 ```
 
-Deterministic ordering:
+`sort` accepts `priority` (default when omitted or `null`), `created_desc`
+(newest created issues first), `updated_desc` (most recently updated issues
+first), or `sequence_desc` (highest `sequence_no` / `ISSUE-N` first). Any other
+non-null value is rejected as an invalid argument.
 
-```text
-priority DESC
-is_claimable DESC
-sequence_no ASC
-```
+Deterministic ordering and tie-breakers per `sort` mode:
+
+- `priority` (default): `priority DESC, is_claimable DESC, sequence_no ASC`
+- `created_desc`: `created_at DESC, sequence_no DESC`
+- `updated_desc`: `updated_at DESC, sequence_no DESC`
+- `sequence_desc`: `sequence_no DESC`
+
+Cursors are bound to the `sort` mode that produced them. Passing a `cursor`
+issued for one `sort` mode alongside a different `sort` mode fails with
+`INVALID_ARGUMENT` (`details[0].field = "cursor"`,
+`details[0].code = "INVALID_CURSOR"`). Legacy cursors without an embedded
+`sort` field remain compatible with `priority` sort.
 
 `view` accepts exactly two values, `compact` and `full`. `view` defaults to
 `compact` (including when the field is omitted entirely). Unknown values

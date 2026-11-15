@@ -78,7 +78,7 @@ func commands() []command {
 			name:         "issue",
 			needsProject: true,
 			usageLines: []string{
-				"issue list [--format table|json] [--limit N] [--cursor CURSOR] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]",
+				"issue list [--format table|json] [--limit N] [--cursor CURSOR] [--sort priority|created_desc|updated_desc|sequence_desc] [--type TYPE ...] [--status STATUS ...] [--effective-status STATUS ...] [--priority PRIORITY ...] [--include-archived]",
 				"issue show ISSUE-ID [--format table|json]",
 			},
 			run: func(c *CLI, ctx context.Context, args []string) error { return c.runIssue(ctx, args) },

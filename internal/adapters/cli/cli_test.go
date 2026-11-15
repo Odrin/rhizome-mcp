@@ -879,8 +879,17 @@ func TestRunMapsServiceInputs(t *testing.T) {
 				if len(issueService.listInput.Priorities) != 1 || issueService.listInput.Priorities[0] != domain.PriorityLow {
 					t.Fatalf("expected priority low, got %#v", issueService.listInput.Priorities)
 				}
-				if issueService.listInput.Limit != 12 || issueService.listInput.Cursor != "abc" || !issueService.listInput.IncludeArchived {
+				if issueService.listInput.Limit != 12 || issueService.listInput.Cursor != "abc" || !issueService.listInput.IncludeArchived || issueService.listInput.Sort != "" {
 					t.Fatalf("unexpected issue list input: %#v", issueService.listInput)
+				}
+			},
+		},
+		{
+			name: "issue list sort flag delegation",
+			args: []string{"issue", "list", "--sort", " updated_desc "},
+			assertFunc: func(t *testing.T, issueService *stubIssueService, searchService *stubSearchService, graphService *stubGraphService) {
+				if issueService.listInput.Sort != domain.IssueSortUpdatedDesc {
+					t.Fatalf("expected sort updated_desc, got %q", issueService.listInput.Sort)
 				}
 			},
 		},

@@ -797,6 +797,7 @@ func (c *CLI) runIssueList(ctx context.Context, args []string) error {
 	format := fs.String("format", "table", "output format")
 	limit := fs.Int("limit", 0, "maximum items to return")
 	cursor := fs.String("cursor", "", "pagination cursor")
+	sortOrder := fs.String("sort", "", "sort order: priority, created_desc, updated_desc, or sequence_desc")
 	types := newStringSliceValue()
 	statuses := newStringSliceValue()
 	effectiveStatuses := newStringSliceValue()
@@ -825,6 +826,7 @@ func (c *CLI) runIssueList(ctx context.Context, args []string) error {
 		IncludeArchived:   *includeArchived,
 		Limit:             *limit,
 		Cursor:            *cursor,
+		Sort:              domain.IssueSortOrder(strings.TrimSpace(*sortOrder)),
 	}
 	page, err := c.services.IssueService.ListIssues(ctx, input)
 	if err != nil {
