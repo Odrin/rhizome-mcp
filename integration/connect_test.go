@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -772,6 +773,11 @@ func TestIntegrationConnectGlobalTargets(t *testing.T) {
 	outsideDir := t.TempDir()
 	dataRoot := filepath.Join(t.TempDir(), "data")
 
+	zedRelPath := []string{".config", "zed", "settings.json"}
+	if runtime.GOOS == "windows" {
+		zedRelPath = []string{"AppData", "Roaming", "Zed", "settings.json"}
+	}
+
 	globalFiles := []struct {
 		target    string
 		configKey string
@@ -781,7 +787,7 @@ func TestIntegrationConnectGlobalTargets(t *testing.T) {
 		{target: "claude", configKey: "mcpServers", wantType: true, relPath: []string{".claude.json"}},
 		{target: "cursor", configKey: "mcpServers", wantType: false, relPath: []string{".cursor", "mcp.json"}},
 		{target: "windsurf", configKey: "mcpServers", wantType: false, relPath: []string{".codeium", "windsurf", "mcp_config.json"}},
-		{target: "zed", configKey: "context_servers", wantType: false, relPath: []string{".config", "zed", "settings.json"}},
+		{target: "zed", configKey: "context_servers", wantType: false, relPath: zedRelPath},
 		{target: "gemini", configKey: "mcpServers", wantType: false, relPath: []string{".gemini", "settings.json"}},
 	}
 
@@ -814,7 +820,14 @@ func TestIntegrationConnectGlobalTargets(t *testing.T) {
 			if cfg["keepMe"] != true {
 				t.Fatalf("%s lost keepMe top-level key", tc.target)
 			}
-			entry := cfg[tc.configKey].(map[string]any)["rhizome-mcp"].(map[string]any)
+			servers, ok := cfg[tc.configKey].(map[string]any)
+			if !ok {
+				t.Fatalf("%s missing %s object in %s", tc.target, tc.configKey, targetPath)
+			}
+			entry, ok := servers["rhizome-mcp"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s missing rhizome-mcp object in %s", tc.target, targetPath)
+			}
 			if tc.wantType && entry["type"] != "stdio" {
 				t.Fatalf("%s global type = %v, want stdio", tc.target, entry["type"])
 			}
