@@ -2,7 +2,7 @@
 
 ## Project routing
 
-Each agent calls `open_project` with the absolute repository root, retains the returned `project_ref`, and passes it to every subsequent project-scoped call. Project selection is not stored in MCP transport or session state. The `project_ref` is a routing token, not a lease token or secret.
+Each agent calls `open_project` with `project_root` (absolute repository root when client and server share a filesystem) or `project_id` (from `.agent-tracker.json` when the server runs on another host, e.g. stdio over SSH), or uses `get_project(project_ref)` equivalently, retains the returned `project_ref`, and passes it to every subsequent project-scoped call. Project selection is not stored in MCP transport or session state. The `project_ref` is a routing token, not a lease token or secret.
 
 ## Before handing off
 
@@ -18,7 +18,7 @@ Keep notes factual and restartable. Avoid raw transcripts, speculative status, a
 
 ## Receiving a handoff
 
-1. Call `open_project` for the target repository and retain its `project_ref`.
+1. Call `open_project` (with `project_root` on a shared filesystem, or `project_id` from `.agent-tracker.json` when the server runs on another host) or `get_project(project_ref)` for the target repository and retain its `project_ref`.
 2. Refetch the issue with that `project_ref` and confirm it is claimable.
 3. Call `get_work_context` with the `project_ref` and request checkpoint, recent attempt notes, attempt history, artifacts, decisions, relations, and changes since the previous attempt as needed.
 4. Inspect referenced artifacts and verify the repository state; do not trust a summary as proof.

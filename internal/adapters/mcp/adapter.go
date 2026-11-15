@@ -221,7 +221,7 @@ func (target *adapter) register(server *sdkmcp.Server) {
 	target.registerTool(server, groupCore, tool("get_project", "Get metadata, limits, supported values, event position, and guide links for a project_ref or configured default.", schemaGetProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, routeProjectRequest[getProjectInput, any](target, t, (*adapter).getProject))
 	})
-	target.registerTool(server, groupCore, tool("open_project", "Open a project by absolute root and return its project_ref, metadata, limits, supported values, event position, and guide links.", schemaOpenProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
+	target.registerTool(server, groupCore, tool("open_project", "Open a project by absolute root or marker project_id and return its project_ref, metadata, limits, supported values, event position, and guide links.", schemaOpenProject(), schemaProjectOutput(), toolHints(true, false, true, false)), func(t *sdkmcp.Tool) {
 		sdkmcp.AddTool(server, t, func(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
 			return target.openProject(ctx, request, input)
 		})
@@ -953,7 +953,27 @@ func (adapter *adapter) getProject(ctx context.Context, request *sdkmcp.CallTool
 }
 
 func (adapter *adapter) openProject(ctx context.Context, request *sdkmcp.CallToolRequest, input openProjectInput) (*sdkmcp.CallToolResult, any, error) {
-	lease, err := adapter.router.OpenProject(ctx, input.ProjectRoot)
+	if (input.ProjectRoot == nil) == (input.ProjectID == nil) {
+		return adapter.failure(domain.NewError(
+			domain.CodeInvalidArgument,
+			"exactly one of project_root or project_id is required",
+			false,
+			domain.Detail{Field: "project_root", Code: "EXACTLY_ONE_SELECTOR_REQUIRED"},
+			domain.Detail{Field: "project_id", Code: "EXACTLY_ONE_SELECTOR_REQUIRED"},
+		))
+	}
+	var (
+		lease projectrouting.ProjectLease
+		err   error
+	)
+	if input.ProjectRoot != nil {
+		lease, err = adapter.router.OpenProject(ctx, *input.ProjectRoot)
+	} else {
+		if err := projectrouting.ValidateProjectID(*input.ProjectID); err != nil {
+			return adapter.failure(err)
+		}
+		lease, err = adapter.router.Acquire(ctx, input.ProjectID)
+	}
 	if err != nil {
 		return adapter.failure(err)
 	}

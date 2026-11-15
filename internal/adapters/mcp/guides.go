@@ -7,7 +7,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const initializeInstructions = "Start with open_project using the absolute project root. Retain its project_ref and pass it to every subsequent project-scoped tool call; routing is stateless. Then use get_planning_graph or list_issues to find claimable work. Read get_work_context before claim_issue. While working, renew the lease and save restartable checkpoints; always finish_attempt on completion, failure, or handoff. Use expected_version for issue writes. Detailed guides: rhizome://guides/agent-workflow."
+const initializeInstructions = "Start with open_project using project_root (absolute path when sharing a filesystem with the server) or project_id (from .agent-tracker.json when the server runs on another host, e.g. stdio over SSH), or get_project when you already know project_ref. Retain its project_ref and pass it to every subsequent project-scoped tool call; routing is stateless. Then use get_planning_graph or list_issues to find claimable work. Read get_work_context before claim_issue. While working, renew the lease and save restartable checkpoints; always finish_attempt on completion, failure, or handoff. Use expected_version for issue writes. Detailed guides: rhizome://guides/agent-workflow."
 
 //go:generate go run ./guidesync
 

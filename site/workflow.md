@@ -6,7 +6,7 @@ By default, clients should use the stdio transport. If you need a local HTTP end
 
 ## The recommended loop
 
-Start with `open_project` to get a routing token for your project, then select a claimable issue with `get_planning_graph` or `list_issues`. Claim it with `claim_issue`, save restartable checkpoints with `save_attempt_note`, and finish with `finish_attempt` once you have a truthful result and verification. See [the agent workflow guide](https://github.com/Odrin/rhizome-mcp/blob/main/.github/skills/rhizome-task-workflow/references/agent-workflow.md) for the complete workflow.
+Start with `open_project` (using `project_root` on a shared filesystem or `project_id` from `.agent-tracker.json` when the server runs on another host, e.g. stdio over SSH) — or `get_project(project_ref)` if you already have a `project_ref` — to get a routing token for your project, then select a claimable issue with `get_planning_graph` or `list_issues`. Claim it with `claim_issue`, save restartable checkpoints with `save_attempt_note`, and finish with `finish_attempt` once you have a truthful result and verification. See [the agent workflow guide](https://github.com/Odrin/rhizome-mcp/blob/main/.github/skills/rhizome-task-workflow/references/agent-workflow.md) for the complete workflow.
 
 ## Logical interchange and recovery
 

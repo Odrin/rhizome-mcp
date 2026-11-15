@@ -2,7 +2,7 @@
 
 ## 1. Orient
 
-Call `open_project` with the absolute repository root. Retain the returned `project_ref` and pass it to every subsequent project-scoped tool call, including `get_project`. Project routing is stateless: `open_project` does not select a project for later requests. Omit `project_ref` only when intentionally relying on a server configured with a default project.
+Call `open_project` with either `project_root` (the absolute repository root when client and server share a filesystem) or `project_id` (from `.agent-tracker.json` when the server runs on another host, such as stdio over SSH). If you already hold a valid `project_ref`, `get_project(project_ref)` is equivalent. Retain the returned `project_ref` and pass it to every subsequent project-scoped tool call, including `get_project`. Project routing is stateless: `open_project` does not select a project for later requests. Omit `project_ref` only when intentionally relying on a server configured with a default project.
 
 Call `get_project` with that `project_ref` when project instructions are needed. Use the metadata returned by `open_project` or `get_project` for limits, supported values, the latest event ID, and guide links. Read only the guide needed for the current operation.
 

@@ -106,10 +106,14 @@ attempt's `lease_token`.
 
 ### 2.2. Stateless project routing
 
-`open_project` is the only projectless tool. Call it with an absolute
-`project_root`, retain the returned canonical `project_ref`, and pass that value
-to every subsequent project-scoped tool call. Calling `open_project` does not
-select a project in MCP transport or session state.
+`open_project` is the only projectless tool. Call it with either `project_root`
+(the absolute repository root when client and server share a filesystem) or
+`project_id` (the canonical ULID from `.agent-tracker.json` when the server runs
+on another host, such as stdio over SSH), retain the returned canonical
+`project_ref`, and pass that value to every subsequent project-scoped tool call.
+If you already hold a valid `project_ref`, `get_project(project_ref)` is
+equivalent. Calling `open_project` does not select a project in MCP transport or
+session state.
 
 Every other tool input schema includes an optional nullable `project_ref`.
 Omission is supported only when the server was started with a configured default
@@ -646,17 +650,35 @@ mode the `toolsets` field is absent. `custom` is a report-only value —
 
 Purpose:
 
-Resolve an existing project from an absolute repository root and return its
-canonical `project_ref`, metadata, server capabilities, and guide links. This
-read-only call does not establish state for later requests.
+Resolve an existing project from either an absolute repository root
+(`project_root`, when client and server share a filesystem) or a marker
+`project_id` from `.agent-tracker.json` (when the server runs on another host,
+such as stdio over SSH), and return its canonical `project_ref`, metadata,
+server capabilities, and guide links. When you already hold a valid
+`project_ref`, `get_project(project_ref)` is equivalent. This read-only call
+does not establish state for later requests.
 
 Input:
+
+Pass mutually exclusive selectors (`null` equals omission):
 
 ```json
 {
   "project_root": "/absolute/path/to/repository"
 }
 ```
+
+Or resolve by marker `project_id`:
+
+```json
+{
+  "project_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+}
+```
+
+Passing neither or both returns `INVALID_ARGUMENT`
+(`EXACTLY_ONE_SELECTOR_REQUIRED`); an unknown canonical `project_id` returns
+`PROJECT_NOT_FOUND` without creating a project database.
 
 Output:
 

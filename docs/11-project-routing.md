@@ -5,13 +5,13 @@ This document is the canonical contract for shipped project routing in Rhizome M
 ## 1. API and routing keys
 
 - All project-dependent MCP tools accept an optional nullable canonical `project_ref`.
-- `open_project(project_root)` is the projectless entry point. It targets an absolute filesystem root and is used to attach to a specific project.
+- `open_project` is the projectless entry point. It attaches to an existing project using either `project_root` (an absolute filesystem root when client and server share a filesystem) or `project_id` (the canonical ULID from `.agent-tracker.json` when the server runs on another host, such as stdio over SSH). If you already hold a valid `project_ref`, `get_project(project_ref)` is equivalent.
 - `project_ref` is a routing token only. It does not authenticate, authorize, or change storage location; it simply selects the project that the server should serve.
 - MCP routing uses ordinary tool arguments. It does not use `Roots`, `_meta`, HTTP headers, or transport-session state to choose a project.
 
 ## 2. Stateless tool workflow
 
-1. Call `open_project` with the absolute repository root.
+1. Call `open_project` with `project_root` (when sharing a filesystem) or `project_id` from `.agent-tracker.json` (when the server runs on another host), or call `get_project(project_ref)` if you already have a valid `project_ref`.
 2. Retain the returned canonical `project_ref`.
 3. Pass that `project_ref` to every subsequent project-scoped tool call, including `get_project`, discovery, context, claim, checkpoint, and finish operations.
 
@@ -33,7 +33,7 @@ This means a workspace-specific registration should pass an absolute root explic
 The server distinguishes two cases:
 
 - A normal default opening is the ordinary startup path for a server instance that resolves one project root at startup.
-- A routed open is an existing-only request-driven open for a known project selected by `project_ref` or `project_root`.
+- A routed open is an existing-only request-driven open for a known project selected by `project_ref`, `project_root`, or marker `project_id`.
 
 Routed opens are existing-only under one configured data root. They do not create a new project database and they do not run init or migration flows for a missing project. A stale database is not silently auto-migrated by routed `project_ref` access; instead, the non-mutating open error includes the stored and expected versions and tells the user to run `rhizome-mcp projects migrate --project-id ID` to apply the supported forward migration explicitly. The migration path is projectless and uses the canonical stored project ID, not a repository root or a newly created marker.
 
@@ -99,13 +99,24 @@ Global registration that does not pin a workspace root:
 }
 ```
 
-The projectless opening call uses the absolute root:
+The projectless opening call uses either an absolute root (on a shared filesystem):
 
 ```json
 {
   "name": "open_project",
   "arguments": {
     "project_root": "/absolute/path/to/workspace"
+  }
+}
+```
+
+or a marker `project_id` from `.agent-tracker.json` when the server runs on another host (e.g. stdio over SSH):
+
+```json
+{
+  "name": "open_project",
+  "arguments": {
+    "project_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
   }
 }
 ```

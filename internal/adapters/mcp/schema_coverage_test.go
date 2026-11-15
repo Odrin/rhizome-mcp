@@ -203,6 +203,20 @@ func TestProjectRefDecorationIsOptionalAndStructural(t *testing.T) {
 	if _, ok := schema.Properties["project_ref"]; ok {
 		t.Fatal("open_project unexpectedly advertises project_ref")
 	}
+	if len(schema.Required) != 0 {
+		t.Fatalf("open_project required = %#v, want empty", schema.Required)
+	}
+	rootSchema := schema.Properties["project_root"]
+	if rootSchema == nil || len(rootSchema.Types) != 2 || rootSchema.Types[0] != "string" || rootSchema.Types[1] != "null" || strings.TrimSpace(rootSchema.Description) == "" {
+		t.Fatalf("open_project project_root schema = %#v", rootSchema)
+	}
+	idSchema := schema.Properties["project_id"]
+	if idSchema == nil || len(idSchema.Types) != 2 || idSchema.Types[0] != "string" || idSchema.Types[1] != "null" {
+		t.Fatalf("open_project project_id schema = %#v", idSchema)
+	}
+	if idSchema.MaxLength == nil || *idSchema.MaxLength != 26 || idSchema.Pattern != "^[0-9A-HJKMNP-TV-Z]{26}$" || !strings.Contains(idSchema.Description, ".agent-tracker.json") {
+		t.Fatalf("open_project project_id constraints/description = %#v", idSchema)
+	}
 }
 
 func TestNamedToolInputPropertiesAreDescribed(t *testing.T) {

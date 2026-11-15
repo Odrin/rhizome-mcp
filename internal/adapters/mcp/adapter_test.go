@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,10 +22,12 @@ import (
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
 	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
 	"rhizome-mcp/internal/ports"
+	"rhizome-mcp/internal/projectconfig"
 	"rhizome-mcp/internal/projectrouting"
 )
 
@@ -3628,17 +3631,21 @@ func (lease *trackingLease) Release() error {
 }
 
 type trackingRouter struct {
-	lease        projectrouting.ProjectLease
-	err          error
-	acquireCount int
+	lease            projectrouting.ProjectLease
+	err              error
+	acquireCount     int
+	openProjectCount int
+	lastAcquireRef   *string
 }
 
-func (router *trackingRouter) Acquire(context.Context, *string) (projectrouting.ProjectLease, error) {
+func (router *trackingRouter) Acquire(_ context.Context, explicitRef *string) (projectrouting.ProjectLease, error) {
 	router.acquireCount++
+	router.lastAcquireRef = explicitRef
 	return router.lease, router.err
 }
 
 func (router *trackingRouter) OpenProject(context.Context, string) (projectrouting.ProjectLease, error) {
+	router.openProjectCount++
 	return router.lease, router.err
 }
 
@@ -4338,5 +4345,271 @@ func TestCancelReviewRequestRevokesClaimedReviewerAuthority(t *testing.T) {
 	decodeStructured(t, after, &afterOutput)
 	if after.IsError || afterOutput.Status != "review" {
 		t.Fatalf("reviewed issue after a cancelled reviewer tried to approve = %#v", afterOutput)
+	}
+}
+
+func TestOpenProjectByProjectIDTrackingRouterAndLeaseRelease(t *testing.T) {
+	ctx := context.Background()
+	db, source := openDatabase(t, filepath.Join(t.TempDir(), "project.db"))
+	defer db.Close(ctx)
+	leaseDB, leaseSource := openDatabase(t, filepath.Join(t.TempDir(), "project-lease.db"))
+	defer leaseDB.Close(ctx)
+	leaseServices := servicesFromOptions(t, composeServices(t, leaseDB, leaseSource))
+
+	releaseCount := 0
+	lease := &trackingLease{ProjectLease: projectrouting.NewStaticLease(projectID, leaseServices), releaseCount: &releaseCount}
+	router := &trackingRouter{lease: lease}
+	options := composeServices(t, db, source)
+	options.ProjectRouter = router
+	client, stop := newClient(t, options)
+	defer stop()
+
+	beforeAcquires := router.acquireCount
+	beforeOpens := router.openProjectCount
+	beforeReleases := releaseCount
+
+	result := call(t, client, "open_project", map[string]any{"project_id": projectID})
+	if result.IsError {
+		t.Fatalf("open_project(project_id) = %#v", result)
+	}
+	assertValidOpenProjectOutput(t, result)
+	var out struct {
+		ProjectRef string `json:"project_ref"`
+		Project    struct {
+			ID string `json:"id"`
+		} `json:"project"`
+	}
+	decodeStructured(t, result, &out)
+	if out.ProjectRef != projectID || out.Project.ID != projectID {
+		t.Fatalf("output = %#v, want project_ref=%s and project.id=%s", out, projectID, projectID)
+	}
+	if router.acquireCount != beforeAcquires+1 || router.openProjectCount != beforeOpens {
+		t.Fatalf("router acquires/opens = %d/%d, want %d/%d", router.acquireCount, router.openProjectCount, beforeAcquires+1, beforeOpens)
+	}
+	if router.lastAcquireRef == nil || *router.lastAcquireRef != projectID {
+		t.Fatalf("lastAcquireRef = %v, want %q", router.lastAcquireRef, projectID)
+	}
+	if releaseCount != beforeReleases+1 {
+		t.Fatalf("releaseCount = %d, want %d", releaseCount, beforeReleases+1)
+	}
+}
+
+func TestOpenProjectByProjectIDSharedAndPinnedRouters(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	dataRoot := filepath.Join(tempDir, "data")
+	if err := os.MkdirAll(dataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoA := filepath.Join(tempDir, "repo-a")
+	repoB := filepath.Join(tempDir, "repo-b")
+	idA := initRepoAndSeedDB(t, ctx, repoA, dataRoot)
+	idB := initRepoAndSeedDB(t, ctx, repoB, dataRoot)
+	unknownID := projectID
+	if idA == unknownID || idB == unknownID {
+		unknownID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	}
+
+	routerOptions := func(router projectrouting.ProjectRouter) mcpadapter.Options {
+		return mcpadapter.Options{
+			ProjectRouter:   router,
+			ServerName:      "test-server",
+			ServerVersion:   "test-version",
+			ConfigVersion:   1,
+			ExportDirectory: t.TempDir(),
+		}
+	}
+
+	t.Run("shared_router", func(t *testing.T) {
+		router := compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, nil)
+		defer router.Close(ctx)
+		client, stop := newClient(t, routerOptions(router))
+		defer stop()
+
+		resByID := call(t, client, "open_project", map[string]any{"project_id": idA})
+		if resByID.IsError {
+			t.Fatalf("open_project(project_id) = %#v", resByID)
+		}
+		assertValidOpenProjectOutput(t, resByID)
+
+		resByRoot := call(t, client, "open_project", map[string]any{"project_root": repoA})
+		if resByRoot.IsError {
+			t.Fatalf("open_project(project_root) = %#v", resByRoot)
+		}
+		var outByID, outByRoot map[string]any
+		decodeStructured(t, resByID, &outByID)
+		decodeStructured(t, resByRoot, &outByRoot)
+		if !reflect.DeepEqual(outByID, outByRoot) {
+			t.Fatalf("open_project(project_id) = %#v, want identical to open_project(project_root) = %#v", outByID, outByRoot)
+		}
+
+		resB := call(t, client, "open_project", map[string]any{"project_id": idB})
+		if resB.IsError {
+			t.Fatalf("open_project(idB) = %#v", resB)
+		}
+		var outB struct {
+			ProjectRef string `json:"project_ref"`
+		}
+		decodeStructured(t, resB, &outB)
+		if created := call(t, client, "create_issue", map[string]any{
+			"project_ref": outB.ProjectRef,
+			"type":        "task",
+			"title":       "opened via marker id",
+			"status":      "ready",
+		}); created.IsError {
+			t.Fatalf("create_issue via project_id project_ref = %#v", created)
+		}
+		listed := call(t, client, "list_issues", map[string]any{
+			"project_ref": outB.ProjectRef,
+			"limit":       10,
+		})
+		if listed.IsError {
+			t.Fatalf("list_issues via project_id project_ref = %#v", listed)
+		}
+
+		entriesBefore, err := os.ReadDir(dataRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unknownRes := call(t, client, "open_project", map[string]any{"project_id": unknownID})
+		assertDomainError(t, unknownRes, domain.CodeProjectNotFound, false)
+		entriesAfter, err := os.ReadDir(dataRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entriesBefore) != len(entriesAfter) {
+			t.Fatalf("dataRoot entries changed from %d to %d after unknown project_id", len(entriesBefore), len(entriesAfter))
+		}
+
+		for _, tc := range []struct {
+			name string
+			args map[string]any
+		}{
+			{name: "empty", args: map[string]any{}},
+			{name: "null_root", args: map[string]any{"project_root": nil}},
+			{name: "null_id", args: map[string]any{"project_id": nil}},
+			{name: "both", args: map[string]any{"project_root": repoA, "project_id": idA}},
+		} {
+			res := call(t, client, "open_project", tc.args)
+			assertDomainError(t, res, domain.CodeInvalidArgument, false)
+			var errOut struct {
+				Details []domain.Detail `json:"details"`
+			}
+			decodeStructured(t, res, &errOut)
+			codes := make(map[string]string, len(errOut.Details))
+			for _, d := range errOut.Details {
+				codes[d.Field] = d.Code
+			}
+			if codes["project_root"] != "EXACTLY_ONE_SELECTOR_REQUIRED" || codes["project_id"] != "EXACTLY_ONE_SELECTOR_REQUIRED" {
+				t.Fatalf("%s details = %#v, want both selectors EXACTLY_ONE_SELECTOR_REQUIRED", tc.name, errOut.Details)
+			}
+		}
+
+		overflowRes := call(t, client, "open_project", map[string]any{"project_id": "ZZZZZZZZZZZZZZZZZZZZZZZZZZ"})
+		assertDomainError(t, overflowRes, domain.CodeInvalidArgument, false)
+		var overflowErr struct {
+			Details []domain.Detail `json:"details"`
+		}
+		decodeStructured(t, overflowRes, &overflowErr)
+		if len(overflowErr.Details) != 1 || overflowErr.Details[0].Field != "project_id" || overflowErr.Details[0].Code != "INVALID_ULID" {
+			t.Fatalf("overflow ULID details = %#v", overflowErr.Details)
+		}
+	})
+
+	t.Run("pinned_compose_router", func(t *testing.T) {
+		defaultBundle, _, err := compose.Open(ctx, repoA, projectconfig.PathInputs{}, dataRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer defaultBundle.Close(ctx)
+		router := compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, defaultBundle)
+		defer router.Close(ctx)
+		client, stop := newClient(t, routerOptions(router))
+		defer stop()
+
+		resByID := call(t, client, "open_project", map[string]any{"project_id": idA})
+		resByRoot := call(t, client, "open_project", map[string]any{"project_root": repoA})
+		if resByID.IsError || resByRoot.IsError {
+			t.Fatalf("pinned compose open_project errors: byID=%#v byRoot=%#v", resByID, resByRoot)
+		}
+		var outByID, outByRoot map[string]any
+		decodeStructured(t, resByID, &outByID)
+		decodeStructured(t, resByRoot, &outByRoot)
+		if !reflect.DeepEqual(outByID, outByRoot) {
+			t.Fatalf("pinned compose outputs differ:\nbyID=%#v\nbyRoot=%#v", outByID, outByRoot)
+		}
+		unknownRes := call(t, client, "open_project", map[string]any{"project_id": unknownID})
+		assertDomainError(t, unknownRes, domain.CodeProjectNotFound, false)
+	})
+
+	t.Run("pinned_static_router", func(t *testing.T) {
+		defaultBundle, rtProj, err := compose.Open(ctx, repoA, projectconfig.PathInputs{}, dataRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer defaultBundle.Close(ctx)
+		staticRouter := projectrouting.NewStaticProjectRouter(idA, rtProj.Root, defaultBundle.Bundle())
+		client, stop := newClient(t, routerOptions(staticRouter))
+		defer stop()
+
+		resByID := call(t, client, "open_project", map[string]any{"project_id": idA})
+		resByRoot := call(t, client, "open_project", map[string]any{"project_root": rtProj.Root})
+		if resByID.IsError || resByRoot.IsError {
+			t.Fatalf("static router open_project errors: byID=%#v byRoot=%#v", resByID, resByRoot)
+		}
+		var outByID, outByRoot map[string]any
+		decodeStructured(t, resByID, &outByID)
+		decodeStructured(t, resByRoot, &outByRoot)
+		if !reflect.DeepEqual(outByID, outByRoot) {
+			t.Fatalf("static router outputs differ:\nbyID=%#v\nbyRoot=%#v", outByID, outByRoot)
+		}
+		unknownRes := call(t, client, "open_project", map[string]any{"project_id": unknownID})
+		assertDomainError(t, unknownRes, domain.CodeProjectNotFound, false)
+	})
+}
+
+func initRepoAndSeedDB(t *testing.T, ctx context.Context, root, dataRoot string) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gen, err := ids.NewGenerator(clock.RealClock{}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj, err := projectconfig.Initialize(root, gen, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, _, err := compose.Open(ctx, root, projectconfig.PathInputs{}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := services.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return proj.Identity.ProjectID
+}
+
+func assertValidOpenProjectOutput(t *testing.T, result *sdkmcp.CallToolResult) {
+	t.Helper()
+	schema := mcpadapter.StrictOutputSchemaForTest("open_project")
+	if schema == nil {
+		t.Fatal("open_project strict output schema missing")
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolve open_project strict schema: %v", err)
+	}
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolved.Validate(payload); err != nil {
+		t.Fatalf("open_project output schema validation failed: %v", err)
 	}
 }

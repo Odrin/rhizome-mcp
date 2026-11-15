@@ -246,12 +246,28 @@ func withProjectRef(schema *jsonschema.Schema) *jsonschema.Schema {
 	return schema
 }
 
+func nullableULIDSchema(description string) *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Types:       []string{"string", "null"},
+		MaxLength:   intPointer(26),
+		Pattern:     "^[0-9A-HJKMNP-TV-Z]{26}$",
+		Description: description,
+	}
+}
+
 func nullableProjectRefSchema() *jsonschema.Schema {
-	return &jsonschema.Schema{Types: []string{"string", "null"}, MaxLength: intPointer(26), Pattern: "^[0-9A-HJKMNP-TV-Z]{26}$", Description: "Project reference returned by open_project. Pass it explicitly for stateless routing; omit only when using a configured default."}
+	return nullableULIDSchema("Project reference returned by open_project. Pass it explicitly for stateless routing; omit only when using a configured default.")
+}
+
+func nullableProjectIDSchema() *jsonschema.Schema {
+	return nullableULIDSchema("Canonical marker project_id from .agent-tracker.json when the server runs on another host.")
 }
 
 func schemaOpenProject() *jsonschema.Schema {
-	return object(map[string]*jsonschema.Schema{"project_root": stringSchema()}, "project_root")
+	return object(map[string]*jsonschema.Schema{
+		"project_root": withDescription(nullableStringSchema(), "Absolute repository root path when client and server share a filesystem."),
+		"project_id":   nullableProjectIDSchema(),
+	})
 }
 
 func schemaCreateAgentSession() *jsonschema.Schema {

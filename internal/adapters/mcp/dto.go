@@ -39,7 +39,8 @@ type getProjectInput struct {
 }
 
 type openProjectInput struct {
-	ProjectRoot string `json:"project_root"`
+	ProjectRoot *string `json:"project_root,omitempty"`
+	ProjectID   *string `json:"project_id,omitempty"`
 }
 
 type listLabelsInput struct {

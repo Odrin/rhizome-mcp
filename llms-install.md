@@ -110,8 +110,12 @@ stdout, logs on stderr.
 1. `rhizome-mcp doctor` (or `npx -y rhizome-mcp doctor`) inside the repository
    must report no errors.
 2. After the MCP client restarts, the server advertises 42 tools; call
-   `open_project` with the absolute repository root — it returns a
-   `project_ref` and guide links. Pass that `project_ref` to subsequent calls.
+   `open_project` with `project_root` (absolute repository root when sharing
+   a filesystem with the server) or `project_id` (from `.agent-tracker.json`
+   when the server runs on another host, e.g. stdio over SSH), or
+   `get_project(project_ref)` if you already hold a valid reference — it
+   returns a `project_ref` and guide links. Pass that `project_ref` to
+   subsequent calls.
 3. `rhizome-mcp board` prints status counts for the project.
 
 ## 5. First workflow for the agent

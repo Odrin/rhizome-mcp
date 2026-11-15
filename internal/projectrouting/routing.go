@@ -129,6 +129,14 @@ func ValidateProjectRef(value string) error {
 	return nil
 }
 
+// ValidateProjectID accepts only canonical uppercase ULIDs.
+func ValidateProjectID(value string) error {
+	if _, err := ids.ParseStrict(value); err != nil {
+		return NewInvalidProjectIDError(value)
+	}
+	return nil
+}
+
 // NewProjectRequiredError reports that neither an explicit nor default project was selected.
 func NewProjectRequiredError() *domain.Error {
 	return domain.NewError(domain.CodeProjectRequired, projectRequiredMessage, false)
@@ -146,9 +154,18 @@ func NewProjectNotFoundError(projectRef string) *domain.Error {
 
 // NewInvalidProjectRefError reports a malformed or noncanonical project reference.
 func NewInvalidProjectRefError(_ string) *domain.Error {
-	message := "project_ref must be a canonical uppercase ULID"
+	return invalidULIDError("project_ref")
+}
+
+// NewInvalidProjectIDError reports a malformed or noncanonical marker project_id.
+func NewInvalidProjectIDError(_ string) *domain.Error {
+	return invalidULIDError("project_id")
+}
+
+func invalidULIDError(field string) *domain.Error {
+	message := field + " must be a canonical uppercase ULID"
 	return domain.NewError(domain.CodeInvalidArgument, message, false,
-		domain.Detail{Field: "project_ref", Code: "INVALID_ULID", Message: message})
+		domain.Detail{Field: field, Code: "INVALID_ULID", Message: message})
 }
 
 // InvalidProjectRootError reports invalid project_root argument.

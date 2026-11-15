@@ -142,3 +142,56 @@ func TestValidateProjectRefRejectsNonCanonical(t *testing.T) {
 		t.Fatalf("ValidateProjectRef(non-canonical) error = %v, want CodeInvalidArgument", err)
 	}
 }
+
+func TestValidateProjectIDAcceptsCanonical(t *testing.T) {
+	if err := ValidateProjectID(projectID); err != nil {
+		t.Fatalf("ValidateProjectID(canonical) error = %v", err)
+	}
+}
+
+func TestValidateProjectIDRejectsInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "empty", value: ""},
+		{name: "malformed", value: "not-a-ulid"},
+		{name: "lowercase", value: "01arz3ndektsv4rrffq69g5fav"},
+		{name: "overlong", value: "01ARZ3NDEKTSV4RRFFQ69G5FAVX"},
+		{name: "overflow", value: "ZZZZZZZZZZZZZZZZZZZZZZZZZZ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProjectID(tc.value)
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) {
+				t.Fatalf("ValidateProjectID(%q) error = %v, want *domain.Error", tc.value, err)
+			}
+			wantMsg := "project_id must be a canonical uppercase ULID"
+			if domainErr.Code != domain.CodeInvalidArgument || domainErr.Message != wantMsg {
+				t.Fatalf("ValidateProjectID(%q) error = %#v, want code=%s message=%q", tc.value, domainErr, domain.CodeInvalidArgument, wantMsg)
+			}
+			if len(domainErr.Details) != 1 || domainErr.Details[0] != (domain.Detail{
+				Field:   "project_id",
+				Code:    "INVALID_ULID",
+				Message: wantMsg,
+			}) {
+				t.Fatalf("ValidateProjectID(%q) details = %#v", tc.value, domainErr.Details)
+			}
+		})
+	}
+}
+
+func TestNewInvalidProjectIDErrorDetails(t *testing.T) {
+	domainErr := NewInvalidProjectIDError("bad")
+	wantMsg := "project_id must be a canonical uppercase ULID"
+	if domainErr.Code != domain.CodeInvalidArgument || domainErr.Retryable || domainErr.Message != wantMsg {
+		t.Fatalf("NewInvalidProjectIDError() = %#v", domainErr)
+	}
+	if len(domainErr.Details) != 1 || domainErr.Details[0] != (domain.Detail{
+		Field:   "project_id",
+		Code:    "INVALID_ULID",
+		Message: wantMsg,
+	}) {
+		t.Fatalf("NewInvalidProjectIDError() details = %#v", domainErr.Details)
+	}
+}

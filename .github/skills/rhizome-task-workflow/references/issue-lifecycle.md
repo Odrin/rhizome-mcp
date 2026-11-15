@@ -2,7 +2,7 @@
 
 ## Project routing
 
-Call `open_project` with the absolute repository root before using lifecycle tools. Retain its `project_ref` and pass it to every subsequent project-scoped call. Routing is stateless, so an earlier call does not establish an implicit current project; omission is valid only when intentionally using a configured default project.
+Call `open_project` with `project_root` (absolute repository root when client and server share a filesystem) or `project_id` (from `.agent-tracker.json` when the server runs on another host, such as stdio over SSH), or use `get_project(project_ref)` when you already have a valid `project_ref`, before using lifecycle tools. Retain its `project_ref` and pass it to every subsequent project-scoped call. Routing is stateless, so an earlier call does not establish an implicit current project; omission is valid only when intentionally using a configured default project.
 
 ## Types and hierarchy
 

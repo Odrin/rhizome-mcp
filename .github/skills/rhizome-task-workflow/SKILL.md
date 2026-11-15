@@ -6,7 +6,7 @@ argument-hint: "Describe the task, issue, or outcome to coordinate."
 
 # Rhizome Task Workflow
 
-1. Call `open_project` with the absolute repository root. Retain its `project_ref` and pass it to every later project-scoped tool call.
+1. Call `open_project` with `project_root` (absolute repository root when client and server share a filesystem) or `project_id` (from `.agent-tracker.json` when the server runs on another host, such as stdio over SSH), or call `get_project(project_ref)` equivalently. Retain its `project_ref` and pass it to every later project-scoped tool call.
 2. Find claimable work with `get_planning_graph` or `list_issues` using that `project_ref`.
 3. Read `get_work_context`, then claim exactly one issue before editing.
 4. Renew long leases and save restartable checkpoints with artifacts.
