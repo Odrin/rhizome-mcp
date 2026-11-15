@@ -2766,6 +2766,11 @@ Parameters captured from URI path segments (`project_ref`, `issue_id`) are URL-u
 
 #### `project-brief`
 
+`project.root_path` is the checkout root validated at server startup or by
+`open_project(project_root: ...)` for the current cached project opening.
+Database-only routing by ID/ref leaves it `null` when no root has been validated;
+the historical initialization origin is not treated as a current checkout path.
+
 ```json
 {
   "project": {

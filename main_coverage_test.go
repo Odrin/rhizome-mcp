@@ -1001,12 +1001,13 @@ func TestConnectSupportsJSONCAndPlatformZedPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects_unterminated_block_comment_and_invalid_commas", func(t *testing.T) {
+	t.Run("rejects_malformed_jsonc_without_clobbering", func(t *testing.T) {
 		for _, bad := range []string{
 			`{"a": 1 /* unterminated`,
 			`{"a": 1,,}`,
-			`[,]` ,
+			`[,]`,
 			`{"a": [,]}`,
+			`{"timeout":1/* note */000}`,
 		} {
 			badPath := filepath.Join(t.TempDir(), "bad.json")
 			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
@@ -1015,6 +1016,13 @@ func TestConnectSupportsJSONCAndPlatformZedPaths(t *testing.T) {
 			err := mergeAndWriteJSONConfig(badPath, map[string]interface{}{"context_servers": map[string]interface{}{}}, "context_servers", "rhizome-mcp")
 			if err == nil || !strings.Contains(err.Error(), "parse config file") {
 				t.Fatalf("mergeAndWriteJSONConfig(%q) error = %v, want parse config file error", bad, err)
+			}
+			after, err := os.ReadFile(badPath)
+			if err != nil {
+				t.Fatalf("read bad jsonc after merge: %v", err)
+			}
+			if string(after) != bad {
+				t.Fatalf("malformed config modified: got %q, want %q", after, bad)
 			}
 		}
 	})

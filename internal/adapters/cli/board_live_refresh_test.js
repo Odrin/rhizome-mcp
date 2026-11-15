@@ -670,10 +670,13 @@ test("SSE error falls back to exponential backoff polling until SSE reconnects",
   assert.equal(harness.timers.size, 1);
   assert.equal(harness.timerDelays[harness.timerDelays.length - 1], 15000);
 
-  // When EventSource reconnects, fallback timer is cleared cleanly.
+  // Reconnect still catches up after a successful fallback poll.
   es.dispatch("open");
   assert.equal(client.sseConnected, true);
   assert.equal(client.timer, null);
+  assert.equal(harness.timers.size, 0);
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 2);
   assert.equal(harness.timers.size, 0);
 
   client.stop();
@@ -771,7 +774,7 @@ test("auto-bootstrapped client uses data-board-events-endpoint or /api/events", 
   assert.equal(FakeEventSource.instances[0].closed, true);
 });
 
-test("SSE reconnect after error triggers catch-up refresh on open and changed ready watermark", async () => {
+test("SSE reconnect coalesces open and changed ready catch-up refreshes", async () => {
   FakeEventSource.instances = [];
   const harness = createHarness({
     initialTestHooks: {},
@@ -813,6 +816,7 @@ test("SSE reconnect after error triggers catch-up refresh on open and changed re
   // Reconnect "open" must clear stale status and trigger an immediate catch-up fetch.
   es.readyState = 1;
   es.dispatch("open");
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
   await flushMicrotasks();
   assert.equal(client.sseConnected, true);
   assert.equal(client.staleStatus, null);
@@ -820,15 +824,118 @@ test("SSE reconnect after error triggers catch-up refresh on open and changed re
   assert.equal(root.children[0].getAttribute("id"), "reconnected-open");
 
   // Ready event carrying the unchanged watermark must not double-fetch.
-  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-1" }) });
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
   await flushMicrotasks();
   assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
 
   // Ready event carrying a new watermark (missed update across server restart/reconnect) refreshes immediately.
-  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-3" }) });
   await flushMicrotasks();
   assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 2);
   assert.equal(root.children[0].getAttribute("id"), "reconnected-watermark");
 
   client.stop();
 });
+
+test("SSE changes during an HTML refresh queue a later refresh without overlapping requests", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({
+    initialTestHooks: {},
+    pageResponses: [
+      { text: "<div id=\"older\"></div>" },
+      { text: "<div id=\"newer\"></div>" },
+    ],
+  });
+  let finishFirstPage;
+  const firstPage = new Promise((resolve) => { finishFirstPage = resolve; });
+  let pageCalls = 0;
+  const fetchImpl = async (url, options) => {
+    const response = await harness.fetchImpl(url, options);
+    if (url === "/" && ++pageCalls === 1) {
+      return { ...response, text: () => firstPage };
+    }
+    return response;
+  };
+  const Client = loadClient(extractBoardLiveRefreshScript(), harness);
+  const root = createTestRoot(harness);
+  const client = new Client(root, {
+    EventSource: FakeEventSource,
+    fetch: fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+  const es = FakeEventSource.instances[0];
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-1" }) });
+  es.dispatch("board_changed", { data: JSON.stringify({ watermark: "wm-2" }) });
+  await flushMicrotasks();
+  es.dispatch("board_changed", { data: JSON.stringify({ watermark: "wm-3" }) });
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+
+  finishFirstPage("<div id=\"older\"></div>");
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 2);
+  assert.equal(root.children[0].id, "newer");
+  client.stop();
+});
+
+for (const failure of ["api", "page"]) {
+  test(`failed reconnect ${failure} fetch retries while SSE stays connected`, async () => {
+    FakeEventSource.instances = [];
+    const harness = createHarness({
+      initialTestHooks: {},
+      boardResponses: [
+        { status: failure === "api" ? 503 : 200, ok: failure !== "api", headers: { get: () => "ETAG-NEW" } },
+        { status: 200, ok: true, headers: { get: () => "ETAG-NEW" } },
+      ],
+      pageResponses: [
+        ...(failure === "page" ? [{ status: 503, ok: false }] : []),
+        { text: "<div id=\"caught-up\"></div>" },
+      ],
+    });
+    const Client = loadClient(extractBoardLiveRefreshScript(), harness);
+    const root = createTestRoot(harness);
+    const client = new Client(root, {
+      EventSource: FakeEventSource,
+      fetch: harness.fetchImpl,
+      setTimeout: harness.setTimeoutImpl,
+      clearTimeout: harness.clearTimeoutImpl,
+      document: harness.document,
+      window: harness.window,
+      DOMParser: FakeDOMParser,
+      etag: "ETAG-OLD",
+    });
+    const es = FakeEventSource.instances[0];
+    es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-1" }) });
+    es.dispatch("error");
+    es.dispatch("open");
+    es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
+    await flushMicrotasks();
+    assert.equal(client.sseConnected, true);
+    assert.equal(client.needsReconnectRefresh, true);
+    assert.equal(client.staleStatus, "stale");
+    assert.equal(harness.timers.size, 1);
+    assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+
+    es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
+    assert.equal(client.staleStatus, "stale");
+    assert.equal(harness.timers.size, 1);
+    const scheduled = Array.from(harness.timers.values())[0];
+    harness.timers.delete(scheduled.id);
+    scheduled.fn();
+    await flushMicrotasks();
+
+    const boardFetches = harness.fetchCalls.filter(({ url }) => url === "/api/board");
+    assert.equal(boardFetches.length, 2);
+    assert.equal(boardFetches[1].options.headers["If-None-Match"], "ETAG-OLD");
+    assert.equal(client.needsReconnectRefresh, false);
+    assert.equal(client.staleStatus, null);
+    assert.equal(client.etag, "ETAG-NEW");
+    assert.equal(harness.timers.size, 0);
+    assert.equal(root.children[0].id, "caught-up");
+    client.stop();
+  });
+}

@@ -43,6 +43,7 @@ Routed opens are existing-only under one configured data root. They do not creat
 - The default opening is pinned and is not evicted while it remains the default.
 - Idle entries are evicted by LRU when the router reaches capacity.
 - Active leases prevent a project from being closed by the router while the lease is still active.
+- Opening by an absolute root records that validated checkout path in the cached entry, including after relocation. Database-only opens do not infer a current checkout root from the historical database origin; project briefs report `root_path: null` until a root is validated.
 - Shutdown drains in-flight work and then closes the router cleanly.
 
 ## 6. Routing isolation
@@ -73,8 +74,10 @@ requires `--print`; `windsurf` writes its single global file
 on Windows, `$XDG_CONFIG_HOME/zed/settings.json` or the Flatpak path
 `~/.var/app/dev.zed.Zed/config/zed/settings.json` when present on Linux, and
 `~/.config/zed/settings.json` otherwise). Merging into existing JSON config
-files strips JSONC comments (`//`, `/* */`) and trailing commas so Zed and
-Gemini settings files parse cleanly. `--profile` or `--toolsets` (mutually exclusive) may
+files strips JSONC comments (`//`, `/* */`) while preserving token boundaries,
+and removes trailing commas so Zed and Gemini settings files parse cleanly.
+Malformed JSONC is rejected without modifying the existing file.
+`--profile` or `--toolsets` (mutually exclusive) may
 also be passed to bake those flags into the emitted `serve` arguments. The
 written `command` is this resolved binary's absolute path by default; when
 `connect` is itself running through the `npx rhizome-mcp` wrapper it emits

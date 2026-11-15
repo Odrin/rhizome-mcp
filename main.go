@@ -1154,6 +1154,7 @@ func stripJSONComments(src []byte) ([]byte, error) {
 				continue
 			}
 			if src[i+1] == '*' {
+				out = append(out, ' ')
 				i += 2
 				closed := false
 				for i < len(src) {

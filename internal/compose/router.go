@@ -109,6 +109,10 @@ func (router *Router) DefaultProjectRef() string {
 }
 
 func (router *Router) Acquire(ctx context.Context, explicitRef *string) (projectrouting.ProjectLease, error) {
+	return router.acquire(ctx, explicitRef, "")
+}
+
+func (router *Router) acquire(ctx context.Context, explicitRef *string, rootPath string) (projectrouting.ProjectLease, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -157,14 +161,15 @@ func (router *Router) Acquire(ctx context.Context, explicitRef *string) (project
 				router.releaseEntryLocked(entry)
 				return nil, ErrRouterClosed
 			}
-			return router.wrapLease(entry), nil
+			return router.wrapLease(entry, rootPath), nil
 		}
 		if entry.state == "ready" {
 			entry.active++
 			entry.lastUsed = router.nextUseLocked()
 			router.activeCount++
+			lease := router.wrapLease(entry, rootPath)
 			router.mu.Unlock()
-			return router.wrapLease(entry), nil
+			return lease, nil
 		}
 	}
 
@@ -231,7 +236,7 @@ func (router *Router) Acquire(ctx context.Context, explicitRef *string) (project
 		router.releaseEntryLocked(entry)
 		return nil, ErrRouterClosed
 	}
-	return router.wrapLease(entry), nil
+	return router.wrapLease(entry, rootPath), nil
 }
 
 func (router *Router) OpenProject(ctx context.Context, absoluteRoot string) (projectrouting.ProjectLease, error) {
@@ -246,7 +251,7 @@ func (router *Router) OpenProject(ctx context.Context, absoluteRoot string) (pro
 		return nil, err
 	}
 	projectRef := project.Identity.ProjectID
-	return router.Acquire(ctx, &projectRef)
+	return router.acquire(ctx, &projectRef, project.Root)
 }
 
 func (router *Router) resolveRef(explicitRef *string) (string, error) {
@@ -287,15 +292,15 @@ func projectRootPath(project *runtime.Project) string {
 	if project == nil {
 		return ""
 	}
-	if project.Root != "" {
-		return project.Root
-	}
-	return project.Origin
+	return project.Root
 }
 
-func (router *Router) wrapLease(entry *routerEntry) projectrouting.ProjectLease {
+func (router *Router) wrapLease(entry *routerEntry, rootPath string) projectrouting.ProjectLease {
 	if entry == nil || entry.bundle == nil {
 		return nil
+	}
+	if rootPath != "" {
+		entry.rootPath = rootPath
 	}
 	baseLease := projectrouting.NewStaticLeaseWithRoot(entry.ref, entry.rootPath, entry.bundle.Bundle())
 	return &routerLease{baseLease: baseLease, router: router, entry: entry}
@@ -475,7 +480,7 @@ func (router *Router) pinReadyEntry(ref string) projectrouting.ProjectLease {
 	}
 	entry.active++
 	router.activeCount++
-	return router.wrapLease(entry)
+	return router.wrapLease(entry, "")
 }
 
 type routerLease struct {
@@ -499,9 +504,6 @@ func (lease *routerLease) RootPath() string {
 	}
 	if rooted, ok := lease.baseLease.(interface{ RootPath() string }); ok {
 		return rooted.RootPath()
-	}
-	if lease.entry != nil {
-		return lease.entry.rootPath
 	}
 	return ""
 }

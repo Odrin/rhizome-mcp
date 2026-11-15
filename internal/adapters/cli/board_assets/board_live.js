@@ -33,6 +33,8 @@
       this.sseConnected = false;
       this.needsReconnectRefresh = false;
       this.lastWatermark = "";
+      this.refreshPromise = null;
+      this.refreshQueued = false;
       this.listenersBound = false;
       this.etag = options.etag || "";
       this.lastSuccessfulRefreshAt = null;
@@ -76,6 +78,7 @@
       this.clearTimer();
       this.closeEvents();
       this.needsReconnectRefresh = false;
+      this.refreshQueued = false;
     }
 
     close(){
@@ -111,15 +114,19 @@
       }
       this.eventSource = es;
       this.sseConnected = false;
+      let refreshedOnOpen = false;
+      let reconnecting = this.needsReconnectRefresh;
 
       const markStreamHealthy = () => {
         if (this.eventSource !== es) {
           return false;
         }
         this.sseConnected = true;
-        this.clearTimer();
-        this.clearStale();
-        this.backoffMs = 1000;
+        if (!this.needsReconnectRefresh) {
+          this.clearTimer();
+          this.clearStale();
+          this.backoffMs = 1000;
+        }
         return true;
       };
 
@@ -127,8 +134,9 @@
         if (!markStreamHealthy()) {
           return;
         }
-        if (this.needsReconnectRefresh) {
-          this.needsReconnectRefresh = false;
+        refreshedOnOpen = reconnecting || this.needsReconnectRefresh;
+        reconnecting = false;
+        if (refreshedOnOpen) {
           this.refresh(true);
         }
       };
@@ -142,8 +150,11 @@
         if (watermark) {
           this.lastWatermark = watermark;
         }
-        if (this.needsReconnectRefresh || watermarkChanged) {
-          this.needsReconnectRefresh = false;
+        // The ready watermark was captured before open started its catch-up.
+        const shouldRefresh = !refreshedOnOpen && (watermarkChanged ||
+          (this.needsReconnectRefresh && this.timer === null && !this.refreshPromise));
+        refreshedOnOpen = false;
+        if (shouldRefresh) {
           this.refresh(true);
         }
       };
@@ -156,7 +167,6 @@
         if (watermark) {
           this.lastWatermark = watermark;
         }
-        this.needsReconnectRefresh = false;
         this.refresh(true);
       };
 
@@ -165,6 +175,7 @@
           return;
         }
         this.sseConnected = false;
+        reconnecting = true;
         this.needsReconnectRefresh = true;
         if (es.readyState === 2) {
           this.closeEvents();
@@ -215,15 +226,35 @@
       this.stop();
     };
 
-    async refresh(immediate){
+    refresh(immediate){
       if (this.isHidden && !immediate) {
-        return;
+        return Promise.resolve();
       }
+      if (this.refreshPromise) {
+        this.refreshQueued = true;
+        return this.refreshPromise;
+      }
+      this.clearTimer();
+      this.needsReconnectRefresh = true;
+      this.refreshPromise = this.refreshOnce().finally(() => {
+        this.refreshPromise = null;
+        if (this.refreshQueued) {
+          this.refreshQueued = false;
+          if (!this.isHidden) {
+            return this.refresh(true);
+          }
+        }
+      });
+      return this.refreshPromise;
+    }
+
+    async refreshOnce(){
       try {
         const headers = this.etag ? {"If-None-Match": this.etag} : {};
         const response = await this.fetchImpl(this.endpoint, {headers, cache: "no-store"});
         if (response.status === 304) {
           this.lastSuccessfulRefreshAt = this.nowImpl();
+          this.needsReconnectRefresh = false;
           this.clearStale();
           this.backoffMs = 1000;
           this.schedule();
@@ -232,9 +263,11 @@
         if (!response.ok) {
           throw new Error("request failed");
         }
-        this.etag = response.headers.get("ETag") || this.etag;
+        const nextETag = response.headers.get("ETag") || this.etag;
         const pageHTML = await this.fetchPageHTML();
         this.refreshContent(pageHTML);
+        this.etag = nextETag;
+        this.needsReconnectRefresh = false;
         this.clearStale();
         this.backoffMs = 1000;
         this.schedule();
@@ -299,7 +332,7 @@
     }
 
     scheduleWithBackoff(){
-      if (this.isHidden || this.sseConnected) {
+      if (this.isHidden || (this.sseConnected && !this.needsReconnectRefresh)) {
         return;
       }
       this.clearTimer();

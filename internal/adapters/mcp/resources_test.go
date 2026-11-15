@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -81,7 +82,7 @@ func (r *spyProjectRouter) OpenProject(ctx context.Context, absoluteRoot string)
 	}, nil
 }
 
-func (l *spyProjectLease) ProjectRef() string          { return l.inner.ProjectRef() }
+func (l *spyProjectLease) ProjectRef() string           { return l.inner.ProjectRef() }
 func (l *spyProjectLease) Services() application.Bundle { return l.inner.Services() }
 func (l *spyProjectLease) Release() error {
 	if l.onRelease != nil {
@@ -1008,8 +1009,47 @@ func TestContextPackProjectBriefPopulatesRootPath(t *testing.T) {
 		}
 
 		docB := readBrief(t, client, idB)
+		if docB.Project.RootPath != nil {
+			t.Fatalf("unverified docB.Project.RootPath = %v, want nil", docB.Project.RootPath)
+		}
+		opened := call(t, client, "open_project", map[string]any{"project_root": repoB})
+		if opened.IsError {
+			t.Fatalf("open_project(repoB) failed: %#v", opened)
+		}
+		docB = readBrief(t, client, idB)
 		if docB.Project.RootPath == nil || *docB.Project.RootPath != rtProjB.Root {
 			t.Fatalf("docB.Project.RootPath = %v, want %q", docB.Project.RootPath, rtProjB.Root)
+		}
+	})
+
+	t.Run("relocated_checkout", func(t *testing.T) {
+		originalRoot := filepath.Join(tempDir, "original")
+		ref := initRepoAndSeedDB(t, ctx, originalRoot, dataRoot)
+		movedRoot := filepath.Join(tempDir, "relocated")
+		if err := os.Rename(originalRoot, movedRoot); err != nil {
+			t.Fatalf("move checkout: %v", err)
+		}
+		project, err := projectconfig.LoadProjectRoot(movedRoot)
+		if err != nil {
+			t.Fatalf("load relocated root: %v", err)
+		}
+
+		router := compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, nil)
+		defer router.Close(ctx)
+		client, cleanup := newClient(t, routerOptions(router))
+		defer cleanup()
+
+		doc := readBrief(t, client, ref)
+		if doc.Project.RootPath != nil {
+			t.Fatalf("unverified root_path = %v, want nil", doc.Project.RootPath)
+		}
+		opened := call(t, client, "open_project", map[string]any{"project_root": movedRoot})
+		if opened.IsError {
+			t.Fatalf("open_project(relocated) failed: %#v", opened)
+		}
+		doc = readBrief(t, client, ref)
+		if doc.Project.RootPath == nil || *doc.Project.RootPath != project.Root {
+			t.Fatalf("relocated root_path = %v, want %q", doc.Project.RootPath, project.Root)
 		}
 	})
 }
