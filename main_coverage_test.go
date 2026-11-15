@@ -10,11 +10,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	cliadapter "rhizome-mcp/internal/adapters/cli"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/compose"
@@ -440,10 +443,456 @@ func TestMergeAndWriteJSONConfigReportsParseAndWriteErrors(t *testing.T) {
 		t.Fatalf("mergeAndWriteJSONConfig(malformed) error = %v, want parse config file", err)
 	}
 
-	writePath := filepath.Join(t.TempDir(), "missing", "config.json")
-	if err := mergeAndWriteJSONConfig(writePath, map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "write config file") {
-		t.Fatalf("mergeAndWriteJSONConfig(write fail) error = %v, want write config file", err)
+	nullPath := filepath.Join(t.TempDir(), "null.json")
+	if err := os.WriteFile(nullPath, []byte(`null`), 0o644); err != nil {
+		t.Fatalf("write null config: %v", err)
 	}
+	if err := mergeAndWriteJSONConfig(nullPath, map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "parse config file") {
+		t.Fatalf("mergeAndWriteJSONConfig(null) error = %v, want parse config file", err)
+	}
+
+	nonObjectSectionPath := filepath.Join(t.TempDir(), "bad-section.json")
+	if err := os.WriteFile(nonObjectSectionPath, []byte(`{"context_servers":"not-an-object"}`), 0o644); err != nil {
+		t.Fatalf("write non-object section config: %v", err)
+	}
+	if err := mergeAndWriteJSONConfig(nonObjectSectionPath, map[string]interface{}{"context_servers": map[string]interface{}{}}, "context_servers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "must be a JSON object") {
+		t.Fatalf("mergeAndWriteJSONConfig(non-object section) error = %v, want JSON object error", err)
+	}
+
+	nestedPath := filepath.Join(t.TempDir(), "missing", "nested", "config.json")
+	if err := mergeAndWriteJSONConfig(nestedPath, map[string]interface{}{"mcpServers": map[string]interface{}{"rhizome-mcp": map[string]interface{}{"command": "/tmp/rhizome"}}}, "mcpServers", "rhizome-mcp"); err != nil {
+		t.Fatalf("mergeAndWriteJSONConfig(auto-mkdir) error = %v", err)
+	}
+	if _, err := os.Stat(nestedPath); err != nil {
+		t.Fatalf("expected nested config file to be created: %v", err)
+	}
+
+	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+	if err := mergeAndWriteJSONConfig(filepath.Join(parentFile, "config.json"), map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "stat config file") {
+		t.Fatalf("mergeAndWriteJSONConfig(stat fail) error = %v, want stat config file", err)
+	}
+
+	if goruntime.GOOS == "windows" || os.Geteuid() != 0 {
+		readOnlyPath := filepath.Join(t.TempDir(), "readonly.json")
+		if err := os.WriteFile(readOnlyPath, []byte(`{}`), 0o444); err != nil {
+			t.Fatalf("write readonly config: %v", err)
+		}
+		if err := mergeAndWriteJSONConfig(readOnlyPath, map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "write config file") {
+			t.Fatalf("mergeAndWriteJSONConfig(write fail) error = %v, want write config file", err)
+		}
+	}
+}
+
+func initTestProjectDir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create project dir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, projectconfig.IdentityFileName), []byte(`{"version":1,"project_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}`), 0o644); err != nil {
+		t.Fatalf("write identity file: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve project dir symlinks: %v", err)
+	}
+	return resolved
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+func readJSONMap(t *testing.T, path string) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read JSON file %s: %v", path, err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal JSON file %s: %v", path, err)
+	}
+	return parsed
+}
+
+func toStringSlice(t *testing.T, raw interface{}) []string {
+	t.Helper()
+	items, ok := raw.([]interface{})
+	if !ok {
+		t.Fatalf("expected []interface{}, got %T (%#v)", raw, raw)
+	}
+	out := make([]string, len(items))
+	for i, item := range items {
+		str, ok := item.(string)
+		if !ok {
+			t.Fatalf("expected string at index %d, got %T", i, item)
+		}
+		out[i] = str
+	}
+	return out
+}
+
+func TestRunConnectNewTargetsProjectScopedAndNonDestructiveMerge(t *testing.T) {
+	tests := []struct {
+		target     string
+		configKey  string
+		relPath    func(projectRoot, home string) string
+		extraTop   map[string]interface{}
+		otherEntry map[string]interface{}
+	}{
+		{
+			target:     "cursor",
+			configKey:  "mcpServers",
+			relPath:    func(projectRoot, _ string) string { return filepath.Join(projectRoot, ".cursor", "mcp.json") },
+			extraTop:   map[string]interface{}{"cursorSetting": true},
+			otherEntry: map[string]interface{}{"command": "other-cursor", "args": []string{"--stdio"}},
+		},
+		{
+			target:     "windsurf",
+			configKey:  "mcpServers",
+			relPath:    func(_, home string) string { return filepath.Join(home, ".codeium", "windsurf", "mcp_config.json") },
+			extraTop:   map[string]interface{}{"windsurfSetting": "keep"},
+			otherEntry: map[string]interface{}{"command": "other-windsurf", "args": []string{"serve"}},
+		},
+		{
+			target:     "zed",
+			configKey:  "context_servers",
+			relPath:    func(projectRoot, _ string) string { return filepath.Join(projectRoot, ".zed", "settings.json") },
+			extraTop:   map[string]interface{}{"theme": "One Dark", "tab_size": float64(4)},
+			otherEntry: map[string]interface{}{"command": "other-zed", "args": []string{"mcp"}},
+		},
+		{
+			target:     "gemini",
+			configKey:  "mcpServers",
+			relPath:    func(projectRoot, _ string) string { return filepath.Join(projectRoot, ".gemini", "settings.json") },
+			extraTop:   map[string]interface{}{"selectedAuthType": "oauth-personal"},
+			otherEntry: map[string]interface{}{"command": "other-gemini", "args": []string{"run"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.target+"/create_and_print", func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatalf("create home dir: %v", err)
+			}
+			setTestHome(t, home)
+			projectRoot := initTestProjectDir(t, filepath.Join(t.TempDir(), "repo"))
+			configPath := tc.relPath(projectRoot, home)
+
+			var printOut bytes.Buffer
+			if err := runConnectWithOptions(context.Background(), projectRoot, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+				Target:    tc.target,
+				PrintOnly: true,
+			}, os.UserHomeDir, &printOut, io.Discard); err != nil {
+				t.Fatalf("runConnect(%s, printOnly) error = %v", tc.target, err)
+			}
+			if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s --print unexpectedly created %s", tc.target, configPath)
+			}
+			var printed map[string]interface{}
+			if err := json.Unmarshal(printOut.Bytes(), &printed); err != nil {
+				t.Fatalf("unmarshal %s print output: %v", tc.target, err)
+			}
+			printedServers := printed[tc.configKey].(map[string]interface{})
+			printedEntry := printedServers["rhizome-mcp"].(map[string]interface{})
+			if _, hasType := printedEntry["type"]; hasType {
+				t.Fatalf("%s entry unexpectedly included type field: %#v", tc.target, printedEntry)
+			}
+
+			if err := runConnectWithOptions(context.Background(), projectRoot, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+				Target: tc.target,
+			}, os.UserHomeDir, io.Discard, io.Discard); err != nil {
+				t.Fatalf("runConnect(%s) error = %v", tc.target, err)
+			}
+			written := readJSONMap(t, configPath)
+			servers := written[tc.configKey].(map[string]interface{})
+			entry := servers["rhizome-mcp"].(map[string]interface{})
+			if entry["command"] != "/tmp/rhizome" {
+				t.Fatalf("%s command = %v, want /tmp/rhizome", tc.target, entry["command"])
+			}
+			wantArgs := []string{"serve", "--project-root", projectRoot}
+			if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, wantArgs) {
+				t.Fatalf("%s args = %v, want %v", tc.target, gotArgs, wantArgs)
+			}
+		})
+
+		t.Run(tc.target+"/non_destructive_merge", func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatalf("create home dir: %v", err)
+			}
+			setTestHome(t, home)
+			projectRoot := initTestProjectDir(t, filepath.Join(t.TempDir(), "repo"))
+			configPath := tc.relPath(projectRoot, home)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatalf("create config parent dir: %v", err)
+			}
+
+			seed := map[string]interface{}{
+				tc.configKey: map[string]interface{}{
+					"existing-server": tc.otherEntry,
+				},
+			}
+			for key, value := range tc.extraTop {
+				seed[key] = value
+			}
+			seedBytes, err := json.MarshalIndent(seed, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal seed config: %v", err)
+			}
+			if err := os.WriteFile(configPath, seedBytes, 0o644); err != nil {
+				t.Fatalf("write seed config: %v", err)
+			}
+
+			if err := runConnectWithOptions(context.Background(), projectRoot, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+				Target: tc.target,
+			}, os.UserHomeDir, io.Discard, io.Discard); err != nil {
+				t.Fatalf("runConnect(%s) merge error = %v", tc.target, err)
+			}
+
+			merged := readJSONMap(t, configPath)
+			for key, wantValue := range tc.extraTop {
+				if merged[key] != wantValue {
+					t.Fatalf("%s top-level key %q = %#v, want %#v", tc.target, key, merged[key], wantValue)
+				}
+			}
+			servers := merged[tc.configKey].(map[string]interface{})
+			if _, ok := servers["existing-server"]; !ok {
+				t.Fatalf("%s did not preserve existing-server entry", tc.target)
+			}
+			if _, ok := servers["rhizome-mcp"]; !ok {
+				t.Fatalf("%s did not add rhizome-mcp entry", tc.target)
+			}
+		})
+	}
+}
+
+func TestRunConnectGlobalTargetsUseUserHomeDirAndSkipDiscovery(t *testing.T) {
+	outsideDir := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("create home dir: %v", err)
+	}
+	setTestHome(t, home)
+
+	fileTargets := []struct {
+		target    string
+		configKey string
+		wantType  bool
+		path      string
+	}{
+		{target: "claude", configKey: "mcpServers", wantType: true, path: filepath.Join(home, ".claude.json")},
+		{target: "cursor", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".cursor", "mcp.json")},
+		{target: "windsurf", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")},
+		{target: "zed", configKey: "context_servers", wantType: false, path: filepath.Join(home, ".config", "zed", "settings.json")},
+		{target: "gemini", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".gemini", "settings.json")},
+	}
+
+	for _, tc := range fileTargets {
+		t.Run(tc.target, func(t *testing.T) {
+			if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+				Target: tc.target,
+				Global: true,
+			}, os.UserHomeDir, io.Discard, io.Discard); err != nil {
+				t.Fatalf("runConnect(%s --global) error = %v", tc.target, err)
+			}
+			cfg := readJSONMap(t, tc.path)
+			servers := cfg[tc.configKey].(map[string]interface{})
+			entry := servers["rhizome-mcp"].(map[string]interface{})
+			if tc.wantType && entry["type"] != "stdio" {
+				t.Fatalf("%s global type = %v, want stdio", tc.target, entry["type"])
+			}
+			if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, []string{"serve"}) {
+				t.Fatalf("%s global args = %v, want [serve]", tc.target, gotArgs)
+			}
+		})
+	}
+
+	t.Run("vscode_global_without_print_errors", func(t *testing.T) {
+		err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target: "vscode",
+			Global: true,
+		}, os.UserHomeDir, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "workspace-scoped") || !strings.Contains(err.Error(), "--print") {
+			t.Fatalf("vscode --global error = %v, want workspace-scoped message naming --print", err)
+		}
+	})
+
+	t.Run("vscode_global_with_print_succeeds", func(t *testing.T) {
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target:    "vscode",
+			Global:    true,
+			PrintOnly: true,
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("vscode --global --print error = %v", err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &cfg); err != nil {
+			t.Fatalf("unmarshal vscode global snippet: %v", err)
+		}
+		entry := cfg["servers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
+		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, []string{"serve"}) {
+			t.Fatalf("vscode global args = %v, want [serve]", gotArgs)
+		}
+	})
+
+	t.Run("codex_global_print", func(t *testing.T) {
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target:    "codex",
+			Global:    true,
+			PrintOnly: true,
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("codex --global --print error = %v", err)
+		}
+		if !strings.Contains(stdout.String(), `args = ["serve"]`) {
+			t.Fatalf("codex global output = %q, want args = [\"serve\"]", stdout.String())
+		}
+	})
+
+	t.Run("json_global", func(t *testing.T) {
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target: "json",
+			Global: true,
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("json --global error = %v", err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &cfg); err != nil {
+			t.Fatalf("unmarshal json global output: %v", err)
+		}
+		entry := cfg["mcpServers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
+		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, []string{"serve"}) {
+			t.Fatalf("json global args = %v, want [serve]", gotArgs)
+		}
+	})
+
+	t.Run("runCLI_global_uses_t_Setenv_HOME_when_PathInputs_HomeDir_empty", func(t *testing.T) {
+		cliHome := filepath.Join(t.TempDir(), "cli-home")
+		if err := os.MkdirAll(cliHome, 0o755); err != nil {
+			t.Fatalf("create cli-home: %v", err)
+		}
+		setTestHome(t, cliHome)
+		var stdout, stderr bytes.Buffer
+		if err := runCLI(context.Background(), &config.Config{}, &stdout, &stderr, []string{"connect", "zed", "--global", "--profile", "agent"}, outsideDir, projectconfig.PathInputs{}); err != nil {
+			t.Fatalf("runCLI(connect zed --global) error = %v", err)
+		}
+		cfg := readJSONMap(t, filepath.Join(cliHome, ".config", "zed", "settings.json"))
+		entry := cfg["context_servers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
+		wantArgs := []string{"serve", "--profile", "agent"}
+		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, wantArgs) {
+			t.Fatalf("zed global profile args = %v, want %v", gotArgs, wantArgs)
+		}
+	})
+}
+
+func TestRunConnectProjectRootProfileAndToolsets(t *testing.T) {
+	baseDir := t.TempDir()
+	otherRepo := initTestProjectDir(t, filepath.Join(baseDir, "other-repo"))
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("create outside dir: %v", err)
+	}
+	uninitSubdir := filepath.Join(otherRepo, "uninit-subdir")
+	if err := os.MkdirAll(uninitSubdir, 0o755); err != nil {
+		t.Fatalf("create uninit subdir: %v", err)
+	}
+
+	t.Run("explicit_absolute_project_root_with_profile", func(t *testing.T) {
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target:      "cursor",
+			ProjectRoot: otherRepo,
+			ToolProfile: "read-only",
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("runConnect(--project-root) error = %v", err)
+		}
+		cfg := readJSONMap(t, filepath.Join(otherRepo, ".cursor", "mcp.json"))
+		entry := cfg["mcpServers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
+		wantArgs := []string{"serve", "--project-root", otherRepo, "--profile", "read-only"}
+		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, wantArgs) {
+			t.Fatalf("args = %v, want %v", gotArgs, wantArgs)
+		}
+	})
+
+	t.Run("explicit_relative_project_root_with_toolsets", func(t *testing.T) {
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target:      "json",
+			PrintOnly:   true,
+			BareCommand: true,
+			ProjectRoot: "../other-repo",
+			Toolsets:    "issues,planning",
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("runConnect(relative --project-root) error = %v", err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &cfg); err != nil {
+			t.Fatalf("unmarshal json output: %v", err)
+		}
+		entry := cfg["mcpServers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
+		if entry["command"] != "rhizome-mcp" {
+			t.Fatalf("command = %v, want rhizome-mcp", entry["command"])
+		}
+		wantArgs := []string{"serve", "--project-root", otherRepo, "--toolsets", "issues,planning"}
+		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, wantArgs) {
+			t.Fatalf("args = %v, want %v", gotArgs, wantArgs)
+		}
+	})
+
+	t.Run("rejects_uninitialized_explicit_project_root", func(t *testing.T) {
+		err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target:      "claude",
+			ProjectRoot: uninitSubdir,
+		}, os.UserHomeDir, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "no rhizome-mcp project found") {
+			t.Fatalf("error = %v, want clear uninitialized project error", err)
+		}
+	})
+
+	t.Run("direct_validation_guards", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			opts cliadapter.ConnectOptions
+			want string
+		}{
+			{
+				name: "global_and_project_root",
+				opts: cliadapter.ConnectOptions{Target: "claude", Global: true, ProjectRoot: otherRepo},
+				want: "mutually exclusive",
+			},
+			{
+				name: "profile_and_toolsets",
+				opts: cliadapter.ConnectOptions{Target: "claude", Global: true, ToolProfile: "agent", Toolsets: "issues"},
+				want: "mutually exclusive",
+			},
+			{
+				name: "invalid_profile",
+				opts: cliadapter.ConnectOptions{Target: "claude", Global: true, ToolProfile: "bogus"},
+				want: "valid profiles",
+			},
+			{
+				name: "invalid_toolsets",
+				opts: cliadapter.ConnectOptions{Target: "claude", Global: true, Toolsets: "bogus"},
+				want: "valid toolsets",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, tc.opts, os.UserHomeDir, io.Discard, io.Discard)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error = %v, want substring %q", err, tc.want)
+				}
+			})
+		}
+	})
 }
 
 func TestComposedServicesNilSafeAccessorsAndClose(t *testing.T) {

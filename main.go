@@ -326,7 +326,7 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 		report, err := project.Doctor(ctx, projectruntime.DoctorOptions{Full: full, HTTPAddress: cfg.HTTPAddress})
 		return doctorReportFromRuntime(report, cfg.Version), err
 	}
-	connectHandler := func(ctx context.Context, target string, printOnly bool, bareCommand bool) error {
+	connectHandler := func(ctx context.Context, opts cliadapter.ConnectOptions) error {
 		exePath, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("determine binary path: %w", err)
@@ -336,7 +336,12 @@ func runCLI(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer, a
 			return fmt.Errorf("resolve binary path: %w", err)
 		}
 		npxLaunched := os.Getenv("RHIZOME_MCP_NPX") == "1"
-		return runConnectWithDataRoot(ctx, startingPath, target, realPath, dataRootOverride, printOnly, bareCommand, npxLaunched, stdout, stderr)
+		homeDirFn := os.UserHomeDir
+		if pathInputs.HomeDir != "" {
+			fixedHome := pathInputs.HomeDir
+			homeDirFn = func() (string, error) { return fixedHome, nil }
+		}
+		return runConnectWithOptions(ctx, startingPath, realPath, dataRootOverride, npxLaunched, opts, homeDirFn, stdout, stderr)
 	}
 
 	// Which commands need an open project is declared once, in the CLI
@@ -549,7 +554,7 @@ func runInit(ctx context.Context, startingPath string, pathInputs projectconfig.
 		ProjectID:    proj.Identity.ProjectID,
 		DatabasePath: proj.DatabasePath,
 		NextActions: []string{
-			"Run 'rhizome-mcp connect claude' (or codex/vscode/json) to register this server with your MCP client.",
+			"Run 'rhizome-mcp connect claude' (or codex/vscode/cursor/windsurf/zed/gemini/json) to register this server with your MCP client.",
 		},
 	}
 	return writeJSON(stdout, response)
@@ -710,8 +715,8 @@ type connectServeInvocation struct {
 }
 
 // resolveConnectServeInvocation is the single shared helper every connect
-// target uses, so claude/vscode/codex/json can never again disagree about
-// whether --project-root is pinned or what command form to use.
+// target uses, so every target agrees on whether --project-root is pinned
+// (when projectRoot is non-empty) and what command form to use.
 //
 // Precedence: launched via the npm launcher (RHIZOME_MCP_NPX=1) always
 // wins, since the resolved binary path in that case points into the npx
@@ -721,7 +726,10 @@ type connectServeInvocation struct {
 // have it on PATH. The default remains this resolved binary's absolute
 // path, unchanged from before this fix.
 func resolveConnectServeInvocation(binaryPath, projectRoot string, bareCommand, npxLaunched bool) connectServeInvocation {
-	args := []string{"serve", "--project-root", projectRoot}
+	args := []string{"serve"}
+	if projectRoot != "" {
+		args = append(args, "--project-root", projectRoot)
+	}
 	switch {
 	case npxLaunched:
 		return connectServeInvocation{Command: "npx", Args: append([]string{"-y", "rhizome-mcp"}, args...)}
@@ -733,33 +741,58 @@ func resolveConnectServeInvocation(binaryPath, projectRoot string, bareCommand, 
 }
 
 func runConnect(ctx context.Context, startingPath string, target string, binaryPath string, printOnly, bareCommand, npxLaunched bool, stdout, stderr io.Writer) error {
-	return runConnectWithDataRoot(ctx, startingPath, target, binaryPath, "", printOnly, bareCommand, npxLaunched, stdout, stderr)
+	return runConnectWithOptions(ctx, startingPath, binaryPath, "", npxLaunched, cliadapter.ConnectOptions{
+		Target:      target,
+		PrintOnly:   printOnly,
+		BareCommand: bareCommand,
+	}, os.UserHomeDir, stdout, stderr)
 }
 
-func runConnectWithDataRoot(ctx context.Context, startingPath string, target string, binaryPath string, dataRootOverride string, printOnly, bareCommand, npxLaunched bool, stdout, stderr io.Writer) error {
-	// Validate the target before touching the filesystem: the CLI layer
-	// already rejects an unsupported target before calling this handler,
-	// but keeping this a cheap, side-effect-free check first (rather than
-	// discovering a project root only to reject the target afterward)
-	// keeps this function's own contract self-sufficient for direct
-	// (non-CLI) callers, including tests.
-	switch target {
-	case "claude", "vscode", "codex", "json":
+func runConnectWithOptions(
+	ctx context.Context,
+	startingPath string,
+	binaryPath string,
+	dataRootOverride string,
+	npxLaunched bool,
+	opts cliadapter.ConnectOptions,
+	userHomeDir func() (string, error),
+	stdout, stderr io.Writer,
+) error {
+	// Validate target and flags before touching the filesystem so direct
+	// (non-CLI) callers share the same self-sufficient contract.
+	switch opts.Target {
+	case "claude", "codex", "vscode", "cursor", "windsurf", "zed", "gemini", "json":
 	default:
-		return fmt.Errorf("unsupported target %q", target)
+		return fmt.Errorf("unsupported target %q", opts.Target)
+	}
+	if opts.Global && opts.ProjectRoot != "" {
+		return cliadapter.NewUsageError("--global and --project-root are mutually exclusive; pass at most one")
+	}
+	if opts.Target == "vscode" && opts.Global && !opts.PrintOnly {
+		return cliadapter.NewUsageError("VS Code MCP configuration is workspace-scoped (.vscode/mcp.json); pass --print for a global snippet")
+	}
+	if opts.ToolProfile != "" && opts.Toolsets != "" {
+		return cliadapter.NewUsageError("--profile and --toolsets are mutually exclusive; pass at most one")
+	}
+	if _, err := domain.ParseToolProfile(opts.ToolProfile); err != nil {
+		return err
+	}
+	if _, err := domain.ParseToolsets(opts.Toolsets); err != nil {
+		return err
 	}
 
-	discovered, err := projectconfig.Discover(startingPath)
-	if err != nil {
-		var domainErr *domain.Error
-		if errors.As(err, &domainErr) && domainErr.Code == projectconfig.CodeProjectNotFound {
-			return fmt.Errorf("no rhizome-mcp project found at or above %q; run `rhizome-mcp init` first", startingPath)
+	var projectRoot string
+	if !opts.Global {
+		var err error
+		projectRoot, err = resolveConnectProjectRoot(startingPath, opts.ProjectRoot)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("discover project root: %w", err)
 	}
-	invocation := resolveConnectServeInvocation(binaryPath, discovered.Root, bareCommand, npxLaunched)
+
+	invocation := resolveConnectServeInvocation(binaryPath, projectRoot, opts.BareCommand, npxLaunched)
 	if dataRootOverride != "" {
-		if !filepath.IsAbs(dataRootOverride) {
+		if !filepath.IsAbs(dataRootOverride) && startingPath != "" {
 			dataRootOverride = filepath.Join(startingPath, dataRootOverride)
 		}
 		dataRoot, err := filepath.Abs(dataRootOverride)
@@ -768,63 +801,157 @@ func runConnectWithDataRoot(ctx context.Context, startingPath string, target str
 		}
 		invocation.Args = append(invocation.Args, "--data-root", dataRoot)
 	}
+	if opts.ToolProfile != "" {
+		invocation.Args = append(invocation.Args, "--profile", opts.ToolProfile)
+	}
+	if opts.Toolsets != "" {
+		invocation.Args = append(invocation.Args, "--toolsets", opts.Toolsets)
+	}
 
-	switch target {
-	case "claude":
-		return connectClaude(discovered.Root, invocation, printOnly, stdout)
-	case "vscode":
-		return connectVSCode(discovered.Root, invocation, printOnly, stdout)
+	switch opts.Target {
 	case "codex":
-		return connectCodex(ctx, invocation, printOnly, stdout, stderr)
+		return connectCodex(ctx, invocation, opts.PrintOnly, stdout, stderr)
 	case "json":
 		return connectJSON(invocation, stdout)
+	case "vscode":
+		return connectVSCode(projectRoot, invocation, opts.PrintOnly, stdout)
 	default:
+		return connectJSONTarget(opts.Target, projectRoot, opts.Global, opts.PrintOnly, invocation, userHomeDir, stdout)
+	}
+}
+
+func resolveConnectProjectRoot(startingPath, explicitProjectRoot string) (string, error) {
+	if explicitProjectRoot != "" {
+		candidate := explicitProjectRoot
+		if !filepath.IsAbs(candidate) && startingPath != "" {
+			candidate = filepath.Join(startingPath, candidate)
+		}
+		absCandidate, err := filepath.Abs(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve project root %q: %w", explicitProjectRoot, err)
+		}
+		loaded, err := projectconfig.LoadProjectRoot(absCandidate)
+		if err != nil {
+			var domainErr *domain.Error
+			if errors.As(err, &domainErr) && domainErr.Code == projectconfig.CodeProjectNotFound {
+				return "", fmt.Errorf("no rhizome-mcp project found at %q; run `rhizome-mcp init` first", absCandidate)
+			}
+			return "", fmt.Errorf("resolve project root %q: %w", explicitProjectRoot, err)
+		}
+		return loaded.Root, nil
+	}
+
+	discovered, err := projectconfig.Discover(startingPath)
+	if err != nil {
+		var domainErr *domain.Error
+		if errors.As(err, &domainErr) && domainErr.Code == projectconfig.CodeProjectNotFound {
+			return "", fmt.Errorf("no rhizome-mcp project found at or above %q; run `rhizome-mcp init` first", startingPath)
+		}
+		return "", fmt.Errorf("discover project root: %w", err)
+	}
+	return discovered.Root, nil
+}
+
+type jsonTargetSpec struct {
+	configKey   string
+	includeType bool
+	projectPath func(projectRoot string) string
+	globalPath  func(homeDir string) string
+}
+
+var jsonTargetSpecs = map[string]jsonTargetSpec{
+	"claude": {
+		configKey:   "mcpServers",
+		includeType: true,
+		projectPath: func(projectRoot string) string { return filepath.Join(projectRoot, ".mcp.json") },
+		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".claude.json") },
+	},
+	"cursor": {
+		configKey:   "mcpServers",
+		includeType: false,
+		projectPath: func(projectRoot string) string { return filepath.Join(projectRoot, ".cursor", "mcp.json") },
+		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".cursor", "mcp.json") },
+	},
+	"windsurf": {
+		configKey:   "mcpServers",
+		includeType: false,
+		// Windsurf only loads its global config file; workspace-scoped runs still
+		// pin --project-root in the args written there.
+		projectPath: nil,
+		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json") },
+	},
+	"zed": {
+		configKey:   "context_servers",
+		includeType: false,
+		projectPath: func(projectRoot string) string { return filepath.Join(projectRoot, ".zed", "settings.json") },
+		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".config", "zed", "settings.json") },
+	},
+	"gemini": {
+		configKey:   "mcpServers",
+		includeType: false,
+		projectPath: func(projectRoot string) string { return filepath.Join(projectRoot, ".gemini", "settings.json") },
+		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".gemini", "settings.json") },
+	},
+}
+
+func buildJSONConfig(configKey string, invocation connectServeInvocation, includeType bool) map[string]interface{} {
+	entry := map[string]interface{}{
+		"command": invocation.Command,
+		"args":    invocation.Args,
+	}
+	if includeType {
+		entry["type"] = "stdio"
+	}
+	return map[string]interface{}{
+		configKey: map[string]interface{}{
+			"rhizome-mcp": entry,
+		},
+	}
+}
+
+func connectJSONTarget(target, projectRoot string, global, printOnly bool, invocation connectServeInvocation, userHomeDir func() (string, error), stdout io.Writer) error {
+	spec, ok := jsonTargetSpecs[target]
+	if !ok {
 		return fmt.Errorf("unsupported target %q", target)
 	}
+	config := buildJSONConfig(spec.configKey, invocation, spec.includeType)
+	if printOnly {
+		return writeJSONToWriter(stdout, config)
+	}
+
+	var filePath string
+	if global || spec.projectPath == nil {
+		if userHomeDir == nil {
+			userHomeDir = os.UserHomeDir
+		}
+		homeDir, err := userHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home directory: %w", err)
+		}
+		if homeDir == "" {
+			return errors.New("resolve home directory: empty home directory")
+		}
+		filePath = spec.globalPath(homeDir)
+	} else {
+		filePath = spec.projectPath(projectRoot)
+	}
+	return mergeAndWriteJSONConfig(filePath, config, spec.configKey, "rhizome-mcp")
 }
 
 func connectClaude(projectRoot string, invocation connectServeInvocation, printOnly bool, stdout io.Writer) error {
-	mcpJSONPath := filepath.Join(projectRoot, ".mcp.json")
-
-	config := map[string]interface{}{
-		"mcpServers": map[string]interface{}{
-			"rhizome-mcp": map[string]interface{}{
-				"type":    "stdio",
-				"command": invocation.Command,
-				"args":    invocation.Args,
-			},
-		},
-	}
-
-	if printOnly {
-		return writeJSONToWriter(stdout, config)
-	}
-
-	return mergeAndWriteJSONConfig(mcpJSONPath, config, "mcpServers", "rhizome-mcp")
+	return connectJSONTarget("claude", projectRoot, false, printOnly, invocation, os.UserHomeDir, stdout)
 }
 
 func connectVSCode(projectRoot string, invocation connectServeInvocation, printOnly bool, stdout io.Writer) error {
-	vscodeDir := filepath.Join(projectRoot, ".vscode")
-	mcpJSONPath := filepath.Join(vscodeDir, "mcp.json")
-
-	config := map[string]interface{}{
-		"servers": map[string]interface{}{
-			"rhizome-mcp": map[string]interface{}{
-				"type":    "stdio",
-				"command": invocation.Command,
-				"args":    invocation.Args,
-			},
-		},
-	}
-
+	config := buildJSONConfig("servers", invocation, true)
 	if printOnly {
 		return writeJSONToWriter(stdout, config)
 	}
-
-	if err := os.MkdirAll(vscodeDir, 0o755); err != nil {
-		return fmt.Errorf("create .vscode directory: %w", err)
+	if projectRoot == "" {
+		return cliadapter.NewUsageError("VS Code MCP configuration is workspace-scoped (.vscode/mcp.json); pass --print for a global snippet")
 	}
 
+	mcpJSONPath := filepath.Join(projectRoot, ".vscode", "mcp.json")
 	if err := mergeAndWriteJSONConfig(mcpJSONPath, config, "servers", "rhizome-mcp"); err != nil {
 		return err
 	}
@@ -864,15 +991,7 @@ args = [%s]
 }
 
 func connectJSON(invocation connectServeInvocation, stdout io.Writer) error {
-	config := map[string]interface{}{
-		"mcpServers": map[string]interface{}{
-			"rhizome-mcp": map[string]interface{}{
-				"command": invocation.Command,
-				"args":    invocation.Args,
-			},
-		},
-	}
-	return writeJSONToWriter(stdout, config)
+	return writeJSONToWriter(stdout, buildJSONConfig("mcpServers", invocation, false))
 }
 
 func canExecuteCodex() bool {
@@ -891,6 +1010,9 @@ func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, 
 		if err := json.Unmarshal(data, &existingConfig); err != nil {
 			return fmt.Errorf("parse config file: %w", err)
 		}
+		if existingConfig == nil {
+			return fmt.Errorf("parse config file: expected a JSON object")
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat config file: %w", err)
 	}
@@ -899,14 +1021,17 @@ func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, 
 		existingConfig = make(map[string]interface{})
 	}
 
-	if _, exists := existingConfig[configKey]; !exists {
-		existingConfig[configKey] = make(map[string]interface{})
-	}
-
-	servers, ok := existingConfig[configKey].(map[string]interface{})
-	if !ok {
+	rawServers, exists := existingConfig[configKey]
+	var servers map[string]interface{}
+	if !exists || rawServers == nil {
 		servers = make(map[string]interface{})
 		existingConfig[configKey] = servers
+	} else {
+		var ok bool
+		servers, ok = rawServers.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("parse config file: %q must be a JSON object", configKey)
+		}
 	}
 
 	newServer := newConfig[configKey].(map[string]interface{})[serverKey]
@@ -915,6 +1040,10 @@ func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, 
 	data, err := json.MarshalIndent(existingConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
 	}
 
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {

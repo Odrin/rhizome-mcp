@@ -151,11 +151,23 @@ func (report DoctorReport) Healthy() bool {
 // DoctorHandler runs a project doctor check after the adapter parses the command.
 type DoctorHandler func(context.Context, bool) (DoctorReport, error)
 
+// ConnectOptions carries the parsed command-line options for `connect`.
+// runConnect guarantees Target is a supported client target, at most one of
+// Global and ProjectRoot is set, and at most one of ToolProfile and Toolsets
+// is non-blank.
+type ConnectOptions struct {
+	Target      string
+	PrintOnly   bool
+	BareCommand bool
+	Global      bool
+	ProjectRoot string
+	ToolProfile string
+	Toolsets    string
+}
+
 // ConnectHandler sets up MCP client configuration after the adapter parses
-// the command: target, printOnly, and bareCommand (the --command opt-in for
-// a portable, shareable config that names "rhizome-mcp" on PATH instead of
-// this resolved binary's absolute, machine-specific path).
-type ConnectHandler func(context.Context, string, bool, bool) error
+// the command.
+type ConnectHandler func(context.Context, ConnectOptions) error
 
 // CLI adapts CLI command parsing and output rendering over application services.
 type CLI struct {
@@ -377,6 +389,10 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	printFlag := fs.Bool("print", false, "print configuration instead of writing")
 	commandFlag := fs.Bool("command", false, "emit a bare \"rhizome-mcp\" command instead of this binary's absolute path, for a config shareable across machines that have it on PATH")
+	globalFlag := fs.Bool("global", false, "write or print a projectless global client configuration instead of pinning --project-root")
+	projectRootFlag := fs.String("project-root", "", "explicit project root directory to pin instead of discovering from the current directory")
+	profileFlag := fs.String("profile", "", "tool exposure profile to bake into generated args: full, agent, read-only, or migration")
+	toolsetsFlag := fs.String("toolsets", "", "comma-separated tool capability groups to bake into generated args (mutually exclusive with --profile)")
 	positionals, err := c.parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -386,7 +402,7 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 	}
 
 	target := positionals[0]
-	validTargets := []string{"claude", "codex", "vscode", "json"}
+	validTargets := []string{"claude", "codex", "vscode", "cursor", "windsurf", "zed", "gemini", "json"}
 	isValid := false
 	for _, valid := range validTargets {
 		if target == valid {
@@ -398,7 +414,39 @@ func (c *CLI) runConnect(ctx context.Context, args []string) error {
 		return NewUsageError(fmt.Sprintf("unsupported target %q (valid targets: %s)", target, strings.Join(validTargets, ", ")))
 	}
 
-	return c.connectHandler(ctx, target, *printFlag, *commandFlag)
+	visited := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+
+	if *globalFlag && (*projectRootFlag != "" || visited["project-root"]) {
+		return NewUsageError("--global and --project-root are mutually exclusive; pass at most one")
+	}
+	if visited["project-root"] && strings.TrimSpace(*projectRootFlag) == "" {
+		return NewUsageError("--project-root requires a non-empty path")
+	}
+	if target == "vscode" && *globalFlag && !*printFlag {
+		return NewUsageError("VS Code MCP configuration is workspace-scoped (.vscode/mcp.json); pass --print for a global snippet")
+	}
+	if *profileFlag != "" && *toolsetsFlag != "" {
+		return NewUsageError("--profile and --toolsets are mutually exclusive; pass at most one")
+	}
+	if _, err := domain.ParseToolProfile(*profileFlag); err != nil {
+		return err
+	}
+	if _, err := domain.ParseToolsets(*toolsetsFlag); err != nil {
+		return err
+	}
+
+	return c.connectHandler(ctx, ConnectOptions{
+		Target:      target,
+		PrintOnly:   *printFlag,
+		BareCommand: *commandFlag,
+		Global:      *globalFlag,
+		ProjectRoot: *projectRootFlag,
+		ToolProfile: strings.TrimSpace(*profileFlag),
+		Toolsets:    strings.TrimSpace(*toolsetsFlag),
+	})
 }
 
 func (c *CLI) runProject(ctx context.Context, args []string) error {

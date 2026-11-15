@@ -60,15 +60,22 @@ This behavior is additive and compatible with existing single-project startup fl
 ## 9. Examples
 
 `rhizome-mcp connect TARGET` generates the workspace-specific form below
-automatically for `claude`, `codex`, `vscode`, and `json` alike, discovering
-the actual project root (walking up from the current directory, the same
-resolution `serve` itself falls back to) rather than trusting the directory
-`connect` happened to be invoked from. The written `command` is this
-resolved binary's absolute path by default; when `connect` is itself
-running through the `npx rhizome-mcp` wrapper it emits `npx` instead
-(the wrapper's own resolved path lives in the npx cache and is not stable
-across evictions or version bumps), and `connect TARGET --command` opts
-into a bare `rhizome-mcp` command name for a config meant to be shared
+automatically for `claude`, `codex`, `vscode`, `cursor`, `windsurf`, `zed`,
+`gemini`, and `json` alike, discovering the actual project root (walking up
+from the current directory, the same resolution `serve` itself falls back to)
+unless `--project-root PATH` names an explicit initialized root or `--global`
+selects a projectless global registration. When `--global` is set, `connect`
+skips project discovery and omits `--project-root` from `args` (note that
+`vscode` MCP configuration is workspace-scoped, so `connect vscode --global`
+requires `--print`; `windsurf` writes its single global file
+`~/.codeium/windsurf/mcp_config.json` and still pins `--project-root` unless
+`--global` is passed). `--profile` or `--toolsets` (mutually exclusive) may
+also be passed to bake those flags into the emitted `serve` arguments. The
+written `command` is this resolved binary's absolute path by default; when
+`connect` is itself running through the `npx rhizome-mcp` wrapper it emits
+`npx` instead (the wrapper's own resolved path lives in the npx cache and is
+not stable across evictions or version bumps), and `connect TARGET --command`
+opts into a bare `rhizome-mcp` command name for a config meant to be shared
 across machines that have it on `PATH`. An absolute-path config is
 machine-specific and should not be treated as portable or checked into a
 shared repository as-is.

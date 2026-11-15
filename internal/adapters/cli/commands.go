@@ -40,7 +40,7 @@ func commands() []command {
 		{
 			name:         "connect",
 			needsProject: false,
-			usageLines:   []string{"connect TARGET [--print] [--command]"},
+			usageLines:   []string{"connect TARGET [--print] [--command] [--global] [--project-root PATH] [--profile PROFILE] [--toolsets GROUP[,GROUP...]]"},
 			run:          func(c *CLI, ctx context.Context, args []string) error { return c.runConnect(ctx, args) },
 		},
 		{

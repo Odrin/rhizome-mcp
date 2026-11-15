@@ -347,6 +347,179 @@ func TestServeCommandRejectsUnknownContentMode(t *testing.T) {
 	}
 }
 
+func TestConnectCommandAcceptsAllValidTargetsAndParsesFlags(t *testing.T) {
+	validTargets := []string{"claude", "codex", "vscode", "cursor", "windsurf", "zed", "gemini", "json"}
+	for _, target := range validTargets {
+		t.Run(target, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			var captured ConnectOptions
+			cli := New(Services{}, &stdout, &stderr, nil, nil)
+			cli.SetConnectHandler(func(_ context.Context, opts ConnectOptions) error {
+				captured = opts
+				return nil
+			})
+			if err := cli.Run(context.Background(), []string{"connect", target, "--print", "--command", "--project-root", "/tmp/repo", "--profile", "agent"}); err != nil {
+				t.Fatalf("connect %s unexpected error: %v", target, err)
+			}
+			want := ConnectOptions{
+				Target:      target,
+				PrintOnly:   true,
+				BareCommand: true,
+				ProjectRoot: "/tmp/repo",
+				ToolProfile: "agent",
+			}
+			if captured != want {
+				t.Fatalf("captured = %#v, want %#v", captured, want)
+			}
+		})
+	}
+
+	t.Run("global and toolsets before target", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		var captured ConnectOptions
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetConnectHandler(func(_ context.Context, opts ConnectOptions) error {
+			captured = opts
+			return nil
+		})
+		if err := cli.Run(context.Background(), []string{"connect", "--global", "--toolsets", "issues,planning", "cursor"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := ConnectOptions{
+			Target:   "cursor",
+			Global:   true,
+			Toolsets: "issues,planning",
+		}
+		if captured != want {
+			t.Fatalf("captured = %#v, want %#v", captured, want)
+		}
+	})
+
+	t.Run("vscode global with print succeeds", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		var captured ConnectOptions
+		cli := New(Services{}, &stdout, &stderr, nil, nil)
+		cli.SetConnectHandler(func(_ context.Context, opts ConnectOptions) error {
+			captured = opts
+			return nil
+		})
+		if err := cli.Run(context.Background(), []string{"connect", "vscode", "--global", "--print"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if captured.Target != "vscode" || !captured.Global || !captured.PrintOnly {
+			t.Fatalf("captured = %#v, want target=vscode global=true print=true", captured)
+		}
+	})
+}
+
+func TestConnectCommandRejectsUnsupportedTargetListingAllValidTargets(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cli := New(Services{}, &stdout, &stderr, nil, nil)
+	cli.SetConnectHandler(func(context.Context, ConnectOptions) error {
+		t.Fatal("connect handler unexpectedly invoked for unsupported target")
+		return nil
+	})
+	err := cli.Run(context.Background(), []string{"connect", "emacs"})
+	if err == nil {
+		t.Fatal("expected unsupported target error")
+	}
+	if ExitCodeFor(err) != ExitUsage {
+		t.Fatalf("ExitCodeFor(%v) = %d, want %d", err, ExitCodeFor(err), ExitUsage)
+	}
+	for _, target := range []string{"claude", "codex", "vscode", "cursor", "windsurf", "zed", "gemini", "json"} {
+		if !strings.Contains(err.Error(), target) {
+			t.Fatalf("error %q does not list valid target %q", err.Error(), target)
+		}
+	}
+}
+
+func TestConnectCommandRejectsInvalidFlagCombinationsAndValues(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantContains []string
+		wantExitCode int
+	}{
+		{
+			name:         "missing target",
+			args:         []string{"connect"},
+			wantContains: []string{"usage error"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "extra positional",
+			args:         []string{"connect", "claude", "extra"},
+			wantContains: []string{"usage error"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "global and project-root mutually exclusive",
+			args:         []string{"connect", "claude", "--global", "--project-root", "/tmp/repo"},
+			wantContains: []string{"mutually exclusive", "--global", "--project-root"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "global and empty project-root mutually exclusive",
+			args:         []string{"connect", "claude", "--global", "--project-root="},
+			wantContains: []string{"mutually exclusive"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "empty project-root rejected",
+			args:         []string{"connect", "claude", "--project-root="},
+			wantContains: []string{"--project-root", "non-empty"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "profile and toolsets mutually exclusive",
+			args:         []string{"connect", "cursor", "--profile", "agent", "--toolsets", "issues"},
+			wantContains: []string{"mutually exclusive", "--profile", "--toolsets"},
+			wantExitCode: ExitUsage,
+		},
+		{
+			name:         "unknown profile rejected",
+			args:         []string{"connect", "cursor", "--profile", "admin"},
+			wantContains: []string{"admin", "valid profiles"},
+			wantExitCode: ExitError,
+		},
+		{
+			name:         "unknown toolsets rejected",
+			args:         []string{"connect", "cursor", "--toolsets", "issues,unknown"},
+			wantContains: []string{"unknown", "valid toolsets"},
+			wantExitCode: ExitError,
+		},
+		{
+			name:         "vscode global without print rejected",
+			args:         []string{"connect", "vscode", "--global"},
+			wantContains: []string{"workspace-scoped", "--print"},
+			wantExitCode: ExitUsage,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cli := New(Services{}, &stdout, &stderr, nil, nil)
+			cli.SetConnectHandler(func(context.Context, ConnectOptions) error {
+				t.Fatal("connect handler unexpectedly invoked")
+				return nil
+			})
+			err := cli.Run(context.Background(), tc.args)
+			if err == nil {
+				t.Fatalf("expected error for %v", tc.args)
+			}
+			for _, token := range tc.wantContains {
+				if !strings.Contains(err.Error(), token) {
+					t.Fatalf("error %q does not contain %q", err.Error(), token)
+				}
+			}
+			if ExitCodeFor(err) != tc.wantExitCode {
+				t.Fatalf("ExitCodeFor(%v) = %d, want %d", err, ExitCodeFor(err), tc.wantExitCode)
+			}
+		})
+	}
+}
+
 func TestBoardCommandRejectsServeAndOutputCombination(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cli := New(Services{BoardService: &stubBoardService{}}, &stdout, &stderr, nil, nil)

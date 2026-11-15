@@ -131,15 +131,25 @@ Then register the server with your MCP client. Automated setup for common client
 rhizome-mcp connect claude    # Claude Code
 rhizome-mcp connect codex     # Codex
 rhizome-mcp connect vscode    # VS Code (if using standalone binary instead of extension)
+rhizome-mcp connect cursor    # Cursor
+rhizome-mcp connect windsurf  # Windsurf (~/.codeium/windsurf/mcp_config.json)
+rhizome-mcp connect zed       # Zed
+rhizome-mcp connect gemini    # Gemini CLI
 rhizome-mcp connect json      # Template for any other client
 ```
 
-Use `--print` for a dry run. `connect` discovers your project's actual root
+Use `--print` for a dry run, `--global` for a user-wide projectless
+registration (omitting `--project-root` and skipping project discovery;
+`vscode --global` requires `--print` since VS Code MCP config is
+workspace-scoped), `--project-root PATH` to target a repository explicitly,
+and `--profile` or `--toolsets` to bake an exposure filter into the generated
+`serve` arguments. By default, `connect` discovers your project's actual root
 (walking up from the current directory the same way `serve` does) and pins
 it with `--project-root`, so the written config works regardless of which
-subdirectory an MCP client later launches the server from. All four targets
-(`claude`, `codex`, `vscode`, `json`) agree on this. The manual equivalent
-for any MCP client, matching `connect`'s own server key:
+subdirectory an MCP client later launches the server from. All eight targets
+(`claude`, `codex`, `vscode`, `cursor`, `windsurf`, `zed`, `gemini`, `json`)
+agree on this. The manual equivalent for any MCP client, matching `connect`'s
+own server key:
 
 ```json
 {

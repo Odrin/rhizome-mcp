@@ -300,7 +300,7 @@ func TestIntegrationConnectUnknownTarget(t *testing.T) {
 		t.Errorf("stderr doesn't mention unsupported target: %s", stderr)
 	}
 
-	for _, target := range []string{"claude", "codex", "vscode", "json"} {
+	for _, target := range []string{"claude", "codex", "vscode", "cursor", "windsurf", "zed", "gemini", "json"} {
 		if !strings.Contains(stderr, target) {
 			t.Errorf("stderr doesn't list supported target %s: %s", target, stderr)
 		}
@@ -408,6 +408,14 @@ func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
 			servers := config["servers"].(map[string]interface{})
 			rhizome := servers["rhizome-mcp"].(map[string]interface{})
 			return rhizome["args"].([]interface{})
+		case "zed":
+			var config map[string]interface{}
+			if err := json.Unmarshal(stdout.Bytes(), &config); err != nil {
+				t.Fatalf("parse zed output: %v", err)
+			}
+			servers := config["context_servers"].(map[string]interface{})
+			rhizome := servers["rhizome-mcp"].(map[string]interface{})
+			return rhizome["args"].([]interface{})
 		default:
 			var config map[string]interface{}
 			if err := json.Unmarshal(stdout.Bytes(), &config); err != nil {
@@ -420,7 +428,7 @@ func TestIntegrationConnectAllTargetsAgreeOnProjectRootPinning(t *testing.T) {
 	}
 
 	want := []interface{}{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
-	for _, target := range []string{"claude", "vscode", "json"} {
+	for _, target := range []string{"claude", "vscode", "cursor", "windsurf", "zed", "gemini", "json"} {
 		got := extractArgs(t, target)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("target %s args = %v, want %v", target, got, want)
@@ -493,7 +501,7 @@ func TestIntegrationConnectCustomDataRootRegistrationsLaunch(t *testing.T) {
 		name string
 		root string
 	}{{name: "absolute", root: env.dataRoot}, {name: "relative", root: relativeRoot}} {
-		for _, target := range []string{"claude", "vscode", "json", "codex"} {
+		for _, target := range []string{"claude", "vscode", "cursor", "windsurf", "zed", "gemini", "json", "codex"} {
 			t.Run(rootCase.name+"/"+target, func(t *testing.T) {
 				output := runIntegrationCommand(t, env, "--data-root", rootCase.root, "connect", target, "--print")
 				var emitted registration
@@ -522,6 +530,8 @@ func TestIntegrationConnectCustomDataRootRegistrationsLaunch(t *testing.T) {
 					key := "mcpServers"
 					if target == "vscode" {
 						key = "servers"
+					} else if target == "zed" {
+						key = "context_servers"
 					}
 					emitted = config[key]["rhizome-mcp"]
 				}
@@ -569,5 +579,433 @@ func TestIntegrationConnectCustomDataRootRegistrationsLaunch(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func runIntegrationCommandWithHome(t *testing.T, dir, home string, args ...string) (string, string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, integrationBinary, args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "RHIZOME_MCP_NPX=0")
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestIntegrationConnectNewTargetsCreateAndMergeConfigs(t *testing.T) {
+	t.Parallel()
+
+	targets := []struct {
+		name          string
+		configKey     string
+		configPath    func(env integrationEnvironment, home string) string
+		unrelatedKeys map[string]any
+	}{
+		{
+			name:       "cursor",
+			configKey:  "mcpServers",
+			configPath: func(env integrationEnvironment, _ string) string { return filepath.Join(env.repository, ".cursor", "mcp.json") },
+			unrelatedKeys: map[string]any{
+				"cursorOption": "preserve-me",
+			},
+		},
+		{
+			name:       "windsurf",
+			configKey:  "mcpServers",
+			configPath: func(_ integrationEnvironment, home string) string { return filepath.Join(home, ".codeium", "windsurf", "mcp_config.json") },
+			unrelatedKeys: map[string]any{
+				"windsurfOption": true,
+			},
+		},
+		{
+			name:       "zed",
+			configKey:  "context_servers",
+			configPath: func(env integrationEnvironment, _ string) string { return filepath.Join(env.repository, ".zed", "settings.json") },
+			unrelatedKeys: map[string]any{
+				"theme":    "One Dark",
+				"tab_size": float64(4),
+			},
+		},
+		{
+			name:       "gemini",
+			configKey:  "mcpServers",
+			configPath: func(env integrationEnvironment, _ string) string { return filepath.Join(env.repository, ".gemini", "settings.json") },
+			unrelatedKeys: map[string]any{
+				"selectedAuthType": "oauth-personal",
+			},
+		},
+	}
+
+	for _, tc := range targets {
+		t.Run(tc.name+"/create_and_idempotent", func(t *testing.T) {
+			t.Parallel()
+			env := newIntegrationEnvironment(t)
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatalf("create home dir: %v", err)
+			}
+
+			configPath := tc.configPath(env, home)
+			if _, stderr, err := runIntegrationCommandWithHome(t, env.repository, home, "--data-root", env.dataRoot, "connect", tc.name, "--print"); err != nil {
+				t.Fatalf("connect %s --print failed: %v\nstderr:\n%s", tc.name, err, stderr)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("connect %s --print unexpectedly created %s", tc.name, configPath)
+			}
+
+			if _, stderr, err := runIntegrationCommandWithHome(t, env.repository, home, "--data-root", env.dataRoot, "connect", tc.name); err != nil {
+				t.Fatalf("connect %s failed: %v\nstderr:\n%s", tc.name, err, stderr)
+			}
+			firstData, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read %s: %v", configPath, err)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal(firstData, &parsed); err != nil {
+				t.Fatalf("parse %s: %v", configPath, err)
+			}
+			servers := parsed[tc.configKey].(map[string]any)
+			entry := servers["rhizome-mcp"].(map[string]any)
+			if _, hasType := entry["type"]; hasType {
+				t.Fatalf("%s unexpectedly included type field: %#v", tc.name, entry)
+			}
+			wantArgs := []any{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+			if !reflect.DeepEqual(entry["args"], wantArgs) {
+				t.Fatalf("%s args = %#v, want %#v", tc.name, entry["args"], wantArgs)
+			}
+
+			if _, stderr, err := runIntegrationCommandWithHome(t, env.repository, home, "--data-root", env.dataRoot, "connect", tc.name); err != nil {
+				t.Fatalf("second connect %s failed: %v\nstderr:\n%s", tc.name, err, stderr)
+			}
+			secondData, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read %s second time: %v", configPath, err)
+			}
+			if !bytes.Equal(firstData, secondData) {
+				t.Fatalf("%s changed on second run", tc.name)
+			}
+		})
+
+		t.Run(tc.name+"/preserves_unrelated_settings_and_servers", func(t *testing.T) {
+			t.Parallel()
+			env := newIntegrationEnvironment(t)
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatalf("create home dir: %v", err)
+			}
+			configPath := tc.configPath(env, home)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatalf("create config parent dir: %v", err)
+			}
+
+			seed := map[string]any{
+				tc.configKey: map[string]any{
+					"other-server": map[string]any{"command": "other", "args": []string{"run"}},
+				},
+			}
+			for k, v := range tc.unrelatedKeys {
+				seed[k] = v
+			}
+			seedData, _ := json.MarshalIndent(seed, "", "  ")
+			if err := os.WriteFile(configPath, seedData, 0o644); err != nil {
+				t.Fatalf("write seed %s: %v", configPath, err)
+			}
+
+			if _, stderr, err := runIntegrationCommandWithHome(t, env.repository, home, "--data-root", env.dataRoot, "connect", tc.name); err != nil {
+				t.Fatalf("connect %s failed: %v\nstderr:\n%s", tc.name, err, stderr)
+			}
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read %s: %v", configPath, err)
+			}
+			var merged map[string]any
+			if err := json.Unmarshal(data, &merged); err != nil {
+				t.Fatalf("parse %s: %v", configPath, err)
+			}
+			for k, want := range tc.unrelatedKeys {
+				if merged[k] != want {
+					t.Fatalf("%s top-level key %q = %#v, want %#v", tc.name, k, merged[k], want)
+				}
+			}
+			servers := merged[tc.configKey].(map[string]any)
+			if _, ok := servers["other-server"]; !ok {
+				t.Fatalf("%s lost existing other-server entry", tc.name)
+			}
+			if _, ok := servers["rhizome-mcp"]; !ok {
+				t.Fatalf("%s missing rhizome-mcp entry", tc.name)
+			}
+		})
+	}
+}
+
+func TestIntegrationConnectGlobalTargets(t *testing.T) {
+	t.Parallel()
+	outsideDir := t.TempDir()
+	dataRoot := filepath.Join(t.TempDir(), "data")
+
+	globalFiles := []struct {
+		target    string
+		configKey string
+		wantType  bool
+		relPath   []string
+	}{
+		{target: "claude", configKey: "mcpServers", wantType: true, relPath: []string{".claude.json"}},
+		{target: "cursor", configKey: "mcpServers", wantType: false, relPath: []string{".cursor", "mcp.json"}},
+		{target: "windsurf", configKey: "mcpServers", wantType: false, relPath: []string{".codeium", "windsurf", "mcp_config.json"}},
+		{target: "zed", configKey: "context_servers", wantType: false, relPath: []string{".config", "zed", "settings.json"}},
+		{target: "gemini", configKey: "mcpServers", wantType: false, relPath: []string{".gemini", "settings.json"}},
+	}
+
+	for _, tc := range globalFiles {
+		t.Run(tc.target, func(t *testing.T) {
+			t.Parallel()
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatalf("create home dir: %v", err)
+			}
+			targetPath := filepath.Join(append([]string{home}, tc.relPath...)...)
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+				t.Fatalf("create parent dir: %v", err)
+			}
+			if err := os.WriteFile(targetPath, []byte(`{"keepMe":true}`), 0o644); err != nil {
+				t.Fatalf("write seed global config: %v", err)
+			}
+
+			if _, stderr, err := runIntegrationCommandWithHome(t, outsideDir, home, "--data-root", dataRoot, "connect", tc.target, "--global"); err != nil {
+				t.Fatalf("connect %s --global failed: %v\nstderr:\n%s", tc.target, err, stderr)
+			}
+			data, err := os.ReadFile(targetPath)
+			if err != nil {
+				t.Fatalf("read %s: %v", targetPath, err)
+			}
+			var cfg map[string]any
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				t.Fatalf("parse %s: %v", targetPath, err)
+			}
+			if cfg["keepMe"] != true {
+				t.Fatalf("%s lost keepMe top-level key", tc.target)
+			}
+			entry := cfg[tc.configKey].(map[string]any)["rhizome-mcp"].(map[string]any)
+			if tc.wantType && entry["type"] != "stdio" {
+				t.Fatalf("%s global type = %v, want stdio", tc.target, entry["type"])
+			}
+			wantArgs := []any{"serve", "--data-root", dataRoot}
+			if !reflect.DeepEqual(entry["args"], wantArgs) {
+				t.Fatalf("%s global args = %#v, want %#v", tc.target, entry["args"], wantArgs)
+			}
+		})
+	}
+
+	t.Run("vscode_global_errors_without_print", func(t *testing.T) {
+		t.Parallel()
+		home := filepath.Join(t.TempDir(), "home")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatalf("create home dir: %v", err)
+		}
+		_, stderr, err := runIntegrationCommandWithHome(t, outsideDir, home, "connect", "vscode", "--global")
+		if err == nil {
+			t.Fatal("expected connect vscode --global without --print to fail")
+		}
+		if !strings.Contains(stderr, "workspace-scoped") || !strings.Contains(stderr, "--print") {
+			t.Fatalf("stderr = %q, want workspace-scoped message mentioning --print", stderr)
+		}
+	})
+
+	t.Run("vscode_global_print_succeeds", func(t *testing.T) {
+		t.Parallel()
+		home := filepath.Join(t.TempDir(), "home")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatalf("create home dir: %v", err)
+		}
+		stdout, stderr, err := runIntegrationCommandWithHome(t, outsideDir, home, "--data-root", dataRoot, "connect", "vscode", "--global", "--print")
+		if err != nil {
+			t.Fatalf("connect vscode --global --print failed: %v\nstderr:\n%s", err, stderr)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(stdout), &cfg); err != nil {
+			t.Fatalf("parse vscode global print output: %v", err)
+		}
+		entry := cfg["servers"].(map[string]any)["rhizome-mcp"].(map[string]any)
+		wantArgs := []any{"serve", "--data-root", dataRoot}
+		if !reflect.DeepEqual(entry["args"], wantArgs) {
+			t.Fatalf("vscode global args = %#v, want %#v", entry["args"], wantArgs)
+		}
+	})
+
+	t.Run("codex_and_json_global", func(t *testing.T) {
+		t.Parallel()
+		home := filepath.Join(t.TempDir(), "home")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatalf("create home dir: %v", err)
+		}
+		codexOut, codexErr, err := runIntegrationCommandWithHome(t, outsideDir, home, "--data-root", dataRoot, "connect", "codex", "--global", "--print")
+		if err != nil {
+			t.Fatalf("connect codex --global --print failed: %v\nstderr:\n%s", err, codexErr)
+		}
+		wantCodexArgs := fmt.Sprintf("args = [%q, %q, %q]", "serve", "--data-root", dataRoot)
+		if !strings.Contains(codexOut, wantCodexArgs) {
+			t.Fatalf("codex global output = %s, want %s", codexOut, wantCodexArgs)
+		}
+
+		jsonOut, jsonErr, err := runIntegrationCommandWithHome(t, outsideDir, home, "--data-root", dataRoot, "connect", "json", "--global")
+		if err != nil {
+			t.Fatalf("connect json --global failed: %v\nstderr:\n%s", err, jsonErr)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(jsonOut), &cfg); err != nil {
+			t.Fatalf("parse json global output: %v", err)
+		}
+		entry := cfg["mcpServers"].(map[string]any)["rhizome-mcp"].(map[string]any)
+		wantArgs := []any{"serve", "--data-root", dataRoot}
+		if !reflect.DeepEqual(entry["args"], wantArgs) {
+			t.Fatalf("json global args = %#v, want %#v", entry["args"], wantArgs)
+		}
+	})
+}
+
+func TestIntegrationConnectProjectRootProfileAndToolsets(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	outsideDir := t.TempDir()
+
+	t.Run("explicit_project_root_from_outside_dir", func(t *testing.T) {
+		runIntegrationCommandExpectingFailure(t, outsideDir, "--data-root", env.dataRoot, "connect", "cursor", "--project-root", outsideDir)
+
+		ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, integrationBinary, "--data-root", env.dataRoot, "connect", "cursor", "--project-root", env.repository)
+		cmd.Dir = outsideDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("connect --project-root failed: %v\n%s", err, string(out))
+		}
+		data, err := os.ReadFile(filepath.Join(env.repository, ".cursor", "mcp.json"))
+		if err != nil {
+			t.Fatalf("read .cursor/mcp.json: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parse .cursor/mcp.json: %v", err)
+		}
+		entry := cfg["mcpServers"].(map[string]any)["rhizome-mcp"].(map[string]any)
+		wantArgs := []any{"serve", "--project-root", env.repository, "--data-root", env.dataRoot}
+		if !reflect.DeepEqual(entry["args"], wantArgs) {
+			t.Fatalf("args = %#v, want %#v", entry["args"], wantArgs)
+		}
+	})
+
+	t.Run("profile_and_toolsets_launch_filtered_servers", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			flag        string
+			value       string
+			wantTool    string
+			forbidTool  string
+			wantProfile string
+		}{
+			{
+				name:        "profile",
+				flag:        "--profile",
+				value:       "read-only",
+				wantTool:    "get_issue",
+				forbidTool:  "create_issue",
+				wantProfile: "read-only",
+			},
+			{
+				name:        "toolsets",
+				flag:        "--toolsets",
+				value:       "issues,planning",
+				wantTool:    "create_issue",
+				forbidTool:  "claim_issue",
+				wantProfile: "custom",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				out := runIntegrationCommand(t, env, "--data-root", env.dataRoot, "connect", "json", tc.flag, tc.value)
+				var cfg struct {
+					MCPServers map[string]struct {
+						Command string   `json:"command"`
+						Args    []string `json:"args"`
+					} `json:"mcpServers"`
+				}
+				if err := json.Unmarshal(out, &cfg); err != nil {
+					t.Fatalf("parse json output: %v", err)
+				}
+				emitted := cfg.MCPServers["rhizome-mcp"]
+				wantArgs := []string{"serve", "--project-root", env.repository, "--data-root", env.dataRoot, tc.flag, tc.value}
+				if !slices.Equal(emitted.Args, wantArgs) {
+					t.Fatalf("args = %v, want %v", emitted.Args, wantArgs)
+				}
+
+				home := t.TempDir()
+				ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+				defer cancel()
+				cmd := exec.Command(emitted.Command, emitted.Args...)
+				cmd.Dir = t.TempDir()
+				cmd.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "RHIZOME_MCP_NPX=0")
+				client := mcp.NewClient(&mcp.Implementation{Name: "connect-profile-test", Version: "test"}, nil)
+				session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd, TerminateDuration: integrationTimeout}, nil)
+				if err != nil {
+					t.Fatalf("launch emitted %s registration: %v", tc.name, err)
+				}
+				t.Cleanup(func() {
+					if err := session.Close(); err != nil {
+						t.Errorf("close session: %v", err)
+					}
+				})
+				tools, err := session.ListTools(ctx, nil)
+				if err != nil {
+					t.Fatalf("list tools: %v", err)
+				}
+				if !hasTool(tools.Tools, tc.wantTool) {
+					t.Fatalf("missing expected tool %q in %v", tc.wantTool, toolNames(tools.Tools))
+				}
+				if hasTool(tools.Tools, tc.forbidTool) {
+					t.Fatalf("unexpected tool %q in %v", tc.forbidTool, toolNames(tools.Tools))
+				}
+			})
+		}
+	})
+
+	t.Run("mutual_exclusion_errors", func(t *testing.T) {
+		_, stderr, err := runIntegrationCommandExpectingFailure(t, env.repository, "connect", "claude", "--global", "--project-root", env.repository)
+		if err == nil || !strings.Contains(stderr, "mutually exclusive") {
+			t.Fatalf("expected mutual exclusion error for --global + --project-root, got err=%v stderr=%q", err, stderr)
+		}
+
+		_, stderr, err = runIntegrationCommandExpectingFailure(t, env.repository, "connect", "claude", "--profile", "agent", "--toolsets", "issues")
+		if err == nil || !strings.Contains(stderr, "mutually exclusive") {
+			t.Fatalf("expected mutual exclusion error for --profile + --toolsets, got err=%v stderr=%q", err, stderr)
+		}
+	})
+}
+
+func TestIntegrationConnectMalformedJSONDoesNotClobber(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	zedDir := filepath.Join(env.repository, ".zed")
+	if err := os.MkdirAll(zedDir, 0o755); err != nil {
+		t.Fatalf("create .zed dir: %v", err)
+	}
+	malformed := `{"theme": "One Dark", "context_servers": `
+	settingsPath := filepath.Join(zedDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(malformed), 0o644); err != nil {
+		t.Fatalf("write malformed settings.json: %v", err)
+	}
+
+	_, stderr, err := runIntegrationCommandExpectingFailure(t, env.repository, "--data-root", env.dataRoot, "connect", "zed")
+	if err == nil || !strings.Contains(stderr, "parse config file") {
+		t.Fatalf("expected parse config file error, got err=%v stderr=%q", err, stderr)
+	}
+	after, readErr := os.ReadFile(settingsPath)
+	if readErr != nil {
+		t.Fatalf("read settings.json: %v", readErr)
+	}
+	if string(after) != malformed {
+		t.Fatalf("malformed file was modified:\ngot:  %q\nwant: %q", string(after), malformed)
 	}
 }

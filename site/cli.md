@@ -47,6 +47,41 @@ rhizome-mcp serve --http-address 127.0.0.1:0 --profile read-only
 
 Supported profiles are `full` (default), `agent` (ordinary issue/planning/review/knowledge/lifecycle work, excluding bulk project transfer and incremental sync), `read-only` (only operations guaranteed not to write durable state), and `migration` (the minimal project opening/metadata/export/validate/apply transfer workflow). An unrecognized profile name fails startup immediately with the list of valid names. `get_project`'s `tool_profile` field reports the active profile so a client can diagnose a missing tool. **Profiles are an exposure and prompt-size control, not an authorization boundary** — every tool still enforces its own server-side validation regardless of what a client can see in `tools/list`. The full membership matrix is documented in [docs/03-mcp-tools.md](../docs/03-mcp-tools.md).
 
+### `connect`
+
+Generate or write MCP client configuration for `rhizome-mcp serve`.
+
+```bash
+rhizome-mcp connect claude
+rhizome-mcp connect cursor --profile agent
+rhizome-mcp connect windsurf
+rhizome-mcp connect zed --global
+rhizome-mcp connect gemini --project-root /path/to/repo
+rhizome-mcp connect json --global --toolsets issues,planning
+```
+
+Supported targets:
+
+- `claude`: `<root>/.mcp.json` or `--global` `~/.claude.json` (`mcpServers` -> `"rhizome-mcp"`, `"type": "stdio"`)
+- `codex`: runs `codex mcp add rhizome-mcp -- ...` or prints `[mcp_servers.rhizome-mcp]` TOML (`--global` skips project discovery and omits `--project-root`)
+- `vscode`: `<root>/.vscode/mcp.json` (`servers` -> `"rhizome-mcp"`, `"type": "stdio"`); `--global` requires `--print` because VS Code MCP configuration is workspace-scoped
+- `cursor`: `<root>/.cursor/mcp.json` or `--global` `~/.cursor/mcp.json` (`mcpServers` -> `"rhizome-mcp"`)
+- `windsurf`: global-only `~/.codeium/windsurf/mcp_config.json` (`mcpServers` -> `"rhizome-mcp"`); pins `--project-root` by default, or omits it with `--global`
+- `zed`: `<root>/.zed/settings.json` or `--global` `~/.config/zed/settings.json` (`context_servers` -> `"rhizome-mcp"`)
+- `gemini`: `<root>/.gemini/settings.json` or `--global` `~/.gemini/settings.json` (`mcpServers` -> `"rhizome-mcp"`)
+- `json`: prints a generic `mcpServers` JSON snippet to stdout; supports `--global`
+
+Supported flags:
+
+- `--print` (print generated configuration to stdout without creating directories or writing files)
+- `--command` (emit bare `rhizome-mcp` instead of the resolved binary path; `RHIZOME_MCP_NPX=1` always emits `npx -y rhizome-mcp`)
+- `--global` (omit `--project-root` and skip project discovery; mutually exclusive with `--project-root`)
+- `--project-root PATH` (explicit initialized project root to pin instead of discovering from the current directory; mutually exclusive with `--global`)
+- `--profile PROFILE` (bake `--profile` into generated `serve` arguments; mutually exclusive with `--toolsets`)
+- `--toolsets GROUP[,GROUP...]` (bake `--toolsets` into generated `serve` arguments; mutually exclusive with `--profile`)
+
+When writing JSON configs, `connect` creates missing parent directories automatically, preserves unrelated top-level settings and existing server entries, and fails without modifying the file if the existing config contains malformed JSON.
+
 ### `backup`
 
 Create a safe backup of the project database.
