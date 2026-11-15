@@ -47,9 +47,21 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		return domain.IssueDetail{}, err
 	}
 
-	graph, err := service.graphService.GetIssueGraph(ctx, domain.GetIssueGraphInput{RootIssueID: issue.ID, Depth: nil, Direction: domain.GraphDirectionBoth, RelationTypes: nil, IncludeHierarchy: nil, IncludeTerminal: nil, MaxNodes: nil, View: "compact"})
-	if err != nil {
-		return domain.IssueDetail{}, err
+	var graph domain.GraphResult
+	if issue.ArchivedAt != nil {
+		// Archived issues cannot root a graph traversal (GetIssueGraph returns
+		// CodeIssueArchived), so skip the graph query and fall back to a
+		// root-only projection from the issue record.
+		graph = domain.GraphResult{
+			RootIssueID: &issue.ID,
+			Nodes:       []domain.IssueProjection{},
+			Edges:       []domain.GraphEdge{},
+		}
+	} else {
+		graph, err = service.graphService.GetIssueGraph(ctx, domain.GetIssueGraphInput{RootIssueID: issue.ID, Depth: nil, Direction: domain.GraphDirectionBoth, RelationTypes: nil, IncludeHierarchy: nil, IncludeTerminal: nil, MaxNodes: nil, View: "compact"})
+		if err != nil {
+			return domain.IssueDetail{}, err
+		}
 	}
 
 	activity, err := service.activityService.GetIssueActivity(ctx, domain.GetIssueActivityInput{IssueID: issue.ID, Limit: 20, Order: domain.ActivityOrderNewestFirst})

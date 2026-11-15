@@ -2,14 +2,22 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"rhizome-mcp/internal/adapters/sqlite"
+	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/migrations"
 )
 
 func TestBoardHTTPHandlerRejectsUnsupportedMethodsAndUnknownRoutes(t *testing.T) {
@@ -721,6 +729,331 @@ func TestSemanticBoardETagReflectsTruncationChanges(t *testing.T) {
 				t.Fatalf("ETag changed unexpectedly: %q -> %q", baseETag, modifiedETag)
 			}
 		})
+	}
+}
+
+type sqliteBackedBoardHTTPService struct {
+	boardService       *application.BoardService
+	issueDetailService *application.IssueDetailService
+	searchService      *application.SearchService
+}
+
+func (s sqliteBackedBoardHTTPService) GetBoard(ctx context.Context) (domain.BoardResult, error) {
+	return s.boardService.GetBoard(ctx)
+}
+
+func (s sqliteBackedBoardHTTPService) GetIssueDetail(ctx context.Context, identifier string) (domain.IssueDetail, error) {
+	return s.issueDetailService.GetIssueDetail(ctx, identifier)
+}
+
+func (s sqliteBackedBoardHTTPService) Search(ctx context.Context, input domain.SearchInput) (domain.SearchPage, error) {
+	return s.searchService.Search(ctx, input)
+}
+
+// TestBoardHTTPHandlerServesArchivedIssueDetailHTMLAndJSON verifies the HTTP
+// detail routes return 200 and render archived issue metadata cleanly.
+func TestBoardHTTPHandlerServesArchivedIssueDetailHTMLAndJSON(t *testing.T) {
+	archivedAt := time.Date(2026, 8, 8, 12, 30, 0, 0, time.UTC)
+	issue := domain.Issue{
+		ID:         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		DisplayID:  "ISSUE-42",
+		Title:      "Archived issue",
+		Type:       domain.TypeTask,
+		Status:     domain.StatusDone,
+		Priority:   domain.PriorityMedium,
+		Version:    2,
+		CreatedAt:  archivedAt.Add(-time.Hour),
+		UpdatedAt:  archivedAt,
+		ArchivedAt: &archivedAt,
+	}
+	rootID := issue.ID
+	detail := domain.IssueDetail{
+		Issue:               issue,
+		RootIssueProjection: &domain.IssueProjection{Issue: issue, EffectiveStatus: domain.EffectiveStatusDone},
+		Graph:               domain.GraphResult{RootIssueID: &rootID, Nodes: []domain.IssueProjection{}, Edges: []domain.GraphEdge{}},
+	}
+	handler := NewBoardHTTPHandler(&stubBoardService{detail: detail})
+
+	htmlRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRecorder, httptest.NewRequest(http.MethodGet, "/issues/ISSUE-42", nil))
+	if htmlRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /issues/ISSUE-42 status = %d, want %d", htmlRecorder.Code, http.StatusOK)
+	}
+	htmlBody := htmlRecorder.Body.String()
+	if !strings.Contains(htmlBody, "ISSUE-42") || !strings.Contains(htmlBody, archivedAt.Format(time.RFC3339)) {
+		t.Fatalf("HTML detail missing archived metadata: %s", htmlBody)
+	}
+	if strings.Contains(htmlBody, "Related graph") {
+		t.Fatalf("HTML detail unexpectedly included Related graph section for empty graph: %s", htmlBody)
+	}
+
+	jsonRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(jsonRecorder, httptest.NewRequest(http.MethodGet, "/api/issues/ISSUE-42", nil))
+	if jsonRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /api/issues/ISSUE-42 status = %d, want %d", jsonRecorder.Code, http.StatusOK)
+	}
+	var decoded domain.IssueDetail
+	if err := json.Unmarshal(jsonRecorder.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode /api/issues/ISSUE-42 response: %v", err)
+	}
+	if decoded.Issue.ArchivedAt == nil || !decoded.Issue.ArchivedAt.Equal(archivedAt) {
+		t.Fatalf("decoded.Issue.ArchivedAt = %v, want %v", decoded.Issue.ArchivedAt, archivedAt)
+	}
+	if decoded.RootIssueProjection == nil || decoded.RootIssueProjection.ArchivedAt == nil || !decoded.RootIssueProjection.ArchivedAt.Equal(archivedAt) {
+		t.Fatalf("decoded.RootIssueProjection = %#v, want ArchivedAt %v", decoded.RootIssueProjection, archivedAt)
+	}
+	if len(decoded.Graph.Nodes) != 0 || len(decoded.Graph.Edges) != 0 {
+		t.Fatalf("decoded.Graph = %#v, want empty nodes and edges", decoded.Graph)
+	}
+}
+
+// TestBoardHTTPHandlerServesArchivedIssueDetailWithSQLiteIssueDetailService
+// exercises the full SQLite -> IssueDetailService -> BoardHTTPHandler path to
+// prove GetIssueGraph's CodeIssueArchived error path is avoided on archived
+// issues while activity, reservations, gates, and active issue graphs still work.
+func TestBoardHTTPHandlerServesArchivedIssueDetailWithSQLiteIssueDetailService(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	source := clock.NewFakeClock(now)
+	dbPath := filepath.Join(t.TempDir(), "board-http-archived-detail.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close(ctx) })
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatalf("migrations.Migrate: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatalf("ids.NewGenerator: %v", err)
+	}
+	issueRepo, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatalf("NewIssueRepository: %v", err)
+	}
+	attemptRepo, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatalf("NewAttemptRepository: %v", err)
+	}
+	reservationRepo, err := sqlite.NewReservationRepository(db)
+	if err != nil {
+		t.Fatalf("NewReservationRepository: %v", err)
+	}
+	reviewRepo, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("NewReviewRepository: %v", err)
+	}
+	graphRepo, err := sqlite.NewGraphRepository(db)
+	if err != nil {
+		t.Fatalf("NewGraphRepository: %v", err)
+	}
+	activityRepo, err := sqlite.NewActivityRepository(db)
+	if err != nil {
+		t.Fatalf("NewActivityRepository: %v", err)
+	}
+	commentRepo, err := sqlite.NewCommentRepository(db)
+	if err != nil {
+		t.Fatalf("NewCommentRepository: %v", err)
+	}
+	searchRepo, err := sqlite.NewSearchRepository(db)
+	if err != nil {
+		t.Fatalf("NewSearchRepository: %v", err)
+	}
+	workflowPolicyRepo, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyRepository: %v", err)
+	}
+
+	issueService, err := application.NewIssueService(issueRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewIssueService: %v", err)
+	}
+	attemptService, err := application.NewAttemptService(attemptRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewAttemptService: %v", err)
+	}
+	reservationService, err := application.NewReservationService(reservationRepo)
+	if err != nil {
+		t.Fatalf("NewReservationService: %v", err)
+	}
+	reviewService, err := application.NewReviewService(reviewRepo, issueRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	graphService, err := application.NewGraphService(graphRepo, source)
+	if err != nil {
+		t.Fatalf("NewGraphService: %v", err)
+	}
+	activityService, err := application.NewActivityService(activityRepo)
+	if err != nil {
+		t.Fatalf("NewActivityService: %v", err)
+	}
+	commentService, err := application.NewCommentService(commentRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewCommentService: %v", err)
+	}
+	searchService, err := application.NewSearchService(searchRepo)
+	if err != nil {
+		t.Fatalf("NewSearchService: %v", err)
+	}
+	workflowPolicyService, err := application.NewWorkflowPolicyService(workflowPolicyRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyService: %v", err)
+	}
+	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
+	if err != nil {
+		t.Fatalf("NewBoardService: %v", err)
+	}
+	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService, workflowPolicyService)
+	if err != nil {
+		t.Fatalf("NewIssueDetailService: %v", err)
+	}
+
+	created, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:   domain.TypeTask,
+		Title:  "Archived end-to-end detail",
+		Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(archived target): %v", err)
+	}
+	if _, err := commentService.AddComment(ctx, domain.AddCommentInput{
+		IssueID: created.ID,
+		Content: "note recorded before archival",
+	}); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	claim, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
+		IssueID:   created.ID,
+		Resources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "archived_detail.go"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimIssue: %v", err)
+	}
+	targetStatus := domain.StatusDone
+	if _, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID:         claim.Attempt.ID,
+		LeaseToken:        claim.LeaseToken,
+		Outcome:           domain.AttemptOutcomeCompleted,
+		ResultSummary:     "completed prior to archival",
+		TargetIssueStatus: &targetStatus,
+	}); err != nil {
+		t.Fatalf("FinishAttempt: %v", err)
+	}
+	currentIssue, err := issueService.GetIssue(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	source.Advance(time.Minute)
+	archived, err := issueService.ArchiveIssue(ctx, domain.ArchiveIssueInput{
+		IssueID:         created.ID,
+		ExpectedVersion: currentIssue.Version,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveIssue: %v", err)
+	}
+
+	// Prove the real SQLite graph service rejects this archived root so the
+	// HTTP 200 below genuinely proves IssueDetailService avoids GetIssueGraph.
+	if _, err := graphService.GetIssueGraph(ctx, domain.GetIssueGraphInput{RootIssueID: created.ID}); !errors.Is(err, &domain.Error{Code: domain.CodeIssueArchived}) {
+		t.Fatalf("GetIssueGraph(archived) error = %v, want %s", err, domain.CodeIssueArchived)
+	}
+
+	active, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type:   domain.TypeTask,
+		Title:  "Active issue detail",
+		Status: domain.StatusReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(active): %v", err)
+	}
+
+	handler := NewBoardHTTPHandler(sqliteBackedBoardHTTPService{
+		boardService:       boardService,
+		issueDetailService: issueDetailService,
+		searchService:      searchService,
+	})
+
+	for _, path := range []string{"/issues/" + created.DisplayID, "/issues/" + created.ID} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d (body=%q)", path, recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		for _, want := range []string{
+			created.DisplayID,
+			"Archived end-to-end detail",
+			archived.Issue.ArchivedAt.Format(time.RFC3339),
+			"note recorded before archival",
+			"archived_detail.go",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("GET %s HTML missing %q:\n%s", path, want, body)
+			}
+		}
+		if strings.Contains(body, "Related graph") {
+			t.Fatalf("GET %s HTML unexpectedly rendered Related graph for archived issue", path)
+		}
+	}
+
+	for _, path := range []string{"/api/issues/" + created.DisplayID, "/api/issues/" + created.ID} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d (body=%q)", path, recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		var detail domain.IssueDetail
+		if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+			t.Fatalf("GET %s unmarshal: %v", path, err)
+		}
+		if detail.Issue.ID != created.ID {
+			t.Fatalf("GET %s Issue.ID = %q, want %q", path, detail.Issue.ID, created.ID)
+		}
+		if detail.Issue.ArchivedAt == nil || !detail.Issue.ArchivedAt.Equal(*archived.Issue.ArchivedAt) {
+			t.Fatalf("GET %s Issue.ArchivedAt = %v, want %v", path, detail.Issue.ArchivedAt, archived.Issue.ArchivedAt)
+		}
+		if detail.RootIssueProjection == nil || detail.RootIssueProjection.ArchivedAt == nil || !detail.RootIssueProjection.ArchivedAt.Equal(*archived.Issue.ArchivedAt) {
+			t.Fatalf("GET %s RootIssueProjection = %#v, want ArchivedAt %v", path, detail.RootIssueProjection, archived.Issue.ArchivedAt)
+		}
+		if detail.Graph.RootIssueID == nil || *detail.Graph.RootIssueID != created.ID {
+			t.Fatalf("GET %s Graph.RootIssueID = %#v, want %q", path, detail.Graph.RootIssueID, created.ID)
+		}
+		if len(detail.Graph.Nodes) != 0 || len(detail.Graph.Edges) != 0 {
+			t.Fatalf("GET %s Graph = %#v, want empty nodes and edges", path, detail.Graph)
+		}
+		if len(detail.Activity.Items) == 0 {
+			t.Fatalf("GET %s expected non-empty activity", path)
+		}
+		if len(detail.Reservations) != 1 || detail.Reservations[0].DisplayValue != "archived_detail.go" {
+			t.Fatalf("GET %s Reservations = %#v, want archived_detail.go", path, detail.Reservations)
+		}
+		if detail.Gates.Point != domain.EnforcementPointClaimWork {
+			t.Fatalf("GET %s Gates.Point = %q, want %q", path, detail.Gates.Point, domain.EnforcementPointClaimWork)
+		}
+	}
+
+	// Non-archived issues still run GetIssueGraph and populate Graph.Nodes.
+	activeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(activeRecorder, httptest.NewRequest(http.MethodGet, "/api/issues/"+active.DisplayID, nil))
+	if activeRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /api/issues/%s status = %d, want %d", active.DisplayID, activeRecorder.Code, http.StatusOK)
+	}
+	var activeDetail domain.IssueDetail
+	if err := json.Unmarshal(activeRecorder.Body.Bytes(), &activeDetail); err != nil {
+		t.Fatalf("unmarshal active issue detail: %v", err)
+	}
+	if len(activeDetail.Graph.Nodes) != 1 || activeDetail.Graph.Nodes[0].ID != active.ID {
+		t.Fatalf("active issue Graph.Nodes = %#v, want 1 node (%q)", activeDetail.Graph.Nodes, active.ID)
 	}
 }
 

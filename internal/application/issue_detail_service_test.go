@@ -260,3 +260,109 @@ func TestIssueDetailServiceFailsWhenGateSummaryFails(t *testing.T) {
 		t.Fatalf("GetIssueDetail error = %v, want the gate service failure", err)
 	}
 }
+
+// TestIssueDetailServiceSkipsGraphForArchivedIssue pins ISSUE-341: archived
+// issues must not call GetIssueGraph (which rejects archived roots with
+// CodeIssueArchived) while still returning the root projection, activity,
+// reservations, and gate summary.
+func TestIssueDetailServiceSkipsGraphForArchivedIssue(t *testing.T) {
+	archivedAt := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	issue := domain.Issue{
+		ID:         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		DisplayID:  "ISSUE-42",
+		Title:      "Archived issue",
+		Type:       domain.TypeTask,
+		Status:     domain.StatusDone,
+		Priority:   domain.PriorityMedium,
+		Version:    2,
+		CreatedAt:  archivedAt.Add(-time.Hour),
+		UpdatedAt:  archivedAt,
+		ArchivedAt: &archivedAt,
+	}
+	activity := domain.IssueActivity{
+		Items: []domain.ActivityItem{
+			{
+				EntityType: domain.ActivityEntityTypeComment,
+				EntityID:   "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+				IssueID:    issue.ID,
+				OccurredAt: archivedAt.Add(-10 * time.Minute),
+				Comment:    &domain.Comment{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB1", IssueID: issue.ID, Content: "archived context", CreatedAt: archivedAt.Add(-10 * time.Minute)},
+			},
+		},
+	}
+	reservations := domain.ReservationList{
+		Items: []domain.Reservation{
+			{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB5", IssueID: issue.ID, AttemptID: "01ARZ3NDEKTSV4RRFFQ69G5FB2", Kind: domain.ResourceKindFile, DisplayValue: "archived.go", Status: domain.ReservationStatusReleased, CreatedAt: archivedAt.Add(-30 * time.Minute), ReleasedAt: &archivedAt},
+		},
+		HasMore: true,
+	}
+	gateService := &stubGateSummaryService{summary: domain.WorkContextGateSummary{
+		Point:            domain.EnforcementPointClaimWork,
+		RequirementCount: 1,
+		SatisfiedCount:   1,
+		Unmet:            []domain.WorkContextUnmetRequirement{},
+		NextActions:      []string{},
+	}}
+	issueService := &recordingIssueService{issue: issue}
+	graphService := &recordingGraphService{err: domain.NewError(domain.CodeIssueArchived, "issue is archived", false)}
+	activityService := &recordingActivityService{activity: activity}
+	reservationService := &recordingReservationLister{list: reservations}
+
+	service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService, gateService)
+	if err != nil {
+		t.Fatalf("NewIssueDetailService returned error: %v", err)
+	}
+
+	detail, err := service.GetIssueDetail(context.Background(), "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetIssueDetail(archived) returned error: %v", err)
+	}
+	if issueService.calls != 1 {
+		t.Fatalf("issue service calls = %d, want 1", issueService.calls)
+	}
+	if graphService.calls != 0 {
+		t.Fatalf("graph service calls = %d, want 0 for archived issue", graphService.calls)
+	}
+	if activityService.calls != 1 || activityService.input.IssueID != issue.ID {
+		t.Fatalf("activity service calls = %d input = %#v, want 1 call for %q", activityService.calls, activityService.input, issue.ID)
+	}
+	if reservationService.calls != 1 || reservationService.input.IssueID == nil || *reservationService.input.IssueID != issue.ID {
+		t.Fatalf("reservation service calls = %d input = %#v, want 1 call for %q", reservationService.calls, reservationService.input, issue.ID)
+	}
+	if len(gateService.calls) != 1 || gateService.calls[0] != issue.ID {
+		t.Fatalf("gate service calls = %#v, want [%q]", gateService.calls, issue.ID)
+	}
+	if detail.Issue.ArchivedAt == nil || !detail.Issue.ArchivedAt.Equal(archivedAt) {
+		t.Fatalf("detail.Issue.ArchivedAt = %v, want %v", detail.Issue.ArchivedAt, archivedAt)
+	}
+	if detail.RootIssueProjection == nil {
+		t.Fatal("expected RootIssueProjection to be populated")
+	}
+	if detail.RootIssueProjection.ID != issue.ID {
+		t.Fatalf("RootIssueProjection.ID = %q, want %q", detail.RootIssueProjection.ID, issue.ID)
+	}
+	if detail.RootIssueProjection.ArchivedAt == nil || !detail.RootIssueProjection.ArchivedAt.Equal(archivedAt) {
+		t.Fatalf("RootIssueProjection.ArchivedAt = %v, want %v", detail.RootIssueProjection.ArchivedAt, archivedAt)
+	}
+	if detail.RootIssueProjection.EffectiveStatus != domain.EffectiveStatusDone {
+		t.Fatalf("RootIssueProjection.EffectiveStatus = %q, want %q", detail.RootIssueProjection.EffectiveStatus, domain.EffectiveStatusDone)
+	}
+	if detail.Graph.RootIssueID == nil || *detail.Graph.RootIssueID != issue.ID {
+		t.Fatalf("Graph.RootIssueID = %#v, want %q", detail.Graph.RootIssueID, issue.ID)
+	}
+	if detail.Graph.Nodes == nil || len(detail.Graph.Nodes) != 0 {
+		t.Fatalf("Graph.Nodes = %#v, want non-nil empty slice", detail.Graph.Nodes)
+	}
+	if detail.Graph.Edges == nil || len(detail.Graph.Edges) != 0 {
+		t.Fatalf("Graph.Edges = %#v, want non-nil empty slice", detail.Graph.Edges)
+	}
+	if len(detail.Activity.Items) != 1 || detail.Activity.Items[0].EntityID != "01ARZ3NDEKTSV4RRFFQ69G5FB1" {
+		t.Fatalf("Activity = %#v, want 1 item", detail.Activity)
+	}
+	if len(detail.Reservations) != 1 || detail.Reservations[0].DisplayValue != "archived.go" || !detail.HasMoreReservations {
+		t.Fatalf("Reservations = %#v HasMore=%v, want archived.go with HasMore=true", detail.Reservations, detail.HasMoreReservations)
+	}
+	if !reflect.DeepEqual(detail.Gates, gateService.summary) {
+		t.Fatalf("Gates = %#v, want %#v", detail.Gates, gateService.summary)
+	}
+}
