@@ -142,13 +142,17 @@ func NewServer(options Options) (*Server, error) {
 	server := sdkmcp.NewServer(
 		&sdkmcp.Implementation{Name: options.ServerName, Version: options.ServerVersion},
 		&sdkmcp.ServerOptions{
-			Capabilities: &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}},
+			Capabilities: &sdkmcp.ServerCapabilities{
+				Tools:     &sdkmcp.ToolCapabilities{},
+				Resources: &sdkmcp.ResourceCapabilities{},
+			},
 			Instructions: initializeInstructions,
 		},
 	)
 	server.AddReceivingMiddleware(adapter.credentialValidationMiddleware)
 	adapter.register(server)
 	registerGuides(server)
+	registerContextResources(server, adapter)
 	return &Server{server: server, adapter: adapter}, nil
 }
 

@@ -2664,3 +2664,162 @@ and `message` packs the remaining three dimensions as
 docs/02 §17.7 is the normative statement of this shape.
 
 Internal SQLite errors and stack traces are logged locally and mapped to stable domain errors.
+
+---
+
+## 14. Context-pack resources
+
+In addition to the 3 static embedded guide resources returned by `resources/list` (`rhizome://guides/agent-workflow`, `rhizome://guides/issue-lifecycle`, and `rhizome://guides/multi-agent-handoff`), the MCP server exposes **3 dynamic read-only resource templates** via `resources/templates/list` (`application/json`). Parameterized templates are excluded from `resources/list` so guide discovery stays unchanged.
+
+### 14.1. Resource templates
+
+| Name | URI Template | Title | MIME Type | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| `issue-brief` | `rhizome://projects/{project_ref}/issues/{issue_id}/brief` | Issue Brief Context Pack | `application/json` | Bounded issue context pack routed to explicit `project_ref` |
+| `default-project-issue-brief` | `rhizome://issues/{issue_id}/brief` | Default Project Issue Brief Context Pack | `application/json` | Stateless fallback to the default project (`Acquire(ctx, nil)`) |
+| `project-brief` | `rhizome://projects/{project_ref}/brief` | Project Brief Context Pack | `application/json` | Project queue counts and ready/blocked issue summary |
+
+Parameters captured from URI path segments (`project_ref`, `issue_id`) are URL-unescaped cleanly (`url.PathUnescape`) before validation. `issue_id` accepts either a canonical uppercase ULID or a display identifier (`ISSUE-N`).
+
+### 14.2. Read-only guarantee and credential redaction
+
+- Reading any context-pack resource **never mutates durable state**, **never appends rows to `issue_events`**, and **never updates `agent_sessions.last_seen_at`**.
+- Every read acquires a router lease via `ProjectRouter.Acquire`, reads through application read services only, and always releases the lease (`defer lease.Release()`).
+- Context-pack payloads and resource error bodies never include `lease_token`, `token_hash`, or `agent_session_handle`.
+
+### 14.3. Payload schemas
+
+#### `issue-brief` and `default-project-issue-brief`
+
+```json
+{
+  "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "issue": {
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+    "display_id": "ISSUE-2",
+    "sequence_no": 2,
+    "type": "task",
+    "title": "Target task",
+    "status": "ready",
+    "effective_status": "ready",
+    "priority": "high",
+    "parent_issue_id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    "blocked_reason": null,
+    "version": 1,
+    "description": "...",
+    "acceptance_criteria": "..."
+  },
+  "gates": {
+    "enforcement_point": "finish_to_done",
+    "passed": true,
+    "requirement_count": 1,
+    "satisfied_count": 1,
+    "unmet": [
+      {
+        "policy_id": "01...",
+        "requirement_key": "acceptance",
+        "reason": "..."
+      }
+    ]
+  },
+  "blockers": [
+    {
+      "id": "01...",
+      "display_id": "ISSUE-1",
+      "title": "Blocker prerequisite",
+      "status": "ready"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "01...",
+      "title": "Architecture decision",
+      "summary": "...",
+      "status": "active"
+    }
+  ],
+  "reviews": [
+    {
+      "id": "01...",
+      "status": "open",
+      "purposes": ["code_review"],
+      "target_issue_version": 1,
+      "created_at": "2026-11-15T12:00:00Z"
+    }
+  ],
+  "warnings": [],
+  "truncated": false,
+  "truncation_reason": null
+}
+```
+
+#### `project-brief`
+
+```json
+{
+  "project": {
+    "project_ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "name": "Example Project",
+    "root_path": null
+  },
+  "summary": {
+    "status_counts": {
+      "open": 0,
+      "ready": 2,
+      "in_progress": 1,
+      "blocked": 1,
+      "review": 0,
+      "done": 3,
+      "cancelled": 0
+    },
+    "active_attempt_count": 1,
+    "blocked_count": 1,
+    "open_review_count": 0
+  },
+  "ready_issues": [
+    {
+      "id": "01...",
+      "display_id": "ISSUE-3",
+      "type": "task",
+      "title": "Claimable task",
+      "status": "ready",
+      "effective_status": "ready",
+      "priority": "high",
+      "is_claimable": true
+    }
+  ],
+  "blocked_issues": [
+    {
+      "id": "01...",
+      "display_id": "ISSUE-4",
+      "type": "bug",
+      "title": "Blocked bug",
+      "status": "blocked",
+      "effective_status": "blocked",
+      "priority": "medium",
+      "is_claimable": false,
+      "unresolved_blocker_count": 1,
+      "blocked_reason": "Waiting on upstream decision"
+    }
+  ],
+  "warnings": [],
+  "truncated": false,
+  "truncation_reason": null
+}
+```
+
+### 14.4. Strict 16 KiB budget and deterministic truncation
+
+Every context pack enforces a strict `MaxContextPackBytes = 16384` (16 KiB) serialized JSON byte ceiling:
+
+1. If initial compact JSON exceeds `16384` bytes, `truncated` becomes `true` and `truncation_reason` becomes `"byte_budget"`.
+2. **Issue briefs** shrink optional slices deterministically from the tail in order: `reviews`, `decisions`, `blockers`, `gates.unmet`, and `warnings`. If still over `16384` bytes, `issue.description` and `issue.acceptance_criteria` are trimmed with a single shared UTF-8-safe byte cap (`...(truncated)` suffix), followed only if necessary by `issue.blocked_reason` and `issue.title`.
+3. **Project briefs** shrink `ready_issues` and `blocked_issues` proportionally from their tails (retaining highest-priority items first), followed only if necessary by `warnings`, `project.root_path`, and `project.name`.
+
+### 14.5. Error semantics
+
+- **Malformed `project_ref` or invalid URI escaping/segments:** rejected with JSON-RPC `-32602` (`Invalid params`) naming the invalid parameter (`project_ref` or `issue_id`) **before** calling `ProjectRouter.Acquire`.
+- **Unknown `project_ref` or unknown `issue_id`:** returns MCP `ResourceNotFoundError` (`-32602` JSON-RPC error carrying `data.uri`).
+- **Missing default project on `rhizome://issues/{issue_id}/brief`:** returns JSON-RPC `-32602` reporting `code: "PROJECT_REQUIRED"` and explaining that no default project is configured.
+- **Archived issues (`archived_at != null`):** never return a brief payload; reading either issue-brief template for an archived issue returns JSON-RPC `-32602` explicitly naming `archived`, `issue_id`, and `data.code: "ISSUE_ARCHIVED"`.
