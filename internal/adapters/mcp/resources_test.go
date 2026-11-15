@@ -224,6 +224,7 @@ func assertNoCredentialLeak(t *testing.T, raw string, secrets ...string) {
 
 func TestResourcesListUntouchedAndTemplatesRegistered(t *testing.T) {
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "resources-list.db"))
+	defer db.Close(context.Background())
 	options := composeServices(t, db, source)
 	client, cleanup := newClient(t, options)
 	defer cleanup()
@@ -276,6 +277,7 @@ func TestResourcesListUntouchedAndTemplatesRegistered(t *testing.T) {
 
 func TestIssueBriefAndProjectBriefResourcesExplicitDefaultAndReadOnly(t *testing.T) {
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "resources-briefs.db"))
+	defer db.Close(context.Background())
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	project, err := services.ProjectService.GetProject(context.Background())
@@ -523,6 +525,7 @@ func TestIssueBriefAndProjectBriefResourcesExplicitDefaultAndReadOnly(t *testing
 
 func TestContextPackResourcesValidationRoutingAndErrors(t *testing.T) {
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "resources-errors.db"))
+	defer db.Close(context.Background())
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	project, err := services.ProjectService.GetProject(context.Background())
@@ -651,6 +654,7 @@ func TestContextPackResourcesValidationRoutingAndErrors(t *testing.T) {
 
 func TestContextPackResources16KiBBudgetTruncation(t *testing.T) {
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "resources-budget.db"))
+	defer db.Close(context.Background())
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	project, err := services.ProjectService.GetProject(context.Background())
@@ -862,6 +866,7 @@ func TestContextPackResources16KiBBudgetTruncation(t *testing.T) {
 
 func TestContextPackResourcesOverStreamableHTTP(t *testing.T) {
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "resources-http.db"))
+	defer db.Close(context.Background())
 	options := composeServices(t, db, source)
 	services := servicesFromOptions(t, options)
 	project, err := services.ProjectService.GetProject(context.Background())

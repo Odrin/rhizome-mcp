@@ -467,12 +467,22 @@ func TestMergeAndWriteJSONConfigReportsParseAndWriteErrors(t *testing.T) {
 		t.Fatalf("expected nested config file to be created: %v", err)
 	}
 
+	invalidPath := filepath.Join(t.TempDir(), "invalid\x00.json")
+	if err := mergeAndWriteJSONConfig(invalidPath, map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "stat config file") {
+		t.Fatalf("mergeAndWriteJSONConfig(invalid path) error = %v, want stat config file", err)
+	}
+
 	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(parentFile, []byte("file"), 0o644); err != nil {
 		t.Fatalf("write parent file: %v", err)
 	}
-	if err := mergeAndWriteJSONConfig(filepath.Join(parentFile, "config.json"), map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), "stat config file") {
-		t.Fatalf("mergeAndWriteJSONConfig(stat fail) error = %v, want stat config file", err)
+	wantParentError := "stat config file"
+	if goruntime.GOOS == "windows" {
+		// Windows reports this stat failure as a missing path, so mkdir rejects it.
+		wantParentError = "create config directory"
+	}
+	if err := mergeAndWriteJSONConfig(filepath.Join(parentFile, "config.json"), map[string]interface{}{"mcpServers": map[string]interface{}{}}, "mcpServers", "rhizome-mcp"); err == nil || !strings.Contains(err.Error(), wantParentError) {
+		t.Fatalf("mergeAndWriteJSONConfig(parent file) error = %v, want %s", err, wantParentError)
 	}
 
 	if goruntime.GOOS == "windows" || os.Geteuid() != 0 {
