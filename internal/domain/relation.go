@@ -58,6 +58,7 @@ type ManageIssueRelationInput struct {
 	SourceIssueID  string
 	TargetIssueID  string
 	RelationType   RelationType
+	SessionID      *string
 	IdempotencyKey *string
 }
 
@@ -81,6 +82,10 @@ func (input ManageIssueRelationInput) Validate() (ManageIssueRelationInput, erro
 	if source.Kind == target.Kind && source.Value == target.Value {
 		return ManageIssueRelationInput{}, selfRelationError()
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ManageIssueRelationInput{}, err
+	}
 	var idempotencyKey *string
 	if input.IdempotencyKey != nil {
 		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
@@ -97,6 +102,7 @@ func (input ManageIssueRelationInput) Validate() (ManageIssueRelationInput, erro
 		SourceIssueID:  source.Value,
 		TargetIssueID:  target.Value,
 		RelationType:   input.RelationType,
+		SessionID:      sessionID,
 		IdempotencyKey: idempotencyKey,
 	}, nil
 }

@@ -145,12 +145,12 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(
 				id, source_issue_id, target_issue_id, type, created_by_session_id, created_at
-			) VALUES (?, ?, ?, ?, NULL, ?)`,
-				relation.ID, relation.SourceIssueID, relation.TargetIssueID, relation.Type, formatStorageTime(now),
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+				relation.ID, relation.SourceIssueID, relation.TargetIssueID, relation.Type, nullableString(command.SessionID), formatStorageTime(now),
 			); err != nil {
 				return err
 			}
-			if err := appendRelationEvents(ctx, uow, "relation_added", relation, now); err != nil {
+			if err := appendRelationEvents(ctx, uow, "relation_added", relation, command.SessionID, now); err != nil {
 				return err
 			}
 			result.Changed = true
@@ -164,7 +164,7 @@ func (repository *RelationRepository) ManageIssueRelation(ctx context.Context, c
 				if _, err := tx.ExecContext(ctx, `DELETE FROM issue_relations WHERE id = ?`, relation.ID); err != nil {
 					return err
 				}
-				if err := appendRelationEvents(ctx, uow, "relation_removed", relation, now); err != nil {
+				if err := appendRelationEvents(ctx, uow, "relation_removed", relation, command.SessionID, now); err != nil {
 					return err
 				}
 				result.Changed = true
@@ -291,7 +291,7 @@ func loadRelationAffectedIssues(ctx context.Context, tx Executor, sourceID, targ
 }
 
 // appendRelationEvents appends issue_events for a relation mutation via UnitOfWork.
-func appendRelationEvents(ctx context.Context, uow ports.UnitOfWork, eventType string, relation domain.IssueRelation, occurredAt time.Time) error {
+func appendRelationEvents(ctx context.Context, uow ports.UnitOfWork, eventType string, relation domain.IssueRelation, sessionID *string, occurredAt time.Time) error {
 	payload, err := json.Marshal(relationEventPayload{
 		RelationID: relation.ID, SourceIssueID: relation.SourceIssueID,
 		TargetIssueID: relation.TargetIssueID, RelationType: relation.Type,
@@ -300,7 +300,7 @@ func appendRelationEvents(ctx context.Context, uow ports.UnitOfWork, eventType s
 		return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode relation event", false)
 	}
 	for _, issueID := range []string{relation.SourceIssueID, relation.TargetIssueID} {
-		_, err := uow.AppendIssueEvent(ctx, &issueID, eventType, nil, nil, payload, occurredAt)
+		_, err := uow.AppendIssueEvent(ctx, &issueID, eventType, sessionID, nil, payload, occurredAt)
 		if err != nil {
 			return err
 		}
@@ -310,7 +310,7 @@ func appendRelationEvents(ctx context.Context, uow ports.UnitOfWork, eventType s
 
 // appendRelationEventsWithExecutor appends issue_events for a relation mutation via a raw Executor.
 // This is used by planning.go and other direct database operations outside UnitOfWork context.
-func appendRelationEventsWithExecutor(ctx context.Context, tx Executor, eventType string, relation domain.IssueRelation, timestamp string) error {
+func appendRelationEventsWithExecutor(ctx context.Context, tx Executor, eventType string, relation domain.IssueRelation, sessionID *string, timestamp string) error {
 	payload, err := json.Marshal(relationEventPayload{
 		RelationID: relation.ID, SourceIssueID: relation.SourceIssueID,
 		TargetIssueID: relation.TargetIssueID, RelationType: relation.Type,
@@ -321,7 +321,7 @@ func appendRelationEventsWithExecutor(ctx context.Context, tx Executor, eventTyp
 	for _, issueID := range []string{relation.SourceIssueID, relation.TargetIssueID} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(
 			issue_id, event_type, session_id, attempt_id, payload, created_at
-		) VALUES (?, ?, NULL, NULL, ?, ?)`, issueID, eventType, string(payload), timestamp); err != nil {
+		) VALUES (?, ?, ?, NULL, ?, ?)`, issueID, eventType, nullableString(sessionID), string(payload), timestamp); err != nil {
 			return err
 		}
 	}

@@ -158,6 +158,7 @@ func (service *IssueService) UpdateIssue(ctx context.Context, input domain.Updat
 		LabelIDs:            labelIDs,
 		CreateMissingLabels: normalized.CreateMissingLabels,
 		UpdatedAt:           service.clock.Now().UTC(),
+		SessionID:           normalized.SessionID,
 		IdempotencyKey:      idempotencyKey,
 		RequestHash:         requestHash,
 	})
@@ -245,6 +246,7 @@ func (service *IssueService) ArchiveIssue(ctx context.Context, input domain.Arch
 		Identifier:      identifier,
 		ExpectedVersion: normalized.ExpectedVersion,
 		ArchivedAt:      service.clock.Now().UTC(),
+		SessionID:       normalized.SessionID,
 		IdempotencyKey:  idempotencyKey,
 		RequestHash:     requestHash,
 	})

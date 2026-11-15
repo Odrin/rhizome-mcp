@@ -11,6 +11,7 @@ import (
 type ArchiveIssueInput struct {
 	IssueID         string
 	ExpectedVersion int64
+	SessionID       *string
 	IdempotencyKey  *string
 }
 
@@ -27,6 +28,10 @@ func (input ArchiveIssueInput) Validate() (normalized ArchiveIssueInput, err err
 	if err != nil {
 		return ArchiveIssueInput{}, err
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ArchiveIssueInput{}, normalizeUpdateValidationError(err)
+	}
 	var idempotencyKey *string
 	if input.IdempotencyKey != nil {
 		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
@@ -41,6 +46,7 @@ func (input ArchiveIssueInput) Validate() (normalized ArchiveIssueInput, err err
 	return ArchiveIssueInput{
 		IssueID:         identifier.Value,
 		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       sessionID,
 		IdempotencyKey:  idempotencyKey,
 	}, nil
 }

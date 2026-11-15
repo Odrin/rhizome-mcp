@@ -343,9 +343,9 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, sequence_no, type, title, description, acceptance_criteria,
 			status, priority, parent_id, blocked_reason, version, created_by_session_id, created_at, updated_at, closed_at, archived_at, archived_by_session_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, NULL, NULL)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL, NULL)`,
 			command.IssueIDs[i], sequence, planned.Type, planned.Title, nullableString(planned.Description), nullableString(planned.AcceptanceCriteria),
-			planned.Status, planned.Priority, nullableString(parentID), nullableString(planned.BlockedReason), timestamp, timestamp); err != nil {
+			planned.Status, planned.Priority, nullableString(parentID), nullableString(planned.BlockedReason), nullableString(command.SessionID), timestamp, timestamp); err != nil {
 			return result, err
 		}
 		labels, err := resolveIssueLabels(ctx, tx, planned.Labels, planned.CreateMissingLabels, command.LabelIDs[i], now)
@@ -360,13 +360,13 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 			return result, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, 'issue_created', NULL, NULL, ?, ?)`, command.IssueIDs[i], string(payload), timestamp); err != nil {
+			VALUES (?, 'issue_created', ?, NULL, ?, ?)`, command.IssueIDs[i], nullableString(command.SessionID), string(payload), timestamp); err != nil {
 			return result, err
 		}
 		result.CreatedIssues = append(result.CreatedIssues, ports.CreatedPlanIssue{Ref: planned.Ref, Issue: domain.Issue{
 			ID: command.IssueIDs[i], DisplayID: fmt.Sprintf("ISSUE-%d", sequence), SequenceNo: sequence, Type: planned.Type, Title: planned.Title,
 			Description: planned.Description, AcceptanceCriteria: planned.AcceptanceCriteria, Status: planned.Status, Priority: planned.Priority,
-			ParentID: parentID, BlockedReason: planned.BlockedReason, Version: 1, CreatedAt: now, UpdatedAt: now, Labels: labels,
+			ParentID: parentID, BlockedReason: planned.BlockedReason, Version: 1, CreatedBySessionID: copyOptionalString(command.SessionID), CreatedAt: now, UpdatedAt: now, Labels: labels,
 		}})
 	}
 	for i, planned := range command.Plan.Relations {
@@ -381,10 +381,10 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 		source, target = domain.CanonicalRelationEndpoints(planned.Type, source, target)
 		relation := domain.IssueRelation{ID: command.RelationIDs[i], SourceIssueID: source, TargetIssueID: target, Type: planned.Type, CreatedAt: now}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_relations(id, source_issue_id, target_issue_id, type, created_by_session_id, created_at)
-			VALUES (?, ?, ?, ?, NULL, ?)`, relation.ID, source, target, relation.Type, timestamp); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?)`, relation.ID, source, target, relation.Type, nullableString(command.SessionID), timestamp); err != nil {
 			return result, err
 		}
-		if err := appendRelationEventsWithExecutor(ctx, tx, "relation_added", relation, timestamp); err != nil {
+		if err := appendRelationEventsWithExecutor(ctx, tx, "relation_added", relation, command.SessionID, timestamp); err != nil {
 			return result, err
 		}
 		result.CreatedRelations = append(result.CreatedRelations, relation)
@@ -399,7 +399,7 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 			issueID = &id
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id, issue_id, title, summary, content, status, supersedes_id, created_by_session_id, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`, command.DecisionIDs[i], nullableString(issueID), planned.Title, planned.Summary, planned.Content, planned.Status, timestamp); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`, command.DecisionIDs[i], nullableString(issueID), planned.Title, planned.Summary, planned.Content, planned.Status, nullableString(command.SessionID), timestamp); err != nil {
 			return result, err
 		}
 		payload, err := json.Marshal(map[string]string{"decision_id": command.DecisionIDs[i], "status": planned.Status})
@@ -407,10 +407,10 @@ func applyPlan(ctx context.Context, tx Executor, command ports.ApplyIssuePlanCom
 			return result, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, 'decision_recorded', NULL, NULL, ?, ?)`, nullableString(issueID), string(payload), timestamp); err != nil {
+			VALUES (?, 'decision_recorded', ?, NULL, ?, ?)`, nullableString(issueID), nullableString(command.SessionID), string(payload), timestamp); err != nil {
 			return result, err
 		}
-		result.CreatedDecisions = append(result.CreatedDecisions, ports.Decision{ID: command.DecisionIDs[i], IssueID: issueID, Title: planned.Title, Summary: planned.Summary, Content: planned.Content, Status: planned.Status, CreatedAt: now})
+		result.CreatedDecisions = append(result.CreatedDecisions, ports.Decision{ID: command.DecisionIDs[i], IssueID: issueID, Title: planned.Title, Summary: planned.Summary, Content: planned.Content, Status: planned.Status, CreatedBySessionID: copyOptionalString(command.SessionID), CreatedAt: now})
 	}
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM issue_events").Scan(&result.LatestEventID); err != nil {
 		return result, err

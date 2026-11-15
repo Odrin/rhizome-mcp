@@ -35,6 +35,7 @@ type CreateReviewRequestInput struct {
 	// and normalized by domain.ValidateReviewPurposes.
 	Purposes     []string
 	SupersedesID *string
+	SessionID    *string
 }
 
 // CreateReviewRequestResult contains the persisted review request and claimability state.
@@ -91,6 +92,7 @@ type ListReviewRequestsResult struct {
 type ReviewMutationInput struct {
 	RequestID       string
 	ExpectedVersion int64
+	SessionID       *string
 }
 
 // ReviewMutationResult contains the updated request and claimability state.
@@ -140,6 +142,10 @@ func (service *ReviewService) CreateReviewRequest(ctx context.Context, input Cre
 			return CreateReviewRequestResult{}, err
 		}
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return CreateReviewRequestResult{}, err
+	}
 	identifier, err := domain.ParseIssueIdentifier(input.IssueID)
 	if err != nil {
 		return CreateReviewRequestResult{}, err
@@ -169,6 +175,7 @@ func (service *ReviewService) CreateReviewRequest(ctx context.Context, input Cre
 		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
 		Purposes:           purposes,
 		SupersedesID:       copyOptionalString(input.SupersedesID),
+		SessionID:          sessionID,
 		OccurredAt:         service.clock.Now().UTC(),
 	})
 	if err != nil {
@@ -285,7 +292,16 @@ func (service *ReviewService) CancelReviewRequest(ctx context.Context, input Rev
 	if input.ExpectedVersion < 1 {
 		return ReviewMutationResult{}, domain.NewError(domain.CodeInvalidArgument, "expected_version must be >= 1", false)
 	}
-	result, err := service.repository.CancelReviewRequest(ctx, ports.ReviewMutationCommand{RequestID: input.RequestID, ExpectedVersion: input.ExpectedVersion, OccurredAt: service.clock.Now().UTC()})
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return ReviewMutationResult{}, err
+	}
+	result, err := service.repository.CancelReviewRequest(ctx, ports.ReviewMutationCommand{
+		RequestID:       input.RequestID,
+		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       sessionID,
+		OccurredAt:      service.clock.Now().UTC(),
+	})
 	if err != nil {
 		return ReviewMutationResult{}, err
 	}
@@ -304,6 +320,7 @@ type ReplaceReviewRequestInput struct {
 	// purposes", resolved by the repository. A non-empty list is validated
 	// and normalized by domain.ReplaceReviewRequestInput.Validate.
 	Purposes       []string
+	SessionID      *string
 	IdempotencyKey string
 }
 
@@ -329,6 +346,10 @@ func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input Re
 		Purposes:                   input.Purposes,
 		IdempotencyKey:             input.IdempotencyKey,
 	}.Validate()
+	if err != nil {
+		return ReplaceReviewRequestResult{}, err
+	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
 	if err != nil {
 		return ReplaceReviewRequestResult{}, err
 	}
@@ -363,6 +384,7 @@ func (service *ReviewService) ReplaceReviewRequest(ctx context.Context, input Re
 		TargetEventID:              normalized.TargetEventID,
 		ArtifactIDs:                normalized.ArtifactIDs,
 		Purposes:                   normalized.Purposes,
+		SessionID:                  sessionID,
 		OccurredAt:                 service.clock.Now().UTC(),
 		IdempotencyKey:             normalized.IdempotencyKey,
 		RequestHash:                requestHash,

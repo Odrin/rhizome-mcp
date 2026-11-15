@@ -158,6 +158,17 @@ func validateSessionID(value string) error {
 	return nil
 }
 
+func copyOptionalSessionID(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if err := validateSessionID(*value); err != nil {
+		return nil, err
+	}
+	copied := *value
+	return &copied, nil
+}
+
 func validateHandleInput(value string) error {
 	trimmed := value
 	if trimmed == "" {

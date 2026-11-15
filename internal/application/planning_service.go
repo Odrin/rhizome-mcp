@@ -25,13 +25,14 @@ type ApplyIssuePlanCreatedIssue struct {
 }
 
 type ApplyIssuePlanDecision struct {
-	ID        string
-	IssueID   *string
-	Title     string
-	Summary   string
-	Content   string
-	Status    string
-	CreatedAt time.Time
+	ID                 string
+	IssueID            *string
+	Title              string
+	Summary            string
+	Content            string
+	Status             string
+	CreatedBySessionID *string
+	CreatedAt          time.Time
 }
 
 type ApplyIssuePlanResult struct {
@@ -60,13 +61,17 @@ func (service *PlanningService) ValidateIssuePlan(ctx context.Context, plan doma
 	return domain.MergePlanErrors(validation, details), nil
 }
 
-func (service *PlanningService) ApplyIssuePlan(ctx context.Context, plan domain.IssuePlan, key string) (ApplyIssuePlanResult, error) {
+func (service *PlanningService) ApplyIssuePlan(ctx context.Context, plan domain.IssuePlan, key string, sessionID ...*string) (ApplyIssuePlanResult, error) {
 	if err := domain.ValidateText("idempotency_key", key, domain.MaxIdempotencyKeyRunes); err != nil {
 		return ApplyIssuePlanResult{}, err
 	}
 	if strings.TrimSpace(key) == "" {
 		return ApplyIssuePlanResult{}, domain.NewError(domain.CodeInvalidArgument, "idempotency_key must not be blank", false,
 			domain.Detail{Field: "idempotency_key", Code: "REQUIRED"})
+	}
+	normalizedSessionID, err := normalizeOptionalSessionID(sessionID)
+	if err != nil {
+		return ApplyIssuePlanResult{}, err
 	}
 	validation := domain.NormalizeIssuePlan(plan)
 	if !validation.Valid {
@@ -87,7 +92,13 @@ func (service *PlanningService) ApplyIssuePlan(ctx context.Context, plan domain.
 			LatestEventID:    result.LatestEventID,
 		}, nil
 	}
-	command := ports.ApplyIssuePlanCommand{Plan: validation.NormalizedPlan, IdempotencyKey: key, RequestHash: hash[:], OccurredAt: service.clock.Now().UTC()}
+	command := ports.ApplyIssuePlanCommand{
+		Plan:           validation.NormalizedPlan,
+		IdempotencyKey: key,
+		RequestHash:    hash[:],
+		SessionID:      normalizedSessionID,
+		OccurredAt:     service.clock.Now().UTC(),
+	}
 	for range command.Plan.Issues {
 		id, err := service.newID()
 		if err != nil {
@@ -147,16 +158,28 @@ func convertPlanDecisions(decisions []ports.Decision) []ApplyIssuePlanDecision {
 	result := make([]ApplyIssuePlanDecision, len(decisions))
 	for i, decision := range decisions {
 		result[i] = ApplyIssuePlanDecision{
-			ID:        decision.ID,
-			IssueID:   decision.IssueID,
-			Title:     decision.Title,
-			Summary:   decision.Summary,
-			Content:   decision.Content,
-			Status:    decision.Status,
-			CreatedAt: decision.CreatedAt,
+			ID:                 decision.ID,
+			IssueID:            decision.IssueID,
+			Title:              decision.Title,
+			Summary:            decision.Summary,
+			Content:            decision.Content,
+			Status:             decision.Status,
+			CreatedBySessionID: copyOptionalString(decision.CreatedBySessionID),
+			CreatedAt:          decision.CreatedAt,
 		}
 	}
 	return result
+}
+
+func normalizeOptionalSessionID(values []*string) (*string, error) {
+	if len(values) > 1 {
+		return nil, domain.NewError(domain.CodeInvalidArgument, "session_id accepts at most one value", false,
+			domain.Detail{Field: "session_id", Code: "INVALID_ARGUMENT"})
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	return copyOptionalSessionID(values[0])
 }
 
 func (service *PlanningService) newID() (string, error) {

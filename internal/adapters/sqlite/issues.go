@@ -126,10 +126,11 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 			status, priority, parent_id, blocked_reason, version,
 			created_by_session_id, created_at, updated_at, closed_at,
 			archived_at, archived_by_session_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, NULL, NULL, NULL)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL, NULL)`,
 			command.ID, sequenceNo, input.Type, input.Title, nullableString(input.Description),
 			nullableString(input.AcceptanceCriteria), input.Status, input.Priority,
-			nullableString(resolvedParentID), nullableString(input.BlockedReason), timestamp, timestamp,
+			nullableString(resolvedParentID), nullableString(input.BlockedReason), nullableString(input.SessionID),
+			timestamp, timestamp,
 		); err != nil {
 			return err
 		}
@@ -154,8 +155,8 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, 'issue_created', NULL, NULL, ?, ?)
-		`, command.ID, string(payload), timestamp); err != nil {
+			VALUES (?, 'issue_created', ?, NULL, ?, ?)
+		`, command.ID, nullableString(input.SessionID), string(payload), timestamp); err != nil {
 			return err
 		}
 
@@ -172,6 +173,7 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 			ParentID:           resolvedParentID,
 			BlockedReason:      input.BlockedReason,
 			Version:            1,
+			CreatedBySessionID: copyOptionalString(input.SessionID),
 			CreatedAt:          now,
 			UpdatedAt:          now,
 			Labels:             labels,
@@ -400,7 +402,7 @@ func (repository *IssueRepository) UpdateIssue(ctx context.Context, command port
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, ?, NULL, NULL, ?, ?)`, current.ID, eventType, string(payload), timestamp); err != nil {
+			VALUES (?, ?, ?, NULL, ?, ?)`, current.ID, eventType, nullableString(command.SessionID), string(payload), timestamp); err != nil {
 			return err
 		}
 		result = ports.UpdateIssueResult{Issue: next, ChangedFields: append([]string(nil), changedFields...)}
@@ -517,10 +519,10 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 
 		res, err := tx.ExecContext(ctx, `
 			UPDATE issues
-			SET archived_at = ?, archived_by_session_id = NULL,
+			SET archived_at = ?, archived_by_session_id = ?,
 				version = version + 1, updated_at = ?
 			WHERE id = ? AND version = ? AND archived_at IS NULL`,
-			timestamp, timestamp, current.ID, command.ExpectedVersion,
+			timestamp, nullableString(command.SessionID), timestamp, current.ID, command.ExpectedVersion,
 		)
 		if err != nil {
 			return err
@@ -542,8 +544,8 @@ func (repository *IssueRepository) ArchiveIssue(ctx context.Context, command por
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-			VALUES (?, 'issue_archived', NULL, NULL, ?, ?)`,
-			current.ID, string(payload), timestamp); err != nil {
+			VALUES (?, 'issue_archived', ?, NULL, ?, ?)`,
+			current.ID, nullableString(command.SessionID), string(payload), timestamp); err != nil {
 			return err
 		}
 

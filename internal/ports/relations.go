@@ -16,6 +16,7 @@ type ManageIssueRelationCommand struct {
 	RelationType     domain.RelationType
 	RelationID       string // Required for add; empty for remove.
 	OccurredAt       time.Time
+	SessionID        *string
 	IdempotencyKey   string
 	RequestHash      []byte
 }

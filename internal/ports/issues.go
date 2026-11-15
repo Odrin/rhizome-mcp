@@ -28,6 +28,7 @@ type UpdateIssueCommand struct {
 	LabelIDs            []string // Corresponds to Changes.Labels when missing creation is enabled.
 	CreateMissingLabels bool
 	UpdatedAt           time.Time
+	SessionID           *string
 	IdempotencyKey      string
 	RequestHash         []byte
 }
@@ -45,6 +46,7 @@ type ArchiveIssueCommand struct {
 	Identifier      domain.IssueIdentifier
 	ExpectedVersion int64
 	ArchivedAt      time.Time
+	SessionID       *string
 	IdempotencyKey  string
 	RequestHash     []byte
 }

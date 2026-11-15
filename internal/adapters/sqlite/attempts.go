@@ -215,7 +215,7 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 	if affected != 1 {
 		return nil
 	}
-	return appendReviewEvent(ctx, tx, request.IssueID, eventType, &attemptID,
+	return appendReviewEvent(ctx, tx, request.IssueID, eventType, nil, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), timestamp)
 }
 
@@ -385,7 +385,7 @@ func (repository *AttemptRepository) ClaimIssue(ctx context.Context, command por
 				return domain.NewError(domain.CodeInvalidArgument, "review attempts cannot hold reservations", false,
 					domain.Detail{Field: "resources", Code: "REVIEW_ATTEMPT_NOT_ELIGIBLE"})
 			}
-			if err := bindOpenReviewRequestForAttempt(ctx, tx, issue.ID, command.AttemptID, now); err != nil {
+			if err := bindOpenReviewRequestForAttempt(ctx, tx, issue.ID, command.AttemptID, command.SessionID, now); err != nil {
 				return err
 			}
 		} else if len(command.Resources) > 0 {
@@ -1628,7 +1628,7 @@ func (repository *AttemptRepository) ForceReleaseAttempt(ctx context.Context, co
 // ClaimReviewRequest performs explicitly; ClaimIssue calls this
 // automatically whenever it starts a review attempt. No-op (returns nil,
 // nil) when no open request exists for the issue.
-func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, attemptID string, now time.Time) error {
+func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, attemptID string, sessionID *string, now time.Time) error {
 	var requestID, targetID string
 	var version, targetIssueVersion, targetEventID int64
 	err := tx.QueryRowContext(ctx, `SELECT id, target_id, version, target_issue_version, target_event_id FROM review_requests
@@ -1665,7 +1665,7 @@ func bindOpenReviewRequestForAttempt(ctx context.Context, tx Executor, issueID, 
 	if affected != 1 {
 		return domain.NewError(domain.CodeStorageCorrupt, "review request claim-time binding lost a race inside its own write transaction", false)
 	}
-	return appendReviewEvent(ctx, tx, issueID, "review_claimed", &attemptID,
+	return appendReviewEvent(ctx, tx, issueID, "review_claimed", sessionID, &attemptID,
 		payloadForReviewEvent(requestID, targetID, &attemptID, nil, nil), claimedAt)
 }
 
@@ -1784,7 +1784,7 @@ func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request 
 	if affected == 0 {
 		return nil
 	}
-	if err := appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", &attemptID,
+	if err := appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), resolvedAt); err != nil {
 		return err
 	}
@@ -1810,7 +1810,7 @@ func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request do
 		VALUES (?, ?, ?, ?, ?, 1, ?)`, attemptID, request.ID, attemptID, outcome, stringOrNil(reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review outcome: %w", err)
 	}
-	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), &attemptID,
+	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), nil, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review event: %w", err)
 	}

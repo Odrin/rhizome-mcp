@@ -48,6 +48,7 @@ type UpdateIssueInput struct {
 	ExpectedVersion     int64
 	Changes             IssuePatch
 	CreateMissingLabels bool
+	SessionID           *string
 	IdempotencyKey      *string
 }
 
@@ -121,6 +122,10 @@ func (input UpdateIssueInput) Validate() (normalized UpdateIssueInput, err error
 		}
 		patch.Labels.Value = labels
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return UpdateIssueInput{}, normalizeUpdateValidationError(err)
+	}
 	var idempotencyKey *string
 	if input.IdempotencyKey != nil {
 		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
@@ -137,6 +142,7 @@ func (input UpdateIssueInput) Validate() (normalized UpdateIssueInput, err error
 		ExpectedVersion:     input.ExpectedVersion,
 		Changes:             copyIssuePatch(patch),
 		CreateMissingLabels: input.CreateMissingLabels,
+		SessionID:           sessionID,
 		IdempotencyKey:      idempotencyKey,
 	}, nil
 }

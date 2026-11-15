@@ -15,6 +15,7 @@ type ApplyIssuePlanCommand struct {
 	RelationIDs    []string
 	DecisionIDs    []string
 	LabelIDs       [][]string
+	SessionID      *string
 	OccurredAt     time.Time
 }
 
@@ -24,13 +25,14 @@ type CreatedPlanIssue struct {
 }
 
 type Decision struct {
-	ID        string    `json:"id"`
-	IssueID   *string   `json:"issue_id,omitempty"`
-	Title     string    `json:"title"`
-	Summary   string    `json:"summary"`
-	Content   string    `json:"content"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	IssueID            *string   `json:"issue_id,omitempty"`
+	Title              string    `json:"title"`
+	Summary            string    `json:"summary"`
+	Content            string    `json:"content"`
+	Status             string    `json:"status"`
+	CreatedBySessionID *string   `json:"created_by_session_id,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type ApplyIssuePlanResult struct {

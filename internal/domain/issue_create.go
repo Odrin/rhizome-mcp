@@ -23,6 +23,7 @@ type CreateIssueInput struct {
 	BlockedReason       *string
 	Labels              []string
 	CreateMissingLabels bool
+	SessionID           *string
 	IdempotencyKey      *string
 }
 
@@ -104,6 +105,10 @@ func (input CreateIssueInput) Validate() (CreateIssueInput, error) {
 	if err != nil {
 		return CreateIssueInput{}, err
 	}
+	sessionID, err := copyOptionalSessionID(input.SessionID)
+	if err != nil {
+		return CreateIssueInput{}, err
+	}
 	var idempotencyKey *string
 	if input.IdempotencyKey != nil {
 		if err := ValidateText("idempotency_key", *input.IdempotencyKey, MaxIdempotencyKeyRunes); err != nil {
@@ -127,6 +132,7 @@ func (input CreateIssueInput) Validate() (CreateIssueInput, error) {
 		BlockedReason:       copyString(input.BlockedReason),
 		Labels:              labels,
 		CreateMissingLabels: input.CreateMissingLabels,
+		SessionID:           sessionID,
 		IdempotencyKey:      idempotencyKey,
 	}, nil
 }

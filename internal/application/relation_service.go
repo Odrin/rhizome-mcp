@@ -75,6 +75,7 @@ func (service *RelationService) ManageIssueRelation(ctx context.Context, input d
 		TargetIdentifier: target,
 		RelationType:     normalized.RelationType,
 		OccurredAt:       service.clock.Now().UTC(),
+		SessionID:        normalized.SessionID,
 		IdempotencyKey:   idempotencyKey,
 		RequestHash:      requestHash,
 	}

@@ -21,6 +21,7 @@ type CreateReviewRequestCommand struct {
 	// like every other field on this command.
 	Purposes     []string
 	SupersedesID *string
+	SessionID    *string
 	OccurredAt   time.Time
 }
 
@@ -38,6 +39,7 @@ type ReviewMutationCommand struct {
 	ActiveAttemptID *string
 	Outcome         *domain.ReviewOutcome
 	Reason          *string
+	SessionID       *string
 }
 
 // ReviewMutationResult is the persisted request after a state transition.
@@ -109,6 +111,7 @@ type ReplaceReviewRequestCommand struct {
 	// Purposes is optional: nil means "inherit the predecessor's purposes",
 	// resolved by the repository once it has loaded the predecessor.
 	Purposes       []string
+	SessionID      *string
 	OccurredAt     time.Time
 	IdempotencyKey string
 	RequestHash    []byte

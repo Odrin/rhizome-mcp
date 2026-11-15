@@ -756,7 +756,7 @@ func (adapter *adapter) validateIssuePlan(ctx context.Context, request *sdkmcp.C
 }
 
 func (adapter *adapter) applyIssuePlan(ctx context.Context, request *sdkmcp.CallToolRequest, input applyIssuePlanInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.services.PlanningService.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey)
+	result, err := adapter.services.PlanningService.ApplyIssuePlan(ctx, input.domainPlan(), input.IdempotencyKey, adapter.sessionIDForRequest(ctx, request))
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -988,6 +988,7 @@ func (adapter *adapter) manageIssueRelation(ctx context.Context, request *sdkmcp
 		SourceIssueID:  input.SourceIssueID,
 		TargetIssueID:  input.TargetIssueID,
 		RelationType:   domain.RelationType(input.RelationType),
+		SessionID:      adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey: input.IdempotencyKey,
 	})
 	if err != nil {
@@ -1044,6 +1045,7 @@ func (adapter *adapter) createIssue(ctx context.Context, request *sdkmcp.CallToo
 		BlockedReason:       input.BlockedReason,
 		Labels:              input.Labels,
 		CreateMissingLabels: input.CreateMissingLabels,
+		SessionID:           adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey:      input.IdempotencyKey,
 	})
 	if err != nil {
@@ -1067,6 +1069,7 @@ func (adapter *adapter) updateIssue(ctx context.Context, request *sdkmcp.CallToo
 		ExpectedVersion:     input.ExpectedVersion,
 		Changes:             input.Changes.domainPatch(),
 		CreateMissingLabels: input.CreateMissingLabels,
+		SessionID:           adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey:      input.IdempotencyKey,
 	})
 	if err != nil {
@@ -1168,6 +1171,7 @@ func (adapter *adapter) archiveIssue(ctx context.Context, request *sdkmcp.CallTo
 	result, err := adapter.services.IssueService.ArchiveIssue(ctx, domain.ArchiveIssueInput{
 		IssueID:         input.IssueID,
 		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey:  input.IdempotencyKey,
 	})
 	if err != nil {
@@ -1210,6 +1214,7 @@ func (adapter *adapter) createReviewRequest(ctx context.Context, request *sdkmcp
 		TargetEventID:      input.TargetEventID,
 		ArtifactIDs:        append([]string(nil), input.ArtifactIDs...),
 		Purposes:           append([]string(nil), input.Purposes...),
+		SessionID:          adapter.sessionIDForRequest(ctx, request),
 	})
 	if err != nil {
 		return adapter.failure(err)
@@ -1249,7 +1254,11 @@ func (adapter *adapter) listReviewRequests(ctx context.Context, request *sdkmcp.
 }
 
 func (adapter *adapter) cancelReviewRequest(ctx context.Context, request *sdkmcp.CallToolRequest, input cancelReviewRequestInput) (*sdkmcp.CallToolResult, any, error) {
-	result, err := adapter.services.ReviewService.CancelReviewRequest(ctx, application.ReviewMutationInput{RequestID: input.ReviewRequestID, ExpectedVersion: input.ExpectedVersion})
+	result, err := adapter.services.ReviewService.CancelReviewRequest(ctx, application.ReviewMutationInput{
+		RequestID:       input.ReviewRequestID,
+		ExpectedVersion: input.ExpectedVersion,
+		SessionID:       adapter.sessionIDForRequest(ctx, request),
+	})
 	if err != nil {
 		return adapter.failure(err)
 	}
@@ -1265,6 +1274,7 @@ func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmc
 		TargetEventID:              input.TargetEventID,
 		ArtifactIDs:                append([]string(nil), input.ArtifactIDs...),
 		Purposes:                   append([]string(nil), input.Purposes...),
+		SessionID:                  adapter.sessionIDForRequest(ctx, request),
 		IdempotencyKey:             input.IdempotencyKey,
 	})
 	if err != nil {

@@ -193,7 +193,7 @@ func (repository *ReviewRepository) CreateReviewRequest(ctx context.Context, com
 		); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, command.IssueID, "review_requested", nil, payloadForReviewEvent(requestID, target.ID, nil, nil, nil), createdAt); err != nil {
+		if err := appendReviewEvent(ctx, tx, command.IssueID, "review_requested", command.SessionID, nil, payloadForReviewEvent(requestID, target.ID, nil, nil, nil), createdAt); err != nil {
 			return err
 		}
 		result.Request = domain.ReviewRequest{
@@ -401,7 +401,7 @@ func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, com
 				terminatedAttemptID = nil
 			}
 		}
-		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_cancelled", terminatedAttemptID, payloadForReviewEvent(request.ID, request.TargetID, terminatedAttemptID, nil, nil), resolvedAt); err != nil {
+		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_cancelled", command.SessionID, terminatedAttemptID, payloadForReviewEvent(request.ID, request.TargetID, terminatedAttemptID, nil, nil), resolvedAt); err != nil {
 			return err
 		}
 		if terminatedAttemptID != nil {
@@ -588,11 +588,11 @@ func (repository *ReviewRepository) ReplaceReviewRequest(ctx context.Context, co
 			return err
 		}
 
-		if err := appendReviewEvent(ctx, tx, predecessor.IssueID, "review_superseded", nil,
+		if err := appendReviewEvent(ctx, tx, predecessor.IssueID, "review_superseded", command.SessionID, nil,
 			payloadForReplaceReviewEvent(predecessor.ID, predecessor.TargetID, successorID, ""), occurredAt); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, predecessor.IssueID, "review_requested", nil,
+		if err := appendReviewEvent(ctx, tx, predecessor.IssueID, "review_requested", command.SessionID, nil,
 			payloadForReplaceReviewEvent(successorID, target.ID, "", predecessor.ID), occurredAt); err != nil {
 			return err
 		}
@@ -721,7 +721,7 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 		if _, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = ?, resolved_at = NULL, version = version + 1 WHERE id = ? AND version = ?`, domain.ReviewRequestStatusClaimed, *command.ActiveAttemptID, request.ID, request.Version); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_claimed", command.ActiveAttemptID,
+		if err := appendReviewEvent(ctx, tx, request.IssueID, "review_claimed", command.SessionID, command.ActiveAttemptID,
 			payloadForReviewEvent(request.ID, request.TargetID, command.ActiveAttemptID, nil, nil), claimedAt); err != nil {
 			return err
 		}
@@ -759,7 +759,7 @@ func supersedeOpenReviewRequest(ctx context.Context, tx Executor, request domain
 	if affected == 0 {
 		return nil
 	}
-	return appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil,
+	return appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil, nil,
 		payloadForReviewEvent(request.ID, request.TargetID, nil, nil, nil), resolvedAt)
 }
 
@@ -804,7 +804,7 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`, outcomeID, request.ID, command.AttemptID, command.Outcome, stringOrNil(command.Reason), resolvedAt); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(command.Outcome)), &command.AttemptID,
+		if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(command.Outcome)), nil, &command.AttemptID,
 			payloadForReviewEvent(request.ID, request.TargetID, &command.AttemptID, &command.Outcome, command.Reason), resolvedAt); err != nil {
 			return err
 		}
@@ -1249,9 +1249,9 @@ func reviewEventTypeForOutcome(outcome domain.ReviewOutcome) domain.ReviewEventT
 // with issue_events' AUTOINCREMENT sequence. requestID/targetID are not
 // separate columns; they are already embedded in payload by
 // payloadForReviewEvent, the same place they were always recorded.
-func appendReviewEvent(ctx context.Context, tx Executor, issueID, eventType string, attemptID *string, payload []byte, createdAt string) error {
+func appendReviewEvent(ctx context.Context, tx Executor, issueID, eventType string, sessionID, attemptID *string, payload []byte, createdAt string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at, source)
-		VALUES (?, ?, NULL, ?, ?, ?, 'review')`, issueID, eventType, nullableStringValuePtr(attemptID), string(payload), createdAt)
+		VALUES (?, ?, ?, ?, ?, ?, 'review')`, issueID, eventType, nullableStringValuePtr(sessionID), nullableStringValuePtr(attemptID), string(payload), createdAt)
 	return err
 }
 
