@@ -93,6 +93,17 @@ func (r *statusRecorder) Write(data []byte) (int, error) {
 	return r.ResponseWriter.Write(data)
 }
 
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func (r *statusRecorder) Flush() {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(r.ResponseWriter).Flush()
+}
+
 // WrapHTTPHandler hardens a local HTTP handler by validating the request host
 // and origin against the configured loopback endpoint before the next handler
 // runs, and by recovering panics to return a 500 without leaking payloads.

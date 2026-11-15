@@ -470,3 +470,40 @@ func extractEndpoint(logs string) string {
 	}
 	return logs[start : start+end]
 }
+
+type fakeControllableResponseWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *fakeControllableResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func TestStatusRecorderUnwrapAndFlush(t *testing.T) {
+	inner := &fakeControllableResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+	wrapped := WrapHTTPHandlerWithBodyLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		controller := http.NewResponseController(w)
+		if err := controller.SetWriteDeadline(time.Time{}); err != nil {
+			t.Fatalf("SetWriteDeadline() error = %v", err)
+		}
+		if err := controller.Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+	}), "127.0.0.1:8080", slog.Default(), 0)
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/events", nil)
+	req.Host = "127.0.0.1:8080"
+	wrapped.ServeHTTP(inner, req)
+
+	if len(inner.deadlines) != 1 || !inner.deadlines[0].IsZero() {
+		t.Fatalf("SetWriteDeadline calls = %v, want single zero time", inner.deadlines)
+	}
+	if !inner.Flushed {
+		t.Fatal("expected inner ResponseWriter to be flushed")
+	}
+	if inner.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", inner.Code, http.StatusOK)
+	}
+}

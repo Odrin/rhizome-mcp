@@ -2,9 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"rhizome-mcp/internal/domain"
@@ -17,6 +21,15 @@ import (
 type BoardSnapshotRepository struct {
 	db                    *DB
 	afterFirstReadForTest func()
+
+	watermarkMu     sync.Mutex
+	watermarkByConn map[string]boardWatermarkConnState
+	externalEpoch   uint64
+}
+
+type boardWatermarkConnState struct {
+	dataVersion int64
+	stateDigest string
 }
 
 // NewBoardSnapshotRepository returns a single-snapshot board and issue-detail
@@ -26,6 +39,160 @@ func NewBoardSnapshotRepository(database *DB) (*BoardSnapshotRepository, error) 
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "board snapshot database is required", false)
 	}
 	return &BoardSnapshotRepository{db: database}, nil
+}
+
+const loadBoardWatermarkQuery = `
+SELECT
+	(SELECT COALESCE(MAX(id), 0) FROM issue_events),
+	(SELECT COUNT(*) FROM issue_events),
+	(SELECT COALESCE(MAX(id), 0) FROM gate_evidence_events),
+	(SELECT COUNT(*) FROM gate_evidence_events),
+	(SELECT COALESCE(MAX(id), 0) FROM workflow_policy_events),
+	(SELECT COUNT(*) FROM workflow_policy_events),
+	(SELECT COUNT(*) FROM issues),
+	(SELECT COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0) FROM issues),
+	(SELECT COALESCE(MAX(version), 0) FROM issues),
+	(SELECT COALESCE(MAX(updated_at), '') FROM issues),
+	(SELECT COALESCE(MAX(archived_at), '') FROM issues),
+	(SELECT COUNT(*) FROM work_attempts),
+	(SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) FROM work_attempts),
+	(SELECT COALESCE(MAX(started_at), '') FROM work_attempts),
+	(SELECT COALESCE(MAX(last_heartbeat_at), '') FROM work_attempts),
+	(SELECT COALESCE(MAX(finished_at), '') FROM work_attempts),
+	(SELECT COALESCE(MAX(lease_expires_at), '') FROM work_attempts),
+	(SELECT COUNT(*) FROM resource_reservations),
+	(SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) FROM resource_reservations),
+	(SELECT COALESCE(MAX(version), 0) FROM resource_reservations),
+	(SELECT COALESCE(MAX(created_at), '') FROM resource_reservations),
+	(SELECT COALESCE(MAX(released_at), '') FROM resource_reservations),
+	(SELECT COUNT(*) FROM review_requests),
+	(SELECT COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) FROM review_requests),
+	(SELECT COALESCE(MAX(version), 0) FROM review_requests),
+	(SELECT COALESCE(MAX(created_at), '') FROM review_requests),
+	(SELECT COALESCE(MAX(resolved_at), '') FROM review_requests),
+	(SELECT COUNT(*) FROM issue_relations),
+	(SELECT COALESCE(MAX(created_at), '') FROM issue_relations),
+	(SELECT COUNT(*) FROM issue_labels),
+	(SELECT COUNT(*) FROM gate_evidence),
+	(SELECT COALESCE(MAX(version), 0) FROM gate_evidence),
+	(SELECT COALESCE(MAX(updated_at), '') FROM gate_evidence),
+	(SELECT COUNT(*) FROM workflow_policies),
+	(SELECT COALESCE(MAX(version), 0) FROM workflow_policies),
+	(SELECT COALESCE(MAX(updated_at), '') FROM workflow_policies),
+	(SELECT COUNT(*) FROM review_approvals),
+	(SELECT COUNT(*) FROM attempt_gate_snapshots)
+`
+
+// LoadBoardWatermark computes a board state watermark within a single SQLite
+// read snapshot combining board-visible table watermarks and PRAGMA data_version
+// so external-process writes are detected without reading the full snapshot.
+func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Context) (string, error) {
+	if repository == nil || repository.db == nil {
+		return "", domain.NewError(domain.CodeStorageConfiguration, "board snapshot database is required", false)
+	}
+	var (
+		issueEventsMaxID, issueEventsCount               int64
+		gateEventsMaxID, gateEventsCount                 int64
+		policyEventsMaxID, policyEventsCount             int64
+		issuesCount, issuesBlocked, issuesMaxVersion     int64
+		issuesMaxUpdatedAt, issuesMaxArchivedAt          string
+		attemptsCount, attemptsActive                    int64
+		attemptsMaxStartedAt, attemptsMaxHeartbeatAt     string
+		attemptsMaxFinishedAt, attemptsMaxLeaseExpiresAt string
+		reservationsCount, reservationsActive            int64
+		reservationsMaxVersion                           int64
+		reservationsMaxCreatedAt, reservationsMaxRelAt   string
+		reviewsCount, reviewsOpen, reviewsMaxVersion     int64
+		reviewsMaxCreatedAt, reviewsMaxResolvedAt        string
+		relationsCount                                   int64
+		relationsMaxCreatedAt                            string
+		labelsCount                                      int64
+		gateEvidenceCount, gateEvidenceMaxVersion        int64
+		gateEvidenceMaxUpdatedAt                         string
+		policiesCount, policiesMaxVersion                int64
+		policiesMaxUpdatedAt                             string
+		reviewApprovalsCount                             int64
+		attemptGateSnapshotsCount                        int64
+		dataVersion                                      int64
+		connKey                                          string
+	)
+	if err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
+		// Query table state first so SQLite opens the WAL read snapshot before
+		// inspecting connection-local PRAGMA data_version within the same snapshot.
+		row := query.QueryRowContext(ctx, loadBoardWatermarkQuery)
+		if err := row.Scan(
+			&issueEventsMaxID, &issueEventsCount,
+			&gateEventsMaxID, &gateEventsCount,
+			&policyEventsMaxID, &policyEventsCount,
+			&issuesCount, &issuesBlocked, &issuesMaxVersion, &issuesMaxUpdatedAt, &issuesMaxArchivedAt,
+			&attemptsCount, &attemptsActive, &attemptsMaxStartedAt, &attemptsMaxHeartbeatAt, &attemptsMaxFinishedAt, &attemptsMaxLeaseExpiresAt,
+			&reservationsCount, &reservationsActive, &reservationsMaxVersion, &reservationsMaxCreatedAt, &reservationsMaxRelAt,
+			&reviewsCount, &reviewsOpen, &reviewsMaxVersion, &reviewsMaxCreatedAt, &reviewsMaxResolvedAt,
+			&relationsCount, &relationsMaxCreatedAt,
+			&labelsCount,
+			&gateEvidenceCount, &gateEvidenceMaxVersion, &gateEvidenceMaxUpdatedAt,
+			&policiesCount, &policiesMaxVersion, &policiesMaxUpdatedAt,
+			&reviewApprovalsCount,
+			&attemptGateSnapshotsCount,
+		); err != nil {
+			return err
+		}
+		if err := query.QueryRowContext(ctx, "PRAGMA data_version").Scan(&dataVersion); err != nil {
+			return err
+		}
+		if conn, ok := query.(*sql.Conn); ok {
+			_ = conn.Raw(func(driverConn any) error {
+				connKey = fmt.Sprintf("%T:%p", driverConn, driverConn)
+				return nil
+			})
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+
+	stateLine := fmt.Sprintf(
+		"ie=%d/%d|ge=%d/%d|pe=%d/%d|i=%d/%d/%d/%s/%s|a=%d/%d/%s/%s/%s/%s|r=%d/%d/%d/%s/%s|rv=%d/%d/%d/%s/%s|rel=%d/%s|lbl=%d|gev=%d/%d/%s|pol=%d/%d/%s|rva=%d|ags=%d",
+		issueEventsMaxID, issueEventsCount,
+		gateEventsMaxID, gateEventsCount,
+		policyEventsMaxID, policyEventsCount,
+		issuesCount, issuesBlocked, issuesMaxVersion, issuesMaxUpdatedAt, issuesMaxArchivedAt,
+		attemptsCount, attemptsActive, attemptsMaxStartedAt, attemptsMaxHeartbeatAt, attemptsMaxFinishedAt, attemptsMaxLeaseExpiresAt,
+		reservationsCount, reservationsActive, reservationsMaxVersion, reservationsMaxCreatedAt, reservationsMaxRelAt,
+		reviewsCount, reviewsOpen, reviewsMaxVersion, reviewsMaxCreatedAt, reviewsMaxResolvedAt,
+		relationsCount, relationsMaxCreatedAt,
+		labelsCount,
+		gateEvidenceCount, gateEvidenceMaxVersion, gateEvidenceMaxUpdatedAt,
+		policiesCount, policiesMaxVersion, policiesMaxUpdatedAt,
+		reviewApprovalsCount,
+		attemptGateSnapshotsCount,
+	)
+	stateSum := sha256.Sum256([]byte(stateLine))
+	stateDigest := hex.EncodeToString(stateSum[:])
+	return repository.resolveBoardWatermark(connKey, dataVersion, stateDigest), nil
+}
+
+func (repository *BoardSnapshotRepository) resolveBoardWatermark(connKey string, dataVersion int64, stateDigest string) string {
+	repository.watermarkMu.Lock()
+	defer repository.watermarkMu.Unlock()
+
+	if repository.watermarkByConn == nil {
+		repository.watermarkByConn = make(map[string]boardWatermarkConnState)
+	}
+	if connKey != "" {
+		if prev, known := repository.watermarkByConn[connKey]; known {
+			if dataVersion != prev.dataVersion && stateDigest == prev.stateDigest {
+				repository.externalEpoch++
+			}
+		}
+		repository.watermarkByConn[connKey] = boardWatermarkConnState{
+			dataVersion: dataVersion,
+			stateDigest: stateDigest,
+		}
+	}
+	combined := fmt.Sprintf("%s|ext:%d", stateDigest, repository.externalEpoch)
+	sum := sha256.Sum256([]byte(combined))
+	return hex.EncodeToString(sum[:])
 }
 
 // LoadBoardSnapshot loads every bounded section of domain.BoardResult inside a

@@ -2,6 +2,10 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"time"
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
@@ -28,6 +32,7 @@ type BoardService struct {
 	graphService       *GraphService
 	gateService        issueGateSummaryGetter
 	snapshotLoader     ports.BoardSnapshotLoader
+	watermarkLoader    ports.BoardWatermarkLoader
 	clock              clock.Clock
 }
 
@@ -47,11 +52,50 @@ func NewBoardService(issueService *IssueService, attemptService *AttemptService,
 
 // WithSnapshotLoader configures an optional single-snapshot loader so
 // GetBoard reads every board section and attempt gate in one snapshot.
+// When loader also implements ports.BoardWatermarkLoader, it is used for
+// fast change-detection watermarks unless overridden by WithWatermarkLoader.
 func (service *BoardService) WithSnapshotLoader(loader ports.BoardSnapshotLoader) *BoardService {
 	if service != nil {
 		service.snapshotLoader = loader
+		if watermarkLoader, ok := loader.(ports.BoardWatermarkLoader); ok {
+			service.watermarkLoader = watermarkLoader
+		} else {
+			service.watermarkLoader = nil
+		}
 	}
 	return service
+}
+
+// WithWatermarkLoader configures an optional lightweight watermark loader used
+// by GetBoardWatermark to detect board state changes without full snapshots.
+func (service *BoardService) WithWatermarkLoader(loader ports.BoardWatermarkLoader) *BoardService {
+	if service != nil {
+		service.watermarkLoader = loader
+	}
+	return service
+}
+
+// GetBoardWatermark returns an opaque board state watermark suitable for live
+// change detection. When no lightweight watermark loader is configured, it
+// computes a deterministic digest from GetBoard ignoring GeneratedAt.
+func (service *BoardService) GetBoardWatermark(ctx context.Context) (string, error) {
+	if service == nil {
+		return "", domain.NewError(domain.CodeStorageConfiguration, "board service is required", false)
+	}
+	if service.watermarkLoader != nil {
+		return service.watermarkLoader.LoadBoardWatermark(ctx)
+	}
+	result, err := service.GetBoard(ctx)
+	if err != nil {
+		return "", err
+	}
+	result.GeneratedAt = time.Time{}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // GetBoard returns the current bounded status board: issue counts by

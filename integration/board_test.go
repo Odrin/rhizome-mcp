@@ -471,6 +471,105 @@ func TestIntegrationBoardServe(t *testing.T) {
 	}
 }
 
+func TestIntegrationBoardServeSSE(t *testing.T) {
+	t.Parallel()
+	env := newIntegrationEnvironment(t)
+	session := env.connect(t)
+	_ = mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Initial SSE issue", "status": "ready",
+	})
+
+	server := launchIntegrationBoardServer(t, env, "127.0.0.1:0")
+	t.Cleanup(func() { stopIntegrationBoardServer(t, server) })
+	endpoint := strings.TrimSuffix(server.waitForEndpoint(t), "/")
+
+	headReq, err := http.NewRequest(http.MethodHead, endpoint+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("construct HEAD /api/events: %v", err)
+	}
+	headResp, err := (&http.Client{Timeout: integrationTimeout}).Do(headReq)
+	if err != nil {
+		t.Fatalf("HEAD /api/events: %v", err)
+	}
+	headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /api/events status = %d, want %d", headResp.StatusCode, http.StatusOK)
+	}
+	if ct := headResp.Header.Get("Content-Type"); ct != "text/event-stream; charset=utf-8" {
+		t.Fatalf("HEAD Content-Type = %q, want text/event-stream; charset=utf-8", ct)
+	}
+
+	sseCtx, cancelSSE := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancelSSE()
+	sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, endpoint+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("construct GET /api/events: %v", err)
+	}
+	sseResp, err := (&http.Client{}).Do(sseReq)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer sseResp.Body.Close()
+	if sseResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/events status = %d, want %d", sseResp.StatusCode, http.StatusOK)
+	}
+
+	chunks := make(chan string, 16)
+	go func() {
+		defer close(chunks)
+		reader := bufio.NewReader(sseResp.Body)
+		var buf strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				buf.WriteString(line)
+				if line == "\n" {
+					chunks <- buf.String()
+					buf.Reset()
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	waitChunk := func(substr string) {
+		t.Helper()
+		timer := time.NewTimer(integrationTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case chunk, ok := <-chunks:
+				if !ok {
+					t.Fatalf("SSE stream closed before %q", substr)
+				}
+				if strings.Contains(chunk, substr) {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf("timed out waiting for SSE chunk %q", substr)
+			}
+		}
+	}
+
+	waitChunk("retry: 2000\n")
+	waitChunk("event: ready\n")
+
+	_ = mustCreateBoardIssue(t, session, map[string]any{
+		"type": "task", "title": "Cross-process SSE trigger", "status": "open",
+	})
+	waitChunk("event: board_changed\n")
+
+	cancelSSE()
+	_ = sseResp.Body.Close()
+
+	stopIntegrationBoardServer(t, server)
+	if err := server.waitForExit(t); err != nil {
+		t.Fatalf("wait for board server exit: %v", err)
+	}
+}
+
 func TestIntegrationBoardServeSearch(t *testing.T) {
 	t.Parallel()
 	env := newIntegrationEnvironment(t)

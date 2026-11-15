@@ -27,17 +27,30 @@ All routes are GET/HEAD only. Any other HTTP method returns 405 Method Not Allow
 - **`GET /search`** — HTML search page (issue search and snippet results)
 - **`GET /issues/{id}`** — HTML issue-detail page (including attempts, activities, notes, and related issues)
 - **`GET /api/board`** — JSON board data (supports ETag / If-None-Match for conditional refresh)
+- **`GET /api/events`** — Server-Sent Events (`text/event-stream; charset=utf-8`) live-update stream (`HEAD /api/events` returns headers with `200 OK` and no body)
 - **`GET /api/search`** — JSON search results. Query parameters: `q` (required; omitting it returns 400), `entity_type`, `limit`, `cursor`, `snippet_length`, `include_archived`. Any other query parameter is rejected.
 - **`GET /api/issues/{id}`** — JSON issue detail (supports ETag / If-None-Match). The bare `/api/issues` path reaches the same handler but has no issue to resolve and returns 404.
 - Anything else — 404 Not Found
 
-If the underlying board service is unavailable, all routes return 503 Service Unavailable with body `service unavailable`.
+If the underlying board service is unavailable, all routes return 503 Service Unavailable with body `service unavailable` (omitting the body for `HEAD` requests).
 
-## 4. ETag and If-None-Match semantics
+## 4. Live updates (SSE), ETag semantics, and polling fallback
+
+### Server-Sent Events (`GET /api/events`)
+
+- **Security and transport headers**: Inherits all board HTTP security headers (`Content-Security-Policy` including `connect-src 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`), runtime loopback/Host/Origin checks, `405 Method Not Allowed` (`Allow: GET, HEAD`) for non-GET/HEAD methods, and `503 Service Unavailable` when the board service is nil. SSE responses additionally set `Content-Type: text/event-stream; charset=utf-8` and `X-Accel-Buffering: no`.
+- **Deadline handling**: `GET /api/events` clears the per-request write deadline via `http.ResponseController.SetWriteDeadline(time.Time{})` (ignoring `http.ErrNotSupported`) so the server's `30s` `WriteTimeout` does not close idle streams.
+- **Events**:
+  - Initial flush on stream open: `retry: 2000` followed by `event: ready` with JSON payload `{"watermark":"<digest>"}`.
+  - Change notifications: polls a single-snapshot SQLite watermark (`PRAGMA data_version` combined with board-visible table watermarks across `issue_events`, `gate_evidence_events`, `workflow_policy_events`, `issues`, `work_attempts`, `resource_reservations`, `review_requests`, and related board tables) at a default `500ms` cadence—falling back to a semantic `GetBoard` ETag digest if the service does not implement `BoardWatermarkProvider`—and emits `event: board_changed` with `{"watermark":"<digest>"}` whenever the watermark changes.
+  - Keepalive: emits `: keepalive` comment lines every `15s` of stream inactivity and exits promptly when the request context finishes.
+- **Browser client behavior & fallback**: `BoardLiveClient` subscribes via `EventSource` to `/api/events`, pauses timer-based polling while SSE is healthy, and triggers an immediate conditional refresh on `board_changed`. If `EventSource` is unavailable or encounters `error`, it marks status stale and falls back gracefully to periodic `intervalMs` polling with exponential backoff until SSE reconnects (`open`/`ready`).
+
+### ETag and If-None-Match semantics
 
 ETags on `/api/board` and `/api/issues/{id}` are semantic, derived from the response content itself, not from timestamps or version counters. An unchanged board therefore yields byte-identical ETags and content.
 
-A conditional request with an `If-None-Match` header matching the current ETag returns `304 Not Modified` with no body. This makes polling for board updates safe: if content has not changed, the response carries no data and the client's parse burden is zero.
+A conditional request with an `If-None-Match` header matching the current ETag returns `304 Not Modified` with no body. This makes both SSE-triggered refreshes and fallback polling safe: if content has not changed, the response carries no data and the client's parse burden is zero.
 
 ## 5. HTTP method, Host, Origin and CSP posture
 

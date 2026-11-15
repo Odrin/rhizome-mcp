@@ -16,10 +16,22 @@
       this.domParserImpl = options.DOMParser || DOMParser;
       this.endpoint = options.endpoint || "/api/board";
       this.pageRoute = options.pageRoute || "/";
+      this.eventsEndpoint = options.eventsEndpoint !== undefined && options.eventsEndpoint !== null
+        ? options.eventsEndpoint
+        : ((root && typeof root.getAttribute === "function" && root.getAttribute("data-board-events-endpoint")) || "/api/events");
+      const windowEventSource = this.windowImpl && typeof this.windowImpl.EventSource === "function"
+        ? this.windowImpl.EventSource
+        : null;
+      this.eventSourceImpl = options.EventSource !== undefined
+        ? options.EventSource
+        : (windowEventSource || (typeof EventSource === "function" ? EventSource : null));
       this.intervalMs = options.intervalMs || 15000;
       this.backoffMs = options.backoffMs || 1000;
       this.maxBackoffMs = options.maxBackoffMs || 30000;
       this.timer = null;
+      this.eventSource = null;
+      this.sseConnected = false;
+      this.listenersBound = false;
       this.etag = options.etag || "";
       this.lastSuccessfulRefreshAt = null;
       this.staleStatus = null;
@@ -30,23 +42,118 @@
 
     start(){
       this.stop();
-      this.schedule();
-      this.documentImpl.addEventListener("visibilitychange", this.handleVisibilityChange);
-      this.windowImpl.addEventListener("pagehide", this.handlePageHide);
+      if (!this.listenersBound) {
+        this.documentImpl.addEventListener("visibilitychange", this.handleVisibilityChange);
+        this.windowImpl.addEventListener("pagehide", this.handlePageHide);
+        this.listenersBound = true;
+      }
+      if (!this.isHidden) {
+        if (!this.connectEvents()) {
+          this.schedule();
+        }
+      }
     }
 
-    stop(){
+    clearTimer(){
       if (this.timer !== null) {
         this.clearTimeoutImpl(this.timer);
         this.timer = null;
       }
     }
 
+    closeEvents(){
+      const es = this.eventSource;
+      this.eventSource = null;
+      this.sseConnected = false;
+      if (es && typeof es.close === "function") {
+        es.close();
+      }
+    }
+
+    stop(){
+      this.clearTimer();
+      this.closeEvents();
+    }
+
+    close(){
+      this.stop();
+    }
+
+    connectEvents(){
+      if (this.isHidden || !this.eventSourceImpl || !this.eventsEndpoint) {
+        return false;
+      }
+      if (this.eventSource) {
+        return true;
+      }
+      let es = null;
+      try {
+        es = new this.eventSourceImpl(this.eventsEndpoint);
+      } catch (error) {
+        this.eventSource = null;
+        this.sseConnected = false;
+        return false;
+      }
+      this.eventSource = es;
+      this.sseConnected = false;
+
+      const onHealthy = () => {
+        if (this.eventSource !== es) {
+          return;
+        }
+        this.sseConnected = true;
+        this.clearTimer();
+        this.clearStale();
+        this.backoffMs = 1000;
+      };
+
+      const onBoardChanged = () => {
+        if (this.eventSource !== es) {
+          return;
+        }
+        this.sseConnected = true;
+        this.clearTimer();
+        this.clearStale();
+        this.backoffMs = 1000;
+        this.refresh(true);
+      };
+
+      const onError = () => {
+        if (this.eventSource !== es) {
+          return;
+        }
+        this.sseConnected = false;
+        if (es.readyState === 2) {
+          this.closeEvents();
+        }
+        this.markStale();
+        if (!this.isHidden && this.timer === null) {
+          this.scheduleWithBackoff();
+        }
+      };
+
+      if (typeof es.addEventListener === "function") {
+        es.addEventListener("open", onHealthy);
+        es.addEventListener("ready", onHealthy);
+        es.addEventListener("board_changed", onBoardChanged);
+        es.addEventListener("error", onError);
+      } else {
+        es.onopen = onHealthy;
+        es.onmessage = onBoardChanged;
+        es.onerror = onError;
+      }
+      return true;
+    }
+
     schedule(){
-      if (this.isHidden) {
+      if (this.isHidden || this.sseConnected) {
         return;
       }
-      this.timer = this.setTimeoutImpl(() => this.refresh(false), this.intervalMs);
+      this.clearTimer();
+      this.timer = this.setTimeoutImpl(() => {
+        this.timer = null;
+        this.refresh(false);
+      }, this.intervalMs);
     }
 
     handleVisibilityChange = () => {
@@ -56,6 +163,7 @@
         return;
       }
       this.isHidden = false;
+      this.connectEvents();
       this.refresh(true);
     };
 
@@ -148,12 +256,19 @@
     }
 
     scheduleWithBackoff(){
+      if (this.isHidden || this.sseConnected) {
+        return;
+      }
+      this.clearTimer();
       const baseDelay = this.backoffMs;
       const nextBackoff = Math.min(baseDelay * 2, this.maxBackoffMs);
       const jitter = Math.max(0, Math.min(1, this.randomImpl()));
       const delay = nextBackoff * (0.75 + jitter * 0.5);
       this.backoffMs = nextBackoff;
-      this.timer = this.setTimeoutImpl(() => this.refresh(false), delay);
+      this.timer = this.setTimeoutImpl(() => {
+        this.timer = null;
+        this.refresh(false);
+      }, delay);
     }
 
     renderStaleStatus(){
@@ -185,7 +300,8 @@
   if (root) {
     const endpoint = root.getAttribute("data-board-endpoint") || "/api/board";
     const pageRoute = root.getAttribute("data-board-route") || "/";
-    const client = new BoardLiveClient(root, {endpoint: endpoint, pageRoute: pageRoute, intervalMs: 15000});
+    const eventsEndpoint = root.getAttribute("data-board-events-endpoint") || "/api/events";
+    const client = new BoardLiveClient(root, {endpoint: endpoint, pageRoute: pageRoute, eventsEndpoint: eventsEndpoint, intervalMs: 15000});
     window.__rhizomeBoardLiveClient = client;
   }
 

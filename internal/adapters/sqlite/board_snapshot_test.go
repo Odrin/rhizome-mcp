@@ -590,3 +590,222 @@ func TestBoardSnapshotRepositoryGetIssueDetailConsistentUnderConcurrentWriters(t
 		}
 	})
 }
+
+func TestBoardSnapshotRepositoryLoadBoardWatermark(t *testing.T) {
+	t.Run("nil repository returns configuration error", func(t *testing.T) {
+		var nilRepo *sqlite.BoardSnapshotRepository
+		_, err := nilRepo.LoadBoardWatermark(context.Background())
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStorageConfiguration {
+			t.Fatalf("nil LoadBoardWatermark error = %v, want code %s", err, domain.CodeStorageConfiguration)
+		}
+	})
+
+	db, dbPath, now, fakeClock, bundle := openBoardSnapshotFixture(t)
+	ctx := context.Background()
+	repo, err := sqlite.NewBoardSnapshotRepository(db)
+	if err != nil {
+		t.Fatalf("NewBoardSnapshotRepository() error = %v", err)
+	}
+
+	assertStableWatermark := func(t *testing.T, want string) {
+		t.Helper()
+		for i := range 6 {
+			if i%2 == 1 {
+				if _, err := repo.LoadBoardSnapshot(ctx, fakeClock.Now().UTC()); err != nil {
+					t.Fatalf("LoadBoardSnapshot() error = %v", err)
+				}
+			}
+			got, err := repo.LoadBoardWatermark(ctx)
+			if err != nil {
+				t.Fatalf("LoadBoardWatermark() call %d error = %v", i, err)
+			}
+			if got != want {
+				t.Fatalf("LoadBoardWatermark() call %d = %q, want stable %q", i, got, want)
+			}
+		}
+	}
+
+	w0, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w0 == "" {
+		t.Fatalf("initial LoadBoardWatermark() = %q, err=%v", w0, err)
+	}
+	assertStableWatermark(t, w0)
+
+	if _, err := bundle.WorkflowPolicyService.CreatePolicy(ctx, domain.WorkflowPolicyInput{
+		Selector: domain.PolicySelectorInput{IssueTypes: []domain.Type{domain.TypeTask}},
+		Requirements: []domain.PolicyRequirementInput{
+			{Key: "tests", Kind: domain.RequirementKindAttemptEvidence, EvidenceKey: "tests"},
+		},
+	}, nil, ""); err != nil {
+		t.Fatalf("CreatePolicy() error = %v", err)
+	}
+	wPolicy, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || wPolicy == w0 {
+		t.Fatalf("after CreatePolicy watermark = %q (want != %q), err=%v", wPolicy, w0, err)
+	}
+	assertStableWatermark(t, wPolicy)
+
+	issue, err := bundle.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Watermark Issue", Status: domain.StatusReady, Priority: domain.PriorityHigh,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	w1, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w1 == wPolicy {
+		t.Fatalf("after CreateIssue watermark = %q (want != %q), err=%v", w1, wPolicy, err)
+	}
+	assertStableWatermark(t, w1)
+
+	claim, err := bundle.AttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
+		IssueID:   issue.ID,
+		Resources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "watermark.go"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimIssue() error = %v", err)
+	}
+	w2, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w2 == w1 {
+		t.Fatalf("after ClaimIssue watermark = %q (want != %q), err=%v", w2, w1, err)
+	}
+	assertStableWatermark(t, w2)
+
+	fakeClock.Advance(time.Second)
+	if _, err := bundle.AttemptService.RenewAttempt(ctx, domain.RenewAttemptInput{
+		AttemptID:  claim.Attempt.ID,
+		LeaseToken: claim.LeaseToken,
+	}); err != nil {
+		t.Fatalf("RenewAttempt() error = %v", err)
+	}
+	w3, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w3 == w2 {
+		t.Fatalf("after RenewAttempt watermark = %q (want != %q), err=%v", w3, w2, err)
+	}
+	assertStableWatermark(t, w3)
+
+	if _, err := bundle.AttemptService.SubmitGateEvidence(ctx, domain.SubmitGateEvidenceInput{
+		AttemptID: claim.Attempt.ID, LeaseToken: claim.LeaseToken, Key: "tests", Result: domain.EvidenceResultSatisfied, Summary: "ok",
+	}); err != nil {
+		t.Fatalf("SubmitGateEvidence() error = %v", err)
+	}
+	w4, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w4 == w3 {
+		t.Fatalf("after SubmitGateEvidence watermark = %q (want != %q), err=%v", w4, w3, err)
+	}
+	assertStableWatermark(t, w4)
+
+	reviewTarget, err := bundle.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeBug, Title: "Watermark Review Bug", Status: domain.StatusReview, Priority: domain.PriorityMedium,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(review) error = %v", err)
+	}
+	reviewEventID := latestEventIDForIssue(t, db, reviewTarget.ID)
+	if _, err := bundle.ReviewService.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID: reviewTarget.ID, TargetIssueVersion: reviewTarget.Issue.Version, TargetEventID: reviewEventID,
+	}); err != nil {
+		t.Fatalf("CreateReviewRequest() error = %v", err)
+	}
+	w5, err := repo.LoadBoardWatermark(ctx)
+	if err != nil || w5 == w4 {
+		t.Fatalf("after CreateReviewRequest watermark = %q (want != %q), err=%v", w5, w4, err)
+	}
+	assertStableWatermark(t, w5)
+
+	t.Run("external process write caught via PRAGMA data_version", func(t *testing.T) {
+		extDB, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatalf("sql.Open() error = %v", err)
+		}
+		defer extDB.Close()
+
+		// Mutate only title without changing version/updated_at/events so PRAGMA data_version
+		// itself is proven to change the watermark when an external writer commits.
+		if _, err := extDB.ExecContext(ctx, `UPDATE issues SET title = 'Externally Updated Title' WHERE id = ?`, issue.ID); err != nil {
+			t.Fatalf("external UPDATE error = %v", err)
+		}
+		wExt, err := repo.LoadBoardWatermark(ctx)
+		if err != nil || wExt == w5 {
+			t.Fatalf("after external write watermark = %q (want != %q), err=%v", wExt, w5, err)
+		}
+	})
+
+	t.Run("single pool connection does not deadlock subsequent writes", func(t *testing.T) {
+		sqlite.SetPoolMaxOpenConnsForTest(db, 1)
+
+		wBefore, err := repo.LoadBoardWatermark(ctx)
+		if err != nil {
+			t.Fatalf("LoadBoardWatermark() single-conn error = %v", err)
+		}
+		if _, err := bundle.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
+			Type: domain.TypeTask, Title: "Single Pool Conn Task", Status: domain.StatusOpen, Priority: domain.PriorityLow,
+		}); err != nil {
+			t.Fatalf("CreateIssue() after LoadBoardWatermark error = %v", err)
+		}
+		wAfter, err := repo.LoadBoardWatermark(ctx)
+		if err != nil || wAfter == wBefore {
+			t.Fatalf("single-conn after write watermark = %q (want != %q), err=%v", wAfter, wBefore, err)
+		}
+		_ = now
+	})
+}
+
+func TestBoardServiceGetBoardWatermark(t *testing.T) {
+	t.Run("nil service returns error", func(t *testing.T) {
+		var nilService *application.BoardService
+		_, err := nilService.GetBoardWatermark(context.Background())
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeStorageConfiguration {
+			t.Fatalf("nil GetBoardWatermark error = %v, want code %s", err, domain.CodeStorageConfiguration)
+		}
+	})
+
+	db, _, _, fakeClock, bundle := openBoardSnapshotFixture(t)
+	ctx := context.Background()
+	repo, err := sqlite.NewBoardSnapshotRepository(db)
+	if err != nil {
+		t.Fatalf("NewBoardSnapshotRepository() error = %v", err)
+	}
+
+	service, err := application.NewBoardService(
+		bundle.IssueService, bundle.AttemptService, bundle.ReservationService,
+		bundle.ReviewService, bundle.GraphService, bundle.WorkflowPolicyService, fakeClock,
+	)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+
+	// Fallback path without snapshot/watermark loader computes deterministic GetBoard digest
+	// ignoring clock ticks (GeneratedAt).
+	fallbackW0, err := service.GetBoardWatermark(ctx)
+	if err != nil || fallbackW0 == "" {
+		t.Fatalf("fallback GetBoardWatermark() = %q, err=%v", fallbackW0, err)
+	}
+	fakeClock.Advance(5 * time.Minute)
+	fallbackW1, err := service.GetBoardWatermark(ctx)
+	if err != nil || fallbackW1 != fallbackW0 {
+		t.Fatalf("fallback watermark drifted across clock advance: %q vs %q, err=%v", fallbackW1, fallbackW0, err)
+	}
+
+	if _, err := bundle.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Fallback Digest Mutation", Status: domain.StatusReady, Priority: domain.PriorityMedium,
+	}); err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	fallbackW2, err := service.GetBoardWatermark(ctx)
+	if err != nil || fallbackW2 == fallbackW1 {
+		t.Fatalf("fallback watermark did not change after CreateIssue: %q vs %q, err=%v", fallbackW2, fallbackW1, err)
+	}
+
+	// Snapshot/watermark loader path via WithSnapshotLoader.
+	service.WithSnapshotLoader(repo)
+	repoW0, err := repo.LoadBoardWatermark(ctx)
+	if err != nil {
+		t.Fatalf("repo.LoadBoardWatermark() error = %v", err)
+	}
+	serviceW0, err := service.GetBoardWatermark(ctx)
+	if err != nil || serviceW0 != repoW0 {
+		t.Fatalf("service.GetBoardWatermark() = %q, want %q, err=%v", serviceW0, repoW0, err)
+	}
+}

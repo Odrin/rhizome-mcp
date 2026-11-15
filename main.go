@@ -657,6 +657,13 @@ func (service boardServeService) GetBoard(ctx context.Context) (domain.BoardResu
 	return service.boardService.GetBoard(ctx)
 }
 
+func (service boardServeService) GetBoardWatermark(ctx context.Context) (string, error) {
+	if service.boardService == nil {
+		return "", errors.New("board service is not configured")
+	}
+	return service.boardService.GetBoardWatermark(ctx)
+}
+
 func (service boardServeService) GetIssueDetail(ctx context.Context, identifier string) (domain.IssueDetail, error) {
 	if service.issueDetailService == nil {
 		return domain.IssueDetail{}, errors.New("issue detail service is not configured")

@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ids"
 	"rhizome-mcp/internal/migrations"
+	projectruntime "rhizome-mcp/internal/runtime"
 )
 
 func TestBoardHTTPHandlerRejectsUnsupportedMethodsAndUnknownRoutes(t *testing.T) {
@@ -1059,4 +1064,615 @@ func TestBoardHTTPHandlerServesArchivedIssueDetailWithSQLiteIssueDetailService(t
 
 func boardResultFixture() domain.BoardResult {
 	return domain.BoardResult{GeneratedAt: time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC), StatusCounts: []domain.EffectiveStatusCount{{EffectiveStatus: domain.EffectiveStatusOpen, Count: 1}}}
+}
+
+type sseFallbackBoardService struct {
+	mu    sync.Mutex
+	board domain.BoardResult
+	err   error
+}
+
+func (s *sseFallbackBoardService) GetBoard(_ context.Context) (domain.BoardResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.board, s.err
+}
+
+func (s *sseFallbackBoardService) SetBoard(board domain.BoardResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.board = board
+}
+
+func (s *sseFallbackBoardService) GetIssueDetail(_ context.Context, _ string) (domain.IssueDetail, error) {
+	return domain.IssueDetail{}, nil
+}
+
+func (s *sseFallbackBoardService) Search(_ context.Context, _ domain.SearchInput) (domain.SearchPage, error) {
+	return domain.SearchPage{}, nil
+}
+
+type sseWatermarkBoardService struct {
+	sseFallbackBoardService
+	wmMu      sync.Mutex
+	watermark string
+	wmErr     error
+}
+
+func (s *sseWatermarkBoardService) GetBoardWatermark(_ context.Context) (string, error) {
+	s.wmMu.Lock()
+	defer s.wmMu.Unlock()
+	return s.watermark, s.wmErr
+}
+
+func (s *sseWatermarkBoardService) SetWatermark(watermark string) {
+	s.wmMu.Lock()
+	defer s.wmMu.Unlock()
+	s.watermark = watermark
+}
+
+type sqliteBoardSSEHTTPService struct {
+	boardService *application.BoardService
+}
+
+func (s sqliteBoardSSEHTTPService) GetBoard(ctx context.Context) (domain.BoardResult, error) {
+	return s.boardService.GetBoard(ctx)
+}
+
+func (s sqliteBoardSSEHTTPService) GetBoardWatermark(ctx context.Context) (string, error) {
+	return s.boardService.GetBoardWatermark(ctx)
+}
+
+func (s sqliteBoardSSEHTTPService) GetIssueDetail(_ context.Context, _ string) (domain.IssueDetail, error) {
+	return domain.IssueDetail{}, nil
+}
+
+func (s sqliteBoardSSEHTTPService) Search(_ context.Context, _ domain.SearchInput) (domain.SearchPage, error) {
+	return domain.SearchPage{}, nil
+}
+
+type sseDeadlineRecorderWriter struct {
+	*httptest.ResponseRecorder
+	mu            sync.Mutex
+	deadlineCalls []time.Time
+	deadlineErr   error
+}
+
+func (w *sseDeadlineRecorderWriter) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadlineCalls = append(w.deadlineCalls, deadline)
+	return w.deadlineErr
+}
+
+type sseFailingResponseWriter struct {
+	header          http.Header
+	status          int
+	writes          int
+	failAfterWrites int
+}
+
+func (w *sseFailingResponseWriter) Header() http.Header  { return w.header }
+func (w *sseFailingResponseWriter) WriteHeader(code int) { w.status = code }
+func (w *sseFailingResponseWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes >= w.failAfterWrites {
+		return 0, errors.New("write failed")
+	}
+	return len(p), nil
+}
+
+func startSSEChunkReader(t *testing.T, resp *http.Response) <-chan string {
+	t.Helper()
+	chunks := make(chan string, 32)
+	go func() {
+		defer close(chunks)
+		reader := bufio.NewReader(resp.Body)
+		var buf strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				buf.WriteString(line)
+				if line == "\n" {
+					chunks <- buf.String()
+					buf.Reset()
+				}
+			}
+			if err != nil {
+				if buf.Len() > 0 {
+					chunks <- buf.String()
+				}
+				return
+			}
+		}
+	}()
+	return chunks
+}
+
+func waitForSSEChunk(t *testing.T, chunks <-chan string, substr string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				t.Fatalf("SSE stream closed before observing %q", substr)
+			}
+			if strings.Contains(chunk, substr) {
+				return chunk
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for SSE chunk containing %q", substr)
+		}
+	}
+}
+
+func TestBoardHTTPHandlerEventsHeadersMethodAndServiceUnavailable(t *testing.T) {
+	t.Run("nil board service returns 503 with security headers", func(t *testing.T) {
+		handler := NewBoardHTTPHandler(nil)
+
+		getRec := httptest.NewRecorder()
+		handler.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+		if getRec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET /api/events status = %d, want %d", getRec.Code, http.StatusServiceUnavailable)
+		}
+		if got := getRec.Body.String(); got != "service unavailable" {
+			t.Fatalf("GET /api/events body = %q, want %q", got, "service unavailable")
+		}
+		if csp := getRec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "connect-src 'self'") {
+			t.Fatalf("missing CSP connect-src 'self': %q", csp)
+		}
+
+		headRec := httptest.NewRecorder()
+		handler.ServeHTTP(headRec, httptest.NewRequest(http.MethodHead, "/api/events", nil))
+		if headRec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("HEAD /api/events status = %d, want %d", headRec.Code, http.StatusServiceUnavailable)
+		}
+		if headRec.Body.Len() != 0 {
+			t.Fatalf("HEAD /api/events body = %q, want empty", headRec.Body.String())
+		}
+	})
+
+	service := &sseWatermarkBoardService{watermark: "wm-head"}
+	handler := NewBoardHTTPHandler(service)
+
+	t.Run("HEAD returns SSE headers without body", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/api/events", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD /api/events status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("HEAD /api/events body = %q, want empty", rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != "text/event-stream; charset=utf-8" {
+			t.Fatalf("Content-Type = %q, want text/event-stream; charset=utf-8", got)
+		}
+		if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+			t.Fatalf("X-Accel-Buffering = %q, want no", got)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+			t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "connect-src 'self'") {
+			t.Fatalf("CSP = %q, want connect-src 'self'", csp)
+		}
+	})
+
+	t.Run("non-GET/HEAD rejected with 405", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/events", nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST /api/events status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+		if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+			t.Fatalf("Allow = %q, want GET, HEAD", allow)
+		}
+	})
+
+	t.Run("runtime wrapper rejects foreign host and cross-origin on /api/events", func(t *testing.T) {
+		wrapped := projectruntime.WrapHTTPHandlerWithBodyLimit(handler, "127.0.0.1:8080", slog.Default(), 0)
+
+		badHostReq := httptest.NewRequest(http.MethodHead, "http://evil.example/api/events", nil)
+		badHostReq.Host = "evil.example"
+		badHostRec := httptest.NewRecorder()
+		wrapped.ServeHTTP(badHostRec, badHostReq)
+		if badHostRec.Code != http.StatusBadRequest {
+			t.Fatalf("foreign Host status = %d, want %d", badHostRec.Code, http.StatusBadRequest)
+		}
+
+		wrongPortReq := httptest.NewRequest(http.MethodHead, "http://127.0.0.1:9999/api/events", nil)
+		wrongPortReq.Host = "127.0.0.1:9999"
+		wrongPortRec := httptest.NewRecorder()
+		wrapped.ServeHTTP(wrongPortRec, wrongPortReq)
+		if wrongPortRec.Code != http.StatusMisdirectedRequest {
+			t.Fatalf("wrong-port Host status = %d, want %d", wrongPortRec.Code, http.StatusMisdirectedRequest)
+		}
+
+		badOriginReq := httptest.NewRequest(http.MethodHead, "http://127.0.0.1:8080/api/events", nil)
+		badOriginReq.Host = "127.0.0.1:8080"
+		badOriginReq.Header.Set("Origin", "https://evil.example")
+		badOriginRec := httptest.NewRecorder()
+		wrapped.ServeHTTP(badOriginRec, badOriginReq)
+		if badOriginRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin status = %d, want %d", badOriginRec.Code, http.StatusForbidden)
+		}
+
+		validReq := httptest.NewRequest(http.MethodHead, "http://127.0.0.1:8080/api/events", nil)
+		validReq.Host = "127.0.0.1:8080"
+		validReq.Header.Set("Origin", "http://127.0.0.1:8080")
+		validRec := httptest.NewRecorder()
+		wrapped.ServeHTTP(validRec, validReq)
+		if validRec.Code != http.StatusOK {
+			t.Fatalf("valid loopback Host+Origin status = %d, want %d", validRec.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("initial watermark error returns 500", func(t *testing.T) {
+		errSvc := &sseWatermarkBoardService{wmErr: errors.New("boom")}
+		errRec := httptest.NewRecorder()
+		NewBoardHTTPHandler(errSvc).ServeHTTP(errRec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+		if errRec.Code != http.StatusInternalServerError {
+			t.Fatalf("initial watermark failure status = %d, want %d", errRec.Code, http.StatusInternalServerError)
+		}
+
+		fallbackErrSvc := &sseFallbackBoardService{err: errors.New("fallback boom")}
+		fallbackErrRec := httptest.NewRecorder()
+		NewBoardHTTPHandler(fallbackErrSvc).ServeHTTP(fallbackErrRec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+		if fallbackErrRec.Code != http.StatusInternalServerError {
+			t.Fatalf("initial fallback GetBoard failure status = %d, want %d", fallbackErrRec.Code, http.StatusInternalServerError)
+		}
+
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		canceledRec := httptest.NewRecorder()
+		NewBoardHTTPHandler(errSvc).ServeHTTP(canceledRec, httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(canceledCtx))
+	})
+
+	t.Run("defaults non-positive options, handles transient poll errors, and exits on write error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		rec := &sseFailingResponseWriter{header: make(http.Header)}
+		rec.failAfterWrites = 1
+		newBoardHTTPHandlerWithOptions(service, boardHTTPOptions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx))
+		cancel()
+
+		svc := &sseWatermarkBoardService{watermark: "wm-a"}
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		rec2 := &sseDeadlineRecorderWriter{ResponseRecorder: httptest.NewRecorder()}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			newBoardHTTPHandlerWithOptions(svc, boardHTTPOptions{
+				pollInterval:      5 * time.Millisecond,
+				keepaliveInterval: time.Second,
+			}).ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(streamCtx))
+		}()
+		time.Sleep(15 * time.Millisecond)
+		svc.wmMu.Lock()
+		svc.wmErr = errors.New("transient")
+		svc.wmMu.Unlock()
+		time.Sleep(15 * time.Millisecond)
+		svc.wmMu.Lock()
+		svc.wmErr = nil
+		svc.watermark = "wm-b"
+		svc.wmMu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		streamCancel()
+		<-done
+		if !strings.Contains(rec2.Body.String(), `"wm-b"`) {
+			t.Fatalf("SSE body after transient error recovery = %q, want wm-b", rec2.Body.String())
+		}
+	})
+
+	t.Run("clears write deadline with zero time on ResponseController writer", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+		rec := &sseDeadlineRecorderWriter{ResponseRecorder: httptest.NewRecorder()}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			newBoardHTTPHandlerWithOptions(service, boardHTTPOptions{
+				pollInterval:      5 * time.Millisecond,
+				keepaliveInterval: time.Second,
+			}).ServeHTTP(rec, req)
+		}()
+		time.Sleep(25 * time.Millisecond)
+		cancel()
+		<-done
+
+		rec.mu.Lock()
+		calls := append([]time.Time(nil), rec.deadlineCalls...)
+		rec.mu.Unlock()
+		if len(calls) != 1 || !calls[0].IsZero() {
+			t.Fatalf("SetWriteDeadline calls = %v, want single zero time", calls)
+		}
+		if !strings.Contains(rec.Body.String(), "retry: 2000\n\nevent: ready\n") {
+			t.Fatalf("SSE initial body = %q, missing retry/ready frames", rec.Body.String())
+		}
+	})
+}
+
+func TestBoardHTTPHandlerEventsSSEStreamingAndFallback(t *testing.T) {
+	t.Run("streams ready, keepalive, board_changed and exits promptly on disconnect", func(t *testing.T) {
+		svc := &sseWatermarkBoardService{watermark: "wm-1"}
+		handlerExited := make(chan struct{}, 4)
+		sseHandler := newBoardHTTPHandlerWithOptions(svc, boardHTTPOptions{
+			pollInterval:      10 * time.Millisecond,
+			keepaliveInterval: 30 * time.Millisecond,
+		})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				select {
+				case handlerExited <- struct{}{}:
+				default:
+				}
+			}()
+			sseHandler.ServeHTTP(w, r)
+		}))
+		defer server.Close()
+
+		reqCtx, cancel := context.WithCancel(context.Background())
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/api/events", nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do GET /api/events: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream; charset=utf-8" {
+			t.Fatalf("Content-Type = %q, want text/event-stream; charset=utf-8", ct)
+		}
+		if xab := resp.Header.Get("X-Accel-Buffering"); xab != "no" {
+			t.Fatalf("X-Accel-Buffering = %q, want no", xab)
+		}
+
+		chunks := startSSEChunkReader(t, resp)
+		waitForSSEChunk(t, chunks, "retry: 2000\n", 2*time.Second)
+		readyChunk := waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+		if !strings.Contains(readyChunk, `"watermark":"wm-1"`) {
+			t.Fatalf("ready chunk = %q, want watermark wm-1", readyChunk)
+		}
+
+		keepaliveChunk := waitForSSEChunk(t, chunks, ": keepalive\n", 2*time.Second)
+		if keepaliveChunk != ": keepalive\n\n" {
+			t.Fatalf("keepalive chunk = %q, want ': keepalive\\n\\n'", keepaliveChunk)
+		}
+
+		svc.SetWatermark("wm-2")
+		changedChunk := waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
+		if !strings.Contains(changedChunk, `"watermark":"wm-2"`) {
+			t.Fatalf("board_changed chunk = %q, want watermark wm-2", changedChunk)
+		}
+
+		cancel()
+		select {
+		case <-handlerExited:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SSE handler did not exit promptly after client disconnect")
+		}
+	})
+
+	t.Run("falls back to semanticBoardETag when BoardWatermarkProvider is unimplemented", func(t *testing.T) {
+		svc := &sseFallbackBoardService{board: boardResultFixture()}
+		server := httptest.NewServer(newBoardHTTPHandlerWithOptions(svc, boardHTTPOptions{
+			pollInterval:      10 * time.Millisecond,
+			keepaliveInterval: time.Second,
+		}))
+		defer server.Close()
+
+		reqCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/api/events", nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do GET /api/events: %v", err)
+		}
+		defer resp.Body.Close()
+
+		chunks := startSSEChunkReader(t, resp)
+		readyChunk := waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+		wantReadyWM := strings.Trim(semanticBoardETag(boardResultFixture()), `"`)
+		if !strings.Contains(readyChunk, wantReadyWM) {
+			t.Fatalf("fallback ready chunk = %q, want semantic ETag %q", readyChunk, wantReadyWM)
+		}
+
+		updatedBoard := boardResultFixture()
+		updatedBoard.StatusCounts[0].Count = 4
+		svc.SetBoard(updatedBoard)
+
+		changedChunk := waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
+		wantUpdatedWM := strings.Trim(semanticBoardETag(updatedBoard), `"`)
+		if !strings.Contains(changedChunk, wantUpdatedWM) {
+			t.Fatalf("fallback board_changed chunk = %q, want semantic ETag %q", changedChunk, wantUpdatedWM)
+		}
+	})
+}
+
+func TestBoardHTTPHandlerEventsSurvivesServeHTTPServerWriteTimeout(t *testing.T) {
+	svc := &sseWatermarkBoardService{watermark: "wt-1"}
+	sseHandler := newBoardHTTPHandlerWithOptions(svc, boardHTTPOptions{
+		pollInterval:      10 * time.Millisecond,
+		keepaliveInterval: 25 * time.Millisecond,
+	})
+
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- projectruntime.ServeHTTPServer(serverCtx, projectruntime.HTTPServerOptions{
+			Address:         "127.0.0.1:0",
+			Logger:          slog.Default(),
+			Handler:         sseHandler,
+			WriteTimeout:    60 * time.Millisecond,
+			ShutdownTimeout: time.Second,
+			OnListener: func(l net.Listener) {
+				addrCh <- l.Addr().String()
+			},
+		})
+	}()
+
+	addr := <-addrCh
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+addr+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	chunks := startSSEChunkReader(t, resp)
+	waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+
+	// Wait longer than WriteTimeout (60ms) so an uncleared write deadline would kill the stream.
+	time.Sleep(150 * time.Millisecond)
+
+	svc.SetWatermark("wt-2")
+	changedChunk := waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
+	if !strings.Contains(changedChunk, `"watermark":"wt-2"`) {
+		t.Fatalf("post-WriteTimeout board_changed chunk = %q, want watermark wt-2", changedChunk)
+	}
+
+	reqCancel()
+	serverCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ServeHTTPServer() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestBoardHTTPHandlerEventsWithSQLiteMutation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	source := clock.NewFakeClock(now)
+	dbPath := filepath.Join(t.TempDir(), "board-http-sse-sqlite.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close(ctx) })
+	if _, err := migrations.Migrate(ctx, db, source); err != nil {
+		t.Fatalf("migrations.Migrate: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", sqlite.FormatStorageTime(now), sqlite.FormatStorageTime(now))
+		return err
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	generator, err := ids.NewGenerator(source, rand.Reader)
+	if err != nil {
+		t.Fatalf("ids.NewGenerator: %v", err)
+	}
+	issueRepo, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatalf("NewIssueRepository: %v", err)
+	}
+	attemptRepo, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatalf("NewAttemptRepository: %v", err)
+	}
+	reservationRepo, err := sqlite.NewReservationRepository(db)
+	if err != nil {
+		t.Fatalf("NewReservationRepository: %v", err)
+	}
+	reviewRepo, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("NewReviewRepository: %v", err)
+	}
+	graphRepo, err := sqlite.NewGraphRepository(db)
+	if err != nil {
+		t.Fatalf("NewGraphRepository: %v", err)
+	}
+	workflowPolicyRepo, err := sqlite.NewWorkflowPolicyRepository(db)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyRepository: %v", err)
+	}
+	snapshotRepo, err := sqlite.NewBoardSnapshotRepository(db)
+	if err != nil {
+		t.Fatalf("NewBoardSnapshotRepository: %v", err)
+	}
+
+	issueService, err := application.NewIssueService(issueRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewIssueService: %v", err)
+	}
+	attemptService, err := application.NewAttemptService(attemptRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewAttemptService: %v", err)
+	}
+	reservationService, err := application.NewReservationService(reservationRepo)
+	if err != nil {
+		t.Fatalf("NewReservationService: %v", err)
+	}
+	reviewService, err := application.NewReviewService(reviewRepo, issueRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	graphService, err := application.NewGraphService(graphRepo, source)
+	if err != nil {
+		t.Fatalf("NewGraphService: %v", err)
+	}
+	workflowPolicyService, err := application.NewWorkflowPolicyService(workflowPolicyRepo, source, generator)
+	if err != nil {
+		t.Fatalf("NewWorkflowPolicyService: %v", err)
+	}
+	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
+	if err != nil {
+		t.Fatalf("NewBoardService: %v", err)
+	}
+	boardService.WithSnapshotLoader(snapshotRepo)
+
+	server := httptest.NewServer(newBoardHTTPHandlerWithOptions(
+		sqliteBoardSSEHTTPService{boardService: boardService},
+		boardHTTPOptions{pollInterval: 15 * time.Millisecond, keepaliveInterval: 5 * time.Second},
+	))
+	defer server.Close()
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do GET /api/events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/events status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	chunks := startSSEChunkReader(t, resp)
+	waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+
+	if _, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "SSE Triggered Issue", Status: domain.StatusReady, Priority: domain.PriorityHigh,
+	}); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
 }

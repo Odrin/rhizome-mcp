@@ -533,3 +533,240 @@ test("visibility changes stop and restart the refresh loop", async () => {
   harness.document.dispatchEvent("visibilitychange");
   assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 2);
 });
+
+class FakeEventSource {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.closed = false;
+    this.listeners = new Map();
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, []);
+    }
+    this.listeners.get(type).push(fn);
+  }
+  dispatch(type, event = {}) {
+    for (const fn of this.listeners.get(type) || []) {
+      fn(event);
+    }
+  }
+  close() {
+    this.closed = true;
+    this.readyState = 2;
+  }
+}
+FakeEventSource.instances = [];
+
+function createTestRoot(harness, attrs = {}) {
+  const root = new FakeElement("main", { id: "root-main", "data-board-main": "", ...attrs });
+  root.ownerDocument = harness.document;
+  harness.document.children = [root];
+  harness.document.querySelector = (selector) => (selector === "main[data-board-main]" ? root : null);
+  harness.document.querySelectorAll = () => [];
+  return root;
+}
+
+async function flushMicrotasks() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("SSE ready and board_changed pause idle polling and refresh on demand", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({
+    initialTestHooks: {},
+    boardResponses: [
+      { status: 200, ok: true, headers: { get: () => "ETAG-SSE-1" }, text: "<main data-board-main></main>" },
+    ],
+    pageResponses: [
+      { status: 200, ok: true, headers: { get: () => "ETAG-SSE-1" }, text: "<div id=\"sse-updated\"></div>" },
+    ],
+  });
+  harness.window.EventSource = FakeEventSource;
+  const scriptSource = extractBoardLiveRefreshScript();
+  const Client = loadClient(scriptSource, harness);
+  const root = createTestRoot(harness, { "data-board-events-endpoint": "/api/events" });
+  const client = new Client(root, {
+    fetch: harness.fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    random: harness.randomImpl,
+    now: harness.nowImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  assert.equal(FakeEventSource.instances.length, 1);
+  const es = FakeEventSource.instances[0];
+  assert.equal(es.url, "/api/events");
+  assert.equal(harness.timers.size, 0);
+
+  es.readyState = 1;
+  es.dispatch("ready");
+  assert.equal(client.sseConnected, true);
+  assert.equal(client.staleStatus, null);
+  assert.equal(harness.fetchCalls.length, 0);
+
+  client.markStale();
+  es.dispatch("board_changed");
+  await flushMicrotasks();
+
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+  assert.equal(client.staleStatus, null);
+  assert.equal(client.timer, null);
+  assert.equal(harness.timers.size, 0);
+  assert.equal(root.children[0].getAttribute("id"), "sse-updated");
+
+  client.close();
+  assert.equal(es.closed, true);
+  assert.equal(client.eventSource, null);
+  assert.equal(client.timer, null);
+});
+
+test("SSE error falls back to exponential backoff polling until SSE reconnects", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({
+    initialTestHooks: {},
+    boardResponses: [
+      { status: 304, ok: true, headers: { get: () => "ETAG-1" } },
+    ],
+  });
+  const scriptSource = extractBoardLiveRefreshScript();
+  const Client = loadClient(scriptSource, harness);
+  const root = createTestRoot(harness);
+  const client = new Client(root, {
+    eventsEndpoint: "/custom/events",
+    EventSource: FakeEventSource,
+    fetch: harness.fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    random: harness.randomImpl,
+    now: harness.nowImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  const es = FakeEventSource.instances[0];
+  assert.equal(es.url, "/custom/events");
+  es.dispatch("error");
+  assert.equal(client.sseConnected, false);
+  assert.equal(client.staleStatus, "stale");
+  assert.equal(harness.timers.size, 1);
+
+  // Repeated SSE error while fallback timer is already scheduled does not duplicate timers.
+  es.dispatch("error");
+  assert.equal(harness.timers.size, 1);
+
+  // A fallback poll succeeds while SSE is still degraded, restoring normal intervalMs polling.
+  const scheduled = Array.from(harness.timers.values())[0];
+  harness.timers.delete(scheduled.id);
+  scheduled.fn();
+  await flushMicrotasks();
+  assert.equal(client.staleStatus, null);
+  assert.equal(harness.timers.size, 1);
+  assert.equal(harness.timerDelays[harness.timerDelays.length - 1], 15000);
+
+  // When EventSource reconnects, fallback timer is cleared cleanly.
+  es.dispatch("open");
+  assert.equal(client.sseConnected, true);
+  assert.equal(client.timer, null);
+  assert.equal(harness.timers.size, 0);
+
+  client.stop();
+  assert.equal(es.closed, true);
+});
+
+test("SSE closes when page hidden and reconnects with fresh EventSource when visible", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({
+    initialTestHooks: {},
+    boardResponses: [{ status: 304, ok: true, headers: { get: () => "ETAG-1" } }],
+  });
+  const scriptSource = extractBoardLiveRefreshScript();
+  const Client = loadClient(scriptSource, harness);
+  const root = createTestRoot(harness);
+  const client = new Client(root, {
+    EventSource: FakeEventSource,
+    fetch: harness.fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    random: harness.randomImpl,
+    now: harness.nowImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  const firstES = FakeEventSource.instances[0];
+  firstES.dispatch("open");
+
+  harness.document.visibilityState = "hidden";
+  harness.document.dispatchEvent("visibilitychange");
+  assert.equal(firstES.closed, true);
+  assert.equal(client.eventSource, null);
+  assert.equal(client.sseConnected, false);
+
+  // Late events after close must be ignored cleanly.
+  firstES.dispatch("board_changed");
+  assert.equal(harness.fetchCalls.length, 0);
+
+  harness.document.visibilityState = "visible";
+  harness.document.dispatchEvent("visibilitychange");
+  assert.equal(FakeEventSource.instances.length, 2);
+  const secondES = FakeEventSource.instances[1];
+  assert.equal(secondES.closed, false);
+
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+
+  secondES.dispatch("ready");
+  assert.equal(client.timer, null);
+  assert.equal(harness.timers.size, 0);
+});
+
+test("EventSource construction error falls back cleanly to periodic polling", async () => {
+  class ThrowingEventSource {
+    constructor() {
+      throw new Error("blocked");
+    }
+  }
+  const harness = createHarness({ initialTestHooks: {} });
+  const scriptSource = extractBoardLiveRefreshScript();
+  const Client = loadClient(scriptSource, harness);
+  const root = createTestRoot(harness);
+  const client = new Client(root, {
+    EventSource: ThrowingEventSource,
+    fetch: harness.fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    random: harness.randomImpl,
+    now: harness.nowImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  assert.equal(client.eventSource, null);
+  assert.equal(harness.timers.size, 1);
+  assert.equal(harness.timerDelays[0], 15000);
+  client.stop();
+  assert.equal(harness.timers.size, 0);
+});
+
+test("auto-bootstrapped client uses data-board-events-endpoint or /api/events", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({ initialTestHooks: {} });
+  harness.window.EventSource = FakeEventSource;
+  createTestRoot(harness, { "data-board-events-endpoint": "/api/events" });
+  const scriptSource = extractBoardLiveRefreshScript();
+  loadClient(scriptSource, harness);
+
+  assert.equal(FakeEventSource.instances.length, 1);
+  assert.equal(FakeEventSource.instances[0].url, "/api/events");
+  harness.window.__rhizomeBoardLiveClient.stop();
+  assert.equal(FakeEventSource.instances[0].closed, true);
+});

@@ -24,11 +24,41 @@ type BoardHTTPService interface {
 	Search(context.Context, domain.SearchInput) (domain.SearchPage, error)
 }
 
+// BoardWatermarkProvider is optionally implemented by board services that expose
+// a lightweight board watermark for change-detection streams.
+type BoardWatermarkProvider interface {
+	GetBoardWatermark(context.Context) (string, error)
+}
+
+const (
+	defaultBoardSSEPollInterval      = 500 * time.Millisecond
+	defaultBoardSSEKeepaliveInterval = 15 * time.Second
+	boardSSERetryMS                  = 2000
+)
+
+type boardHTTPOptions struct {
+	pollInterval      time.Duration
+	keepaliveInterval time.Duration
+}
+
+func defaultBoardHTTPOptions() boardHTTPOptions {
+	return boardHTTPOptions{
+		pollInterval:      defaultBoardSSEPollInterval,
+		keepaliveInterval: defaultBoardSSEKeepaliveInterval,
+	}
+}
+
 // NewBoardHTTPHandler serves the board as an interactive loopback-only page and JSON API.
 func NewBoardHTTPHandler(boardService BoardHTTPService) http.Handler {
+	return newBoardHTTPHandlerWithOptions(boardService, defaultBoardHTTPOptions())
+}
+
+func newBoardHTTPHandlerWithOptions(boardService BoardHTTPService, opts boardHTTPOptions) http.Handler {
 	if boardService == nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			writeBoardHTTPResponse(w, http.StatusServiceUnavailable, "text/plain; charset=utf-8", []byte("service unavailable"), true)
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			setBoardHTTPHeaders(w)
+			includeBody := request == nil || request.Method != http.MethodHead
+			writeBoardHTTPResponse(w, http.StatusServiceUnavailable, "text/plain; charset=utf-8", []byte("service unavailable"), includeBody)
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -51,6 +81,8 @@ func NewBoardHTTPHandler(boardService BoardHTTPService) http.Handler {
 			serveBoardPage(w, request.Method, boardService, request.Context())
 		case path == "/api/board":
 			serveBoardAPI(w, request.Method, boardService, request.Context(), request.Header.Get("If-None-Match"))
+		case path == "/api/events":
+			serveBoardEventsSSE(w, request, boardService, opts)
 		case path == "/api/search":
 			serveSearchAPI(w, request.Method, boardService, request.Context(), request.URL)
 		case path == "/search":
@@ -517,5 +549,107 @@ func writeBoardHTTPResponse(w http.ResponseWriter, statusCode int, contentType s
 	w.WriteHeader(statusCode)
 	if includeBody && len(body) > 0 {
 		_, _ = w.Write(body)
+	}
+}
+
+type boardSSEWatermarkPayload struct {
+	Watermark string `json:"watermark"`
+}
+
+func resolveBoardHTTPWatermark(ctx context.Context, boardService BoardHTTPService) (string, error) {
+	if provider, ok := boardService.(BoardWatermarkProvider); ok {
+		return provider.GetBoardWatermark(ctx)
+	}
+	result, err := boardService.GetBoard(ctx)
+	if err != nil {
+		return "", err
+	}
+	return strings.Trim(semanticBoardETag(result), `"`), nil
+}
+
+func formatSSEWatermarkEvent(eventName string, watermark string) string {
+	payload, _ := json.Marshal(boardSSEWatermarkPayload{Watermark: watermark})
+	return fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, payload)
+}
+
+func writeAndFlushSSE(w http.ResponseWriter, controller *http.ResponseController, frame string) error {
+	if _, err := w.Write([]byte(frame)); err != nil {
+		return err
+	}
+	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
+}
+
+func serveBoardEventsSSE(w http.ResponseWriter, request *http.Request, boardService BoardHTTPService, opts boardHTTPOptions) {
+	if request.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	pollInterval := opts.pollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultBoardSSEPollInterval
+	}
+	keepaliveInterval := opts.keepaliveInterval
+	if keepaliveInterval <= 0 {
+		keepaliveInterval = defaultBoardSSEKeepaliveInterval
+	}
+
+	ctx := request.Context()
+	currentWatermark, err := resolveBoardHTTPWatermark(ctx, boardService)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte("internal error"), true)
+		return
+	}
+
+	initialFrame := formatSSEWatermarkEvent("ready", currentWatermark)
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Time{})
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	if err := writeAndFlushSSE(w, controller, fmt.Sprintf("retry: %d\n\n%s", boardSSERetryMS, initialFrame)); err != nil {
+		return
+	}
+
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+	keepaliveTicker := time.NewTicker(keepaliveInterval)
+	defer keepaliveTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keepaliveTicker.C:
+			if err := writeAndFlushSSE(w, controller, ": keepalive\n\n"); err != nil {
+				return
+			}
+		case <-pollTicker.C:
+			nextWatermark, err := resolveBoardHTTPWatermark(ctx, boardService)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				continue
+			}
+			if nextWatermark == currentWatermark {
+				continue
+			}
+			if err := writeAndFlushSSE(w, controller, formatSSEWatermarkEvent("board_changed", nextWatermark)); err != nil {
+				return
+			}
+			currentWatermark = nextWatermark
+			keepaliveTicker.Reset(keepaliveInterval)
+		}
 	}
 }
