@@ -86,3 +86,22 @@ type BoardResult struct {
 	PlanningGraph      GraphResult            `json:"planning_graph"`
 	Truncation         BoardTruncation        `json:"truncation"`
 }
+
+// FilterReservationsByActiveAttempts drops any reservation whose owning
+// attempt is not in activeAttempts. resource_reservations.status='active'
+// alone is not sufficient: active attempts additionally require
+// lease_expires_at > now, so an attempt whose lease has expired before sweep
+// still owns active rows.
+func FilterReservationsByActiveAttempts(reservations []Reservation, activeAttempts []ActiveAttemptSummary) []Reservation {
+	attemptIDs := make(map[string]struct{}, len(activeAttempts))
+	for _, attempt := range activeAttempts {
+		attemptIDs[attempt.AttemptID] = struct{}{}
+	}
+	filtered := make([]Reservation, 0, len(reservations))
+	for _, reservation := range reservations {
+		if _, ok := attemptIDs[reservation.AttemptID]; ok {
+			filtered = append(filtered, reservation)
+		}
+	}
+	return filtered
+}

@@ -754,3 +754,77 @@ func TestBoardServiceReservationTruncationIsPreFilter(t *testing.T) {
 
 	// D2 guarantee verified: truncation flag survives the filter and doesn't depend on post-filter length
 }
+
+type stubBoardSnapshotLoader struct {
+	calls  int
+	gotNow time.Time
+	result domain.BoardResult
+	err    error
+}
+
+func (stub *stubBoardSnapshotLoader) LoadBoardSnapshot(_ context.Context, now time.Time) (domain.BoardResult, error) {
+	stub.calls++
+	stub.gotNow = now
+	if stub.err != nil {
+		return domain.BoardResult{}, stub.err
+	}
+	return stub.result, nil
+}
+
+func TestBoardServiceWithSnapshotLoaderDelegatesToSingleSnapshot(t *testing.T) {
+	localNow := time.Date(2026, 8, 25, 13, 0, 0, 0, time.FixedZone("UTC+2", 2*3600))
+	expectedNow := localNow.UTC()
+	fallbackErr := errors.New("unexpected fallback call")
+
+	issueRepo := &boardRecordingIssueRepository{countErr: fallbackErr, listErr: fallbackErr}
+	attemptRepo := &boardRecordingAttemptRepository{listErr: fallbackErr}
+	reservationRepo := &boardRecordingReservationRepository{listErr: fallbackErr}
+	reviewRepo := &boardRecordingReviewRepository{listErr: fallbackErr}
+	graphRepo := &boardRecordingGraphRepository{err: fallbackErr}
+	gateService := &stubGateSummaryService{err: fallbackErr}
+
+	issueService, attemptService, reservationService, reviewService, graphService, source := newBoardServiceDependenciesWithRepos(t, issueRepo, attemptRepo, reservationRepo, reviewRepo, graphRepo, localNow)
+	service, err := NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, gateService, source)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+
+	want := domain.BoardResult{
+		GeneratedAt: expectedNow,
+		StatusCounts: []domain.EffectiveStatusCount{
+			{EffectiveStatus: domain.EffectiveStatusReady, Count: 3},
+		},
+		ActiveAttempts:     []domain.ActiveAttemptSummary{},
+		AttemptGates:       []domain.AttemptGateProgress{},
+		ActiveReservations: []domain.Reservation{},
+		BlockedIssues:      []domain.IssueProjection{},
+		ReviewRequests:     []domain.ReviewRequest{},
+		PlanningGraph:      domain.GraphResult{Nodes: []domain.IssueProjection{}, Edges: []domain.GraphEdge{}},
+	}
+	loader := &stubBoardSnapshotLoader{result: want}
+	if returned := service.WithSnapshotLoader(loader); returned != service {
+		t.Fatal("WithSnapshotLoader did not return receiver for chaining")
+	}
+
+	got, err := service.GetBoard(context.Background())
+	if err != nil {
+		t.Fatalf("GetBoard() error = %v", err)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("snapshot loader calls = %d, want 1", loader.calls)
+	}
+	if !loader.gotNow.Equal(expectedNow) || loader.gotNow.Location() != time.UTC {
+		t.Fatalf("snapshot loader now = %v (%v), want %v UTC", loader.gotNow, loader.gotNow.Location(), expectedNow)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetBoard() = %#v, want %#v", got, want)
+	}
+	if len(gateService.calls) != 0 {
+		t.Fatalf("gateService calls = %#v, want none when snapshot loader is configured", gateService.calls)
+	}
+
+	loader.err = errors.New("snapshot failure")
+	if _, err := service.GetBoard(context.Background()); !errors.Is(err, loader.err) {
+		t.Fatalf("GetBoard() error = %v, want %v", err, loader.err)
+	}
+}

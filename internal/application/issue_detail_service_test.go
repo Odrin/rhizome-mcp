@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 type recordingIssueService struct {
@@ -364,5 +366,79 @@ func TestIssueDetailServiceSkipsGraphForArchivedIssue(t *testing.T) {
 	}
 	if !reflect.DeepEqual(detail.Gates, gateService.summary) {
 		t.Fatalf("Gates = %#v, want %#v", detail.Gates, gateService.summary)
+	}
+}
+
+type stubIssueDetailSnapshotLoader struct {
+	calls   int
+	command ports.LoadIssueDetailSnapshotCommand
+	detail  domain.IssueDetail
+	err     error
+}
+
+func (stub *stubIssueDetailSnapshotLoader) LoadIssueDetailSnapshot(_ context.Context, command ports.LoadIssueDetailSnapshotCommand) (domain.IssueDetail, error) {
+	stub.calls++
+	stub.command = command
+	if stub.err != nil {
+		return domain.IssueDetail{}, stub.err
+	}
+	return stub.detail, nil
+}
+
+func TestIssueDetailServiceWithSnapshotLoaderDelegatesToSingleSnapshot(t *testing.T) {
+	localNow := time.Date(2026, 8, 25, 13, 0, 0, 0, time.FixedZone("UTC+2", 2*3600))
+	expectedNow := localNow.UTC()
+	fallbackErr := errors.New("unexpected fallback call")
+
+	issueService := &recordingIssueService{err: fallbackErr}
+	graphService := &recordingGraphService{err: fallbackErr}
+	activityService := &recordingActivityService{err: fallbackErr}
+	reservationService := &recordingReservationLister{err: fallbackErr}
+	gateService := &stubGateSummaryService{err: fallbackErr}
+
+	service, err := NewIssueDetailService(issueService, graphService, activityService, reservationService, gateService)
+	if err != nil {
+		t.Fatalf("NewIssueDetailService() error = %v", err)
+	}
+
+	want := domain.IssueDetail{
+		Issue: domain.Issue{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB1", SequenceNo: 42, Title: "Archived detail", Status: domain.StatusDone},
+	}
+	loader := &stubIssueDetailSnapshotLoader{detail: want}
+	if returned := service.WithSnapshotLoader(loader).WithClock(clock.NewFakeClock(localNow)); returned != service {
+		t.Fatal("WithSnapshotLoader / WithClock did not return receiver for chaining")
+	}
+
+	if _, err := service.GetIssueDetail(context.Background(), "not-an-id"); !errors.Is(err, &domain.Error{Code: domain.CodeInvalidArgument}) {
+		t.Fatalf("GetIssueDetail(invalid) error = %v, want %s", err, domain.CodeInvalidArgument)
+	}
+	if loader.calls != 0 {
+		t.Fatalf("snapshot loader calls after invalid id = %d, want 0", loader.calls)
+	}
+
+	got, err := service.GetIssueDetail(context.Background(), "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetIssueDetail() error = %v", err)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("snapshot loader calls = %d, want 1", loader.calls)
+	}
+	if loader.command.Identifier.Kind != domain.IssueIdentifierDisplayID || loader.command.Identifier.SequenceNo != 42 {
+		t.Fatalf("command.Identifier = %#v, want display ISSUE-42", loader.command.Identifier)
+	}
+	if !loader.command.Now.Equal(expectedNow) || loader.command.Now.Location() != time.UTC {
+		t.Fatalf("command.Now = %v (%v), want %v UTC", loader.command.Now, loader.command.Now.Location(), expectedNow)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetIssueDetail() = %#v, want %#v", got, want)
+	}
+	if issueService.calls != 0 || graphService.calls != 0 || activityService.calls != 0 || reservationService.calls != 0 || len(gateService.calls) != 0 {
+		t.Fatalf("unexpected fallback calls: issue=%d graph=%d activity=%d reservation=%d gate=%d",
+			issueService.calls, graphService.calls, activityService.calls, reservationService.calls, len(gateService.calls))
+	}
+
+	loader.err = errors.New("snapshot failure")
+	if _, err := service.GetIssueDetail(context.Background(), "ISSUE-42"); !errors.Is(err, loader.err) {
+		t.Fatalf("GetIssueDetail() error = %v, want %v", err, loader.err)
 	}
 }

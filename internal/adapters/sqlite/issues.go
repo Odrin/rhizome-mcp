@@ -203,43 +203,51 @@ func (repository *IssueRepository) CreateIssue(ctx context.Context, command port
 func (repository *IssueRepository) GetIssue(ctx context.Context, identifier domain.IssueIdentifier) (domain.Issue, error) {
 	var issue domain.Issue
 	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
-		var row *sql.Row
-		switch identifier.Kind {
-		case domain.IssueIdentifierInternalID:
-			row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE id = ?", identifier.Value)
-		case domain.IssueIdentifierDisplayID:
-			row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE sequence_no = ?", identifier.SequenceNo)
-		default:
-			return domain.NewError(
-				domain.CodeInvalidArgument,
-				"issue identifier is invalid",
-				false,
-				domain.Detail{Field: "issue_id", Code: "INVALID_IDENTIFIER"},
-			)
-		}
-
-		parsed, err := scanIssueProjection(row)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
-			}
-			return err
-		}
-		if repository.afterGetIssueProjectionReadForTest != nil {
-			repository.afterGetIssueProjectionReadForTest()
-		}
-		labels, err := loadIssueLabels(ctx, query, parsed.ID)
+		loaded, err := loadIssueByIdentifier(ctx, query, identifier, repository.afterGetIssueProjectionReadForTest)
 		if err != nil {
 			return err
 		}
-		parsed.Labels = labels
-		issue = parsed
+		issue = loaded
 		return nil
 	})
 	if err != nil {
 		return domain.Issue{}, err
 	}
 	return issue, nil
+}
+
+func loadIssueByIdentifier(ctx context.Context, query Queryer, identifier domain.IssueIdentifier, afterProjectionRead func()) (domain.Issue, error) {
+	var row *sql.Row
+	switch identifier.Kind {
+	case domain.IssueIdentifierInternalID:
+		row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE id = ?", identifier.Value)
+	case domain.IssueIdentifierDisplayID:
+		row = query.QueryRowContext(ctx, issueProjectionSelect+" WHERE sequence_no = ?", identifier.SequenceNo)
+	default:
+		return domain.Issue{}, domain.NewError(
+			domain.CodeInvalidArgument,
+			"issue identifier is invalid",
+			false,
+			domain.Detail{Field: "issue_id", Code: "INVALID_IDENTIFIER"},
+		)
+	}
+
+	parsed, err := scanIssueProjection(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Issue{}, domain.NewError(domain.CodeIssueNotFound, "issue not found", false)
+		}
+		return domain.Issue{}, err
+	}
+	if afterProjectionRead != nil {
+		afterProjectionRead()
+	}
+	labels, err := loadIssueLabels(ctx, query, parsed.ID)
+	if err != nil {
+		return domain.Issue{}, err
+	}
+	parsed.Labels = labels
+	return parsed, nil
 }
 
 // LookupUpdateIssue serves a replay before label IDs are allocated. Update

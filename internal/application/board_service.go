@@ -5,6 +5,7 @@ import (
 
 	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 // issueGateSummaryGetter reads one issue's compact workflow-gate summary --
@@ -26,6 +27,7 @@ type BoardService struct {
 	reviewService      *ReviewService
 	graphService       *GraphService
 	gateService        issueGateSummaryGetter
+	snapshotLoader     ports.BoardSnapshotLoader
 	clock              clock.Clock
 }
 
@@ -43,10 +45,22 @@ func NewBoardService(issueService *IssueService, attemptService *AttemptService,
 	}, nil
 }
 
+// WithSnapshotLoader configures an optional single-snapshot loader so
+// GetBoard reads every board section and attempt gate in one snapshot.
+func (service *BoardService) WithSnapshotLoader(loader ports.BoardSnapshotLoader) *BoardService {
+	if service != nil {
+		service.snapshotLoader = loader
+	}
+	return service
+}
+
 // GetBoard returns the current bounded status board: issue counts by
 // effective status, currently leased attempts, blocked issues with their
 // reasons, open review requests, and the project-wide planning graph.
 func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, error) {
+	if service.snapshotLoader != nil {
+		return service.snapshotLoader.LoadBoardSnapshot(ctx, service.clock.Now().UTC())
+	}
 	statusCounts, err := service.issueService.CountIssuesByEffectiveStatus(ctx)
 	if err != nil {
 		return domain.BoardResult{}, err
@@ -80,7 +94,7 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 	// A truncated reservation list may show fewer than 100 entries after
 	// filtering, and orphaned rows awaiting sweep can push a live reservation
 	// out of the window.
-	activeReservations := filterReservationsByActiveAttempts(reservationPage.Items, activeAttempts)
+	activeReservations := domain.FilterReservationsByActiveAttempts(reservationPage.Items, activeAttempts)
 
 	// One gate-progress row per active attempt (ISSUE-175 AC2): the gate the
 	// attempt holder will actually hit, evaluated against the attempt's
@@ -139,29 +153,4 @@ func (service *BoardService) GetBoard(ctx context.Context) (domain.BoardResult, 
 			ReviewRequests:     reviewPage.HasMore,
 		},
 	}, nil
-}
-
-// filterReservationsByActiveAttempts drops any reservation whose owning
-// attempt is not in activeAttempts. resource_reservations.status='active'
-// alone is not sufficient: ListActiveAttempts additionally requires
-// lease_expires_at > now, so an attempt whose lease has technically expired
-// but has not yet been swept by ExpireAttempts still owns rows with status
-// 'active'. Without this filter such a reservation would be an orphan on
-// the board -- present in ActiveReservations with no matching
-// ActiveAttempts row to attribute owner/session/lease-expiry to, which the
-// HTML view happens to hide (it only renders reservations grouped under a
-// known attempt) but the JSON API and CLI table would otherwise show
-// as if it were still legitimately held.
-func filterReservationsByActiveAttempts(reservations []domain.Reservation, activeAttempts []domain.ActiveAttemptSummary) []domain.Reservation {
-	attemptIDs := make(map[string]struct{}, len(activeAttempts))
-	for _, attempt := range activeAttempts {
-		attemptIDs[attempt.AttemptID] = struct{}{}
-	}
-	filtered := make([]domain.Reservation, 0, len(reservations))
-	for _, reservation := range reservations {
-		if _, ok := attemptIDs[reservation.AttemptID]; ok {
-			filtered = append(filtered, reservation)
-		}
-	}
-	return filtered
 }

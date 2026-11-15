@@ -66,70 +66,76 @@ func (repository *ActivityRepository) GetIssueActivity(ctx context.Context, comm
 		if err != nil {
 			return err
 		}
-
-		arms, args, err := buildActivityUnionArms(input.Types, canonicalIssueID)
+		loaded, err := loadIssueActivityFromQuery(ctx, query, canonicalIssueID, input, after)
 		if err != nil {
 			return err
 		}
-		if after != nil {
-			args = append(args, after.OccurredAt, after.OccurredAt, after.TypeRank, after.TypeRank, after.SortID)
-		}
-		statement := "SELECT entity_type, entity_id, occurred_at, type_rank, sort_id FROM (" + strings.Join(arms, " UNION ALL ") + ") AS activity"
-		if after != nil {
-			statement += " WHERE occurred_at < ? OR (occurred_at = ? AND (type_rank > ? OR (type_rank = ? AND sort_id > ?)))"
-		}
-		statement += " ORDER BY occurred_at DESC, type_rank ASC, sort_id ASC LIMIT ?"
-		args = append(args, input.Limit+1)
-
-		rows, err := query.QueryContext(ctx, statement, args...)
-		if err != nil {
-			return err
-		}
-		descriptors := make([]activityDescriptor, 0, input.Limit+1)
-		for rows.Next() {
-			descriptor, err := scanActivityDescriptor(rows)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			descriptors = append(descriptors, descriptor)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return activityCorrupt(err)
-		}
-		if err := rows.Close(); err != nil {
-			return activityCorrupt(err)
-		}
-
-		if len(descriptors) > input.Limit {
-			result.HasMore = true
-			descriptors = descriptors[:input.Limit]
-		}
-		items, err := loadActivityItems(ctx, query, canonicalIssueID, descriptors)
-		if err != nil {
-			return err
-		}
-		if len(items) == 0 {
-			result.Items = []domain.ActivityItem{}
-		} else {
-			result.Items = items
-		}
-		if result.HasMore {
-			last := descriptors[len(descriptors)-1]
-			cursor, err := activityCursorCodec.Encode(activityCursor{OccurredAt: last.OccurredAtText, TypeRank: last.TypeRank, SortID: last.SortID})
-			if err != nil {
-				return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode activity cursor", false)
-			}
-			result.NextCursor = &cursor
-		}
+		result = loaded
 		return nil
 	})
 	if err != nil {
 		return domain.IssueActivity{}, err
 	}
-	if result.Items == nil {
+	return result, nil
+}
+
+func loadIssueActivityFromQuery(ctx context.Context, query Queryer, canonicalIssueID string, input domain.GetIssueActivityInput, after *activityCursor) (domain.IssueActivity, error) {
+	arms, args, err := buildActivityUnionArms(input.Types, canonicalIssueID)
+	if err != nil {
+		return domain.IssueActivity{}, err
+	}
+	if after != nil {
+		args = append(args, after.OccurredAt, after.OccurredAt, after.TypeRank, after.TypeRank, after.SortID)
+	}
+	statement := "SELECT entity_type, entity_id, occurred_at, type_rank, sort_id FROM (" + strings.Join(arms, " UNION ALL ") + ") AS activity"
+	if after != nil {
+		statement += " WHERE occurred_at < ? OR (occurred_at = ? AND (type_rank > ? OR (type_rank = ? AND sort_id > ?)))"
+	}
+	statement += " ORDER BY occurred_at DESC, type_rank ASC, sort_id ASC LIMIT ?"
+	args = append(args, input.Limit+1)
+
+	rows, err := query.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return domain.IssueActivity{}, err
+	}
+	descriptors := make([]activityDescriptor, 0, input.Limit+1)
+	for rows.Next() {
+		descriptor, err := scanActivityDescriptor(rows)
+		if err != nil {
+			rows.Close()
+			return domain.IssueActivity{}, err
+		}
+		descriptors = append(descriptors, descriptor)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.IssueActivity{}, activityCorrupt(err)
+	}
+	if err := rows.Close(); err != nil {
+		return domain.IssueActivity{}, activityCorrupt(err)
+	}
+
+	var result domain.IssueActivity
+	if len(descriptors) > input.Limit {
+		result.HasMore = true
+		descriptors = descriptors[:input.Limit]
+	}
+	items, err := loadActivityItems(ctx, query, canonicalIssueID, descriptors)
+	if err != nil {
+		return domain.IssueActivity{}, err
+	}
+	if len(items) == 0 {
 		result.Items = []domain.ActivityItem{}
+	} else {
+		result.Items = items
+	}
+	if result.HasMore {
+		last := descriptors[len(descriptors)-1]
+		cursor, err := activityCursorCodec.Encode(activityCursor{OccurredAt: last.OccurredAtText, TypeRank: last.TypeRank, SortID: last.SortID})
+		if err != nil {
+			return domain.IssueActivity{}, domain.WrapError(err, domain.CodeStorageFailure, "cannot encode activity cursor", false)
+		}
+		result.NextCursor = &cursor
 	}
 	return domain.CloneIssueActivity(result), nil
 }

@@ -3,7 +3,9 @@ package application
 import (
 	"context"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ports"
 )
 
 type issueGetter interface {
@@ -30,6 +32,8 @@ type IssueDetailService struct {
 	activityService    activityGetter
 	reservationService issueDetailReservationLister
 	gateService        issueGateSummaryGetter
+	snapshotLoader     ports.IssueDetailSnapshotLoader
+	clock              clock.Clock
 }
 
 // NewIssueDetailService composes issue detail reads from the existing bounded services.
@@ -37,11 +41,50 @@ func NewIssueDetailService(issueService issueGetter, graphService graphGetter, a
 	if issueService == nil || graphService == nil || activityService == nil || reservationService == nil || gateService == nil {
 		return nil, domain.NewError(domain.CodeInvalidArgument, "issue detail dependencies are required", false)
 	}
-	return &IssueDetailService{issueService: issueService, graphService: graphService, activityService: activityService, reservationService: reservationService, gateService: gateService}, nil
+	return &IssueDetailService{
+		issueService:       issueService,
+		graphService:       graphService,
+		activityService:    activityService,
+		reservationService: reservationService,
+		gateService:        gateService,
+		clock:              clock.RealClock{},
+	}, nil
+}
+
+// WithSnapshotLoader configures an optional single-snapshot loader so
+// GetIssueDetail reads every section within one consistent snapshot.
+func (service *IssueDetailService) WithSnapshotLoader(loader ports.IssueDetailSnapshotLoader) *IssueDetailService {
+	if service != nil {
+		service.snapshotLoader = loader
+	}
+	return service
+}
+
+// WithClock configures the clock passed to snapshot detail reads.
+func (service *IssueDetailService) WithClock(source clock.Clock) *IssueDetailService {
+	if service != nil && source != nil {
+		service.clock = source
+	}
+	return service
 }
 
 // GetIssueDetail returns a bounded detail projection for one issue.
 func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifier string) (domain.IssueDetail, error) {
+	if service.snapshotLoader != nil {
+		parsed, err := domain.ParseIssueIdentifier(identifier)
+		if err != nil {
+			return domain.IssueDetail{}, err
+		}
+		currentClock := service.clock
+		if currentClock == nil {
+			currentClock = clock.RealClock{}
+		}
+		return service.snapshotLoader.LoadIssueDetailSnapshot(ctx, ports.LoadIssueDetailSnapshotCommand{
+			Identifier: parsed,
+			Now:        currentClock.Now().UTC(),
+		})
+	}
+
 	issue, err := service.issueService.GetIssue(ctx, identifier)
 	if err != nil {
 		return domain.IssueDetail{}, err
@@ -69,24 +112,6 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		return domain.IssueDetail{}, err
 	}
 
-	var rootProjection *domain.IssueProjection
-	if graph.RootIssueID != nil {
-		for _, node := range graph.Nodes {
-			if node.ID == *graph.RootIssueID {
-				projection := node
-				rootProjection = &projection
-				break
-			}
-		}
-	}
-	if rootProjection == nil {
-		effectiveStatus, err := domain.EffectiveStatusFor(issue.Status, false)
-		if err != nil {
-			return domain.IssueDetail{}, err
-		}
-		rootProjection = &domain.IssueProjection{Issue: issue, EffectiveStatus: effectiveStatus}
-	}
-
 	reservationPage, err := service.reservationService.ListReservations(ctx, domain.ListResourceReservationsInput{
 		IssueID: &issue.ID,
 		Limit:   domain.DefaultReservationHistoryLimit,
@@ -100,30 +125,5 @@ func (service *IssueDetailService) GetIssueDetail(ctx context.Context, identifie
 		return domain.IssueDetail{}, err
 	}
 
-	var latestAttempt *domain.WorkAttempt
-	var openReview *domain.ReviewRequest
-	var latestDecision *domain.Decision
-	for _, item := range activity.Items {
-		switch {
-		case item.Attempt != nil && latestAttempt == nil:
-			latestAttempt = item.Attempt
-		case item.Review != nil && openReview == nil && item.Review.Status == domain.ReviewRequestStatusOpen:
-			openReview = item.Review
-		case item.Decision != nil && latestDecision == nil:
-			latestDecision = item.Decision
-		}
-	}
-
-	return domain.IssueDetail{
-		Issue:               issue,
-		RootIssueProjection: rootProjection,
-		Graph:               graph,
-		Activity:            activity,
-		LatestAttempt:       latestAttempt,
-		OpenReview:          openReview,
-		LatestDecision:      latestDecision,
-		Reservations:        domain.SummarizeReservations(reservationPage.Items),
-		HasMoreReservations: reservationPage.HasMore,
-		Gates:               gates,
-	}, nil
+	return domain.AssembleIssueDetail(issue, graph, activity, reservationPage.Items, reservationPage.HasMore, gates)
 }

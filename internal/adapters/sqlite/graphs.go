@@ -33,20 +33,7 @@ func (repository *GraphRepository) LoadGraph(ctx context.Context, command ports.
 		defer func() { command.Stats.SnapshotDuration = time.Since(started) }()
 	}
 	result := domain.GraphSnapshot{Nodes: []domain.IssueProjection{}, Edges: []domain.GraphEdge{}, TopLevelIssueIDs: []string{}}
-	claimableSQL := issueClaimableSQLAt(command.Now)
-	effectiveStatusSQL := issueEffectiveStatusSQL(command.Now)
-	activeAttemptSQL := issueActiveAttemptIDSQL(command.Now)
-	projectionSQL := `SELECT id, sequence_no, type, title, NULL AS description, NULL AS acceptance_criteria,
-		status, priority, parent_id, blocked_reason, version,
-		created_by_session_id, created_at, updated_at, closed_at,
-		archived_at, archived_by_session_id,
-		` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
-		` + issueBlockedSQL + ` AS is_blocked,
-		` + claimableSQL + ` AS is_claimable,
-		` + effectiveStatusSQL + ` AS effective_status,
-		` + activeAttemptSQL + ` AS active_attempt_id,
-		` + issuePriorityRankSQL + ` AS priority_rank
-		FROM issues WHERE archived_at IS NULL`
+	projectionSQL := graphProjectionSQL(command.Now)
 	err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		if command.Stats != nil {
 			query = graphStatsQueryer{Queryer: query, stats: command.Stats}
@@ -150,6 +137,23 @@ func (repository *GraphRepository) LoadGraph(ctx context.Context, command ports.
 		}
 	}
 	return result, nil
+}
+
+func graphProjectionSQL(now time.Time) string {
+	claimableSQL := issueClaimableSQLAt(now)
+	effectiveStatusSQL := issueEffectiveStatusSQL(now)
+	activeAttemptSQL := issueActiveAttemptIDSQL(now)
+	return `SELECT id, sequence_no, type, title, NULL AS description, NULL AS acceptance_criteria,
+		status, priority, parent_id, blocked_reason, version,
+		created_by_session_id, created_at, updated_at, closed_at,
+		archived_at, archived_by_session_id,
+		` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
+		` + issueBlockedSQL + ` AS is_blocked,
+		` + claimableSQL + ` AS is_claimable,
+		` + effectiveStatusSQL + ` AS effective_status,
+		` + activeAttemptSQL + ` AS active_attempt_id,
+		` + issuePriorityRankSQL + ` AS priority_rank
+		FROM issues WHERE archived_at IS NULL`
 }
 
 func loadSelectedGraph(ctx context.Context, query Queryer, command ports.LoadGraphCommand, projectionSQL string, snapshot *domain.GraphSnapshot) error {

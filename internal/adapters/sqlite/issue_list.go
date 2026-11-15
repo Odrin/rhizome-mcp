@@ -153,7 +153,6 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	err = repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		claimableSQL := issueClaimableSQLAt(now)
 		effectiveStatusSQL := issueEffectiveStatusSQL(now)
-		activeAttemptSQL := issueActiveAttemptIDSQL(now)
 		where := []string{"1 = 1"}
 		args := make([]any, 0, 16)
 		if !input.IncludeArchived {
@@ -201,17 +200,7 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 				boolInt(after.IsClaimable), after.SequenceNo)
 		}
 
-		statement := `SELECT id, sequence_no, type, title, description, acceptance_criteria,
-			status, priority, parent_id, blocked_reason, version,
-			created_by_session_id, created_at, updated_at, closed_at,
-			archived_at, archived_by_session_id,
-			` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
-			` + issueBlockedSQL + ` AS is_blocked,
-			` + claimableSQL + ` AS is_claimable,
-			` + effectiveStatusSQL + ` AS effective_status,
-			` + activeAttemptSQL + ` AS active_attempt_id,
-			` + issuePriorityRankSQL + ` AS priority_rank
-			FROM issues WHERE ` + strings.Join(where, " AND ") +
+		statement := issueListProjectionSelect(now) + ` WHERE ` + strings.Join(where, " AND ") +
 			` ORDER BY priority_rank DESC, is_claimable DESC, sequence_no ASC LIMIT ?`
 		args = append(args, input.Limit+1)
 		rows, err := query.QueryContext(ctx, statement, args...)
@@ -264,6 +253,20 @@ func (repository *IssueRepository) ListIssues(ctx context.Context, command ports
 	return result, nil
 }
 
+func issueListProjectionSelect(now time.Time) string {
+	return `SELECT id, sequence_no, type, title, description, acceptance_criteria,
+		status, priority, parent_id, blocked_reason, version,
+		created_by_session_id, created_at, updated_at, closed_at,
+		archived_at, archived_by_session_id,
+		` + issueUnresolvedBlockerCountSQL + ` AS unresolved_blocker_count,
+		` + issueBlockedSQL + ` AS is_blocked,
+		` + issueClaimableSQLAt(now) + ` AS is_claimable,
+		` + issueEffectiveStatusSQL(now) + ` AS effective_status,
+		` + issueActiveAttemptIDSQL(now) + ` AS active_attempt_id,
+		` + issuePriorityRankSQL + ` AS priority_rank
+		FROM issues`
+}
+
 // CountIssuesByEffectiveStatus returns one row per effective status present
 // among non-archived issues. The result set is bounded by the fixed number of
 // possible effective statuses regardless of backlog size.
@@ -271,30 +274,41 @@ func (repository *IssueRepository) CountIssuesByEffectiveStatus(ctx context.Cont
 	now := command.Now.UTC()
 	var result []domain.EffectiveStatusCount
 	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
-		effectiveStatusSQL := issueEffectiveStatusSQL(now)
-		rows, err := query.QueryContext(ctx, `SELECT `+effectiveStatusSQL+` AS effective_status, COUNT(*)
-			FROM issues WHERE archived_at IS NULL
-			GROUP BY effective_status
-			ORDER BY effective_status ASC`)
+		counts, err := countIssuesByEffectiveStatus(ctx, query, now)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var effectiveStatus string
-			var count int64
-			if err := rows.Scan(&effectiveStatus, &count); err != nil {
-				return domain.WrapError(err, domain.CodeStorageCorrupt, "stored effective status count is invalid", false)
-			}
-			result = append(result, domain.EffectiveStatusCount{EffectiveStatus: domain.EffectiveStatus(effectiveStatus), Count: count})
-		}
-		return rows.Err()
+		result = counts
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		result = []domain.EffectiveStatusCount{}
+	return result, nil
+}
+
+func countIssuesByEffectiveStatus(ctx context.Context, query Queryer, now time.Time) ([]domain.EffectiveStatusCount, error) {
+	effectiveStatusSQL := issueEffectiveStatusSQL(now.UTC())
+	rows, err := query.QueryContext(ctx, `SELECT `+effectiveStatusSQL+` AS effective_status, COUNT(*)
+		FROM issues WHERE archived_at IS NULL
+		GROUP BY effective_status
+		ORDER BY effective_status ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]domain.EffectiveStatusCount, 0)
+	for rows.Next() {
+		var effectiveStatus string
+		var count int64
+		if err := rows.Scan(&effectiveStatus, &count); err != nil {
+			return nil, domain.WrapError(err, domain.CodeStorageCorrupt, "stored effective status count is invalid", false)
+		}
+		result = append(result, domain.EffectiveStatusCount{EffectiveStatus: domain.EffectiveStatus(effectiveStatus), Count: count})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

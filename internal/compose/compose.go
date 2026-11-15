@@ -203,14 +203,20 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	if err != nil {
 		return nil, err
 	}
+	boardSnapshotRepository, err := sqlite.NewBoardSnapshotRepository(project.Database)
+	if err != nil {
+		return nil, err
+	}
 	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
 	if err != nil {
 		return nil, err
 	}
+	boardService.WithSnapshotLoader(boardSnapshotRepository)
 	issueDetailService, err := application.NewIssueDetailService(issueService, graphService, activityService, reservationService, workflowPolicyService)
 	if err != nil {
 		return nil, err
 	}
+	issueDetailService.WithSnapshotLoader(boardSnapshotRepository).WithClock(source)
 
 	return &Services{
 		project: project,

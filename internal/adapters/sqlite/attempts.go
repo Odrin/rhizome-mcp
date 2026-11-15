@@ -548,52 +548,66 @@ func (repository *AttemptRepository) ListActiveAttempts(ctx context.Context, com
 		effectiveLimit = domain.MaxBoardCollectionLimit
 	}
 	now := command.Now.UTC()
-	var items []domain.ActiveAttemptSummary
+	var result domain.ActiveAttemptList
 	err := repository.db.Read(ctx, func(ctx context.Context, query Queryer) error {
-		rows, err := query.QueryContext(ctx, `SELECT wa.id, wa.issue_id, i.sequence_no, i.title, wa.kind,
-				wa.session_id, s.agent_label, wa.started_at, wa.lease_expires_at
-			FROM work_attempts AS wa
-			JOIN issues AS i ON i.id = wa.issue_id
-			LEFT JOIN agent_sessions AS s ON s.id = wa.session_id
-			WHERE wa.status = 'active' AND wa.lease_expires_at > ?
-			ORDER BY wa.lease_expires_at ASC, wa.id ASC
-			LIMIT ?`, formatStorageTime(now), effectiveLimit+1)
+		loaded, err := listActiveAttemptsSnapshot(ctx, query, now, effectiveLimit)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				id, issueID, title, kindText, startedAt, leaseExpiresAt string
-				sequenceNo                                              int64
-				sessionID, agentLabel                                   sql.NullString
-			)
-			if err := rows.Scan(&id, &issueID, &sequenceNo, &title, &kindText, &sessionID, &agentLabel, &startedAt, &leaseExpiresAt); err != nil {
-				return domain.WrapError(err, domain.CodeStorageCorrupt, "stored active attempt projection is invalid", false)
-			}
-			started, err := parseIssueTimestamp("started_at", startedAt)
-			if err != nil {
-				return err
-			}
-			leaseExpires, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
-			if err != nil {
-				return err
-			}
-			items = append(items, domain.ActiveAttemptSummary{
-				AttemptID:      id,
-				IssueID:        issueID,
-				IssueDisplayID: fmt.Sprintf("ISSUE-%d", sequenceNo),
-				IssueTitle:     title,
-				Kind:           domain.AttemptKind(kindText),
-				SessionID:      nullableStringScan(sessionID),
-				SessionLabel:   nullableStringScan(agentLabel),
-				StartedAt:      started,
-				LeaseExpiresAt: leaseExpires,
-			})
-		}
-		return rows.Err()
+		result = loaded
+		return nil
 	})
 	if err != nil {
+		return domain.ActiveAttemptList{}, err
+	}
+	return result, nil
+}
+
+func listActiveAttemptsSnapshot(ctx context.Context, query Queryer, now time.Time, effectiveLimit int) (domain.ActiveAttemptList, error) {
+	rows, err := query.QueryContext(ctx, `SELECT wa.id, wa.issue_id, i.sequence_no, i.title, wa.kind,
+			wa.session_id, s.agent_label, wa.started_at, wa.lease_expires_at
+		FROM work_attempts AS wa
+		JOIN issues AS i ON i.id = wa.issue_id
+		LEFT JOIN agent_sessions AS s ON s.id = wa.session_id
+		WHERE wa.status = 'active' AND wa.lease_expires_at > ?
+		ORDER BY wa.lease_expires_at ASC, wa.id ASC
+		LIMIT ?`, formatStorageTime(now.UTC()), effectiveLimit+1)
+	if err != nil {
+		return domain.ActiveAttemptList{}, err
+	}
+	defer rows.Close()
+
+	var items []domain.ActiveAttemptSummary
+	for rows.Next() {
+		var (
+			id, issueID, title, kindText, startedAt, leaseExpiresAt string
+			sequenceNo                                              int64
+			sessionID, agentLabel                                   sql.NullString
+		)
+		if err := rows.Scan(&id, &issueID, &sequenceNo, &title, &kindText, &sessionID, &agentLabel, &startedAt, &leaseExpiresAt); err != nil {
+			return domain.ActiveAttemptList{}, domain.WrapError(err, domain.CodeStorageCorrupt, "stored active attempt projection is invalid", false)
+		}
+		started, err := parseIssueTimestamp("started_at", startedAt)
+		if err != nil {
+			return domain.ActiveAttemptList{}, err
+		}
+		leaseExpires, err := parseIssueTimestamp("lease_expires_at", leaseExpiresAt)
+		if err != nil {
+			return domain.ActiveAttemptList{}, err
+		}
+		items = append(items, domain.ActiveAttemptSummary{
+			AttemptID:      id,
+			IssueID:        issueID,
+			IssueDisplayID: fmt.Sprintf("ISSUE-%d", sequenceNo),
+			IssueTitle:     title,
+			Kind:           domain.AttemptKind(kindText),
+			SessionID:      nullableStringScan(sessionID),
+			SessionLabel:   nullableStringScan(agentLabel),
+			StartedAt:      started,
+			LeaseExpiresAt: leaseExpires,
+		})
+	}
+	if err := rows.Err(); err != nil {
 		return domain.ActiveAttemptList{}, err
 	}
 
