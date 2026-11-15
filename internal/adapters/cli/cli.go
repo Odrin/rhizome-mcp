@@ -373,9 +373,6 @@ func (c *CLI) runDoctor(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err != nil {
-		return err
-	}
 	if *format == "json" {
 		return writeJSON(c.stdoutWriter(), report)
 	}
