@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,10 @@ import (
 	mcpadapter "rhizome-mcp/internal/adapters/mcp"
 	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
+	"rhizome-mcp/internal/compose"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/projectconfig"
 	"rhizome-mcp/internal/projectrouting"
 )
 
@@ -85,7 +89,15 @@ func (l *spyProjectLease) Release() error {
 	}
 	return l.inner.Release()
 }
-func (l *spyProjectLease) RootPath() string { return l.rootPath }
+func (l *spyProjectLease) RootPath() string {
+	if l.rootPath != "" {
+		return l.rootPath
+	}
+	if rooted, ok := l.inner.(interface{ RootPath() string }); ok {
+		return rooted.RootPath()
+	}
+	return ""
+}
 
 type issueBriefDoc struct {
 	ProjectRef string `json:"project_ref"`
@@ -403,7 +415,7 @@ func TestIssueBriefAndProjectBriefResourcesExplicitDefaultAndReadOnly(t *testing
 		"issue_id":             targetOut.ID,
 		"target_issue_version": targetVer,
 		"target_event_id":      targetEvt,
-		"purposes":             []string{"code_review"},
+		"purposes":             []string{"code_review", "security"},
 	})
 	if revRes.IsError {
 		t.Fatalf("create_review_request failed: %#v", revRes)
@@ -459,8 +471,8 @@ func TestIssueBriefAndProjectBriefResourcesExplicitDefaultAndReadOnly(t *testing
 		if len(doc.Decisions) != 1 || doc.Decisions[0].Title != "Keep context packs bounded" {
 			t.Fatalf("doc.Decisions = %+v, want 1 decision", doc.Decisions)
 		}
-		if len(doc.Reviews) != 1 || doc.Reviews[0].Status != "open" {
-			t.Fatalf("doc.Reviews = %+v, want 1 open review", doc.Reviews)
+		if len(doc.Reviews) != 1 || doc.Reviews[0].Status != "open" || !reflect.DeepEqual(doc.Reviews[0].Purposes, []string{"code_review", "security"}) {
+			t.Fatalf("doc.Reviews = %+v, want 1 open review with purposes [code_review security]", doc.Reviews)
 		}
 		if doc.Truncated || doc.TruncationReason != nil {
 			t.Fatalf("unexpected truncation on normal brief: truncated=%v reason=%v", doc.Truncated, doc.TruncationReason)
@@ -649,6 +661,16 @@ func TestContextPackResources16KiBBudgetTruncation(t *testing.T) {
 	client, cleanup := newClient(t, options)
 	defer cleanup()
 
+	// Enforce an acceptance_criteria policy so unmet claim_work gate requirements must survive long-text truncation.
+	if res := call(t, client, "manage_workflow_policy", map[string]any{
+		"action": "create",
+		"requirements": []map[string]any{
+			{"key": "acceptance", "kind": "issue_field_nonblank", "field": "acceptance_criteria"},
+		},
+	}); res.IsError {
+		t.Fatalf("manage_workflow_policy failed: %#v", res)
+	}
+
 	// Huge issue brief: > 30 KiB description + > 20 KiB acceptance criteria + escaped/UTF-8 text + blockers/decisions/reviews.
 	descChunk := strings.Repeat(`multi-byte UTF-8 café 🚀 <tag> "quote" `, 800)
 	acChunk := strings.Repeat(`acceptance ✅ check & verify "clause" `, 600)
@@ -727,6 +749,65 @@ func TestContextPackResources16KiBBudgetTruncation(t *testing.T) {
 	if issueDoc.Issue.Description == nil || *issueDoc.Issue.Description == "" ||
 		issueDoc.Issue.AcceptanceCriteria == nil || *issueDoc.Issue.AcceptanceCriteria == "" {
 		t.Fatalf("expected both oversized description and acceptance_criteria to preserve trimmed prefixes")
+	}
+	if len(*issueDoc.Issue.Description) >= len(descChunk) || len(*issueDoc.Issue.AcceptanceCriteria) >= len(acChunk) {
+		t.Fatalf("expected oversized description/acceptance_criteria to be trimmed (got %d/%d, original %d/%d)",
+			len(*issueDoc.Issue.Description), len(*issueDoc.Issue.AcceptanceCriteria), len(descChunk), len(acChunk))
+	}
+	if len(issueDoc.Blockers) != 6 {
+		t.Fatalf("len(issueDoc.Blockers) = %d, want 6 preserved ahead of long text truncation", len(issueDoc.Blockers))
+	}
+
+	// Oversized description with missing acceptance_criteria and 6 blockers must preserve both unmet gates and blockers.
+	gatedRes := call(t, client, "create_issue", map[string]any{
+		"type":        "task",
+		"title":       "Oversized blocked gated issue",
+		"description": descChunk,
+		"status":      "ready",
+	})
+	var gatedIssue struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, gatedRes, &gatedIssue)
+	for i := 0; i < 6; i++ {
+		blkRes := call(t, client, "create_issue", map[string]any{
+			"type":                "task",
+			"title":               "Gated blocker task " + strings.Repeat("b", 120),
+			"acceptance_criteria": "Done",
+			"status":              "ready",
+		})
+		var blk struct {
+			ID string `json:"id"`
+		}
+		decodeStructured(t, blkRes, &blk)
+		if res := call(t, client, "manage_issue_relation", map[string]any{
+			"action":          "add",
+			"source_issue_id": blk.ID,
+			"target_issue_id": gatedIssue.ID,
+			"relation_type":   "blocks",
+		}); res.IsError {
+			t.Fatalf("manage_issue_relation failed: %#v", res)
+		}
+	}
+	gatedRead, err := client.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+		URI: "rhizome://issues/" + gatedIssue.DisplayID + "/brief",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource(oversized gated issue) error = %v", err)
+	}
+	if len(gatedRead.Contents[0].Text) > mcpadapter.MaxContextPackBytes {
+		t.Fatalf("gated brief length = %d bytes, exceeds 16 KiB limit (%d)", len(gatedRead.Contents[0].Text), mcpadapter.MaxContextPackBytes)
+	}
+	var gatedDoc issueBriefDoc
+	if err := json.Unmarshal([]byte(gatedRead.Contents[0].Text), &gatedDoc); err != nil {
+		t.Fatalf("truncated gated brief invalid JSON: %v", err)
+	}
+	if len(gatedDoc.Blockers) != 6 {
+		t.Fatalf("len(gatedDoc.Blockers) = %d, want 6 preserved blockers", len(gatedDoc.Blockers))
+	}
+	if gatedDoc.Gates.Passed || len(gatedDoc.Gates.Unmet) != 1 || gatedDoc.Gates.Unmet[0].RequirementKey != "acceptance" {
+		t.Fatalf("gatedDoc.Gates = %+v, want 1 preserved unmet acceptance requirement", gatedDoc.Gates)
 	}
 
 	// Huge project brief: 100 ready issues + 20 blocked issues exceeding 16 KiB before trimming.
@@ -856,4 +937,79 @@ func TestContextPackResourcesOverStreamableHTTP(t *testing.T) {
 	if projDoc.Project.ProjectRef != projectRef || projDoc.Summary.StatusCounts.Ready != 1 {
 		t.Fatalf("HTTP projDoc = %+v", projDoc)
 	}
+}
+
+func TestContextPackProjectBriefPopulatesRootPath(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	dataRoot := filepath.Join(tempDir, "data")
+	repoA := filepath.Join(tempDir, "repo-a")
+	repoB := filepath.Join(tempDir, "repo-b")
+	idA := initRepoAndSeedDB(t, ctx, repoA, dataRoot)
+	idB := initRepoAndSeedDB(t, ctx, repoB, dataRoot)
+
+	routerOptions := func(router projectrouting.ProjectRouter) mcpadapter.Options {
+		return mcpadapter.Options{
+			ProjectRouter:   router,
+			ServerName:      "test-server",
+			ServerVersion:   "test-version",
+			ConfigVersion:   1,
+			ExportDirectory: t.TempDir(),
+		}
+	}
+
+	readBrief := func(t *testing.T, client *sdkmcp.ClientSession, ref string) projectBriefDoc {
+		t.Helper()
+		res, err := client.ReadResource(ctx, &sdkmcp.ReadResourceParams{
+			URI: "rhizome://projects/" + ref + "/brief",
+		})
+		if err != nil {
+			t.Fatalf("ReadResource(project-brief %q) error = %v", ref, err)
+		}
+		var doc projectBriefDoc
+		if err := json.Unmarshal([]byte(res.Contents[0].Text), &doc); err != nil {
+			t.Fatalf("unmarshal project brief: %v", err)
+		}
+		return doc
+	}
+
+	bundleA, rtProjA, err := compose.Open(ctx, repoA, projectconfig.PathInputs{}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundleA.Close(ctx)
+
+	bundleB, rtProjB, err := compose.Open(ctx, repoB, projectconfig.PathInputs{}, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundleB.Close(ctx)
+
+	t.Run("static_router", func(t *testing.T) {
+		router := projectrouting.NewStaticProjectRouter(idA, rtProjA.Root, bundleA.Bundle())
+		client, cleanup := newClient(t, routerOptions(router))
+		defer cleanup()
+
+		doc := readBrief(t, client, idA)
+		if doc.Project.RootPath == nil || *doc.Project.RootPath != rtProjA.Root {
+			t.Fatalf("doc.Project.RootPath = %v, want %q", doc.Project.RootPath, rtProjA.Root)
+		}
+	})
+
+	t.Run("compose_router", func(t *testing.T) {
+		router := compose.NewRouter(dataRoot, clock.RealClock{}, sqlite.Options{}, bundleA)
+		defer router.Close(ctx)
+		client, cleanup := newClient(t, routerOptions(router))
+		defer cleanup()
+
+		docA := readBrief(t, client, idA)
+		if docA.Project.RootPath == nil || *docA.Project.RootPath != rtProjA.Root {
+			t.Fatalf("docA.Project.RootPath = %v, want %q", docA.Project.RootPath, rtProjA.Root)
+		}
+
+		docB := readBrief(t, client, idB)
+		if docB.Project.RootPath == nil || *docB.Project.RootPath != rtProjB.Root {
+			t.Fatalf("docB.Project.RootPath = %v, want %q", docB.Project.RootPath, rtProjB.Root)
+		}
+	})
 }

@@ -55,7 +55,7 @@ func TestActivityRepositoryLoadsReviewRequestEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := reviewRepository.CreateReviewRequest(context.Background(), ports.CreateReviewRequestCommand{
-		Purposes:  []string{"implementation"},
+		Purposes:  []string{"implementation", "security"},
 		RequestID: "01ARZ3NDEKTSV4RRFFQ69G5FA1",
 		TargetID:  "01ARZ3NDEKTSV4RRFFQ69G5FA2",
 		IssueID:   issue.ID, TargetIssueVersion: issue.Version,
@@ -84,6 +84,9 @@ func TestActivityRepositoryLoadsReviewRequestEntry(t *testing.T) {
 	}
 	if review.Status != domain.ReviewRequestStatusOpen {
 		t.Fatalf("review status = %q, want open", review.Status)
+	}
+	if !reflect.DeepEqual(review.Purposes, []string{"implementation", "security"}) {
+		t.Fatalf("review purposes = %#v, want [implementation security]", review.Purposes)
 	}
 	if review.CreatedAt.IsZero() {
 		t.Fatal("review CreatedAt is zero")

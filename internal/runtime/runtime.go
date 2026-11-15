@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -50,6 +51,7 @@ type Options struct {
 // composition; callers must not close it independently.
 type Project struct {
 	Root          string
+	Origin        string
 	ProjectID     string
 	DatabasePath  string
 	SchemaVersion int
@@ -127,6 +129,7 @@ func OpenProject(ctx context.Context, options Options) (_ *Project, err error) {
 	keep = true
 	return &Project{
 		Root:          discovered.Root,
+		Origin:        discovered.Root,
 		ProjectID:     discovered.Identity.ProjectID,
 		DatabasePath:  databasePath,
 		SchemaVersion: migrationResult.Version,
@@ -175,12 +178,14 @@ func OpenExistingProject(ctx context.Context, projectID, dataRoot string, clock 
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyProjectRowIdentity(ctx, db, projectID); err != nil {
+	origin, err := verifyProjectRowIdentity(ctx, db, projectID)
+	if err != nil {
 		return nil, err
 	}
 
 	keep = true
 	return &Project{
+		Origin:        origin,
 		ProjectID:     projectID,
 		DatabasePath:  databasePath,
 		SchemaVersion: schemaVersion,
@@ -237,12 +242,14 @@ func MigrateExistingProject(ctx context.Context, projectID, dataRoot string, clo
 		}
 		schemaVersion = migrationResult.Version
 	}
-	if err := verifyProjectRowIdentity(ctx, db, projectID); err != nil {
+	origin, err := verifyProjectRowIdentity(ctx, db, projectID)
+	if err != nil {
 		return nil, err
 	}
 
 	keep = true
 	return &Project{
+		Origin:        origin,
 		ProjectID:     projectID,
 		DatabasePath:  databasePath,
 		SchemaVersion: schemaVersion,
@@ -317,20 +324,23 @@ func verifyProjectHistory(ctx context.Context, db *sqlite.DB, projectID string) 
 	return version, nil
 }
 
-func verifyProjectRowIdentity(ctx context.Context, db *sqlite.DB, projectID string) error {
+func verifyProjectRowIdentity(ctx context.Context, db *sqlite.DB, projectID string) (string, error) {
 	var ids []string
+	var origins []string
 	err := db.Read(ctx, func(ctx context.Context, query sqlite.Queryer) error {
-		rows, err := query.QueryContext(ctx, "SELECT id FROM projects ORDER BY id")
+		rows, err := query.QueryContext(ctx, "SELECT id, origin FROM projects ORDER BY id")
 		if err != nil {
 			return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var id string
-			if err := rows.Scan(&id); err != nil {
+			var origin sql.NullString
+			if err := rows.Scan(&id, &origin); err != nil {
 				return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
 			}
 			ids = append(ids, id)
+			origins = append(origins, origin.String)
 		}
 		if err := rows.Err(); err != nil {
 			return lifecycleError(err, CodeProjectOpen, "cannot verify project database identity")
@@ -338,13 +348,13 @@ func verifyProjectRowIdentity(ctx context.Context, db *sqlite.DB, projectID stri
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(ids) != 1 || ids[0] != projectID {
-		return domain.NewError(CodeProjectMismatch, "project database identity does not match repository identity", false,
+		return "", domain.NewError(CodeProjectMismatch, "project database identity does not match repository identity", false,
 			domain.Detail{Field: "projects", Code: CodeProjectMismatch, Message: fmt.Sprintf("expected one row for project %s", projectID)})
 	}
-	return nil
+	return origins[0], nil
 }
 
 func ensureProjectRow(ctx context.Context, db *sqlite.DB, projectID, repositoryRoot string, now time.Time) error {
@@ -436,6 +446,7 @@ func (project *Project) Backup(ctx context.Context, output string) (BackupReport
 
 	validationProject := &Project{
 		Root:          project.Root,
+		Origin:        project.Origin,
 		ProjectID:     project.ProjectID,
 		DatabasePath:  outputPath,
 		SchemaVersion: project.SchemaVersion,

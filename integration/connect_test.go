@@ -583,13 +583,37 @@ func TestIntegrationConnectCustomDataRootRegistrationsLaunch(t *testing.T) {
 }
 
 func runIntegrationCommandWithHome(t *testing.T, dir, home string, args ...string) (string, string, error) {
+	return runIntegrationCommandWithEnv(t, dir, map[string]string{
+		"HOME":            home,
+		"USERPROFILE":     home,
+		"XDG_CONFIG_HOME": "",
+		"APPDATA":         "",
+		"RHIZOME_MCP_NPX": "0",
+	}, args...)
+}
+
+func runIntegrationCommandWithEnv(t *testing.T, dir string, overrides map[string]string, args ...string) (string, string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 	defer cancel()
 
 	command := exec.CommandContext(ctx, integrationBinary, args...)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "RHIZOME_MCP_NPX=0")
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, overridden := overrides[key]; overridden {
+			continue
+		}
+		env = append(env, entry)
+	}
+	for key, value := range overrides {
+		if value == "" && key != "RHIZOME_MCP_NPX" {
+			continue
+		}
+		env = append(env, key+"="+value)
+	}
+	command.Env = env
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1007,5 +1031,66 @@ func TestIntegrationConnectMalformedJSONDoesNotClobber(t *testing.T) {
 	}
 	if string(after) != malformed {
 		t.Fatalf("malformed file was modified:\ngot:  %q\nwant: %q", string(after), malformed)
+	}
+}
+
+func TestIntegrationConnectZedJSONCAndXDGPath(t *testing.T) {
+	t.Parallel()
+	outsideDir := t.TempDir()
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	home := filepath.Join(t.TempDir(), "home")
+	xdgConfig := filepath.Join(t.TempDir(), "xdg-config")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("create home dir: %v", err)
+	}
+	zedSettings := filepath.Join(xdgConfig, "zed", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(zedSettings), 0o755); err != nil {
+		t.Fatalf("create xdg zed dir: %v", err)
+	}
+	initialJSONC := `{
+  // Real Zed configuration with comments and trailing commas
+  "theme": "Ayu Dark",
+  "context_servers": {
+    "other-server": {
+      "command": "other",
+    },
+  },
+}
+`
+	if err := os.WriteFile(zedSettings, []byte(initialJSONC), 0o644); err != nil {
+		t.Fatalf("write initial JSONC settings: %v", err)
+	}
+
+	stdout, stderr, err := runIntegrationCommandWithEnv(t, outsideDir, map[string]string{
+		"HOME":            home,
+		"USERPROFILE":     home,
+		"XDG_CONFIG_HOME": xdgConfig,
+		"APPDATA":         xdgConfig,
+		"RHIZOME_MCP_NPX": "0",
+	}, "--data-root", dataRoot, "connect", "zed", "--global")
+	if err != nil {
+		t.Fatalf("connect zed --global on JSONC failed: %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Wrote ") || !strings.Contains(stdout, "settings.json.") {
+		t.Fatalf("stdout = %q, want confirmation printing written settings path", stdout)
+	}
+
+	data, err := os.ReadFile(zedSettings)
+	if err != nil {
+		t.Fatalf("read merged zed settings: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse merged zed settings: %v", err)
+	}
+	if cfg["theme"] != "Ayu Dark" {
+		t.Fatalf("theme = %v, want Ayu Dark", cfg["theme"])
+	}
+	servers := cfg["context_servers"].(map[string]any)
+	if _, ok := servers["other-server"]; !ok {
+		t.Fatalf("lost other-server in context_servers")
+	}
+	if _, ok := servers["rhizome-mcp"]; !ok {
+		t.Fatalf("missing rhizome-mcp in context_servers")
 	}
 }

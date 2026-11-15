@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
 	"rhizome-mcp/internal/ports"
 )
@@ -20,6 +21,7 @@ import (
 // concurrent writers and active-attempt gates never pay O(N) read transactions.
 type BoardSnapshotRepository struct {
 	db                    *DB
+	clock                 clock.Clock
 	afterFirstReadForTest func()
 
 	watermarkMu     sync.Mutex
@@ -38,7 +40,32 @@ func NewBoardSnapshotRepository(database *DB) (*BoardSnapshotRepository, error) 
 	if database == nil {
 		return nil, domain.NewError(domain.CodeStorageConfiguration, "board snapshot database is required", false)
 	}
-	return &BoardSnapshotRepository{db: database}, nil
+	return &BoardSnapshotRepository{db: database, clock: clock.RealClock{}}, nil
+}
+
+// WithClock configures the clock used when checking time-sensitive board
+// state such as active-attempt lease expiration.
+func (repository *BoardSnapshotRepository) WithClock(source clock.Clock) *BoardSnapshotRepository {
+	if repository != nil && source != nil {
+		repository.clock = source
+	}
+	return repository
+}
+
+// EnsureClock adopts source when the repository still uses the default real clock
+// (or has nil clock), allowing composed services with injected clocks to share
+// one time source with pre-constructed repositories.
+func (repository *BoardSnapshotRepository) EnsureClock(source clock.Clock) {
+	if repository == nil || source == nil {
+		return
+	}
+	if repository.clock == nil {
+		repository.clock = source
+		return
+	}
+	if _, isDefault := repository.clock.(clock.RealClock); isDefault {
+		repository.clock = source
+	}
 }
 
 const loadBoardWatermarkQuery = `
@@ -80,7 +107,10 @@ SELECT
 	(SELECT COALESCE(MAX(version), 0) FROM workflow_policies),
 	(SELECT COALESCE(MAX(updated_at), '') FROM workflow_policies),
 	(SELECT COUNT(*) FROM review_approvals),
-	(SELECT COUNT(*) FROM attempt_gate_snapshots)
+	(SELECT COUNT(*) FROM attempt_gate_snapshots),
+	(SELECT COUNT(*) FROM work_attempts WHERE status = 'active' AND lease_expires_at > ?),
+	(SELECT COALESCE(MAX(id), '') FROM work_attempts WHERE status = 'active' AND lease_expires_at > ?),
+	(SELECT COALESCE(MIN(lease_expires_at), '') FROM work_attempts WHERE status = 'active' AND lease_expires_at > ?)
 `
 
 // LoadBoardWatermark computes a board state watermark within a single SQLite
@@ -90,6 +120,11 @@ func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Contex
 	if repository == nil || repository.db == nil {
 		return "", domain.NewError(domain.CodeStorageConfiguration, "board snapshot database is required", false)
 	}
+	clockSource := repository.clock
+	if clockSource == nil {
+		clockSource = clock.RealClock{}
+	}
+	nowText := formatStorageTime(clockSource.Now().UTC())
 	var (
 		issueEventsMaxID, issueEventsCount               int64
 		gateEventsMaxID, gateEventsCount                 int64
@@ -113,13 +148,16 @@ func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Contex
 		policiesMaxUpdatedAt                             string
 		reviewApprovalsCount                             int64
 		attemptGateSnapshotsCount                        int64
+		attemptsLiveLeaseCount                           int64
+		attemptsLiveLeaseMaxID                           string
+		attemptsLiveLeaseMinExpiresAt                    string
 		dataVersion                                      int64
 		connKey                                          string
 	)
 	if err := repository.db.readSnapshot(ctx, func(ctx context.Context, query Queryer) error {
 		// Query table state first so SQLite opens the WAL read snapshot before
 		// inspecting connection-local PRAGMA data_version within the same snapshot.
-		row := query.QueryRowContext(ctx, loadBoardWatermarkQuery)
+		row := query.QueryRowContext(ctx, loadBoardWatermarkQuery, nowText, nowText, nowText)
 		if err := row.Scan(
 			&issueEventsMaxID, &issueEventsCount,
 			&gateEventsMaxID, &gateEventsCount,
@@ -134,6 +172,9 @@ func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Contex
 			&policiesCount, &policiesMaxVersion, &policiesMaxUpdatedAt,
 			&reviewApprovalsCount,
 			&attemptGateSnapshotsCount,
+			&attemptsLiveLeaseCount,
+			&attemptsLiveLeaseMaxID,
+			&attemptsLiveLeaseMinExpiresAt,
 		); err != nil {
 			return err
 		}
@@ -152,7 +193,7 @@ func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Contex
 	}
 
 	stateLine := fmt.Sprintf(
-		"ie=%d/%d|ge=%d/%d|pe=%d/%d|i=%d/%d/%d/%s/%s|a=%d/%d/%s/%s/%s/%s|r=%d/%d/%d/%s/%s|rv=%d/%d/%d/%s/%s|rel=%d/%s|lbl=%d|gev=%d/%d/%s|pol=%d/%d/%s|rva=%d|ags=%d",
+		"ie=%d/%d|ge=%d/%d|pe=%d/%d|i=%d/%d/%d/%s/%s|a=%d/%d/%s/%s/%s/%s|r=%d/%d/%d/%s/%s|rv=%d/%d/%d/%s/%s|rel=%d/%s|lbl=%d|gev=%d/%d/%s|pol=%d/%d/%s|rva=%d|ags=%d|alive=%d/%s/%s",
 		issueEventsMaxID, issueEventsCount,
 		gateEventsMaxID, gateEventsCount,
 		policyEventsMaxID, policyEventsCount,
@@ -166,6 +207,7 @@ func (repository *BoardSnapshotRepository) LoadBoardWatermark(ctx context.Contex
 		policiesCount, policiesMaxVersion, policiesMaxUpdatedAt,
 		reviewApprovalsCount,
 		attemptGateSnapshotsCount,
+		attemptsLiveLeaseCount, attemptsLiveLeaseMaxID, attemptsLiveLeaseMinExpiresAt,
 	)
 	stateSum := sha256.Sum256([]byte(stateLine))
 	stateDigest := hex.EncodeToString(stateSum[:])

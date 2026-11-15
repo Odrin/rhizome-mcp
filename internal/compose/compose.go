@@ -207,6 +207,7 @@ func NewServices(project *runtime.Project, source clock.Clock) (*Services, error
 	if err != nil {
 		return nil, err
 	}
+	boardSnapshotRepository.WithClock(source)
 	boardService, err := application.NewBoardService(issueService, attemptService, reservationService, reviewService, graphService, workflowPolicyService, source)
 	if err != nil {
 		return nil, err

@@ -229,7 +229,7 @@ var activityRegistry = []activityEntitySpec{
 		Rank:       3,
 		Arm:        `SELECT 'review' AS entity_type, review_requests.id AS entity_id, review_requests.created_at AS occurred_at, 3 AS type_rank, review_requests.id AS sort_id FROM review_requests WHERE review_requests.issue_id = ?`,
 		SortIDKind: activitySortIDULID,
-		Batch: activityBatchLoader(`SELECT id, id, target_id, issue_id, target_issue_version, target_event_id, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at FROM review_requests WHERE id IN (%s)`,
+		Batch: activityBatchLoader(`SELECT id, id, target_id, issue_id, target_issue_version, target_event_id, purposes_json, artifact_ids_json, status, supersedes_id, active_attempt_id, version, created_at, resolved_at FROM review_requests WHERE id IN (%s)`,
 			scanActivityReview, func(item *domain.ActivityItem, value domain.ReviewRequest) { item.Review = &value }),
 	},
 	{
@@ -917,18 +917,22 @@ func scanActivityEvent(scanner scanner) (domain.IssueEvent, error) {
 
 func scanActivityReview(scanner scanner) (domain.ReviewRequest, error) {
 	var request domain.ReviewRequest
-	var artifactIDsJSON []byte
+	var purposesJSON, artifactIDsJSON []byte
 	var status string
 	var supersedesID sql.NullString
 	var activeAttemptID sql.NullString
 	var createdAtText string
 	var resolvedAtText sql.NullString
 	var err error
-	if err = scanner.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
+	if err = scanner.Scan(&request.ID, &request.TargetID, &request.IssueID, &request.TargetIssueVersion, &request.TargetEventID, &purposesJSON, &artifactIDsJSON, &status, &supersedesID, &activeAttemptID, &request.Version, &createdAtText, &resolvedAtText); err != nil {
 		if err == sql.ErrNoRows {
 			return domain.ReviewRequest{}, activityCorrupt(err)
 		}
 		return domain.ReviewRequest{}, err
+	}
+	request.Purposes, err = unmarshalReviewPurposes(purposesJSON)
+	if err != nil {
+		return domain.ReviewRequest{}, activityCorrupt(err)
 	}
 	request.ArtifactIDs, err = unmarshalArtifactIDs(artifactIDsJSON)
 	if err != nil {

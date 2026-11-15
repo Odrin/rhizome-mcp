@@ -3,18 +3,25 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"rhizome-mcp/internal/adapters/sqlite"
 	"rhizome-mcp/internal/application"
+	"rhizome-mcp/internal/clock"
 	"rhizome-mcp/internal/domain"
+	"rhizome-mcp/internal/ids"
+	"rhizome-mcp/internal/migrations"
 )
 
 type stubProjectService struct {
@@ -1196,6 +1203,191 @@ func TestIssueShowAndListComputedFieldsMatch(t *testing.T) {
 		// Verify blocked issue fields in list
 		if !strings.Contains(output, `"effective_status": "blocked"`) {
 			t.Fatalf("expected blocked issue to have effective_status 'blocked' in list, got %q", output)
+		}
+	})
+}
+
+func TestCLIIssueListSortModesAndPagination(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
+	fakeClock := clock.NewFakeClock(now)
+	dbPath := filepath.Join(t.TempDir(), "cli-sort.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.Options{})
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close(ctx) })
+	if _, err := migrations.Migrate(ctx, db, fakeClock); err != nil {
+		t.Fatalf("migrations.Migrate: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		ts := sqlite.FormatStorageTime(now)
+		_, err := tx.ExecContext(ctx, `INSERT INTO projects(id, next_issue_number, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+			"01ARZ3NDEKTSV4RRFFQ69G5FAV", ts, ts)
+		return err
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	repo, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatalf("NewIssueRepository: %v", err)
+	}
+	gen, err := ids.NewGenerator(fakeClock, rand.Reader)
+	if err != nil {
+		t.Fatalf("NewGenerator: %v", err)
+	}
+	issueService, err := application.NewIssueService(repo, fakeClock, gen)
+	if err != nil {
+		t.Fatalf("NewIssueService: %v", err)
+	}
+
+	createdOne, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "First medium issue", Status: domain.StatusReady, Priority: domain.PriorityMedium,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(1): %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	createdTwo, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Second low issue", Status: domain.StatusReady, Priority: domain.PriorityLow,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(2): %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	createdThree, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Third critical issue", Status: domain.StatusReady, Priority: domain.PriorityCritical,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(3): %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	createdFour, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Fourth high issue", Status: domain.StatusReady, Priority: domain.PriorityHigh,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(4): %v", err)
+	}
+
+	// Update ISSUE-2 later so updated_desc diverges from created_desc / sequence_desc / priority.
+	fakeClock.Advance(10 * time.Minute)
+	if _, err := issueService.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID:         createdTwo.ID,
+		ExpectedVersion: createdTwo.Issue.Version,
+		Changes: domain.IssuePatch{
+			Title: domain.OptionalValue[string]{Set: true, Value: "Second low issue (updated latest)"},
+		},
+	}); err != nil {
+		t.Fatalf("UpdateIssue(2): %v", err)
+	}
+
+	runJSON := func(args ...string) IssueListResponse {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		runner := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+		if err := runner.Run(ctx, append([]string{"issue", "list", "--format", "json"}, args...)); err != nil {
+			t.Fatalf("issue list %v failed: %v (stderr=%q)", args, err, stderr.String())
+		}
+		var out IssueListResponse
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("decode JSON %q: %v", stdout.String(), err)
+		}
+		return out
+	}
+
+	displayIDs := func(items []IssueSummary) []string {
+		ids := make([]string, len(items))
+		for i, item := range items {
+			ids[i] = item.DisplayID
+		}
+		return ids
+	}
+
+	cases := []struct {
+		name      string
+		sortArgs  []string
+		wantOrder []string
+	}{
+		{
+			name:      "default",
+			sortArgs:  nil,
+			wantOrder: []string{createdThree.DisplayID, createdFour.DisplayID, createdOne.DisplayID, createdTwo.DisplayID},
+		},
+		{
+			name:      "priority",
+			sortArgs:  []string{"--sort", "priority"},
+			wantOrder: []string{createdThree.DisplayID, createdFour.DisplayID, createdOne.DisplayID, createdTwo.DisplayID},
+		},
+		{
+			name:      "created_desc",
+			sortArgs:  []string{"--sort", "created_desc"},
+			wantOrder: []string{createdFour.DisplayID, createdThree.DisplayID, createdTwo.DisplayID, createdOne.DisplayID},
+		},
+		{
+			name:      "updated_desc",
+			sortArgs:  []string{"--sort", "updated_desc"},
+			wantOrder: []string{createdTwo.DisplayID, createdFour.DisplayID, createdThree.DisplayID, createdOne.DisplayID},
+		},
+		{
+			name:      "sequence_desc",
+			sortArgs:  []string{"--sort", "sequence_desc"},
+			wantOrder: []string{createdFour.DisplayID, createdThree.DisplayID, createdTwo.DisplayID, createdOne.DisplayID},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			full := runJSON(tc.sortArgs...)
+			if got := displayIDs(full.Items); !reflect.DeepEqual(got, tc.wantOrder) {
+				t.Fatalf("full json order = %v, want %v", got, tc.wantOrder)
+			}
+
+			// Verify table output renders rows in the same sorted order.
+			var stdout, stderr bytes.Buffer
+			runner := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+			tableArgs := append([]string{"issue", "list", "--format", "table"}, tc.sortArgs...)
+			if err := runner.Run(ctx, tableArgs); err != nil {
+				t.Fatalf("table %v failed: %v", tableArgs, err)
+			}
+			tableOut := stdout.String()
+			lastIdx := -1
+			for _, wantID := range tc.wantOrder {
+				idx := strings.Index(tableOut, wantID)
+				if idx <= lastIdx {
+					t.Fatalf("table output order mismatch for %q (idx=%d <= prev=%d):\n%s", wantID, idx, lastIdx, tableOut)
+				}
+				lastIdx = idx
+			}
+
+			// Verify cursor pagination across pages preserves order with no duplicates.
+			page1Args := append([]string{"--limit", "2"}, tc.sortArgs...)
+			page1 := runJSON(page1Args...)
+			if !page1.HasMore || page1.NextCursor == nil || *page1.NextCursor == "" || len(page1.Items) != 2 {
+				t.Fatalf("page1 = %#v, want 2 items with next_cursor and has_more=true", page1)
+			}
+			page2Args := append([]string{"--limit", "2", "--cursor", *page1.NextCursor}, tc.sortArgs...)
+			page2 := runJSON(page2Args...)
+			if page2.HasMore || page2.NextCursor != nil || len(page2.Items) != 2 {
+				t.Fatalf("page2 = %#v, want 2 final items with has_more=false", page2)
+			}
+			combined := append(displayIDs(page1.Items), displayIDs(page2.Items)...)
+			if !reflect.DeepEqual(combined, tc.wantOrder) {
+				t.Fatalf("paginated order = %v, want %v", combined, tc.wantOrder)
+			}
+		})
+	}
+
+	t.Run("invalid_sort", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := New(Services{IssueService: issueService}, &stdout, &stderr, nil, nil)
+		err := runner.Run(ctx, []string{"issue", "list", "--sort", "not_a_sort"})
+		var domainErr *domain.Error
+		if !errors.As(err, &domainErr) || domainErr.Code != domain.CodeInvalidArgument {
+			t.Fatalf("invalid sort error = %v, want %s", err, domain.CodeInvalidArgument)
+		}
+		if gotExit := ExitCodeFor(err); gotExit != ExitError {
+			t.Fatalf("ExitCodeFor(invalid sort) = %d, want %d", gotExit, ExitError)
 		}
 	})
 }

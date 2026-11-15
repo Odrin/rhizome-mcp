@@ -59,6 +59,9 @@ func (service *BoardService) WithSnapshotLoader(loader ports.BoardSnapshotLoader
 		service.snapshotLoader = loader
 		if watermarkLoader, ok := loader.(ports.BoardWatermarkLoader); ok {
 			service.watermarkLoader = watermarkLoader
+			if clockAware, ok := watermarkLoader.(interface{ EnsureClock(clock.Clock) }); ok {
+				clockAware.EnsureClock(service.clock)
+			}
 		} else {
 			service.watermarkLoader = nil
 		}
@@ -71,6 +74,9 @@ func (service *BoardService) WithSnapshotLoader(loader ports.BoardSnapshotLoader
 func (service *BoardService) WithWatermarkLoader(loader ports.BoardWatermarkLoader) *BoardService {
 	if service != nil {
 		service.watermarkLoader = loader
+		if clockAware, ok := loader.(interface{ EnsureClock(clock.Clock) }); ok {
+			clockAware.EnsureClock(service.clock)
+		}
 	}
 	return service
 }

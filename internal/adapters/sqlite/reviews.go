@@ -391,7 +391,7 @@ func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, com
 			// matters if that rule is ever relaxed; force_released matches
 			// the other termination a party outside the lease performs.
 			terminated, err := terminateAttempt(ctx, tx, *terminatedAttemptID, domain.AttemptStatusCancelled,
-				terminateAttemptReason{ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, command.OccurredAt)
+				terminateAttemptReason{SessionID: command.SessionID, ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, command.OccurredAt)
 			if err != nil {
 				return err
 			}
@@ -405,7 +405,7 @@ func (repository *ReviewRepository) CancelReviewRequest(ctx context.Context, com
 			return err
 		}
 		if terminatedAttemptID != nil {
-			if err := appendAttemptCancelledEvent(ctx, tx, request.IssueID, *terminatedAttemptID, resolvedAt); err != nil {
+			if err := appendAttemptCancelledEvent(ctx, tx, request.IssueID, *terminatedAttemptID, resolvedAt, command.SessionID); err != nil {
 				return err
 			}
 		}
@@ -680,7 +680,7 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 			return err
 		}
 		if stale {
-			if err := supersedeOpenReviewRequest(ctx, tx, request, command.OccurredAt); err != nil {
+			if err := supersedeOpenReviewRequest(ctx, tx, request, command.OccurredAt, command.SessionID); err != nil {
 				return err
 			}
 			staleReviewTargetErr = staleReviewTargetError()
@@ -745,7 +745,7 @@ func (repository *ReviewRepository) ClaimReviewRequest(ctx context.Context, comm
 // supersedeOpenReviewRequest resolves an open request as superseded and
 // records the matching review event. Used wherever an open request is found
 // to have gone stale (claim time, and the claim-time binding in attempts.go).
-func supersedeOpenReviewRequest(ctx context.Context, tx Executor, request domain.ReviewRequest, occurredAt time.Time) error {
+func supersedeOpenReviewRequest(ctx context.Context, tx Executor, request domain.ReviewRequest, occurredAt time.Time, sessionID *string) error {
 	resolvedAt := formatStorageTime(occurredAt)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
 		WHERE id = ? AND status = 'open'`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID)
@@ -759,7 +759,7 @@ func supersedeOpenReviewRequest(ctx context.Context, tx Executor, request domain
 	if affected == 0 {
 		return nil
 	}
-	return appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil, nil,
+	return appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", sessionID, nil,
 		payloadForReviewEvent(request.ID, request.TargetID, nil, nil, nil), resolvedAt)
 }
 
@@ -804,7 +804,7 @@ func (repository *ReviewRepository) ResolveReviewRequest(ctx context.Context, co
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_outcomes(id, request_id, attempt_id, outcome, reason, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`, outcomeID, request.ID, command.AttemptID, command.Outcome, stringOrNil(command.Reason), resolvedAt); err != nil {
 			return err
 		}
-		if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(command.Outcome)), nil, &command.AttemptID,
+		if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(command.Outcome)), command.SessionID, &command.AttemptID,
 			payloadForReviewEvent(request.ID, request.TargetID, &command.AttemptID, &command.Outcome, command.Reason), resolvedAt); err != nil {
 			return err
 		}

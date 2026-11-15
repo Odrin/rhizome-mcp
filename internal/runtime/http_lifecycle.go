@@ -10,8 +10,24 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type serverShutdownContextKey struct{}
+
+// ServerShutdownDone returns a channel that closes as soon as ServeHTTPServer
+// initiates graceful shutdown, or nil when ctx did not originate from
+// ServeHTTPServer. Long-lived streaming handlers (such as SSE) select on both
+// ctx.Done() and ServerShutdownDone(ctx) so they return promptly instead of
+// blocking http.Server.Shutdown until ShutdownTimeout expires.
+func ServerShutdownDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	ch, _ := ctx.Value(serverShutdownContextKey{}).(<-chan struct{})
+	return ch
+}
 
 var (
 	errInvalidRequestHost  = errors.New("invalid request host")
@@ -337,6 +353,10 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 	baseCtx, cancelBaseCtx := context.WithCancel(context.Background())
 	defer cancelBaseCtx()
 
+	shutdownCh := make(chan struct{})
+	closeShutdown := sync.OnceFunc(func() { close(shutdownCh) })
+	handlerBaseCtx := context.WithValue(baseCtx, serverShutdownContextKey{}, (<-chan struct{})(shutdownCh))
+
 	hardeningHandler := WrapHTTPHandlerWithBodyLimit(options.Handler, listener.Addr().String(), options.Logger, options.MaxRequestBodyBytes)
 	server := &http.Server{
 		Handler:           hardeningHandler,
@@ -345,8 +365,9 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 		WriteTimeout:      options.WriteTimeout,
 		IdleTimeout:       options.IdleTimeout,
 		MaxHeaderBytes:    options.MaxHeaderBytes,
-		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		BaseContext:       func(net.Listener) context.Context { return handlerBaseCtx },
 	}
+	server.RegisterOnShutdown(closeShutdown)
 	serveErrs := make(chan error, 1)
 	go func() {
 		serveErrs <- server.Serve(listener)
@@ -354,11 +375,13 @@ func ServeHTTPServer(ctx context.Context, options HTTPServerOptions) error {
 
 	select {
 	case err := <-serveErrs:
+		closeShutdown()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	case <-ctx.Done():
+		closeShutdown()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), options.ShutdownTimeout)
 		defer cancel()
 		shutdownErr := server.Shutdown(shutdownCtx)

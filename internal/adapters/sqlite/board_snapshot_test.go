@@ -809,3 +809,70 @@ func TestBoardServiceGetBoardWatermark(t *testing.T) {
 		t.Fatalf("service.GetBoardWatermark() = %q, want %q, err=%v", serviceW0, repoW0, err)
 	}
 }
+
+func TestBoardSnapshotWatermarkDetectsClockOnlyLeaseExpiry(t *testing.T) {
+	db, _, _, fakeClock, bundle := openBoardSnapshotFixture(t)
+	ctx := context.Background()
+
+	repo, err := sqlite.NewBoardSnapshotRepository(db)
+	if err != nil {
+		t.Fatalf("NewBoardSnapshotRepository() error = %v", err)
+	}
+	repo.WithClock(fakeClock)
+
+	service, err := application.NewBoardService(
+		bundle.IssueService, bundle.AttemptService, bundle.ReservationService,
+		bundle.ReviewService, bundle.GraphService, bundle.WorkflowPolicyService, fakeClock,
+	)
+	if err != nil {
+		t.Fatalf("NewBoardService() error = %v", err)
+	}
+	service.WithSnapshotLoader(repo)
+
+	issue, err := bundle.IssueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Lease Expiry Watermark Task", Status: domain.StatusReady, Priority: domain.PriorityHigh,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	claim, err := bundle.AttemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
+		IssueID:   issue.ID,
+		Resources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "expiry.go"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimIssue() error = %v", err)
+	}
+
+	w0, err := repo.LoadBoardWatermark(ctx)
+	if err != nil {
+		t.Fatalf("LoadBoardWatermark(active) error = %v", err)
+	}
+
+	// Advancing clock before lease expiry must keep watermark stable.
+	untilExpiry := claim.Attempt.LeaseExpiresAt.Sub(fakeClock.Now())
+	if untilExpiry <= time.Second {
+		t.Fatalf("unexpectedly short lease duration: %s", untilExpiry)
+	}
+	fakeClock.Advance(untilExpiry - time.Second)
+	wBeforeExpiry, err := repo.LoadBoardWatermark(ctx)
+	if err != nil {
+		t.Fatalf("LoadBoardWatermark(pre-expiry) error = %v", err)
+	}
+	if wBeforeExpiry != w0 {
+		t.Fatalf("watermark changed before lease expiry: got %q want %q", wBeforeExpiry, w0)
+	}
+
+	// Advancing clock past lease_expires_at with zero DB writes must change the watermark.
+	fakeClock.Advance(2 * time.Second)
+	wAfterExpiry, err := repo.LoadBoardWatermark(ctx)
+	if err != nil {
+		t.Fatalf("LoadBoardWatermark(post-expiry) error = %v", err)
+	}
+	if wAfterExpiry == w0 {
+		t.Fatalf("LoadBoardWatermark did not change after wall-clock lease expiry: %q == %q", wAfterExpiry, w0)
+	}
+	serviceWAfter, err := service.GetBoardWatermark(ctx)
+	if err != nil || serviceWAfter != wAfterExpiry {
+		t.Fatalf("service.GetBoardWatermark() = %q, want %q, err=%v", serviceWAfter, wAfterExpiry, err)
+	}
+}

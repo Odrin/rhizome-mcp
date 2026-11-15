@@ -1315,12 +1315,12 @@ func (adapter *adapter) replaceReviewRequest(ctx context.Context, request *sdkmc
 }
 
 // maxAutoTextContentBytes caps inline JSON duplication in Content[0].Text
-// under ContentModeAuto: every default response budget in docs/03 §3 is
-// well under 64 KiB, while oversized explicit opt-in payloads (e.g.
-// get_issue view:"full" on a multi-hundred-KiB body) fall back to the
-// enriched summary string in Content[0].Text and keep the full payload in
-// StructuredContent.
-const maxAutoTextContentBytes = 64 * 1024
+// under ContentModeAuto: every default response budget in docs/03 §3
+// (including get_work_context at 256 KiB) fits within 256 KiB, while
+// oversized explicit opt-in payloads (e.g. get_issue view:"full" on a
+// multi-byte >256 KiB body) fall back to the enriched summary string in
+// Content[0].Text and keep the full payload in StructuredContent.
+const maxAutoTextContentBytes = 256 * 1024
 
 func (adapter *adapter) success(output any, summary string) (*sdkmcp.CallToolResult, any, error) {
 	result, err := adapter.renderResult(output, summary, false)

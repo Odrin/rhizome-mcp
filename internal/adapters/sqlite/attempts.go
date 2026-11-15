@@ -97,6 +97,7 @@ func authenticateActiveAttempt(ctx context.Context, tx Executor, attemptID strin
 // different things for reservations (force_released vs interrupted), so each
 // call site states its own.
 type terminateAttemptReason struct {
+	SessionID                *string
 	FailureReasonCode        *domain.FailureReasonCode
 	InterruptionReasonCode   *domain.InterruptionReasonCode
 	ReservationReleaseReason domain.ReservationReleaseReason
@@ -147,7 +148,7 @@ func terminateAttempt(ctx context.Context, tx Executor, attemptID string, finalS
 	if !terminalStatusAbandonsReviewClaim(finalStatus) {
 		return true, nil
 	}
-	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now); err != nil {
+	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now, reason.SessionID); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -182,7 +183,7 @@ func reservationReleaseReasonForOutcome(outcome domain.AttemptOutcome) domain.Re
 // expireAttempt already performed on lease expiry, now shared by every path
 // that ends a review attempt without it completing (failed, interrupted,
 // force-released).
-func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID string, now time.Time) error {
+func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID string, now time.Time, sessionID *string) error {
 	request, err := loadActiveReviewRequestForAttempt(ctx, tx, attemptID)
 	if err != nil {
 		return err
@@ -215,7 +216,7 @@ func releaseClaimedReviewRequest(ctx context.Context, tx Executor, attemptID str
 	if affected != 1 {
 		return nil
 	}
-	return appendReviewEvent(ctx, tx, request.IssueID, eventType, nil, &attemptID,
+	return appendReviewEvent(ctx, tx, request.IssueID, eventType, sessionID, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), timestamp)
 }
 
@@ -1321,16 +1322,16 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 					return err
 				}
 				if stale {
-					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now); err != nil {
+					if err := supersedeReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now, command.SessionID); err != nil {
 						return err
 					}
 					terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatusCancelled,
-						terminateAttemptReason{ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, now)
+						terminateAttemptReason{SessionID: command.SessionID, ReservationReleaseReason: domain.ReservationReleaseReasonForceReleased}, now)
 					if err != nil {
 						return err
 					}
 					if terminated {
-						if err := appendAttemptCancelledEvent(ctx, tx, issue.ID, command.AttemptID, timestamp); err != nil {
+						if err := appendAttemptCancelledEvent(ctx, tx, issue.ID, command.AttemptID, timestamp, command.SessionID); err != nil {
 							return err
 						}
 					}
@@ -1426,7 +1427,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			}
 			issue.Status, issue.Version, issue.UpdatedAt, issue.BlockedReason, issue.ClosedAt = target, issue.Version+1, now, nullableAttemptString(blockedReason), closedAt
 			if reviewRequest != nil && reviewRequest.Status == domain.ReviewRequestStatusClaimed && reviewRequest.ActiveAttemptID != nil && *reviewRequest.ActiveAttemptID == command.AttemptID {
-				if err := resolveReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now, *input.ReviewOutcome, input.BlockedReason); err != nil {
+				if err := resolveReviewRequestForAttempt(ctx, tx, *reviewRequest, command.AttemptID, now, *input.ReviewOutcome, input.BlockedReason, command.SessionID); err != nil {
 					return err
 				}
 			}
@@ -1446,7 +1447,7 @@ func (repository *AttemptRepository) FinishAttempt(ctx context.Context, command 
 			}
 			verificationValue = string(encoded)
 		}
-		reason := terminateAttemptReason{FailureReasonCode: input.FailureReasonCode, InterruptionReasonCode: input.InterruptionReasonCode,
+		reason := terminateAttemptReason{SessionID: command.SessionID, FailureReasonCode: input.FailureReasonCode, InterruptionReasonCode: input.InterruptionReasonCode,
 			ReservationReleaseReason: reservationReleaseReasonForOutcome(input.Outcome)}
 		terminated, err := terminateAttempt(ctx, tx, command.AttemptID, domain.AttemptStatus(input.Outcome), reason, now)
 		if err != nil {
@@ -1784,7 +1785,7 @@ func loadActiveReviewRequestForAttempt(ctx context.Context, tx Queryer, attemptI
 	return &request, nil
 }
 
-func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time) error {
+func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time, sessionID *string) error {
 	resolvedAt := formatStorageTime(occurredAt)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
 		WHERE id = ? AND status = 'claimed' AND active_attempt_id = ?`, domain.ReviewRequestStatusSuperseded, resolvedAt, request.ID, attemptID)
@@ -1798,14 +1799,14 @@ func supersedeReviewRequestForAttempt(ctx context.Context, tx Executor, request 
 	if affected == 0 {
 		return nil
 	}
-	if err := appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", nil, &attemptID,
+	if err := appendReviewEvent(ctx, tx, request.IssueID, "review_superseded", sessionID, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, nil, nil), resolvedAt); err != nil {
 		return err
 	}
 	return nil
 }
 
-func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time, outcome domain.ReviewOutcome, reason *string) error {
+func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request domain.ReviewRequest, attemptID string, occurredAt time.Time, outcome domain.ReviewOutcome, reason *string, sessionID *string) error {
 	nextStatus := reviewRequestStatusForOutcome(outcome)
 	resolvedAt := formatStorageTime(occurredAt)
 	res, err := tx.ExecContext(ctx, `UPDATE review_requests SET status = ?, active_attempt_id = NULL, resolved_at = ?, version = version + 1
@@ -1824,7 +1825,7 @@ func resolveReviewRequestForAttempt(ctx context.Context, tx Executor, request do
 		VALUES (?, ?, ?, ?, ?, 1, ?)`, attemptID, request.ID, attemptID, outcome, stringOrNil(reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review outcome: %w", err)
 	}
-	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), nil, &attemptID,
+	if err := appendReviewEvent(ctx, tx, request.IssueID, string(reviewEventTypeForOutcome(outcome)), sessionID, &attemptID,
 		payloadForReviewEvent(request.ID, request.TargetID, &attemptID, &outcome, reason), resolvedAt); err != nil {
 		return fmt.Errorf("insert review event: %w", err)
 	}
@@ -1995,7 +1996,7 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 	if err := releaseReservationsForAttempt(ctx, tx, attemptID, domain.ReservationReleaseReasonExpired, now); err != nil {
 		return false, err
 	}
-	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now); err != nil {
+	if err := releaseClaimedReviewRequest(ctx, tx, attemptID, now, nil); err != nil {
 		return false, err
 	}
 	payload, err := json.Marshal(struct {
@@ -2016,7 +2017,7 @@ func expireAttempt(ctx context.Context, tx Executor, attemptID string, now time.
 // ignores it (reviewedWorkChangedSince skips events owned by review
 // attempts): cancelling one request must not invalidate another issue's
 // pending review target.
-func appendAttemptCancelledEvent(ctx context.Context, tx Executor, issueID, attemptID, timestamp string) error {
+func appendAttemptCancelledEvent(ctx context.Context, tx Executor, issueID, attemptID, timestamp string, sessionID *string) error {
 	payload, err := json.Marshal(struct {
 		AttemptID string `json:"attempt_id"`
 		Reason    string `json:"reason"`
@@ -2025,7 +2026,7 @@ func appendAttemptCancelledEvent(ctx context.Context, tx Executor, issueID, atte
 		return domain.WrapError(err, domain.CodeStorageFailure, "cannot encode attempt cancellation event", false)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issue_events(issue_id, event_type, session_id, attempt_id, payload, created_at)
-		VALUES (?, 'attempt_cancelled', NULL, ?, ?, ?)`, issueID, attemptID, string(payload), timestamp)
+		VALUES (?, 'attempt_cancelled', ?, ?, ?, ?)`, issueID, nullableStringValuePtr(sessionID), attemptID, string(payload), timestamp)
 	return err
 }
 

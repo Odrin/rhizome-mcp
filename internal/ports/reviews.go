@@ -85,6 +85,7 @@ type ResolveReviewRequestCommand struct {
 	OutcomeID       string
 	OccurredAt      time.Time
 	AttemptID       string
+	SessionID       *string
 	Outcome         domain.ReviewOutcome
 	Reason          *string
 }

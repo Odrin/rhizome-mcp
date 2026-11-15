@@ -368,22 +368,28 @@ func TestSQLiteReviewEventsPersistSessionAttribution(t *testing.T) {
 	}
 	assertNullStringEqual(t, readNullString(t, fixture.db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_claimed' ORDER BY id DESC LIMIT 1`, issueID), sessionA)
 
-	// Attempt-driven resolution preserves NULL session_id.
+	// Attempt-driven resolution persists caller's session_id.
 	if _, err := fixture.repository.ResolveReviewRequest(fixture.ctx, ports.ResolveReviewRequestCommand{
 		OutcomeID:       fixture.newID(t),
 		RequestID:       claimed.Request.ID,
 		ExpectedVersion: claimed.Request.Version,
 		AttemptID:       attemptID,
+		SessionID:       &sb,
 		Outcome:         domain.ReviewOutcomeApproved,
 		OccurredAt:      now.Add(3 * time.Minute),
 	}); err != nil {
 		t.Fatalf("ResolveReviewRequest() error = %v", err)
 	}
-	if resolvedSession := readNullString(t, fixture.db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_approved' ORDER BY id DESC LIMIT 1`, issueID); resolvedSession.Valid {
-		t.Fatalf("review_approved.session_id = %#v, want NULL", resolvedSession)
-	}
+	assertNullStringEqual(t, readNullString(t, fixture.db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_approved' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
 
-	// Open second request and cancel with sessionB.
+	// Open second request on the same issue after terminating attemptID, claim a fresh active attempt,
+	// and cancel with sessionB: both review_cancelled and attempt_cancelled must carry sessionB.
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		_, err := tx.ExecContext(ctx, `UPDATE work_attempts SET status = 'completed', finished_at = ? WHERE id = ?`, sqlite.FormatStorageTime(now.Add(3*time.Minute)), attemptID)
+		return err
+	}); err != nil {
+		t.Fatalf("complete first review attempt: %v", err)
+	}
 	second, err := fixture.repository.CreateReviewRequest(fixture.ctx, ports.CreateReviewRequestCommand{
 		RequestID:          fixture.newID(t),
 		TargetID:           fixture.newID(t),
@@ -398,13 +404,205 @@ func TestSQLiteReviewEventsPersistSessionAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateReviewRequest(second) error = %v", err)
 	}
-	if _, err := fixture.repository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+	secondAttemptID := fixture.newID(t)
+	if err := fixture.db.Write(fixture.ctx, func(ctx context.Context, tx sqlite.Executor) error {
+		ts := sqlite.FormatStorageTime(now.Add(4 * time.Minute))
+		exp := sqlite.FormatStorageTime(now.Add(time.Hour))
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_attempts(
+			id, issue_id, kind, status, issue_version_at_start, context_event_id_at_start,
+			lease_token_hash, lease_expires_at, started_at, last_heartbeat_at
+		) VALUES (?, ?, 'review', 'active', 1, 0, X'02', ?, ?, ?)`, secondAttemptID, issueID, exp, ts, ts)
+		return err
+	}); err != nil {
+		t.Fatalf("insert second review attempt: %v", err)
+	}
+	claimedSecond, err := fixture.repository.ClaimReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
 		RequestID:       second.Request.ID,
 		ExpectedVersion: second.Request.Version,
+		ActiveAttemptID: &secondAttemptID,
+		SessionID:       &sa,
+		OccurredAt:      now.Add(4*time.Minute + 30*time.Second),
+	})
+	if err != nil {
+		t.Fatalf("ClaimReviewRequest(second) error = %v", err)
+	}
+	if _, err := fixture.repository.CancelReviewRequest(fixture.ctx, ports.ReviewMutationCommand{
+		RequestID:       claimedSecond.Request.ID,
+		ExpectedVersion: claimedSecond.Request.Version,
 		SessionID:       &sb,
 		OccurredAt:      now.Add(5 * time.Minute),
 	}); err != nil {
 		t.Fatalf("CancelReviewRequest() error = %v", err)
 	}
 	assertNullStringEqual(t, readNullString(t, fixture.db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_cancelled' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+	assertNullStringEqual(t, readNullString(t, fixture.db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_cancelled' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+}
+
+func TestSQLiteFinishAttemptPersistsReviewAndCancellationSessionAttribution(t *testing.T) {
+	const (
+		sessionA = "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+		sessionB = "01BX5ZZKBKACTAV9WEVGEMMVS0"
+	)
+	issueService, db, now := openIssueService(t)
+	ctx := context.Background()
+	insertTestAgentSession(t, db, sessionA, now)
+	insertTestAgentSession(t, db, sessionB, now)
+	fakeClock := clock.NewFakeClock(now)
+	generator, err := ids.NewGenerator(fakeClock, rand.Reader)
+	if err != nil {
+		t.Fatalf("ids.NewGenerator() error = %v", err)
+	}
+	attemptRepo, err := sqlite.NewAttemptRepository(db)
+	if err != nil {
+		t.Fatalf("NewAttemptRepository() error = %v", err)
+	}
+	issueRepo, err := sqlite.NewIssueRepository(db)
+	if err != nil {
+		t.Fatalf("NewIssueRepository() error = %v", err)
+	}
+	reviewRepo, err := sqlite.NewReviewRepository(db)
+	if err != nil {
+		t.Fatalf("NewReviewRepository() error = %v", err)
+	}
+	attemptService, err := application.NewAttemptService(attemptRepo, fakeClock, generator)
+	if err != nil {
+		t.Fatalf("NewAttemptService() error = %v", err)
+	}
+	reviewService, err := application.NewReviewService(reviewRepo, issueRepo, fakeClock, generator)
+	if err != nil {
+		t.Fatalf("NewReviewService() error = %v", err)
+	}
+
+	sa, sb := sessionA, sessionB
+	created, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "Finish attribution issue", Status: domain.StatusReady, SessionID: &sa,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	issueID := created.Issue.ID
+
+	// Complete initial work to review.
+	workClaim, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(work) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	reviewStatus := domain.StatusReview
+	workDone, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: workClaim.Attempt.ID, LeaseToken: workClaim.LeaseToken, SessionID: &sa,
+		Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "ready for review", TargetIssueStatus: &reviewStatus,
+	})
+	if err != nil {
+		t.Fatalf("FinishAttempt(work) error = %v", err)
+	}
+
+	rev1, err := reviewService.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID: issueID, TargetIssueVersion: workDone.Issue.Version, TargetEventID: workDone.LatestEventID,
+		Purposes: []string{"implementation"}, SessionID: &sa,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRequest(1) error = %v", err)
+	}
+
+	// 1. Failing a review attempt releases the claimed review request back to open under sessionB.
+	claim1, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(review 1) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	failReason := domain.FailureReasonOther
+	if _, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: claim1.Attempt.ID, LeaseToken: claim1.LeaseToken, SessionID: &sb,
+		Outcome: domain.AttemptOutcomeFailed, FailureReasonCode: &failReason, ResultSummary: "interrupted check",
+	}); err != nil {
+		t.Fatalf("FinishAttempt(fail review) error = %v", err)
+	}
+	assertNullStringEqual(t, readNullString(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_requested' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+
+	// 2. Completing a review attempt with changes_requested records sessionB.
+	claim2, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(review 2) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	changesOutcome := domain.ReviewOutcomeChangesRequested
+	reason := "needs fix"
+	if _, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: claim2.Attempt.ID, LeaseToken: claim2.LeaseToken, SessionID: &sb,
+		Outcome: domain.AttemptOutcomeCompleted, ReviewOutcome: &changesOutcome, ResultSummary: reason,
+	}); err != nil {
+		t.Fatalf("FinishAttempt(changes_requested) error = %v", err)
+	}
+	assertNullStringEqual(t, readNullString(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_changes_requested' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+	_ = rev1
+
+	// Move back to review and create rev2.
+	workClaim2, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(work 2) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	workDone2, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: workClaim2.Attempt.ID, LeaseToken: workClaim2.LeaseToken, SessionID: &sa,
+		Outcome: domain.AttemptOutcomeCompleted, ResultSummary: "fixed", TargetIssueStatus: &reviewStatus,
+	})
+	if err != nil {
+		t.Fatalf("FinishAttempt(work 2) error = %v", err)
+	}
+	if _, err := reviewService.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID: issueID, TargetIssueVersion: workDone2.Issue.Version, TargetEventID: workDone2.LatestEventID,
+		Purposes: []string{"implementation"}, SessionID: &sa,
+	}); err != nil {
+		t.Fatalf("CreateReviewRequest(2) error = %v", err)
+	}
+
+	// 3. Stale review superseded at finish_attempt records review_superseded + attempt_cancelled under sessionB.
+	staleClaim, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(stale review) error = %v", err)
+	}
+	updatedIssue, err := issueService.UpdateIssue(ctx, domain.UpdateIssueInput{
+		IssueID: issueID, ExpectedVersion: workDone2.Issue.Version,
+		Changes: domain.IssuePatch{Title: domain.OptionalValue[string]{Set: true, Value: "Edited while in review"}}, SessionID: &sa,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue(edit to make stale) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	approved := domain.ReviewOutcomeApproved
+	if _, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: staleClaim.Attempt.ID, LeaseToken: staleClaim.LeaseToken, SessionID: &sb,
+		Outcome: domain.AttemptOutcomeCompleted, ReviewOutcome: &approved, ResultSummary: "stale finish",
+	}); err == nil {
+		t.Fatalf("expected stale review error")
+	}
+	assertNullStringEqual(t, readNullString(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_superseded' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+	assertNullStringEqual(t, readNullString(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_cancelled' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
+
+	// 4. Create fresh review request and approve with finish_attempt under sessionB.
+	var latestEvt int64
+	if err := db.Read(ctx, func(ctx context.Context, q sqlite.Queryer) error {
+		return q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM issue_events`).Scan(&latestEvt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewService.CreateReviewRequest(ctx, application.CreateReviewRequestInput{
+		IssueID: issueID, TargetIssueVersion: updatedIssue.Issue.Version, TargetEventID: latestEvt,
+		Purposes: []string{"implementation"}, SessionID: &sa,
+	}); err != nil {
+		t.Fatalf("CreateReviewRequest(3) error = %v", err)
+	}
+	claim3, err := attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{IssueID: issueID, SessionID: &sa})
+	if err != nil {
+		t.Fatalf("ClaimIssue(review 3) error = %v", err)
+	}
+	fakeClock.Advance(time.Minute)
+	if _, err := attemptService.FinishAttempt(ctx, domain.FinishAttemptInput{
+		AttemptID: claim3.Attempt.ID, LeaseToken: claim3.LeaseToken, SessionID: &sb,
+		Outcome: domain.AttemptOutcomeCompleted, ReviewOutcome: &approved, ResultSummary: "looks good",
+	}); err != nil {
+		t.Fatalf("FinishAttempt(approved) error = %v", err)
+	}
+	assertNullStringEqual(t, readNullString(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_approved' ORDER BY id DESC LIMIT 1`, issueID), sessionB)
 }

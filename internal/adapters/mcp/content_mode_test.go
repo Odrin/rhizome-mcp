@@ -30,7 +30,7 @@ func TestNewServerRejectsUnsupportedContentMode(t *testing.T) {
 	}
 }
 
-func TestContentModeAutoDefaultIncludesJSONInTextAndFallsBackOver64KiB(t *testing.T) {
+func TestContentModeAutoDefaultIncludesJSONInTextAndFallsBackOver256KiB(t *testing.T) {
 	ctx := context.Background()
 	db, source := openDatabase(t, filepath.Join(t.TempDir(), "content-mode-auto.db"))
 	defer db.Close(ctx)
@@ -72,20 +72,20 @@ func TestContentModeAutoDefaultIncludesJSONInTextAndFallsBackOver64KiB(t *testin
 		t.Fatalf("decoded session from Content[0].Text = %#v, want non-empty handle and session ID", decodedSession)
 	}
 
-	// Create an issue with a >64 KiB body (description + acceptance_criteria = ~70 KiB).
-	largeDescription := strings.Repeat("d", 40*1024)
-	largeAcceptance := strings.Repeat("a", 30*1024)
+	// Create an issue with a >64 KiB and <=256 KiB body (description + acceptance_criteria = 100 KiB).
+	mediumDescription := strings.Repeat("d", 70*1024)
+	mediumAcceptance := strings.Repeat("a", 30*1024)
 	created := call(t, client, "create_issue", map[string]any{
 		"type":                "task",
-		"title":               "Large body issue",
-		"description":         largeDescription,
-		"acceptance_criteria": largeAcceptance,
+		"title":               "Medium-large body issue",
+		"description":         mediumDescription,
+		"acceptance_criteria": mediumAcceptance,
 		"status":              "ready",
 	})
 	if created.IsError {
 		t.Fatalf("create_issue failed: %#v", created)
 	}
-	// Default create_issue view is compact (<64 KiB), so Content[0].Text is JSON.
+	// Default create_issue view is compact (<256 KiB), so Content[0].Text is JSON.
 	createdText := firstTextContent(t, created)
 	var createdCompact struct {
 		ID        string `json:"id"`
@@ -99,24 +99,90 @@ func TestContentModeAutoDefaultIncludesJSONInTextAndFallsBackOver64KiB(t *testin
 		t.Fatalf("createdCompact = %#v", createdCompact)
 	}
 
-	// Explicit opt-in full view exceeds 64 KiB: StructuredContent holds the full
-	// object while Content[0].Text falls back to the enriched summary string.
-	fullIssue := call(t, client, "get_issue", map[string]any{
+	// Default get_work_context between 64 KiB and 256 KiB must keep full JSON in Content[0].Text.
+	workCtx := call(t, client, "get_work_context", map[string]any{
+		"issue_id": "ISSUE-1",
+	})
+	if workCtx.IsError {
+		t.Fatalf("get_work_context failed: %#v", workCtx)
+	}
+	workCtxText := firstTextContent(t, workCtx)
+	if len(workCtxText) <= 64*1024 || len(workCtxText) > 256*1024 {
+		t.Fatalf("get_work_context Content[0].Text len = %d, want between 64 KiB and 256 KiB", len(workCtxText))
+	}
+	var decodedWorkCtx struct {
+		Issue struct {
+			ID                 string `json:"id"`
+			Description        string `json:"description"`
+			AcceptanceCriteria string `json:"acceptance_criteria"`
+		} `json:"issue"`
+	}
+	if err := json.Unmarshal([]byte(workCtxText), &decodedWorkCtx); err != nil {
+		t.Fatalf("auto mode get_work_context Content[0].Text is not valid JSON: %v", err)
+	}
+	if decodedWorkCtx.Issue.ID != createdCompact.ID || decodedWorkCtx.Issue.Description != mediumDescription || decodedWorkCtx.Issue.AcceptanceCriteria != mediumAcceptance {
+		t.Fatalf("decoded get_work_context lost description or acceptance_criteria")
+	}
+
+	// Explicit opt-in full view between 64 KiB and 256 KiB also preserves full JSON in Content[0].Text.
+	mediumFull := call(t, client, "get_issue", map[string]any{
 		"issue_id": "ISSUE-1",
 		"view":     "full",
 	})
+	if mediumFull.IsError {
+		t.Fatalf("get_issue(view=full) failed: %#v", mediumFull)
+	}
+	var decodedMediumIssue struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(firstTextContent(t, mediumFull)), &decodedMediumIssue); err != nil {
+		t.Fatalf("auto mode medium full get_issue Content[0].Text is not valid JSON: %v", err)
+	}
+	if decodedMediumIssue.Description != mediumDescription {
+		t.Fatalf("decoded medium get_issue lost description")
+	}
+
+	// Explicit opt-in full view exceeding 256 KiB (80k 4-byte runes = 320 KiB UTF-8):
+	// StructuredContent holds the full object while Content[0].Text falls back to the enriched summary string.
+	hugeDescription := strings.Repeat("🚀", 80*1024)
+	createdHuge := call(t, client, "create_issue", map[string]any{
+		"type":        "task",
+		"title":       "Over-256KiB body issue",
+		"description": hugeDescription,
+		"status":      "ready",
+	})
+	if createdHuge.IsError {
+		t.Fatalf("create_issue(huge) failed: %#v", createdHuge)
+	}
+	var hugeCompact struct {
+		ID        string `json:"id"`
+		DisplayID string `json:"display_id"`
+	}
+	decodeStructured(t, createdHuge, &hugeCompact)
+
+	fullIssue := call(t, client, "get_issue", map[string]any{
+		"issue_id": hugeCompact.DisplayID,
+		"view":     "full",
+	})
 	if fullIssue.IsError {
-		t.Fatalf("get_issue(view=full) failed: %#v", fullIssue)
+		t.Fatalf("get_issue(view=full, huge) failed: %#v", fullIssue)
 	}
 	if fullIssue.StructuredContent == nil {
-		t.Fatal("get_issue(view=full) StructuredContent is nil")
+		t.Fatal("get_issue(view=full, huge) StructuredContent is nil")
 	}
 	fullText := firstTextContent(t, fullIssue)
-	if !strings.HasPrefix(fullText, "issue returned (display_id=ISSUE-1, id="+createdCompact.ID+", status=ready, version=1)") {
+	if !strings.HasPrefix(fullText, "issue returned (display_id="+hugeCompact.DisplayID+", id="+hugeCompact.ID+", status=ready, version=1)") {
 		t.Fatalf("oversized auto mode Content[0].Text = %q, want enriched summary fallback", fullText)
 	}
 	if len(fullText) > 256 {
 		t.Fatalf("oversized auto mode Content[0].Text length = %d, want compact summary fallback", len(fullText))
+	}
+	var structuredHuge struct {
+		Description string `json:"description"`
+	}
+	decodeStructured(t, fullIssue, &structuredHuge)
+	if structuredHuge.Description != hugeDescription {
+		t.Fatalf("oversized auto mode StructuredContent lost full description")
 	}
 
 	// Error response in auto mode serializes errorOutput JSON in Content[0].Text.

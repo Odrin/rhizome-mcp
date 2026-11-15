@@ -505,6 +505,8 @@ func setTestHome(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
 }
 
 func readJSONMap(t *testing.T, path string) map[string]interface{} {
@@ -690,17 +692,21 @@ func TestRunConnectGlobalTargetsUseUserHomeDirAndSkipDiscovery(t *testing.T) {
 		{target: "claude", configKey: "mcpServers", wantType: true, path: filepath.Join(home, ".claude.json")},
 		{target: "cursor", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".cursor", "mcp.json")},
 		{target: "windsurf", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")},
-		{target: "zed", configKey: "context_servers", wantType: false, path: filepath.Join(home, ".config", "zed", "settings.json")},
+		{target: "zed", configKey: "context_servers", wantType: false, path: resolveZedGlobalConfigPath(home)},
 		{target: "gemini", configKey: "mcpServers", wantType: false, path: filepath.Join(home, ".gemini", "settings.json")},
 	}
 
 	for _, tc := range fileTargets {
 		t.Run(tc.target, func(t *testing.T) {
+			var stdout bytes.Buffer
 			if err := runConnectWithOptions(context.Background(), outsideDir, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
 				Target: tc.target,
 				Global: true,
-			}, os.UserHomeDir, io.Discard, io.Discard); err != nil {
+			}, os.UserHomeDir, &stdout, io.Discard); err != nil {
 				t.Fatalf("runConnect(%s --global) error = %v", tc.target, err)
+			}
+			if !strings.Contains(stdout.String(), "Wrote "+tc.path+".") {
+				t.Fatalf("%s output = %q, want confirmation containing %q", tc.target, stdout.String(), tc.path)
 			}
 			cfg := readJSONMap(t, tc.path)
 			servers := cfg[tc.configKey].(map[string]interface{})
@@ -785,7 +791,11 @@ func TestRunConnectGlobalTargetsUseUserHomeDirAndSkipDiscovery(t *testing.T) {
 		if err := runCLI(context.Background(), &config.Config{}, &stdout, &stderr, []string{"connect", "zed", "--global", "--profile", "agent"}, outsideDir, projectconfig.PathInputs{}); err != nil {
 			t.Fatalf("runCLI(connect zed --global) error = %v", err)
 		}
-		cfg := readJSONMap(t, filepath.Join(cliHome, ".config", "zed", "settings.json"))
+		zedPath := resolveZedGlobalConfigPath(cliHome)
+		if !strings.Contains(stdout.String(), "Wrote "+zedPath+".") {
+			t.Fatalf("zed stdout = %q, want Wrote %s.", stdout.String(), zedPath)
+		}
+		cfg := readJSONMap(t, zedPath)
 		entry := cfg["context_servers"].(map[string]interface{})["rhizome-mcp"].(map[string]interface{})
 		wantArgs := []string{"serve", "--profile", "agent"}
 		if gotArgs := toStringSlice(t, entry["args"]); !slices.Equal(gotArgs, wantArgs) {
@@ -915,4 +925,140 @@ func TestComposedServicesNilSafeAccessorsAndClose(t *testing.T) {
 	if err := bundle.Close(context.Background()); err != nil {
 		t.Fatalf("empty Close() error = %v, want nil", err)
 	}
+}
+
+func TestConnectSupportsJSONCAndPlatformZedPaths(t *testing.T) {
+	t.Run("zed_and_gemini_jsonc_merge", func(t *testing.T) {
+		home := filepath.Join(t.TempDir(), "home")
+		setTestHome(t, home)
+		projectRoot := initTestProjectDir(t, filepath.Join(t.TempDir(), "repo"))
+
+		zedPath := filepath.Join(projectRoot, ".zed", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(zedPath), 0o755); err != nil {
+			t.Fatalf("mkdir .zed: %v", err)
+		}
+		zedJSONC := "\xEF\xBB\xBF" + `{
+  // Zed default settings header
+  "theme": "One Dark",
+  "telemetry": {
+    "metrics": false, /* block comment with newline
+    preserved */
+  },
+  "languages": ["Go", "JSON",],
+  "docs_url": "https://zed.dev/docs//settings,json",
+  "escaped": "quote\"inside\\//not-a-comment",
+  "context_servers": {
+    "existing-server": {
+      "command": "other",
+      "args": ["serve",],
+    },
+  },
+}
+`
+		if err := os.WriteFile(zedPath, []byte(zedJSONC), 0o644); err != nil {
+			t.Fatalf("write zed jsonc: %v", err)
+		}
+
+		var stdout bytes.Buffer
+		if err := runConnectWithOptions(context.Background(), projectRoot, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target: "zed",
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("runConnect(zed on JSONC) error = %v", err)
+		}
+		if !strings.Contains(stdout.String(), "Wrote "+zedPath+".") {
+			t.Fatalf("stdout = %q, want Wrote %s.", stdout.String(), zedPath)
+		}
+		zedCfg := readJSONMap(t, zedPath)
+		if zedCfg["docs_url"] != "https://zed.dev/docs//settings,json" {
+			t.Fatalf("docs_url corrupted: %v", zedCfg["docs_url"])
+		}
+		if zedCfg["escaped"] != `quote"inside\//not-a-comment` {
+			t.Fatalf("escaped corrupted: %q", zedCfg["escaped"])
+		}
+		ctxServers := zedCfg["context_servers"].(map[string]interface{})
+		if _, ok := ctxServers["existing-server"]; !ok {
+			t.Fatalf("lost existing-server entry")
+		}
+		if _, ok := ctxServers["rhizome-mcp"]; !ok {
+			t.Fatalf("missing rhizome-mcp entry")
+		}
+
+		geminiPath := filepath.Join(projectRoot, ".gemini", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(geminiPath), 0o755); err != nil {
+			t.Fatalf("mkdir .gemini: %v", err)
+		}
+		if err := os.WriteFile(geminiPath, []byte("// Only comments in existing Gemini settings\n/* trailing empty */\n"), 0o644); err != nil {
+			t.Fatalf("write comment-only gemini settings: %v", err)
+		}
+		if err := runConnectWithOptions(context.Background(), projectRoot, "/tmp/rhizome", "", false, cliadapter.ConnectOptions{
+			Target: "gemini",
+		}, os.UserHomeDir, &stdout, io.Discard); err != nil {
+			t.Fatalf("runConnect(gemini comment-only) error = %v", err)
+		}
+		geminiCfg := readJSONMap(t, geminiPath)
+		if _, ok := geminiCfg["mcpServers"].(map[string]interface{})["rhizome-mcp"]; !ok {
+			t.Fatalf("missing rhizome-mcp in gemini settings")
+		}
+	})
+
+	t.Run("rejects_unterminated_block_comment_and_invalid_commas", func(t *testing.T) {
+		for _, bad := range []string{
+			`{"a": 1 /* unterminated`,
+			`{"a": 1,,}`,
+			`[,]` ,
+			`{"a": [,]}`,
+		} {
+			badPath := filepath.Join(t.TempDir(), "bad.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatalf("write bad jsonc: %v", err)
+			}
+			err := mergeAndWriteJSONConfig(badPath, map[string]interface{}{"context_servers": map[string]interface{}{}}, "context_servers", "rhizome-mcp")
+			if err == nil || !strings.Contains(err.Error(), "parse config file") {
+				t.Fatalf("mergeAndWriteJSONConfig(%q) error = %v, want parse config file error", bad, err)
+			}
+		}
+	})
+
+	t.Run("resolveZedGlobalConfigPathForOS", func(t *testing.T) {
+		home := filepath.Join(string(filepath.Separator), "home", "tester")
+		makeEnv := func(vals map[string]string) func(string) string {
+			return func(k string) string { return vals[k] }
+		}
+		makeDirs := func(dirs ...string) func(string) bool {
+			set := make(map[string]bool, len(dirs))
+			for _, d := range dirs {
+				set[filepath.Clean(d)] = true
+			}
+			return func(p string) bool { return set[filepath.Clean(p)] }
+		}
+
+		winAppData := filepath.Join(home, "RoamingCfg")
+		if got, want := resolveZedGlobalConfigPathForOS("windows", home, makeEnv(map[string]string{"APPDATA": winAppData}), makeDirs()), filepath.Join(winAppData, "Zed", "settings.json"); got != want {
+			t.Fatalf("windows APPDATA path = %q, want %q", got, want)
+		}
+		if got, want := resolveZedGlobalConfigPathForOS("windows", home, makeEnv(nil), makeDirs()), filepath.Join(home, "AppData", "Roaming", "Zed", "settings.json"); got != want {
+			t.Fatalf("windows fallback path = %q, want %q", got, want)
+		}
+
+		customXDG := filepath.Join(home, "custom-xdg")
+		if got, want := resolveZedGlobalConfigPathForOS("linux", home, makeEnv(map[string]string{"XDG_CONFIG_HOME": customXDG}), makeDirs(filepath.Join(home, ".var", "app", "dev.zed.Zed", "config", "zed"))), filepath.Join(customXDG, "zed", "settings.json"); got != want {
+			t.Fatalf("linux XDG_CONFIG_HOME path = %q, want %q", got, want)
+		}
+
+		flatpakDir := filepath.Join(home, ".var", "app", "dev.zed.Zed", "config", "zed")
+		if got, want := resolveZedGlobalConfigPathForOS("linux", home, makeEnv(nil), makeDirs(flatpakDir)), filepath.Join(flatpakDir, "settings.json"); got != want {
+			t.Fatalf("linux Flatpak path = %q, want %q", got, want)
+		}
+		if got, want := resolveZedGlobalConfigPathForOS("linux", home, makeEnv(map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, ".config")}), makeDirs(flatpakDir)), filepath.Join(flatpakDir, "settings.json"); got != want {
+			t.Fatalf("linux default-XDG Flatpak path = %q, want %q", got, want)
+		}
+
+		standardDir := filepath.Join(home, ".config", "zed")
+		if got, want := resolveZedGlobalConfigPathForOS("linux", home, makeEnv(nil), makeDirs(standardDir, flatpakDir)), filepath.Join(standardDir, "settings.json"); got != want {
+			t.Fatalf("linux standard-over-flatpak path = %q, want %q", got, want)
+		}
+		if got, want := resolveZedGlobalConfigPathForOS("darwin", home, makeEnv(nil), makeDirs()), filepath.Join(home, ".config", "zed", "settings.json"); got != want {
+			t.Fatalf("darwin default path = %q, want %q", got, want)
+		}
+	})
 }

@@ -69,7 +69,12 @@ skips project discovery and omits `--project-root` from `args` (note that
 `vscode` MCP configuration is workspace-scoped, so `connect vscode --global`
 requires `--print`; `windsurf` writes its single global file
 `~/.codeium/windsurf/mcp_config.json` and still pins `--project-root` unless
-`--global` is passed). `--profile` or `--toolsets` (mutually exclusive) may
+`--global` is passed; `connect zed --global` resolves `%APPDATA%\Zed\settings.json`
+on Windows, `$XDG_CONFIG_HOME/zed/settings.json` or the Flatpak path
+`~/.var/app/dev.zed.Zed/config/zed/settings.json` when present on Linux, and
+`~/.config/zed/settings.json` otherwise). Merging into existing JSON config
+files strips JSONC comments (`//`, `/* */`) and trailing commas so Zed and
+Gemini settings files parse cleanly. `--profile` or `--toolsets` (mutually exclusive) may
 also be passed to bake those flags into the emitted `serve` arguments. The
 written `command` is this resolved binary's absolute path by default; when
 `connect` is itself running through the `npx rhizome-mcp` wrapper it emits

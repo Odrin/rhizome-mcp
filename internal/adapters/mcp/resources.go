@@ -700,20 +700,6 @@ func fitIssueBriefToBudget(pack issueBriefOutput, maxBytes int) ([]byte, error) 
 			return true
 		},
 		func() bool {
-			if len(pack.Blockers) == 0 {
-				return false
-			}
-			pack.Blockers = pack.Blockers[:len(pack.Blockers)-1]
-			return true
-		},
-		func() bool {
-			if len(pack.Gates.Unmet) == 0 {
-				return false
-			}
-			pack.Gates.Unmet = pack.Gates.Unmet[:len(pack.Gates.Unmet)-1]
-			return true
-		},
-		func() bool {
 			if len(pack.Warnings) == 0 {
 				return false
 			}
@@ -728,10 +714,69 @@ func fitIssueBriefToBudget(pack issueBriefOutput, maxBytes int) ([]byte, error) 
 		}
 	}
 
-	if encoded, done, err := fitIssueTextFieldsToBudget(&pack, maxBytes); err != nil {
+	if encoded, done, err := fitIssueLongTextFieldsToBudget(&pack, maxBytes); err != nil {
 		return nil, err
 	} else if done {
 		return encoded, nil
+	}
+
+	// Only after description and acceptance_criteria are empty, shed excess
+	// gates.unmet and blockers while trying to preserve at least one item
+	// of each so a blocked/gated issue never looks claimable.
+	for _, shrink := range []func() bool{
+		func() bool {
+			if len(pack.Gates.Unmet) <= 1 {
+				return false
+			}
+			pack.Gates.Unmet = pack.Gates.Unmet[:len(pack.Gates.Unmet)-1]
+			return true
+		},
+		func() bool {
+			if len(pack.Blockers) <= 1 {
+				return false
+			}
+			pack.Blockers = pack.Blockers[:len(pack.Blockers)-1]
+			return true
+		},
+	} {
+		if encoded, done, err := shrinkSlice(shrink); err != nil {
+			return nil, err
+		} else if done {
+			return encoded, nil
+		}
+	}
+
+	if pack.Issue.BlockedReason != nil && *pack.Issue.BlockedReason != "" {
+		if encoded, done, err := trimOptionalTextFieldToBudget(maxBytes, pack.Issue.BlockedReason, func() ([]byte, error) {
+			return json.Marshal(pack)
+		}); err != nil {
+			return nil, err
+		} else if done {
+			return encoded, nil
+		}
+	}
+
+	for _, shrink := range []func() bool{
+		func() bool {
+			if len(pack.Gates.Unmet) == 0 {
+				return false
+			}
+			pack.Gates.Unmet = pack.Gates.Unmet[:len(pack.Gates.Unmet)-1]
+			return true
+		},
+		func() bool {
+			if len(pack.Blockers) == 0 {
+				return false
+			}
+			pack.Blockers = pack.Blockers[:len(pack.Blockers)-1]
+			return true
+		},
+	} {
+		if encoded, done, err := shrinkSlice(shrink); err != nil {
+			return nil, err
+		} else if done {
+			return encoded, nil
+		}
 	}
 
 	encoded, done, err := trimOptionalTextFieldToBudget(maxBytes, &pack.Issue.Title, func() ([]byte, error) {
@@ -746,10 +791,10 @@ func fitIssueBriefToBudget(pack issueBriefOutput, maxBytes int) ([]byte, error) 
 	return json.Marshal(pack)
 }
 
-// fitIssueTextFieldsToBudget binary-searches one shared byte cap across
+// fitIssueLongTextFieldsToBudget binary-searches one shared byte cap across
 // description and acceptance_criteria so both long fields keep fair content
-// while short fields stay intact, then trims blocked_reason only if needed.
-func fitIssueTextFieldsToBudget(pack *issueBriefOutput, maxBytes int) ([]byte, bool, error) {
+// while short fields, blockers, and unmet gates stay intact.
+func fitIssueLongTextFieldsToBudget(pack *issueBriefOutput, maxBytes int) ([]byte, bool, error) {
 	origDesc := ""
 	if pack.Issue.Description != nil {
 		origDesc = *pack.Issue.Description
@@ -757,10 +802,6 @@ func fitIssueTextFieldsToBudget(pack *issueBriefOutput, maxBytes int) ([]byte, b
 	origAC := ""
 	if pack.Issue.AcceptanceCriteria != nil {
 		origAC = *pack.Issue.AcceptanceCriteria
-	}
-	origBlocked := ""
-	if pack.Issue.BlockedReason != nil {
-		origBlocked = *pack.Issue.BlockedReason
 	}
 
 	maxTextLen := max(len(origDesc), len(origAC))
@@ -799,11 +840,6 @@ func fitIssueTextFieldsToBudget(pack *issueBriefOutput, maxBytes int) ([]byte, b
 		applyCap(0)
 	}
 
-	if pack.Issue.BlockedReason != nil && origBlocked != "" {
-		return trimOptionalTextFieldToBudget(maxBytes, pack.Issue.BlockedReason, func() ([]byte, error) {
-			return json.Marshal(pack)
-		})
-	}
 	encoded, err := json.Marshal(pack)
 	if err != nil {
 		return nil, false, err

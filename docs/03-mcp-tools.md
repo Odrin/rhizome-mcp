@@ -10,11 +10,11 @@ Tools return:
 
 - `structuredContent` as the authoritative result (in `auto` and `structured` content modes);
 - `content[0].text` carrying either the compact serialized JSON payload or an enriched one-line summary with non-secret entity identifiers, depending on the configured content mode (`--content-mode` / `RHIZOME_CONTENT_MODE`):
-  - `auto` (default): populates `structuredContent`, advertises `outputSchema` in `tools/list`, and sets `content[0].text` to the compact serialized JSON payload whenever it fits within `64 KiB` (`65536` bytes), falling back to the enriched human-readable summary string when an explicit opt-in payload exceeds `64 KiB`. Because all default response budgets (section 3) are under `64 KiB`, `auto` sends the JSON payload in both channels on ordinary calls so `content`-only MCP hosts work without configuration; hosts that forward both `content[0].text` and `structuredContent` into the model context can pass `--content-mode structured` (or `--content-mode text`) to avoid duplicate token consumption;
+  - `auto` (default): populates `structuredContent`, advertises `outputSchema` in `tools/list`, and sets `content[0].text` to the compact serialized JSON payload whenever it fits within `256 KiB` (`262144` bytes), falling back to the enriched human-readable summary string when an explicit opt-in payload exceeds `256 KiB`. Because all default response budgets (section 3, including `get_work_context` at `256 KiB`) fit within `256 KiB`, `auto` sends the JSON payload in both channels on ordinary calls so `content`-only MCP hosts work without configuration; hosts that forward both `content[0].text` and `structuredContent` into the model context can pass `--content-mode structured` (or `--content-mode text`) to avoid duplicate token consumption;
   - `structured`: populates `structuredContent`, advertises `outputSchema` in `tools/list`, and sets `content[0].text` to only the enriched human-readable summary string (zero JSON duplication on the wire; bearer credentials such as `lease_token` and `agent_session_handle` are never included in text summaries);
   - `text`: sets `content[0].text` to the compact serialized JSON payload, omits `structuredContent`, and omits `outputSchema` from `tools/list` for `content`-only MCP hosts;
 - short `next_actions` on workflow-sensitive results;
-- no full duplication of oversized (`> 64 KiB`) JSON results in text under `auto` or `structured` mode.
+- no full duplication of oversized (`> 256 KiB`) JSON results in text under `auto` or `structured` mode.
 
 The initialize response contains compact baseline workflow instructions. Full
 guidance is available through these static Markdown resources:
@@ -2721,7 +2721,7 @@ Parameters captured from URI path segments (`project_ref`, `issue_id`) are URL-u
     "acceptance_criteria": "..."
   },
   "gates": {
-    "enforcement_point": "finish_to_done",
+    "enforcement_point": "complete_work_to_done",
     "passed": true,
     "requirement_count": 1,
     "satisfied_count": 1,
@@ -2825,8 +2825,8 @@ Parameters captured from URI path segments (`project_ref`, `issue_id`) are URL-u
 Every context pack enforces a strict `MaxContextPackBytes = 16384` (16 KiB) serialized JSON byte ceiling:
 
 1. If initial compact JSON exceeds `16384` bytes, `truncated` becomes `true` and `truncation_reason` becomes `"byte_budget"`.
-2. **Issue briefs** shrink optional slices deterministically from the tail in order: `reviews`, `decisions`, `blockers`, `gates.unmet`, and `warnings`. If still over `16384` bytes, `issue.description` and `issue.acceptance_criteria` are trimmed with a single shared UTF-8-safe byte cap (`...(truncated)` suffix), followed only if necessary by `issue.blocked_reason` and `issue.title`.
-3. **Project briefs** shrink `ready_issues` and `blocked_issues` proportionally from their tails (retaining highest-priority items first), followed only if necessary by `warnings`, `project.root_path`, and `project.name`.
+2. **Issue briefs** shrink non-blocking optional slices deterministically from the tail in order: `reviews`, `decisions`, and `warnings`. If still over `16384` bytes, `issue.description` and `issue.acceptance_criteria` are trimmed with a single shared UTF-8-safe byte cap (`...(truncated)` suffix). Only if the payload still exceeds `16384` bytes after those long text fields are emptied does it shed excess `gates.unmet` and `blockers` (preserving at least one item of each while possible), `issue.blocked_reason`, remaining `gates.unmet`/`blockers`, and `issue.title`.
+3. **Project briefs** shrink `ready_issues` and `blocked_issues` evenly from their tails (retaining highest-priority items first), followed only if necessary by `warnings`, `project.root_path`, and `project.name`.
 
 ### 14.5. Error semantics
 

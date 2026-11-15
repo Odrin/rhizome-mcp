@@ -496,6 +496,7 @@ func cloneActivityReview(value *ReviewRequest) *ReviewRequest {
 		return nil
 	}
 	result := *value
+	result.Purposes = append([]string(nil), value.Purposes...)
 	result.ArtifactIDs = append([]string(nil), value.ArtifactIDs...)
 	result.SupersedesID = copyOptionalString(value.SupersedesID)
 	result.ActiveAttemptID = copyOptionalString(value.ActiveAttemptID)

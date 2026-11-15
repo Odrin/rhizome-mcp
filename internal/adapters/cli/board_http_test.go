@@ -1560,7 +1560,15 @@ func TestBoardHTTPHandlerEventsSurvivesServeHTTPServerWriteTimeout(t *testing.T)
 	}
 }
 
-func TestBoardHTTPHandlerEventsWithSQLiteMutation(t *testing.T) {
+type boardSSESQLiteFixture struct {
+	source         *clock.FakeClock
+	issueService   *application.IssueService
+	attemptService *application.AttemptService
+	boardService   *application.BoardService
+}
+
+func openBoardSSESQLiteFixture(t *testing.T) boardSSESQLiteFixture {
+	t.Helper()
 	ctx := context.Background()
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	source := clock.NewFakeClock(now)
@@ -1643,9 +1651,20 @@ func TestBoardHTTPHandlerEventsWithSQLiteMutation(t *testing.T) {
 		t.Fatalf("NewBoardService: %v", err)
 	}
 	boardService.WithSnapshotLoader(snapshotRepo)
+	return boardSSESQLiteFixture{
+		source:         source,
+		issueService:   issueService,
+		attemptService: attemptService,
+		boardService:   boardService,
+	}
+}
+
+func TestBoardHTTPHandlerEventsWithSQLiteMutation(t *testing.T) {
+	ctx := context.Background()
+	fx := openBoardSSESQLiteFixture(t)
 
 	server := httptest.NewServer(newBoardHTTPHandlerWithOptions(
-		sqliteBoardSSEHTTPService{boardService: boardService},
+		sqliteBoardSSEHTTPService{boardService: fx.boardService},
 		boardHTTPOptions{pollInterval: 15 * time.Millisecond, keepaliveInterval: 5 * time.Second},
 	))
 	defer server.Close()
@@ -1668,11 +1687,109 @@ func TestBoardHTTPHandlerEventsWithSQLiteMutation(t *testing.T) {
 	chunks := startSSEChunkReader(t, resp)
 	waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
 
-	if _, err := issueService.CreateIssue(ctx, domain.CreateIssueInput{
+	if _, err := fx.issueService.CreateIssue(ctx, domain.CreateIssueInput{
 		Type: domain.TypeTask, Title: "SSE Triggered Issue", Status: domain.StatusReady, Priority: domain.PriorityHigh,
 	}); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
 	waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
+}
+
+func TestBoardHTTPHandlerEventsDetectsClockOnlyLeaseExpiry(t *testing.T) {
+	ctx := context.Background()
+	fx := openBoardSSESQLiteFixture(t)
+
+	issue, err := fx.issueService.CreateIssue(ctx, domain.CreateIssueInput{
+		Type: domain.TypeTask, Title: "SSE Expiry Issue", Status: domain.StatusReady, Priority: domain.PriorityHigh,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	claim, err := fx.attemptService.ClaimIssue(ctx, domain.ClaimIssueInput{
+		IssueID:   issue.ID,
+		Resources: []domain.Resource{{Kind: domain.ResourceKindFile, Path: "sse-expiry.go"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimIssue: %v", err)
+	}
+
+	server := httptest.NewServer(newBoardHTTPHandlerWithOptions(
+		sqliteBoardSSEHTTPService{boardService: fx.boardService},
+		boardHTTPOptions{pollInterval: 15 * time.Millisecond, keepaliveInterval: 5 * time.Second},
+	))
+	defer server.Close()
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do GET /api/events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	chunks := startSSEChunkReader(t, resp)
+	waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+
+	// Advance fake clock past lease expiry without any database write.
+	fx.source.Advance(claim.Attempt.LeaseExpiresAt.Sub(fx.source.Now()) + time.Second)
+	waitForSSEChunk(t, chunks, "event: board_changed\n", 2*time.Second)
+}
+
+func TestBoardHTTPHandlerEventsShutsDownPromptlyWithOpenTab(t *testing.T) {
+	svc := &sseWatermarkBoardService{watermark: "wt-open-tab"}
+	sseHandler := newBoardHTTPHandlerWithOptions(svc, boardHTTPOptions{
+		pollInterval:      20 * time.Millisecond,
+		keepaliveInterval: 5 * time.Second,
+	})
+
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- projectruntime.ServeHTTPServer(serverCtx, projectruntime.HTTPServerOptions{
+			Address:         "127.0.0.1:0",
+			Logger:          slog.Default(),
+			Handler:         sseHandler,
+			ShutdownTimeout: 5 * time.Second,
+			OnListener: func(l net.Listener) {
+				addrCh <- l.Addr().String()
+			},
+		})
+	}()
+
+	addr := <-addrCh
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	chunks := startSSEChunkReader(t, resp)
+	waitForSSEChunk(t, chunks, "event: ready\n", 2*time.Second)
+
+	// Keep the browser SSE request open and shut down the server.
+	started := time.Now()
+	serverCancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ServeHTTPServer() error = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Fatalf("ServeHTTPServer shutdown took %s with open SSE client, want < 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTPServer hung waiting for open SSE client during shutdown")
+	}
 }

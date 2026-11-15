@@ -507,3 +507,78 @@ func TestStatusRecorderUnwrapAndFlush(t *testing.T) {
 		t.Fatalf("status = %d, want %d", inner.Code, http.StatusOK)
 	}
 }
+
+func TestServeHTTPServerSignalsServerShutdownDone(t *testing.T) {
+	if ch := ServerShutdownDone(nil); ch != nil {
+		t.Fatalf("ServerShutdownDone(nil) = %v, want nil", ch)
+	}
+	if ch := ServerShutdownDone(context.Background()); ch != nil {
+		t.Fatalf("ServerShutdownDone(background) = %v, want nil", ch)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamStarted := make(chan struct{})
+	handlerExited := make(chan struct{})
+	addrCh := make(chan string, 1)
+	done := make(chan error, 1)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerExited)
+		controller := http.NewResponseController(w)
+		_ = controller.SetWriteDeadline(time.Time{})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready\n"))
+		_ = controller.Flush()
+		close(streamStarted)
+		select {
+		case <-ServerShutdownDone(r.Context()):
+		case <-r.Context().Done():
+		}
+	})
+
+	go func() {
+		done <- ServeHTTPServer(ctx, HTTPServerOptions{
+			Address:         "127.0.0.1:0",
+			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Handler:         handler,
+			ShutdownTimeout: 5 * time.Second,
+			OnListener: func(l net.Listener) {
+				addrCh <- l.Addr().String()
+			},
+		})
+	}()
+
+	addr := <-addrCh
+	resp, err := (&http.Client{}).Get("http://" + addr + "/events")
+	if err != nil {
+		t.Fatalf("GET /events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 6)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatalf("read stream header: %v", err)
+	}
+	<-streamStarted
+
+	started := time.Now()
+	cancel()
+	select {
+	case <-handlerExited:
+	case <-time.After(1 * time.Second):
+		t.Fatal("streaming handler did not exit on ServerShutdownDone")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ServeHTTPServer() = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Fatalf("ServeHTTPServer shutdown took %s, want < 1s", elapsed)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeHTTPServer did not shut down promptly")
+	}
+}

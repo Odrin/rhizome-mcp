@@ -50,6 +50,7 @@ type Router struct {
 
 type routerEntry struct {
 	ref      string
+	rootPath string
 	pinned   bool
 	state    string
 	bundle   *Services
@@ -61,8 +62,9 @@ type routerEntry struct {
 }
 
 type routerResult struct {
-	bundle *Services
-	err    error
+	bundle   *Services
+	rootPath string
+	err      error
 }
 
 func NewRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.Options, defaultBundle *Services) *Router {
@@ -81,12 +83,11 @@ func NewRouter(dataRoot string, source clock.Clock, sqliteOptions sqlite.Options
 	if defaultBundle != nil && defaultBundle.ProjectRef() != "" {
 		router.defaultBundle = defaultBundle
 		router.defaultRef = defaultBundle.ProjectRef()
-		if defaultBundle.project != nil {
-			router.defaultRoot = defaultBundle.project.Root
-		}
+		router.defaultRoot = projectRootPath(defaultBundle.project)
 		router.useCounter = 1
 		router.entries[router.defaultRef] = &routerEntry{
 			ref:      router.defaultRef,
+			rootPath: router.defaultRoot,
 			pinned:   true,
 			state:    "ready",
 			bundle:   defaultBundle,
@@ -205,6 +206,7 @@ func (router *Router) Acquire(ctx context.Context, explicitRef *string) (project
 		}
 		entry.state = "ready"
 		entry.bundle = result.bundle
+		entry.rootPath = result.rootPath
 		entry.lastUsed = router.nextUseLocked()
 		router.openingCount--
 		close(entry.done)
@@ -278,14 +280,24 @@ func (router *Router) openEntry(ctx context.Context, entry *routerEntry) routerR
 		return routerResult{err: fmt.Errorf("project bundle for %q was nil", entry.ref)}
 	}
 	entry.bundle = bundle
-	return routerResult{bundle: bundle}
+	return routerResult{bundle: bundle, rootPath: projectRootPath(project)}
+}
+
+func projectRootPath(project *runtime.Project) string {
+	if project == nil {
+		return ""
+	}
+	if project.Root != "" {
+		return project.Root
+	}
+	return project.Origin
 }
 
 func (router *Router) wrapLease(entry *routerEntry) projectrouting.ProjectLease {
 	if entry == nil || entry.bundle == nil {
 		return nil
 	}
-	baseLease := projectrouting.NewStaticLease(entry.ref, entry.bundle.Bundle())
+	baseLease := projectrouting.NewStaticLeaseWithRoot(entry.ref, entry.rootPath, entry.bundle.Bundle())
 	return &routerLease{baseLease: baseLease, router: router, entry: entry}
 }
 
@@ -479,6 +491,19 @@ func (lease *routerLease) ProjectRef() string {
 		return ""
 	}
 	return lease.baseLease.ProjectRef()
+}
+
+func (lease *routerLease) RootPath() string {
+	if lease == nil {
+		return ""
+	}
+	if rooted, ok := lease.baseLease.(interface{ RootPath() string }); ok {
+		return rooted.RootPath()
+	}
+	if lease.entry != nil {
+		return lease.entry.rootPath
+	}
+	return ""
 }
 
 func (lease *routerLease) Services() application.Bundle {

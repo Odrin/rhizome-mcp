@@ -79,7 +79,7 @@ func TestActivityBatchHydrationOrderCountAndErrors(t *testing.T) {
 		`CREATE TABLE comments(id TEXT PRIMARY KEY, issue_id TEXT, content TEXT, created_by_session_id TEXT, author_label TEXT, created_at TEXT, edited_at TEXT)`,
 		`CREATE TABLE issue_events(id INTEGER PRIMARY KEY, issue_id TEXT, event_type TEXT, session_id TEXT, attempt_id TEXT, payload TEXT, created_at TEXT)`,
 		`CREATE TABLE gate_evidence(id TEXT PRIMARY KEY, attempt_id TEXT, issue_id TEXT, key TEXT, result TEXT, summary TEXT, details TEXT, artifact_ids_json TEXT, version INTEGER, created_at TEXT, updated_at TEXT)`,
-		`CREATE TABLE review_requests(id TEXT PRIMARY KEY, target_id TEXT, issue_id TEXT, target_issue_version INTEGER, target_event_id INTEGER, artifact_ids_json TEXT, status TEXT, supersedes_id TEXT, active_attempt_id TEXT, version INTEGER, created_at TEXT, resolved_at TEXT)`,
+		`CREATE TABLE review_requests(id TEXT PRIMARY KEY, target_id TEXT, issue_id TEXT, target_issue_version INTEGER, target_event_id INTEGER, purposes_json TEXT, artifact_ids_json TEXT, status TEXT, supersedes_id TEXT, active_attempt_id TEXT, version INTEGER, created_at TEXT, resolved_at TEXT)`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)

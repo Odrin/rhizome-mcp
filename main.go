@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -891,7 +892,7 @@ var jsonTargetSpecs = map[string]jsonTargetSpec{
 		configKey:   "context_servers",
 		includeType: false,
 		projectPath: func(projectRoot string) string { return filepath.Join(projectRoot, ".zed", "settings.json") },
-		globalPath:  func(homeDir string) string { return filepath.Join(homeDir, ".config", "zed", "settings.json") },
+		globalPath:  resolveZedGlobalConfigPath,
 	},
 	"gemini": {
 		configKey:   "mcpServers",
@@ -942,7 +943,51 @@ func connectJSONTarget(target, projectRoot string, global, printOnly bool, invoc
 	} else {
 		filePath = spec.projectPath(projectRoot)
 	}
-	return mergeAndWriteJSONConfig(filePath, config, spec.configKey, "rhizome-mcp")
+	if err := mergeAndWriteJSONConfig(filePath, config, spec.configKey, "rhizome-mcp"); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "Wrote %s.\n", filePath)
+	return err
+}
+
+func resolveZedGlobalConfigPath(homeDir string) string {
+	return resolveZedGlobalConfigPathForOS(
+		goruntime.GOOS,
+		homeDir,
+		os.Getenv,
+		func(path string) bool {
+			info, err := os.Stat(path)
+			return err == nil && info.IsDir()
+		},
+	)
+}
+
+func resolveZedGlobalConfigPathForOS(goos, homeDir string, getenv func(string) string, dirExists func(string) bool) string {
+	if goos == "windows" {
+		appData := strings.TrimSpace(getenv("APPDATA"))
+		if appData != "" {
+			return filepath.Join(appData, "Zed", "settings.json")
+		}
+		return filepath.Join(homeDir, "AppData", "Roaming", "Zed", "settings.json")
+	}
+
+	xdgConfig := strings.TrimSpace(getenv("XDG_CONFIG_HOME"))
+	defaultConfigRoot := filepath.Join(homeDir, ".config")
+	configRoot := defaultConfigRoot
+	if xdgConfig != "" {
+		configRoot = xdgConfig
+	}
+
+	standardDir := filepath.Join(configRoot, "zed")
+	if goos == "linux" && !dirExists(standardDir) && (xdgConfig == "" || filepath.Clean(xdgConfig) == filepath.Clean(defaultConfigRoot)) {
+		flatpakAppDir := filepath.Join(homeDir, ".var", "app", "dev.zed.Zed")
+		flatpakDir := filepath.Join(flatpakAppDir, "config", "zed")
+		if dirExists(flatpakDir) || dirExists(flatpakAppDir) {
+			return filepath.Join(flatpakDir, "settings.json")
+		}
+	}
+
+	return filepath.Join(standardDir, "settings.json")
 }
 
 func connectClaude(projectRoot string, invocation connectServeInvocation, printOnly bool, stdout io.Writer) error {
@@ -1014,11 +1059,17 @@ func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, 
 		if err != nil {
 			return fmt.Errorf("read config file: %w", err)
 		}
-		if err := json.Unmarshal(data, &existingConfig); err != nil {
+		normalized, err := normalizeJSONC(data)
+		if err != nil {
 			return fmt.Errorf("parse config file: %w", err)
 		}
-		if existingConfig == nil {
-			return fmt.Errorf("parse config file: expected a JSON object")
+		if len(bytes.TrimSpace(normalized)) > 0 {
+			if err := json.Unmarshal(normalized, &existingConfig); err != nil {
+				return fmt.Errorf("parse config file: %w", err)
+			}
+			if existingConfig == nil {
+				return fmt.Errorf("parse config file: expected a JSON object")
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat config file: %w", err)
@@ -1058,6 +1109,117 @@ func mergeAndWriteJSONConfig(filePath string, newConfig map[string]interface{}, 
 	}
 
 	return nil
+}
+
+// normalizeJSONC strips UTF-8 BOM, // and /* */ comments, and trailing commas
+// outside string literals so strict encoding/json can parse Zed and Gemini JSONC configs.
+func normalizeJSONC(src []byte) ([]byte, error) {
+	src = bytes.TrimPrefix(src, []byte{0xEF, 0xBB, 0xBF})
+	stripped, err := stripJSONComments(src)
+	if err != nil {
+		return nil, err
+	}
+	return stripTrailingCommasJSON(stripped), nil
+}
+
+func stripJSONComments(src []byte) ([]byte, error) {
+	out := make([]byte, 0, len(src))
+	inString := false
+	for i := 0; i < len(src); i++ {
+		b := src[i]
+		if inString {
+			out = append(out, b)
+			if b == '\\' && i+1 < len(src) {
+				i++
+				out = append(out, src[i])
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			continue
+		}
+		if b == '/' && i+1 < len(src) {
+			if src[i+1] == '/' {
+				i += 2
+				for i < len(src) && src[i] != '\n' {
+					i++
+				}
+				if i < len(src) && src[i] == '\n' {
+					out = append(out, '\n')
+				}
+				continue
+			}
+			if src[i+1] == '*' {
+				i += 2
+				closed := false
+				for i < len(src) {
+					if src[i] == '*' && i+1 < len(src) && src[i+1] == '/' {
+						i++
+						closed = true
+						break
+					}
+					if src[i] == '\n' {
+						out = append(out, '\n')
+					}
+					i++
+				}
+				if !closed {
+					return nil, errors.New("unterminated block comment")
+				}
+				continue
+			}
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func stripTrailingCommasJSON(src []byte) []byte {
+	out := make([]byte, 0, len(src))
+	inString := false
+	var prevSig byte
+	for i := 0; i < len(src); i++ {
+		b := src[i]
+		if inString {
+			out = append(out, b)
+			if b == '\\' && i+1 < len(src) {
+				i++
+				out = append(out, src[i])
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			prevSig = '"'
+			out = append(out, b)
+			continue
+		}
+		if b == ',' {
+			j := i + 1
+			for j < len(src) && isJSONWhitespace(src[j]) {
+				j++
+			}
+			if j < len(src) && (src[j] == '}' || src[j] == ']') &&
+				prevSig != 0 && prevSig != '{' && prevSig != '[' && prevSig != ',' {
+				continue
+			}
+		}
+		if !isJSONWhitespace(b) {
+			prevSig = b
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+func isJSONWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 func writeJSONToWriter(w io.Writer, value interface{}) error {

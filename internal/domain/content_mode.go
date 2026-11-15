@@ -14,8 +14,8 @@ const (
 	// ContentModeAuto populates StructuredContent with the output DTO,
 	// advertises OutputSchema in tools/list, and populates Content[0].Text
 	// with the compact serialized JSON payload whenever the serialized
-	// payload fits within the 64 KiB text cap, falling back to the enriched
-	// human-readable summary string when an opt-in response exceeds 64 KiB.
+	// payload fits within the 256 KiB text cap, falling back to the enriched
+	// human-readable summary string when an opt-in response exceeds 256 KiB.
 	// This is the default when no mode is configured.
 	ContentModeAuto ContentMode = "auto"
 	// ContentModeStructured populates StructuredContent with the output DTO,

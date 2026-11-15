@@ -333,4 +333,207 @@ func TestMCPSessionAttributionAcrossMutationsAndReplay(t *testing.T) {
 		t.Fatalf("cancel_review_request = %#v", cancelledRev)
 	}
 	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_cancelled' ORDER BY id DESC LIMIT 1`, issueOut.ID), sessionA)
+
+	// 7. finish_attempt & cancel_review_request attribution on review/attempt events via MCP:
+	revIssueRes := call(t, client, "create_issue", map[string]any{
+		"type":                 "task",
+		"title":                "MCP review attribution issue",
+		"status":               "ready",
+		"agent_session_handle": handleA,
+	})
+	if revIssueRes.IsError {
+		t.Fatalf("create_issue(ready) = %#v", revIssueRes)
+	}
+	var revIssue struct {
+		ID string `json:"id"`
+	}
+	decodeStructured(t, revIssueRes, &revIssue)
+	wc0 := call(t, client, "claim_issue", map[string]any{"issue_id": revIssue.ID, "agent_session_handle": handleA})
+	if wc0.IsError {
+		t.Fatalf("claim_issue(initial work) = %#v", wc0)
+	}
+	var wc0Out struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, wc0, &wc0Out)
+	source.Advance(time.Second)
+	if wf0 := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":           wc0Out.Attempt.ID,
+		"lease_token":          wc0Out.LeaseToken,
+		"outcome":              "completed",
+		"target_issue_status":  "review",
+		"result_summary":       "ready for review",
+		"agent_session_handle": handleA,
+	}); wf0.IsError {
+		t.Fatalf("finish_attempt(initial work->review) = %#v", wf0)
+	}
+
+	// (a) claim review request and cancel_review_request under handleB -> attempt_cancelled has sessionB;
+	vCancel, evtCancel := currentReviewTargetPosition(t, db, revIssue.ID)
+	reqCancel := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             revIssue.ID,
+		"target_issue_version": vCancel,
+		"target_event_id":      evtCancel,
+		"purposes":             []string{"implementation"},
+		"agent_session_handle": handleA,
+	})
+	if reqCancel.IsError {
+		t.Fatalf("create_review_request(cancel) = %#v", reqCancel)
+	}
+	var reqCancelOut struct {
+		ID      string `json:"id"`
+		Version int64  `json:"version"`
+	}
+	decodeStructured(t, reqCancel, &reqCancelOut)
+	if clCancel := call(t, client, "claim_issue", map[string]any{"issue_id": revIssue.ID, "agent_session_handle": handleA}); clCancel.IsError {
+		t.Fatalf("claim_issue(cancel) = %#v", clCancel)
+	}
+	if cancelClaimed := call(t, client, "cancel_review_request", map[string]any{
+		"review_request_id":    reqCancelOut.ID,
+		"expected_version":     reqCancelOut.Version + 1,
+		"agent_session_handle": handleB,
+	}); cancelClaimed.IsError {
+		t.Fatalf("cancel_review_request(claimed) = %#v", cancelClaimed)
+	}
+	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_cancelled' ORDER BY id DESC LIMIT 1`, revIssue.ID), sessionB)
+
+	// (b) claim review request and finish with changes_requested (handleB) -> review_changes_requested has sessionB;
+	v3, evt3 := currentReviewTargetPosition(t, db, revIssue.ID)
+	req3 := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             revIssue.ID,
+		"target_issue_version": v3,
+		"target_event_id":      evt3,
+		"purposes":             []string{"implementation"},
+		"agent_session_handle": handleA,
+	})
+	if req3.IsError {
+		t.Fatalf("create_review_request(3) = %#v", req3)
+	}
+	claim3 := call(t, client, "claim_issue", map[string]any{
+		"issue_id":             revIssue.ID,
+		"agent_session_handle": handleA,
+	})
+	if claim3.IsError {
+		t.Fatalf("claim_issue(review 3) = %#v", claim3)
+	}
+	var claim3Out struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claim3, &claim3Out)
+	source.Advance(time.Second)
+	rejectRes := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":           claim3Out.Attempt.ID,
+		"lease_token":          claim3Out.LeaseToken,
+		"outcome":              "completed",
+		"review_outcome":       "changes_requested",
+		"result_summary":       "needs tests",
+		"agent_session_handle": handleB,
+	})
+	if rejectRes.IsError {
+		t.Fatalf("finish_attempt(changes_requested) = %#v", rejectRes)
+	}
+	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_changes_requested' ORDER BY id DESC LIMIT 1`, revIssue.ID), sessionB)
+
+	// (c) Reclaim work -> move to review -> create req4 -> make stale -> finish_attempt rejects with review_superseded + attempt_cancelled under handleB;
+	workClaim := call(t, client, "claim_issue", map[string]any{"issue_id": revIssue.ID, "agent_session_handle": handleA})
+	if workClaim.IsError {
+		t.Fatalf("claim_issue(work) = %#v", workClaim)
+	}
+	var workClaimOut struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, workClaim, &workClaimOut)
+	source.Advance(time.Second)
+	workDone := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":           workClaimOut.Attempt.ID,
+		"lease_token":          workClaimOut.LeaseToken,
+		"outcome":              "completed",
+		"target_issue_status":  "review",
+		"result_summary":       "fixed tests",
+		"agent_session_handle": handleA,
+	})
+	if workDone.IsError {
+		t.Fatalf("finish_attempt(work->review) = %#v", workDone)
+	}
+	v4, evt4 := currentReviewTargetPosition(t, db, revIssue.ID)
+	req4 := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             revIssue.ID,
+		"target_issue_version": v4,
+		"target_event_id":      evt4,
+		"purposes":             []string{"implementation"},
+		"agent_session_handle": handleA,
+	})
+	if req4.IsError {
+		t.Fatalf("create_review_request(4) = %#v", req4)
+	}
+	claim4 := call(t, client, "claim_issue", map[string]any{"issue_id": revIssue.ID, "agent_session_handle": handleB})
+	if claim4.IsError {
+		t.Fatalf("claim_issue(review 4) = %#v", claim4)
+	}
+	var claim4Out struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claim4, &claim4Out)
+	advanceReviewedIssueForTest(t, db, revIssue.ID, source.Now().UTC())
+	source.Advance(time.Second)
+	staleFinish := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":           claim4Out.Attempt.ID,
+		"lease_token":          claim4Out.LeaseToken,
+		"outcome":              "completed",
+		"review_outcome":       "approved",
+		"result_summary":       "stale finish",
+		"agent_session_handle": handleB,
+	})
+	if !staleFinish.IsError {
+		t.Fatalf("expected stale finish error, got %#v", staleFinish)
+	}
+	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_superseded' ORDER BY id DESC LIMIT 1`, revIssue.ID), sessionB)
+	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'attempt_cancelled' ORDER BY id DESC LIMIT 1`, revIssue.ID), sessionB)
+
+	// (d) Fresh req5 -> claim -> approve under handleA -> review_approved has sessionA.
+	v5, evt5 := currentReviewTargetPosition(t, db, revIssue.ID)
+	if req5 := call(t, client, "create_review_request", map[string]any{
+		"issue_id":             revIssue.ID,
+		"target_issue_version": v5,
+		"target_event_id":      evt5,
+		"purposes":             []string{"implementation"},
+		"agent_session_handle": handleB,
+	}); req5.IsError {
+		t.Fatalf("create_review_request(5) = %#v", req5)
+	}
+	claim5 := call(t, client, "claim_issue", map[string]any{"issue_id": revIssue.ID, "agent_session_handle": handleB})
+	if claim5.IsError {
+		t.Fatalf("claim_issue(review 5) = %#v", claim5)
+	}
+	var claim5Out struct {
+		Attempt struct {
+			ID string `json:"id"`
+		} `json:"attempt"`
+		LeaseToken string `json:"lease_token"`
+	}
+	decodeStructured(t, claim5, &claim5Out)
+	source.Advance(time.Second)
+	if approveRes := call(t, client, "finish_attempt", map[string]any{
+		"attempt_id":           claim5Out.Attempt.ID,
+		"lease_token":          claim5Out.LeaseToken,
+		"outcome":              "completed",
+		"review_outcome":       "approved",
+		"result_summary":       "approved",
+		"agent_session_handle": handleA,
+	}); approveRes.IsError {
+		t.Fatalf("finish_attempt(approved) = %#v", approveRes)
+	}
+	requireNullString(t, queryNullColumn(t, db, `SELECT session_id FROM issue_events WHERE issue_id = ? AND event_type = 'review_approved' ORDER BY id DESC LIMIT 1`, revIssue.ID), sessionA)
 }

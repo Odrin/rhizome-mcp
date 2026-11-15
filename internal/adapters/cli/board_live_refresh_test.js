@@ -770,3 +770,65 @@ test("auto-bootstrapped client uses data-board-events-endpoint or /api/events", 
   harness.window.__rhizomeBoardLiveClient.stop();
   assert.equal(FakeEventSource.instances[0].closed, true);
 });
+
+test("SSE reconnect after error triggers catch-up refresh on open and changed ready watermark", async () => {
+  FakeEventSource.instances = [];
+  const harness = createHarness({
+    initialTestHooks: {},
+    boardResponses: [
+      { status: 200, ok: true, headers: { get: () => "ETAG-REC-1" }, text: "<main data-board-main></main>" },
+      { status: 200, ok: true, headers: { get: () => "ETAG-REC-2" }, text: "<main data-board-main></main>" },
+    ],
+    pageResponses: [
+      { status: 200, ok: true, headers: { get: () => "ETAG-REC-1" }, text: "<div id=\"reconnected-open\"></div>" },
+      { status: 200, ok: true, headers: { get: () => "ETAG-REC-2" }, text: "<div id=\"reconnected-watermark\"></div>" },
+    ],
+  });
+  harness.window.EventSource = FakeEventSource;
+  const scriptSource = extractBoardLiveRefreshScript();
+  const Client = loadClient(scriptSource, harness);
+  const root = createTestRoot(harness, { "data-board-events-endpoint": "/api/events" });
+  const client = new Client(root, {
+    fetch: harness.fetchImpl,
+    setTimeout: harness.setTimeoutImpl,
+    clearTimeout: harness.clearTimeoutImpl,
+    random: harness.randomImpl,
+    now: harness.nowImpl,
+    document: harness.document,
+    window: harness.window,
+    DOMParser: FakeDOMParser,
+  });
+
+  const es = FakeEventSource.instances[0];
+  es.readyState = 1;
+  es.dispatch("open");
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-1" }) });
+  assert.equal(harness.fetchCalls.length, 0);
+
+  // Simulate SSE interruption followed by EventSource reconnection.
+  es.dispatch("error");
+  assert.equal(client.sseConnected, false);
+  assert.equal(client.staleStatus, "stale");
+
+  // Reconnect "open" must clear stale status and trigger an immediate catch-up fetch.
+  es.readyState = 1;
+  es.dispatch("open");
+  await flushMicrotasks();
+  assert.equal(client.sseConnected, true);
+  assert.equal(client.staleStatus, null);
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+  assert.equal(root.children[0].getAttribute("id"), "reconnected-open");
+
+  // Ready event carrying the unchanged watermark must not double-fetch.
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-1" }) });
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 1);
+
+  // Ready event carrying a new watermark (missed update across server restart/reconnect) refreshes immediately.
+  es.dispatch("ready", { data: JSON.stringify({ watermark: "wm-2" }) });
+  await flushMicrotasks();
+  assert.equal(harness.fetchCalls.filter(({ url }) => url === "/api/board").length, 2);
+  assert.equal(root.children[0].getAttribute("id"), "reconnected-watermark");
+
+  client.stop();
+});

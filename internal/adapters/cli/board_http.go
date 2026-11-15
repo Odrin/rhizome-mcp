@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"rhizome-mcp/internal/domain"
+	projectruntime "rhizome-mcp/internal/runtime"
 )
 
 const boardHTTPContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
@@ -600,10 +601,24 @@ func serveBoardEventsSSE(w http.ResponseWriter, request *http.Request, boardServ
 	}
 
 	ctx := request.Context()
+	shutdownCh := projectruntime.ServerShutdownDone(ctx)
+	select {
+	case <-ctx.Done():
+		return
+	case <-shutdownCh:
+		return
+	default:
+	}
+
 	currentWatermark, err := resolveBoardHTTPWatermark(ctx, boardService)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
+		}
+		select {
+		case <-shutdownCh:
+			return
+		default:
 		}
 		writeBoardHTTPResponse(w, http.StatusInternalServerError, "text/plain; charset=utf-8", []byte("internal error"), true)
 		return
@@ -630,6 +645,8 @@ func serveBoardEventsSSE(w http.ResponseWriter, request *http.Request, boardServ
 		select {
 		case <-ctx.Done():
 			return
+		case <-shutdownCh:
+			return
 		case <-keepaliveTicker.C:
 			if err := writeAndFlushSSE(w, controller, ": keepalive\n\n"); err != nil {
 				return
@@ -639,6 +656,11 @@ func serveBoardEventsSSE(w http.ResponseWriter, request *http.Request, boardServ
 			if err != nil {
 				if ctx.Err() != nil {
 					return
+				}
+				select {
+				case <-shutdownCh:
+					return
+				default:
 				}
 				continue
 			}

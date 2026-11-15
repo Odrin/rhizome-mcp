@@ -51,7 +51,7 @@ func (router *StaticProjectRouter) Acquire(ctx context.Context, explicitRef *str
 		if router == nil || *explicitRef != router.defaultProjectRef {
 			return nil, NewProjectNotFoundError(*explicitRef)
 		}
-		return NewStaticLease(router.defaultProjectRef, router.services), nil
+		return NewStaticLeaseWithRoot(router.defaultProjectRef, router.projectRoot, router.services), nil
 	}
 	if router == nil || router.defaultProjectRef == "" {
 		return nil, NewProjectRequiredError()
@@ -59,7 +59,7 @@ func (router *StaticProjectRouter) Acquire(ctx context.Context, explicitRef *str
 	if err := ValidateProjectRef(router.defaultProjectRef); err != nil {
 		return nil, err
 	}
-	return NewStaticLease(router.defaultProjectRef, router.services), nil
+	return NewStaticLeaseWithRoot(router.defaultProjectRef, router.projectRoot, router.services), nil
 }
 
 // OpenProject validates the absolute project root and resolves the static default project.
@@ -79,11 +79,12 @@ func (router *StaticProjectRouter) OpenProject(ctx context.Context, absoluteRoot
 	if err := ValidateProjectRef(router.defaultProjectRef); err != nil {
 		return nil, err
 	}
-	return NewStaticLease(router.defaultProjectRef, router.services), nil
+	return NewStaticLeaseWithRoot(router.defaultProjectRef, router.projectRoot, router.services), nil
 }
 
 type staticLease struct {
 	projectRef  string
+	rootPath    string
 	services    application.Bundle
 	releaseFn   func() error
 	releaseErr  error
@@ -95,11 +96,23 @@ func NewStaticLease(projectRef string, services application.Bundle) ProjectLease
 	return &staticLease{projectRef: projectRef, services: services}
 }
 
+// NewStaticLeaseWithRoot constructs a static project lease that exposes the project root path.
+func NewStaticLeaseWithRoot(projectRef, rootPath string, services application.Bundle) ProjectLease {
+	return &staticLease{projectRef: projectRef, rootPath: rootPath, services: services}
+}
+
 func (lease *staticLease) ProjectRef() string {
 	if lease == nil {
 		return ""
 	}
 	return lease.projectRef
+}
+
+func (lease *staticLease) RootPath() string {
+	if lease == nil {
+		return ""
+	}
+	return lease.rootPath
 }
 
 func (lease *staticLease) Services() application.Bundle {

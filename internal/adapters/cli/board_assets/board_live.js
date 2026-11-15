@@ -31,6 +31,8 @@
       this.timer = null;
       this.eventSource = null;
       this.sseConnected = false;
+      this.needsReconnectRefresh = false;
+      this.lastWatermark = "";
       this.listenersBound = false;
       this.etag = options.etag || "";
       this.lastSuccessfulRefreshAt = null;
@@ -73,10 +75,23 @@
     stop(){
       this.clearTimer();
       this.closeEvents();
+      this.needsReconnectRefresh = false;
     }
 
     close(){
       this.stop();
+    }
+
+    extractWatermark(event){
+      if (!event || typeof event.data !== "string" || event.data === "") {
+        return "";
+      }
+      try {
+        const parsed = JSON.parse(event.data);
+        return parsed && typeof parsed.watermark === "string" ? parsed.watermark : "";
+      } catch (error) {
+        return "";
+      }
     }
 
     connectEvents(){
@@ -97,24 +112,51 @@
       this.eventSource = es;
       this.sseConnected = false;
 
-      const onHealthy = () => {
+      const markStreamHealthy = () => {
         if (this.eventSource !== es) {
-          return;
+          return false;
         }
         this.sseConnected = true;
         this.clearTimer();
         this.clearStale();
         this.backoffMs = 1000;
+        return true;
       };
 
-      const onBoardChanged = () => {
-        if (this.eventSource !== es) {
+      const onOpen = () => {
+        if (!markStreamHealthy()) {
           return;
         }
-        this.sseConnected = true;
-        this.clearTimer();
-        this.clearStale();
-        this.backoffMs = 1000;
+        if (this.needsReconnectRefresh) {
+          this.needsReconnectRefresh = false;
+          this.refresh(true);
+        }
+      };
+
+      const onReady = (event) => {
+        if (!markStreamHealthy()) {
+          return;
+        }
+        const watermark = this.extractWatermark(event);
+        const watermarkChanged = Boolean(watermark && this.lastWatermark && watermark !== this.lastWatermark);
+        if (watermark) {
+          this.lastWatermark = watermark;
+        }
+        if (this.needsReconnectRefresh || watermarkChanged) {
+          this.needsReconnectRefresh = false;
+          this.refresh(true);
+        }
+      };
+
+      const onBoardChanged = (event) => {
+        if (!markStreamHealthy()) {
+          return;
+        }
+        const watermark = this.extractWatermark(event);
+        if (watermark) {
+          this.lastWatermark = watermark;
+        }
+        this.needsReconnectRefresh = false;
         this.refresh(true);
       };
 
@@ -123,6 +165,7 @@
           return;
         }
         this.sseConnected = false;
+        this.needsReconnectRefresh = true;
         if (es.readyState === 2) {
           this.closeEvents();
         }
@@ -133,12 +176,12 @@
       };
 
       if (typeof es.addEventListener === "function") {
-        es.addEventListener("open", onHealthy);
-        es.addEventListener("ready", onHealthy);
+        es.addEventListener("open", onOpen);
+        es.addEventListener("ready", onReady);
         es.addEventListener("board_changed", onBoardChanged);
         es.addEventListener("error", onError);
       } else {
-        es.onopen = onHealthy;
+        es.onopen = onOpen;
         es.onmessage = onBoardChanged;
         es.onerror = onError;
       }
