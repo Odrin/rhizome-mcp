@@ -7,9 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-15
+
 ### Added
 
-- **Configurable MCP tool result content mode (`serve --content-mode`, `RHIZOME_CONTENT_MODE`)** — New `--content-mode auto|structured|text` flag on `serve` (and `RHIZOME_CONTENT_MODE` environment variable) controls how tool results populate `content[0].text` and `structuredContent`. `auto` (the default) populates `structuredContent`, advertises `outputSchema` in `tools/list`, and includes the compact serialized JSON payload in `content[0].text` whenever it fits within `64 KiB` (falling back to an identifier-enriched summary for oversized opt-in payloads) so `content`-only MCP hosts work out of the box. `structured` emits only the enriched human-readable summary in `content[0].text` alongside `structuredContent` (zero JSON duplication on the wire; bearer secrets such as `lease_token` and `agent_session_handle` are never included in text summaries), and `text` emits compact serialized JSON in `content[0].text` while omitting `structuredContent` and `outputSchema`. Note that because `auto` is the default, responses up to `64 KiB` now carry serialized JSON in both `content[0].text` and `structuredContent`; deployments whose MCP client forwards both channels to the model should pass `--content-mode structured` or `--content-mode text` to avoid duplicate token consumption (docs/03 §1, docs/04 §17.1).
+- **Configurable MCP content modes** — `serve --content-mode auto|structured|text` and `RHIZOME_CONTENT_MODE` control tool-result delivery. The default `auto` sends compact JSON in both `content[0].text` and `structuredContent` up to `256 KiB`, covering ordinary `get_work_context` responses, and falls back to an identifier-enriched summary for larger opt-in payloads. `structured` keeps JSON only in `structuredContent` and excludes bearer credentials from text summaries; `text` sends JSON only in text and omits advertised output schemas. Hosts that forward both channels to the model can select `structured` or `text` to avoid duplicate token consumption.
+
+- **More MCP client registrations** — `connect` now supports Cursor, Windsurf, Zed, and Gemini alongside Claude, Codex, VS Code, and generic JSON. `--global` creates projectless registrations, `--project-root` pins an explicit checkout, and `--profile` or `--toolsets` bakes the chosen tool exposure into generated arguments. Existing JSON settings and other server entries are preserved, JSONC comments and trailing commas are supported without joining tokens, and malformed settings are rejected without clobbering the file. Zed global paths follow Windows, XDG, and detected Linux Flatpak layouts; VS Code global registrations require `--print`.
+
+- **Live status-board updates** — The served board exposes `GET /api/events` as an SSE stream and refreshes conditionally on board changes instead of polling while the stream is healthy. Watermarks detect lease expiry even without a database write. Reconnects catch up without duplicate open/ready refreshes, updates are serialized, failed API or HTML fetches retry with backoff, and open streams exit promptly during server shutdown. Clients without SSE retain polling fallback.
+
+- **Bounded context-pack resources** — Three read-only JSON templates provide explicit-project and default-project issue briefs plus project queue summaries: `rhizome://projects/{project_ref}/issues/{issue_id}/brief`, `rhizome://issues/{issue_id}/brief`, and `rhizome://projects/{project_ref}/brief`. Each enforces a `16 KiB` ceiling with UTF-8-safe truncation, preserving blockers and unmet gates ahead of long issue text. Briefs include review purposes and only validated checkout roots, including relocated roots opened explicitly; unverified historical origins remain `null`. Reads do not touch session timestamps or expose bearer credentials, and archived issue briefs report `ISSUE_ARCHIVED`.
+
+- **Project opening by marker ID** — `open_project` accepts the canonical `project_id` from `.agent-tracker.json` when the server runs on another host, without requiring the client's checkout path to exist there. Exactly one of `project_root` or `project_id` is required; invalid or ambiguous selectors return `INVALID_ARGUMENT`. Later calls still pass the returned `project_ref` explicitly.
+
+- **Issue-list sort modes** — MCP `list_issues(sort: ...)` and CLI `issue list --sort` support `priority`, `created_desc`, `updated_desc`, and `sequence_desc`. The existing priority order remains the default, while cursor pagination preserves the selected deterministic order and rejects mismatched sort cursors with `INVALID_ARGUMENT`.
+
+### Changed
+
+- **Board and issue-detail reads share one SQLite snapshot** — Counts, leases, reservations, review state, planning graphs, activity, and workflow gates are assembled from one bounded read snapshot, avoiding mixed-time sections and repeated reads during concurrent writes.
+
+### Fixed
+
+- **Durable agent attribution survives mutations** — Optional `agent_session_handle` attribution now reaches issue creation, updates, archival, issue plans, relations, and review-request mutations. Caller sessions also accompany review outcomes, supersession, and cancellation events produced by `finish_attempt` or review cancellation. Idempotent replays preserve the original event attribution instead of writing duplicate history.
+
+- **Archived issues remain inspectable on the board** — Issue-detail pages and JSON skip graph traversal for archived roots rather than failing with `ISSUE_ARCHIVED`, retaining the issue's detail and activity with an empty graph.
+
+- **Unix installation works with either SHA-256 utility** — The installer uses `sha256sum` when available or falls back to `shasum -a 256`; missing utilities, empty checksums, and verification failures stop installation rather than bypassing checksum validation.
+
+### Internal
+
+- **Unchanged branches skip scheduled full race runs** — Nightly race verification skips expensive suites when the branch still matches the last successful workflow run; manual runs continue to execute the full suites.
+
+- **CLI maintenance and regression coverage** — Removed a redundant `doctor` error check, expanded connection, sorting, context-resource, attribution, board, and routing regression tests, and refreshed CLI and Windows ARM64 distribution guidance.
 
 ## [1.6.1] - 2026-10-14
 
